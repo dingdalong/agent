@@ -2,7 +2,9 @@ import time
 from openai import APIConnectionError, RateLimitError
 from config import client, MODEL_NAME
 from typing import Dict, List, Any, Optional, Tuple, Callable
+from .performance import time_function
 
+@time_function()
 def call_model_with_retry(
     messages,
     stream=False,

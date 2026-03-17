@@ -7,7 +7,8 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional, Set, Union
 
-from core.api import call_model_with_retry
+from src.core.api import call_model_with_retry
+from src.core.performance import time_function
 
 logger = logging.getLogger(__name__)
 
@@ -164,6 +165,7 @@ class FactExtractor:
         self.text_utils = TextUtils()
         self.fallback_parser = FallbackParser()
 
+    @time_function()
     def extract(self,
                 user_input: str,
                 assistant_response: str = "",
@@ -254,6 +256,7 @@ class FactExtractor:
 JSON 输出："""
         return prompt
 
+    @time_function()
     def _call_model(self, prompt: str) -> Optional[str]:
         try:
             response, tool_calls, finish_reason = call_model_with_retry([{"role": "user", "content": prompt}], temperature=0.0)

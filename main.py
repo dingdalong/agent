@@ -1,23 +1,63 @@
-from tools import tools, tool_executor
-from core.api import call_model_with_retry, execute_tool_calls
-from memory.memory import ConversationBuffer, VectorMemory
+import re
+import logging
+
+from src.tools import tools, tool_executor
+from src.core.api import call_model_with_retry, execute_tool_calls
+from src.memory.memory import ConversationBuffer, VectorMemory
 from config import USER_ID
+from src.core.performance import time_function
+
+
+def _build_collection_name(prefix: str, user_id: str | None) -> str:
+    if not user_id:
+        return prefix
+
+    sanitized_user_id = re.sub(r"[^a-zA-Z0-9_-]+", "_", user_id).strip("_").lower()
+    if not sanitized_user_id:
+        return prefix
+
+    return f"{prefix}_{sanitized_user_id}"[:63].strip("_")
+
 
 # 初始化长期记忆（每个用户一个集合，这里简单起见使用固定集合）
-vector_memory = VectorMemory(collection_name=USER_ID)  # 实际中应根据 user_id 动态选择
+user_facts = VectorMemory(collection_name=_build_collection_name("user_facts", USER_ID))
+conversation_summaries = VectorMemory(
+    collection_name=_build_collection_name("conversation_summaries", USER_ID)
+)
 
+
+def _memory_texts(results) -> list[str]:
+    texts = []
+    for item in results:
+        if isinstance(item, dict):
+            fact = item.get("fact")
+            if fact:
+                texts.append(fact)
+        else:
+            content = item.get_content()
+            if content:
+                texts.append(content)
+    return texts
+
+
+@time_function()
 def run_agent(user_input: str, memory: ConversationBuffer, system_prompt: str = "你是一个完美的助手。"):
     """处理单次用户输入，集成长期记忆检索和存储"""
-    # --- 检索相关记忆 ---
-    relevant_memories = vector_memory.search(user_input, n_results=3)
-    if relevant_memories:
-        # 将记忆拼接到 system prompt 中，或作为额外上下文插入
-        memory_context = "以下是你知道的关于用户的一些信息：\n" + "\n".join([m["fact"] for m in relevant_memories])
-        # 我们可以把记忆作为 system 消息的一部分，也可以作为单独的 user 消息（但注意 role）
-        # 这里我们扩展 system_prompt
-        enhanced_system = system_prompt + "\n\n" + memory_context
-    else:
-        enhanced_system = system_prompt
+    memory_sections = []
+
+    facts = _memory_texts(user_facts.search(user_input, n_results=10))
+    if facts:
+        fact_context = "以下是你知道的关于用户的信息：\n" + "\n".join(facts)
+        memory_sections.append(fact_context)
+
+    summaries = _memory_texts(conversation_summaries.search(user_input, n_results=10))
+    if summaries:
+        summary_context = "以下是与当前对话相关的历史摘要：\n" + "\n".join(summaries)
+        memory_sections.append(summary_context)
+
+    enhanced_system = system_prompt
+    if memory_sections:
+        enhanced_system = system_prompt + "\n\n" + "\n\n".join(memory_sections)
 
     # 1. 将用户消息加入短期记忆
     memory.add_user_message(user_input)
@@ -25,7 +65,7 @@ def run_agent(user_input: str, memory: ConversationBuffer, system_prompt: str = 
     # 2. 多轮工具调用循环
     while True:
         messages = [{"role": "system", "content": enhanced_system}] + memory.get_messages_for_api()
-        content, tool_calls, finish_reason = call_model_with_retry(messages, stream=True, tools=tools)
+        content, tool_calls, _ = call_model_with_retry(messages, stream=True, tools=tools)
 
         if not tool_calls:
             # 没有工具调用，将助手回复存入短期记忆并结束
@@ -39,9 +79,13 @@ def run_agent(user_input: str, memory: ConversationBuffer, system_prompt: str = 
         for tool_msg in new_messages[1:]:
             memory.add_tool_message(tool_msg["tool_call_id"], tool_msg["content"])
 
-    vector_memory.add_conversation(user_input, final_response)
+    user_facts.add_conversation(user_input, final_response)
+
+    if memory.should_compress():
+        memory.compress(conversation_summaries)
 
     return final_response
+
 
 def main():
     memory = ConversationBuffer(max_rounds=10)
@@ -56,6 +100,7 @@ def main():
         print("助手: ", end="", flush=True)
         run_agent(user_input, memory, system_prompt)
         print()  # 确保换行
+
 
 if __name__ == "__main__":
     main()

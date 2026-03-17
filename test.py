@@ -1,6 +1,6 @@
 import json
-from memory.memory_extractor import FactExtractor
-from memory.memory import VectorMemory
+from src.memory.memory_extractor import FactExtractor
+from src.memory.memory import VectorMemory
 
 extractor = FactExtractor()
 memory = VectorMemory()

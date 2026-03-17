@@ -207,3 +207,7 @@ marimo/_lsp/
 __marimo__/
 
 chroma_data/
+
+# Worktrees for isolated development
+.worktrees/
+.claude/

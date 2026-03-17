@@ -271,3 +271,4 @@ graph LR
 
 祝你顺利打造出强大的完全体 AI Agent！🚀
 
+缓存、skill、mcp、web界面
