@@ -5,7 +5,8 @@ import importlib
 import sys
 import types
 import unittest
-from unittest.mock import Mock
+import asyncio
+from unittest.mock import Mock, AsyncMock
 
 
 class TestMainMemoryIntegration(unittest.TestCase):
@@ -19,9 +20,13 @@ class TestMainMemoryIntegration(unittest.TestCase):
 
         stub_modules = {
             "src.tools": types.SimpleNamespace(tools=[], tool_executor={}),
-            "src.core.api": types.SimpleNamespace(
-                call_model_with_retry=Mock(return_value=("stub", {}, "stop")),
+            "src.core.async_api": types.SimpleNamespace(
+                call_model=AsyncMock(return_value=("stub", {}, "stop")),
                 execute_tool_calls=Mock(return_value=[]),
+            ),
+            "src.core.performance": types.SimpleNamespace(
+                time_function=Mock(return_value=lambda f: f),
+                async_time_function=Mock(return_value=lambda f: f),
             ),
             "src.memory.memory": types.SimpleNamespace(
                 ConversationBuffer=conversation_buffer_cls,
@@ -60,10 +65,10 @@ class TestMainMemoryIntegration(unittest.TestCase):
         memory.get_messages_for_api.return_value = [{"role": "user", "content": "你好"}]
         memory.should_compress.return_value = False
 
-        mock_call = Mock(return_value=("最终回复", {}, "stop"))
-        main_module.call_model_with_retry = mock_call
+        mock_call = AsyncMock(return_value=("最终回复", {}, "stop"))
+        main_module.call_model = mock_call
 
-        response = main_module.run_agent("你好", memory, "系统提示")
+        response = asyncio.run(main_module.run_agent("你好", memory, "系统提示"))
 
         self.assertEqual(response, "最终回复")
         sent_messages = mock_call.call_args.args[0]

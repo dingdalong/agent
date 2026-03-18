@@ -2,12 +2,20 @@ import os
 import logging
 import asyncio
 from dotenv import load_dotenv
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, OpenAI
 
 load_dotenv()
 
 # 纯异步客户端（替换现有的同步客户端）
 async_client = AsyncOpenAI(
+    base_url=os.getenv("OPENAI_BASE_URL"),
+    api_key=os.getenv("OPENAI_API_KEY"),
+    timeout=30.0,
+    max_retries=2,
+)
+
+# 同步客户端（用于向后兼容）
+client = OpenAI(
     base_url=os.getenv("OPENAI_BASE_URL"),
     api_key=os.getenv("OPENAI_API_KEY"),
     timeout=30.0,
