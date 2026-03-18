@@ -1,6 +1,7 @@
 import time
 import functools
 import logging
+import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -25,4 +26,21 @@ def time_function(log_threshold=1.0):
 
             return result
         return wrapper
+    return decorator
+
+
+def async_time_function():
+    """异步函数计时装饰器"""
+    def decorator(func):
+        @functools.wraps(func)
+        async def async_wrapper(*args, **kwargs):
+            start_time = time.time()
+            try:
+                result = await func(*args, **kwargs)
+                return result
+            finally:
+                end_time = time.time()
+                duration = end_time - start_time
+                print(f"[性能] {func.__name__} 耗时: {duration:.3f}秒")
+        return async_wrapper
     return decorator

@@ -1,6 +1,7 @@
 import pytest
 import asyncio
 from src.core.async_api import call_model, parse_nonstream_response, execute_tool_calls, _execute_single_tool
+from src.core.performance import async_time_function
 
 
 @pytest.mark.asyncio
@@ -74,3 +75,19 @@ async def test_execute_single_tool_sync():
 
     result = await _execute_single_tool(tool_call, {"sync_tool": sync_tool})
     assert result == 10
+
+
+@pytest.mark.asyncio
+async def test_async_time_decorator(capsys):
+    """测试异步计时装饰器"""
+
+    @async_time_function()
+    async def test_func():
+        await asyncio.sleep(0.1)
+        return "done"
+
+    result = await test_func()
+    assert result == "done"
+
+    captured = capsys.readouterr()
+    assert "test_func 耗时:" in captured.out

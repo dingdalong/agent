@@ -3,7 +3,9 @@ import json
 from typing import Dict, List, Any, Optional, Tuple, Callable, Union
 from openai import APIConnectionError, RateLimitError, APIError
 from config import async_client, MODEL_NAME, request_semaphore
+from .performance import async_time_function
 
+@async_time_function()
 async def call_model(
     messages: List[Dict[str, Any]],
     stream: bool = False,
