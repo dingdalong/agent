@@ -1,6 +1,6 @@
 import pytest
 import asyncio
-from src.core.async_api import call_model, parse_nonstream_response
+from src.core.async_api import call_model, parse_nonstream_response, execute_tool_calls, _execute_single_tool
 
 @pytest.mark.asyncio
 async def test_call_model_not_implemented():
@@ -48,3 +48,26 @@ async def test_parse_nonstream_response():
     assert content == "Hello"
     assert tool_calls == {}
     assert finish_reason == "stop"
+
+
+@pytest.mark.asyncio
+async def test_execute_tool_calls_no_tools():
+    """测试无工具调用情况"""
+    result = await execute_tool_calls("Hello", {}, {})
+    assert result == []
+
+
+@pytest.mark.asyncio
+async def test_execute_single_tool_sync():
+    """测试同步工具执行"""
+    def sync_tool(x):
+        return x * 2
+
+    tool_call = {
+        "id": "test-id",
+        "name": "sync_tool",
+        "arguments": '{"x": 5}'
+    }
+
+    result = await _execute_single_tool(tool_call, {"sync_tool": sync_tool})
+    assert result == 10

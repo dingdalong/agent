@@ -124,3 +124,84 @@ async def parse_nonstream_response(
             print(content)
 
     return content, tool_calls_dict, finish_reason
+
+
+async def execute_tool_calls(
+    content: str,
+    tool_calls: Dict[int, Dict[str, str]],
+    tool_executor: Dict[str, Callable]
+) -> List[Dict[str, Any]]:
+    """
+    异步执行工具调用，支持同步/异步混合工具
+    """
+    if not tool_calls:
+        return []
+
+    new_messages = []
+
+    # 构造assistant消息
+    assistant_msg = {
+        "role": "assistant",
+        "content": content if content else None,
+        "tool_calls": [
+            {
+                "id": tc["id"],
+                "type": "function",
+                "function": {
+                    "name": tc["name"],
+                    "arguments": tc["arguments"]
+                }
+            }
+            for tc in tool_calls.values()
+        ]
+    }
+    new_messages.append(assistant_msg)
+
+    # 并行执行所有工具调用
+    tool_tasks = []
+    for idx, tc in tool_calls.items():
+        task = asyncio.create_task(_execute_single_tool(tc, tool_executor))
+        tool_tasks.append((idx, task))
+
+    # 等待所有工具完成
+    results = []
+    for idx, task in tool_tasks:
+        try:
+            result = await task
+            results.append((idx, result))
+        except Exception as e:
+            results.append((idx, f"工具执行异常: {e}"))
+
+    # 按原始顺序构造tool消息
+    for idx, result in sorted(results, key=lambda x: x[0]):
+        new_messages.append({
+            "role": "tool",
+            "tool_call_id": tool_calls[idx]["id"],
+            "content": str(result)
+        })
+
+    return new_messages
+
+
+async def _execute_single_tool(
+    tool_call: Dict[str, str],
+    tool_executor: Dict[str, Callable]
+) -> Any:
+    """执行单个工具调用"""
+    try:
+        args = json.loads(tool_call["arguments"])
+    except json.JSONDecodeError as e:
+        return f"参数解析失败: {e}"
+
+    func = tool_executor.get(tool_call["name"])
+    if not func:
+        return f"未找到工具: {tool_call['name']}"
+
+    try:
+        # 自动检测并执行异步/同步函数
+        if asyncio.iscoroutinefunction(func):
+            return await func(**args)
+        else:
+            return await asyncio.to_thread(func, **args)
+    except Exception as e:
+        return f"执行错误: {e}"
