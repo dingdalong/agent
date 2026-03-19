@@ -1,20 +1,22 @@
 import time
 import logging
+import pytest
 from main import run_agent, ConversationBuffer
 
 logger = logging.getLogger(__name__)
 
-def test_single_conversation():
+@pytest.mark.asyncio
+async def test_single_conversation():
     """测试单轮对话的性能"""
     memory = ConversationBuffer()
     start = time.perf_counter()
-    response = run_agent("你好，我叫大龙，我喜欢喝咖啡", memory)
+    response = await run_agent("你好，我叫大龙，我喜欢喝咖啡", memory)
     elapsed = time.perf_counter() - start
     logger.info(f"单轮对话耗时: {elapsed:.2f}s")
-    print(f"单轮对话耗时: {elapsed:.2f}s")
     return elapsed
 
-def test_multiple_conversations():
+@pytest.mark.asyncio
+async def test_multiple_conversations():
     """测试多轮对话的性能"""
     memory = ConversationBuffer()
     total_time = 0
@@ -29,7 +31,7 @@ def test_multiple_conversations():
 
     for i, user_input in enumerate(test_inputs):
         start = time.perf_counter()
-        response = run_agent(user_input, memory)
+        response = await run_agent(user_input, memory)
         elapsed = time.perf_counter() - start
         total_time += elapsed
         logger.info(f"第{i+1}轮: {elapsed:.2f}s")
@@ -40,7 +42,8 @@ def test_multiple_conversations():
     print(f"总耗时: {total_time:.2f}s, 平均每轮: {avg_time:.2f}s")
     return total_time
 
-def test_empty_memory():
+@pytest.mark.asyncio
+async def test_empty_memory():
     """场景A：空记忆库测试 - 测试基础API调用和事实提取开销"""
     logger.info("=== 场景A：空记忆库测试 ===")
     print("=== 场景A：空记忆库测试 ===")
@@ -54,12 +57,13 @@ def test_empty_memory():
 
     for i, user_input in enumerate(test_inputs):
         start = time.perf_counter()
-        response = run_agent(user_input, memory)
+        response = await run_agent(user_input, memory)
         elapsed = time.perf_counter() - start
         logger.info(f"空记忆库第{i+1}轮: {elapsed:.2f}s")
         print(f"空记忆库第{i+1}轮: {elapsed:.2f}s")
 
-def test_with_existing_memory():
+@pytest.mark.asyncio
+async def test_with_existing_memory():
     """场景B：有记忆库测试 - 测试记忆检索和版本控制开销"""
     logger.info("=== 场景B：有记忆库测试 ===")
     print("=== 场景B：有记忆库测试 ===")
@@ -74,7 +78,7 @@ def test_with_existing_memory():
     ]
 
     for user_input in setup_inputs:
-        run_agent(user_input, memory)
+        await run_agent(user_input, memory)
 
     # 测试有记忆时的性能
     test_inputs = [
@@ -86,12 +90,13 @@ def test_with_existing_memory():
 
     for i, user_input in enumerate(test_inputs):
         start = time.perf_counter()
-        response = run_agent(user_input, memory)
+        response = await run_agent(user_input, memory)
         elapsed = time.perf_counter() - start
         logger.info(f"有记忆库第{i+1}轮: {elapsed:.2f}s")
         print(f"有记忆库第{i+1}轮: {elapsed:.2f}s")
 
-def test_long_conversation():
+@pytest.mark.asyncio
+async def test_long_conversation():
     """场景C：长对话测试 - 测试对话压缩和摘要生成开销"""
     logger.info("=== 场景C：长对话测试 ===")
     print("=== 场景C：长对话测试 ===")
@@ -113,7 +118,7 @@ def test_long_conversation():
     total_time = 0
     for i, user_input in enumerate(long_inputs):
         start = time.perf_counter()
-        response = run_agent(user_input, memory)
+        response = await run_agent(user_input, memory)
         elapsed = time.perf_counter() - start
         total_time += elapsed
         logger.info(f"长对话第{i+1}轮: {elapsed:.2f}s (累计轮数: {len(memory.messages)//2})")
@@ -124,26 +129,26 @@ def test_long_conversation():
     print(f"长对话总耗时: {total_time:.2f}s, 平均每轮: {avg_time:.2f}s")
     return total_time
 
-if __name__ == "__main__":
+async def main():
     print("开始性能测试...")
     logger.info("性能测试开始")
 
     # 运行所有测试场景
     try:
         print("\n1. 单轮对话测试")
-        test_single_conversation()
+        await test_single_conversation()
 
         print("\n2. 多轮对话测试")
-        test_multiple_conversations()
+        await test_multiple_conversations()
 
         print("\n3. 场景A：空记忆库测试")
-        test_empty_memory()
+        await test_empty_memory()
 
         print("\n4. 场景B：有记忆库测试")
-        test_with_existing_memory()
+        await test_with_existing_memory()
 
         print("\n5. 场景C：长对话测试")
-        test_long_conversation()
+        await test_long_conversation()
 
         print("\n性能测试完成！详细日志请查看 performance.log 文件")
         logger.info("性能测试完成")
@@ -151,3 +156,7 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"性能测试失败: {e}", exc_info=True)
         print(f"性能测试失败: {e}")
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())

@@ -31,11 +31,13 @@ DEFAULT_CONCURRENCY = 5
 request_semaphore = asyncio.Semaphore(DEFAULT_CONCURRENCY)
 
 # 性能监控日志配置
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('performance.log'),
-        logging.StreamHandler()
-    ]
-)
+# 避免重复配置日志
+if not logging.getLogger().hasHandlers():
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler('performance.log'),
+            logging.StreamHandler()
+        ]
+    )

@@ -7,6 +7,24 @@ class OllamaEmbeddingFunction(EmbeddingFunction):
         self.base_url = base_url.rstrip('/')
         self.api_url = f"{self.base_url}/api/embeddings"
 
+    @classmethod
+    def name(cls) -> str:
+        return "ollama"
+
+    def get_config(self) -> dict:
+        return {
+            "model_name": self.model_name,
+            "base_url": self.base_url,
+            "api_url": self.api_url
+        }
+
+    @classmethod
+    def build_from_config(cls, config: dict) -> "OllamaEmbeddingFunction":
+        return cls(
+            model_name=config["model_name"],
+            base_url=config["base_url"]
+        )
+
     def __call__(self, input: Documents) -> Embeddings:
         # 确保输入是列表
         if isinstance(input, str):
