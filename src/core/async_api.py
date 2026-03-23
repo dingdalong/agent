@@ -125,3 +125,7 @@ async def parse_nonstream_response(
             print(content)
 
     return content, tool_calls_dict, finish_reason
+
+async def async_input(prompt: str = "") -> str:
+    """异步输入函数，使用asyncio.to_thread包装input()"""
+    return await asyncio.to_thread(input, prompt)
