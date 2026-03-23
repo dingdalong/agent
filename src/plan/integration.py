@@ -11,6 +11,8 @@ from config import PLAN_MAX_ADJUSTMENTS
 logger = logging.getLogger(__name__)
 
 USER_PROMPT_FINAL_CONFIRM_YES = "y"
+INPUT_PREFIX = "\n你: "
+OUTPUT_PREFIX = "助手: "
 
 # 默认输出函数，使用 print
 def _default_output(msg: str) -> None:
@@ -63,13 +65,13 @@ async def handle_planning_request(
                 return None  # 模型判断不需要计划
 
         # 展示计划
-        output_func("\n📋 我为你制定了以下计划：")
+        output_func(f"\n{OUTPUT_PREFIX}📋 我为你制定了以下计划：")
         for i, step in enumerate(current_plan.steps, 1):
-            output_func(f"{i}. {step.description}")
+            output_func(f"  {i}. {step.description}")
+        output_func(f"{OUTPUT_PREFIX}是否执行此计划？输入 '确认' 开始执行，或输入修改意见。")
 
         # 询问用户
-        output_func("\n是否执行此计划？输入 '确认' 开始执行，或输入修改意见（如 '修改步骤2为...'）。")
-        user_feedback = await async_input_func("你的反馈：")
+        user_feedback = await async_input_func(INPUT_PREFIX)
 
         action = await classify_user_feedback(user_feedback, current_plan)
         if action == "confirm":
@@ -80,12 +82,12 @@ async def handle_planning_request(
         else:
             # 调整计划
             current_plan = await adjust_plan(original_request, current_plan, user_feedback, available_tools)
-            output_func("\n已根据你的意见调整计划。")
+            output_func(f"\n{OUTPUT_PREFIX}已根据你的意见调整计划。")
 
     # 达到最大调整次数，询问是否执行当前计划
     assert current_plan is not None
-    output_func("\n已达到最大调整次数，是否仍要执行当前计划？(y/n)")
-    final_confirm = await async_input_func("")
+    output_func(f"\n{OUTPUT_PREFIX}已达到最大调整次数，是否仍要执行当前计划？(y/n)")
+    final_confirm = await async_input_func(INPUT_PREFIX)
     if final_confirm.lower() == USER_PROMPT_FINAL_CONFIRM_YES:
         result_dict = await execute_plan(current_plan, tool_executor, async_input_func)
         return format_execution_results(current_plan, result_dict)

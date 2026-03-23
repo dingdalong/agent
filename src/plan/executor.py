@@ -174,7 +174,7 @@ async def execute_step(
                 action=step.action
             )
         # 用户输入不设超时
-        prompt = step.description or "请提供信息："
+        prompt = f"\n助手: {step.description or '请提供信息：'}\n\n你: "
         try:
             user_input = await async_input_func(prompt)
             return user_input

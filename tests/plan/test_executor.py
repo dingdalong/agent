@@ -148,7 +148,7 @@ async def test_execute_step_user_input():
         step, {}, MagicMock(), async_input_func=mock_input_func
     )
 
-    mock_input_func.assert_called_once_with("请输入信息")
+    mock_input_func.assert_called_once_with("\n助手: 请输入信息\n\n你: ")
     assert result == "用户输入内容"
 
 
@@ -259,7 +259,7 @@ async def test_execute_plan_with_user_input():
         plan, mock_executor, async_input_func=mock_input_func
     )
 
-    mock_input_func.assert_called_once_with("获取输入")
+    mock_input_func.assert_called_once_with("\n助手: 获取输入\n\n你: ")
     mock_executor.execute.assert_called_once_with("process", {})
     assert result["step1"] == "用户提供的数据"
     assert result["step2"] == "处理结果"
