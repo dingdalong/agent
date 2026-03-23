@@ -3,6 +3,7 @@ from typing import Dict, List, Any, Optional, Tuple, Callable, Union
 from openai import APIConnectionError, RateLimitError, APIError
 from config import async_client, MODEL_NAME, request_semaphore
 from .performance import async_time_function
+from src.utils.text import extract_json
 
 @async_time_function()
 async def call_model(
@@ -11,7 +12,8 @@ async def call_model(
     temperature: float = 1.0,
     tools: Optional[List[Dict]] = None,
     max_retries: int = 3,
-    timeout: float = 30.0
+    timeout: float = 30.0,
+    response_format: Optional[Dict[str, str]] = None
 ) -> Tuple[str, Dict[int, Dict[str, str]], Optional[str]]:
     """
     纯异步模型调用，带指数退避重试和并发控制
@@ -20,19 +22,23 @@ async def call_model(
         for attempt in range(max_retries):
             try:
                 async with asyncio.timeout(timeout):
-                    response = await async_client.chat.completions.create(
+                    create_kwargs = dict(
                         model=MODEL_NAME,
                         messages=messages,
                         tools=tools,
                         stream=stream,
                         temperature=temperature,
-                        tool_choice="auto" if tools else None
+                        tool_choice="auto" if tools else None,
                     )
+                    if response_format:
+                        create_kwargs["response_format"] = response_format
+                    response = await async_client.chat.completions.create(**create_kwargs)
 
+                    is_json = response_format and response_format.get("type") == "json_object"
                     if stream:
-                        return await parse_stream_response(response, stream_output=True)
+                        return await parse_stream_response(response, stream_output=True, clean_json=is_json)
                     else:
-                        return await parse_nonstream_response(response, stream_output=False)
+                        return await parse_nonstream_response(response, stream_output=False, clean_json=is_json)
 
             except (APIConnectionError, RateLimitError, asyncio.TimeoutError) as e:
                 if attempt == max_retries - 1:
@@ -46,7 +52,8 @@ async def call_model(
 
 async def parse_stream_response(
     stream,
-    stream_output: Union[bool, Callable] = True
+    stream_output: Union[bool, Callable] = True,
+    clean_json: bool = False
 ) -> Tuple[str, Dict[int, Dict[str, str]], Optional[str]]:
     """
     异步迭代流式响应，支持异步回调
@@ -91,17 +98,22 @@ async def parse_stream_response(
         print()
 
     content = "".join(content_parts)
+    if clean_json:
+        content = extract_json(content)
     return content, tool_calls, finish_reason
 
 async def parse_nonstream_response(
     response,
-    stream_output: Union[bool, Callable] = True
+    stream_output: Union[bool, Callable] = True,
+    clean_json: bool = False
 ) -> Tuple[str, Dict[int, Dict[str, str]], Optional[str]]:
     """
     异步解析非流式响应
     """
     message = response.choices[0].message
     content = message.content or ""
+    if clean_json:
+        content = extract_json(content)
     finish_reason = response.choices[0].finish_reason
 
     # 转换tool_calls为字典格式

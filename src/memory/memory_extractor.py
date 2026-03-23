@@ -261,7 +261,10 @@ class FactExtractor:
                 {"role": "system", "content": self.prompt},  # 固定部分
                 {"role": "user", "content": f"用户说：{user_input}\n助手说：{assistant_response}"}  # 变化部分
             ]
-            response, tool_calls, finish_reason = await call_model(prompt, temperature=0.0)
+            response, tool_calls, finish_reason = await call_model(
+                prompt, temperature=0.0,
+                response_format={"type": "json_object"}
+            )
             if not response:
                 return None
             return response
@@ -270,9 +273,8 @@ class FactExtractor:
             return None
 
     def _parse_model_output(self, text: str) -> List[Dict[str, Any]]:
-        cleaned = self.text_utils.extract_json(text)
         try:
-            data = json.loads(cleaned)
+            data = json.loads(text)
             facts = data.get("facts", [])
             if isinstance(facts, list):
                 return facts
