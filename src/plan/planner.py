@@ -101,6 +101,53 @@ def parse_plan_response(response: str) -> Plan:
         logger.error(f"{error_msg}, 原始响应: {response}")
         raise JSONParseError(error_msg, raw_response=response) from e
 
+CONFIRM_CLASSIFICATION_PROMPT = """判断用户的回复是"确认执行计划"还是"要求调整计划"。
+
+当前计划：
+{plan_summary}
+
+用户回复：{user_feedback}
+
+请只输出一个JSON对象，格式为：{{"action": "confirm"}} 或 {{"action": "adjust"}}
+- 如果用户表示同意、确认、执行、没问题等意思，输出 confirm
+- 如果用户提出修改意见、补充要求、质疑等，输出 adjust"""
+
+
+async def classify_user_feedback(user_feedback: str, plan: Plan) -> str:
+    """使用LLM判断用户反馈是确认执行还是要求调整计划
+
+    Args:
+        user_feedback: 用户的反馈文本
+        plan: 当前计划
+
+    Returns:
+        "confirm" 或 "adjust"
+    """
+    plan_summary = "\n".join(
+        f"{i}. {step.description}" for i, step in enumerate(plan.steps, 1)
+    )
+    prompt = CONFIRM_CLASSIFICATION_PROMPT.format(
+        plan_summary=plan_summary, user_feedback=user_feedback
+    )
+
+    try:
+        response, _, _ = await asyncio.wait_for(
+            call_model([
+                {"role": "user", "content": prompt}
+            ], stream=False, temperature=0),
+            timeout=15
+        )
+        response = extract_json(response)
+        data = json.loads(response)
+        action = data.get("action", "adjust")
+        if action in ("confirm", "adjust"):
+            return action
+        return "adjust"
+    except Exception as e:
+        logger.warning(f"分类用户反馈失败: {e}, 默认为调整")
+        return "adjust"
+
+
 async def generate_plan(user_input: str, available_tools: List[ToolDict], context: str = "") -> Optional[Plan]:
     """生成初始计划。如果模型判断请求不适合生成计划，返回 None。"""
     tools_desc = build_tools_description(available_tools)

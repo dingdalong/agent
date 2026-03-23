@@ -3,15 +3,13 @@ from typing import List, Dict, Any, Optional, Callable, Awaitable
 
 from src.tools.tool_executor import ToolExecutor
 from src.plan.models import Plan
-from src.plan.planner import generate_plan, adjust_plan, ToolDict
+from src.plan.planner import generate_plan, adjust_plan, classify_user_feedback, ToolDict
 from src.plan.executor import execute_plan
 from src.plan.exceptions import PlanError
 from config import PLAN_MAX_ADJUSTMENTS
 
 logger = logging.getLogger(__name__)
 
-# 用户确认选项
-USER_PROMPT_CONFIRM_OPTIONS = ["确认", "执行", "好的", "ok", "yes"]
 USER_PROMPT_FINAL_CONFIRM_YES = "y"
 
 # 默认输出函数，使用 print
@@ -73,7 +71,8 @@ async def handle_planning_request(
         output_func("\n是否执行此计划？输入 '确认' 开始执行，或输入修改意见（如 '修改步骤2为...'）。")
         user_feedback = await async_input_func("你的反馈：")
 
-        if user_feedback.lower() in USER_PROMPT_CONFIRM_OPTIONS:
+        action = await classify_user_feedback(user_feedback, current_plan)
+        if action == "confirm":
             # 确认执行
             result_dict = await execute_plan(current_plan, tool_executor, async_input_func)
             logger.debug(f"执行结果: {result_dict}")
