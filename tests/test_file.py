@@ -3,7 +3,7 @@ import os
 import shutil
 from tools.file import (
     write_file, read_file, delete_file, list_files,
-    append_file, search_file, insert_lines, delete_lines,
+    append_file, search_file, find_files, insert_lines, delete_lines,
     replace_lines, find_replace, _safe_path, _read_lines,
     _validate_line_range,
 )
@@ -500,6 +500,104 @@ class TestFindReplace:
     async def test_replace_nonexistent_file(self):
         result = await find_replace("test_no_fr.txt", "a", "b")
         assert "不存在" in result
+
+
+# ===================== search_file 正则测试 =====================
+
+class TestSearchFileRegex:
+    @pytest.mark.asyncio
+    async def test_regex_search_in_file(self):
+        await write_file("test_regex.txt", "foo123\nbar456\nfoo789\n")
+        result = await search_file(r"foo\d+", "test_regex.txt", use_regex=True)
+        assert "test_regex.txt:1:" in result
+        assert "test_regex.txt:3:" in result
+        assert "bar" not in result
+
+    @pytest.mark.asyncio
+    async def test_regex_search_all_files(self):
+        await write_file("test_rx1.txt", "hello world\n")
+        await write_file("test_rx2.txt", "HELLO WORLD\n")
+        result = await search_file(r"[Hh]ello", use_regex=True)
+        assert "test_rx1.txt" in result
+        assert "test_rx2.txt" not in result  # 大写 HELLO 不匹配 [Hh]ello
+
+    @pytest.mark.asyncio
+    async def test_regex_case_insensitive(self):
+        await write_file("test_rxi.txt", "Hello World\nhello world\n")
+        result = await search_file(r"(?i)hello", "test_rxi.txt", use_regex=True)
+        assert "test_rxi.txt:1:" in result
+        assert "test_rxi.txt:2:" in result
+
+    @pytest.mark.asyncio
+    async def test_regex_invalid_pattern(self):
+        result = await search_file(r"[invalid", "test_regex.txt", use_regex=True)
+        assert "正则表达式无效" in result
+
+    @pytest.mark.asyncio
+    async def test_regex_not_found(self):
+        await write_file("test_rx_nf.txt", "hello world\n")
+        result = await search_file(r"^\d+$", "test_rx_nf.txt", use_regex=True)
+        assert "未找到" in result
+
+    @pytest.mark.asyncio
+    async def test_plain_search_still_works(self):
+        """确认不传 use_regex 时行为不变"""
+        await write_file("test_plain.txt", "foo.bar\nfoo-bar\n")
+        result = await search_file("foo.bar", "test_plain.txt")
+        # 纯文本匹配，"foo.bar" 只匹配第 1 行
+        assert "test_plain.txt:1:" in result
+
+
+# ===================== find_files 测试 =====================
+
+class TestFindFiles:
+    @pytest.mark.asyncio
+    async def test_find_by_extension(self):
+        await write_file("test_ff_a.py", "# python file")
+        await write_file("test_ff_b.txt", "text file")
+        result = await find_files("test_ff_*.py")
+        assert "test_ff_a.py" in result
+        assert "test_ff_b.txt" not in result
+
+    @pytest.mark.asyncio
+    async def test_find_with_keyword_filter(self):
+        await write_file("test_fk_a.txt", "apple banana")
+        await write_file("test_fk_b.txt", "cherry date")
+        result = await find_files("test_fk_*.txt", keyword="apple")
+        assert "test_fk_a.txt" in result
+        assert "test_fk_b.txt" not in result
+
+    @pytest.mark.asyncio
+    async def test_find_no_match(self):
+        result = await find_files("test_nonexistent_pattern_*.xyz")
+        assert "未找到" in result
+
+    @pytest.mark.asyncio
+    async def test_find_recursive(self):
+        await write_file("test_ffdir/nested.txt", "nested content")
+        result = await find_files("**/*.txt")
+        assert "nested.txt" in result
+
+
+# ===================== list_files 递归测试 =====================
+
+class TestListFilesRecursive:
+    @pytest.mark.asyncio
+    async def test_recursive_list(self):
+        await write_file("test_recdir/sub/deep.txt", "deep content")
+        await write_file("test_recdir/top.txt", "top content")
+        result = await list_files("test_recdir", recursive=True)
+        assert "deep.txt" in result
+        assert "top.txt" in result
+
+    @pytest.mark.asyncio
+    async def test_non_recursive_default(self):
+        await write_file("test_nrdir/sub/deep.txt", "deep")
+        await write_file("test_nrdir/top.txt", "top")
+        result = await list_files("test_nrdir")
+        assert "top.txt" in result
+        assert "sub/" in result
+        assert "deep.txt" not in result
 
 
 # ===================== 端到端流程测试 =====================

@@ -1,4 +1,6 @@
 import os
+import re
+from pathlib import Path
 from . import tool
 from pydantic import BaseModel, Field
 from typing import Optional
@@ -59,14 +61,16 @@ class DeleteFileArgs(BaseModel):
 
 class ListFilesArgs(BaseModel):
     subdir: str = Field(default="", description="子目录路径，默认列出 workspace 根目录")
+    recursive: bool = Field(default=False, description="是否递归列出所有子目录中的文件")
 
 class AppendFileArgs(BaseModel):
     filename: str = Field(description="文件名（相对于 workspace 目录）")
     content: str = Field(description="要追加的内容")
 
 class SearchFileArgs(BaseModel):
-    keyword: str = Field(description="要搜索的关键词")
+    keyword: str = Field(description="要搜索的关键词或正则表达式")
     filename: Optional[str] = Field(default=None, description="指定文件名搜索，为空则搜索整个 workspace")
+    use_regex: bool = Field(default=False, description="是否使用正则表达式匹配，默认为普通文本搜索")
 
 class InsertLinesArgs(BaseModel):
     filename: str = Field(description="文件名（相对于 workspace 目录）")
@@ -83,6 +87,10 @@ class ReplaceLinesArgs(BaseModel):
     start_line: int = Field(description="起始行号（从 1 开始，闭区间）")
     end_line: int = Field(description="结束行号（闭区间，包含此行）")
     content: str = Field(description="用于替换的新内容")
+
+class FindFilesArgs(BaseModel):
+    pattern: str = Field(description="文件名匹配模式，支持 glob 语法（如 '*.py', '**/*.txt'）")
+    keyword: Optional[str] = Field(default=None, description="可选：只返回内容包含此关键词的文件")
 
 class FindReplaceArgs(BaseModel):
     filename: str = Field(description="文件名（相对于 workspace 目录）")
@@ -150,8 +158,8 @@ async def delete_file(filename: str) -> str:
     return f"文件已删除：{filename}"
 
 
-@tool(model=ListFilesArgs, description="列出工作区中的文件和目录")
-async def list_files(subdir: str = "") -> str:
+@tool(model=ListFilesArgs, description="列出工作区中的文件和目录，支持递归列出子目录")
+async def list_files(subdir: str = "", recursive: bool = False) -> str:
     workspace = os.path.abspath("./workspace")
     target = os.path.abspath(os.path.join(workspace, subdir))
     if not target.startswith(workspace):
@@ -160,13 +168,26 @@ async def list_files(subdir: str = "") -> str:
         return f"错误：目录 '{subdir or 'workspace'}' 不存在"
 
     entries = []
-    for name in sorted(os.listdir(target)):
-        full = os.path.join(target, name)
-        if os.path.isdir(full):
-            entries.append(f"📁 {name}/")
-        else:
-            size = os.path.getsize(full)
-            entries.append(f"📄 {name} ({_format_size(size)})")
+
+    if recursive:
+        for root, dirs, files in os.walk(target):
+            dirs.sort()
+            for name in sorted(files):
+                full = os.path.join(root, name)
+                rel = os.path.relpath(full, target)
+                size = os.path.getsize(full)
+                entries.append(f"📄 {rel} ({_format_size(size)})")
+            if len(entries) >= 200:
+                entries.append("... 文件过多，仅显示前 200 个")
+                break
+    else:
+        for name in sorted(os.listdir(target)):
+            full = os.path.join(target, name)
+            if os.path.isdir(full):
+                entries.append(f"📁 {name}/")
+            else:
+                size = os.path.getsize(full)
+                entries.append(f"📄 {name} ({_format_size(size)})")
 
     if not entries:
         return "目录为空"
@@ -185,9 +206,16 @@ async def append_file(filename: str, content: str) -> str:
     return f"内容已追加到：{filename}"
 
 
-@tool(model=SearchFileArgs, description="在工作区文件中搜索关键词，返回匹配的行号和内容")
-async def search_file(keyword: str, filename: Optional[str] = None) -> str:
+@tool(model=SearchFileArgs, description="在工作区文件中搜索关键词或正则表达式，返回匹配的行号和内容")
+async def search_file(keyword: str, filename: Optional[str] = None, use_regex: bool = False) -> str:
     workspace = os.path.abspath("./workspace")
+
+    # 正则模式下预编译
+    if use_regex:
+        try:
+            pattern = re.compile(keyword)
+        except re.error as e:
+            return f"错误：正则表达式无效 - {e}"
 
     if filename:
         full_path, err = _safe_path(filename)
@@ -209,7 +237,8 @@ async def search_file(keyword: str, filename: Optional[str] = None) -> str:
         try:
             with open(abs_path, "r", encoding="utf-8") as f:
                 for line_no, line in enumerate(f, 1):
-                    if keyword in line:
+                    matched = pattern.search(line) if use_regex else (keyword in line)
+                    if matched:
                         results.append(f"{rel_name}:{line_no}: {line.rstrip()}")
         except (UnicodeDecodeError, PermissionError):
             continue
@@ -220,6 +249,43 @@ async def search_file(keyword: str, filename: Optional[str] = None) -> str:
         results = results[:50]
         results.append(f"... 结果过多，仅显示前 50 条")
     return "\n".join(results)
+
+
+@tool(model=FindFilesArgs, description="按文件名模式查找工作区中的文件，支持 glob 语法如 *.py 和 **/*.txt")
+async def find_files(pattern: str, keyword: Optional[str] = None) -> str:
+    workspace = os.path.abspath("./workspace")
+    workspace_path = Path(workspace)
+
+    if not workspace_path.is_dir():
+        return "错误：工作区目录不存在"
+
+    matched = []
+    for p in workspace_path.glob(pattern):
+        # 安全检查：确保在 workspace 内
+        if not str(p.resolve()).startswith(workspace):
+            continue
+        if not p.is_file():
+            continue
+        rel = p.relative_to(workspace_path)
+
+        # 可选内容过滤
+        if keyword:
+            try:
+                text = p.read_text(encoding="utf-8")
+                if keyword not in text:
+                    continue
+            except (UnicodeDecodeError, PermissionError):
+                continue
+
+        size = p.stat().st_size
+        matched.append(f"📄 {rel} ({_format_size(size)})")
+        if len(matched) >= 100:
+            matched.append("... 结果过多，仅显示前 100 个")
+            break
+
+    if not matched:
+        return f"未找到匹配 '{pattern}' 的文件"
+    return f"找到 {len(matched)} 个匹配文件：\n" + "\n".join(matched)
 
 
 # === 行级编辑工具 ===
