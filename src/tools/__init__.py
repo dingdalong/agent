@@ -1,6 +1,6 @@
 import importlib
 from pathlib import Path
-from typing import Dict, Any, Callable, Optional, Type
+from typing import Dict, Any, Callable, Optional, Type, TypedDict
 from pydantic import BaseModel
 import logging
 from .tool_executor import ToolExecutor
@@ -74,6 +74,11 @@ def get_tools_schemas() -> list:
         })
     return schemas
 
+
+class ToolDict(TypedDict):
+    function: Dict[str, Any]
+
+
 # 非工具模块，自动发现时跳过
 _SKIP_MODULES = {"__init__", "tool_call", "tool_executor"}
 
@@ -88,4 +93,4 @@ for item in sorted(package_dir.glob("*.py")):
 tools = get_tools_schemas()
 tool_executor = ToolExecutor(_TOOL_REGISTRY)
 
-__all__ = ["tools", "tool_executor", "tool"]
+__all__ = ["tools", "tool_executor", "tool", "ToolDict"]

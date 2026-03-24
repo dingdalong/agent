@@ -5,7 +5,8 @@ from typing import List, Dict, Any, Optional, Callable
 from src.tools.tool_executor import ToolExecutor
 from src.core.async_api import async_input
 from src.plan.models import Plan
-from src.plan.planner import generate_plan, adjust_plan, classify_user_feedback, check_clarification_needed, ToolDict
+from src.plan.planner import generate_plan, adjust_plan, classify_user_feedback, check_clarification_needed
+from src.tools import ToolDict
 from src.plan.executor import execute_plan
 from src.plan.exceptions import PlanError
 from config import PLAN_MAX_ADJUSTMENTS, PLAN_MAX_CLARIFICATION_ROUNDS
