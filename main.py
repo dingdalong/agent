@@ -14,7 +14,7 @@ from src.core.guardrails import InputGuardrail
 from src.memory.memory import ConversationBuffer, VectorMemory
 from src.flows import detect_flow
 from src.flows.planning import PlanningFlow
-from src.flows.chat import ChatFlow
+from src.agents import agent_registry, MultiAgentFlow
 from config import USER_ID
 
 input_guard = InputGuardrail()
@@ -80,16 +80,17 @@ async def handle_input(user_input: str):
             return
         # result 为 None 表示模型判断不需要计划，回退到普通对话
 
-    # 4. 普通对话 → ChatFlow
-    chat_flow = ChatFlow(
+    # 4. 普通对话 → MultiAgentFlow（总控 + 专业 Agent）
+    multi_agent_flow = MultiAgentFlow(
+        registry=agent_registry,
         memory=memory,
         user_facts=user_facts,
         conversation_summaries=conversation_summaries,
-        tools_schema=tools,
+        all_tools=tools,
         tool_executor=tool_executor,
     )
-    chat_flow.model.data["user_input"] = user_input
-    runner = FSMRunner(chat_flow)
+    multi_agent_flow.model.data["user_input"] = user_input
+    runner = FSMRunner(multi_agent_flow)
     await runner.run()
 
 
