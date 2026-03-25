@@ -153,6 +153,18 @@ class MultiAgentFlow(StateMachine):
             if memory_sections:
                 system_prompt += "\n\n" + "\n\n".join(memory_sections)
 
+            # 追加 Skill catalog
+            skill_manager = getattr(model.tool_executor, "skill_manager", None)
+            if skill_manager:
+                catalog = skill_manager.get_catalog_prompt()
+                if catalog:
+                    system_prompt += "\n\n" + catalog
+
+            # 注入斜杠命令预激活的 skill 内容
+            skill_content = model.data.get("skill_content")
+            if skill_content:
+                system_prompt += "\n\n" + skill_content
+
             model.messages = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_input},
@@ -160,14 +172,57 @@ class MultiAgentFlow(StateMachine):
             model.memory.add_user_message(user_input)
             model.output_text = OUTPUT_PREFIX
 
-        # 调用总控 LLM（只有 transfer_to_agent 工具）
+        # 构建总控 LLM 工具列表
         transfer_schema = model.registry.build_transfer_tool_schema()
+        orchestrator_tools = [transfer_schema]
+
+        # 追加 activate_skill 工具
+        skill_manager = getattr(model.tool_executor, "skill_manager", None)
+        if skill_manager:
+            activate_schema = skill_manager.build_activate_tool_schema()
+            if activate_schema:
+                orchestrator_tools.append(activate_schema)
+
         content, tool_calls, _ = await call_model(
             model.messages,
-            tools=[transfer_schema],
+            tools=orchestrator_tools,
         )
 
         if tool_calls:
+            # 检查是否有 activate_skill 调用
+            for tc in tool_calls.values():
+                if tc.get("name") == "activate_skill":
+                    try:
+                        args = json.loads(tc["arguments"])
+                        skill_result = skill_manager.activate(args.get("name", "")) if skill_manager else None
+                    except (json.JSONDecodeError, KeyError):
+                        skill_result = None
+
+                    model.messages.append({
+                        "role": "assistant",
+                        "content": content if content else None,
+                        "tool_calls": [
+                            {
+                                "id": tc["id"],
+                                "type": "function",
+                                "function": {"name": tc["name"], "arguments": tc["arguments"]},
+                            }
+                        ],
+                    })
+                    model.messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc["id"],
+                        "content": skill_result or "Skill not found.",
+                    })
+                    # 递归调用重新查询 LLM（skill 内容已在 messages 中）
+                    depth = model.data.get("_skill_activation_depth", 0)
+                    if depth < 3:
+                        model.data["_skill_activation_depth"] = depth + 1
+                        await self.on_enter_orchestrating()
+                    else:
+                        logger.warning("Skill 激活深度超过限制，停止递归")
+                    return
+
             # 找到 transfer_to_agent 调用
             handoff = None
             for tc in tool_calls.values():
