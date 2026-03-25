@@ -45,6 +45,9 @@ SPECIALIST_MAX_RESULT_LENGTH = 500
 # MCP 配置
 MCP_CONFIG_PATH = os.getenv("MCP_CONFIG_PATH", "mcp_servers.json")
 
+# Skills 配置
+SKILLS_DIRS = ["skills/", ".agents/skills/"]
+
 # 性能监控日志配置
 # 避免重复配置日志
 if not logging.getLogger().hasHandlers():
