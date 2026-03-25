@@ -1,0 +1,2 @@
+class MCPManager:
+    pass
