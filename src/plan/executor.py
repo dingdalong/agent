@@ -1,6 +1,7 @@
 import asyncio
 import logging
-from typing import Dict, Any, Optional, List
+from dataclasses import dataclass, field
+from typing import Dict, Any, Optional, List, Tuple
 
 from src.tools.tool_executor import ToolExecutor
 from src.core.async_api import call_model
@@ -16,6 +17,15 @@ VARIABLE_PREFIX = "$"
 ACTION_TOOL = "tool"
 ACTION_USER_INPUT = "user_input"
 ACTION_SUBTASK = "subtask"
+
+DEFERRED_PLACEHOLDER = "[待确认]"
+
+
+@dataclass
+class DeferredStep:
+    """被延迟执行的敏感工具步骤"""
+    step: Step
+    resolved_args: Dict[str, Any] = field(default_factory=dict)
 
 def resolve_variables(obj: Any, context: Dict[str, Any]) -> Any:
     """解析变量引用，支持 $step_id.field 语法"""
@@ -110,7 +120,7 @@ def topological_sort_layered(steps: List[Step]) -> List[List[Step]]:
         unsorted = set(step.id for step in steps) - {s.id for layer in layers for s in layer}
         raise DependencyError(
             f"存在循环依赖：步骤 {unsorted} 形成循环",
-            step_id=list(unsorted)[0] if unsorted else None,
+            step_id=list(unsorted)[0] if unsorted else "",
             missing_deps=list(unsorted)
         )
 
@@ -260,28 +270,40 @@ def validate_plan(plan: Plan) -> None:
         raise PlanValidationError("计划验证失败", validation_errors=errors)
 
 
+def _is_sensitive_tool_step(step: Step, tool_executor: ToolExecutor) -> bool:
+    """判断步骤是否为敏感工具步骤"""
+    return (step.action == ACTION_TOOL
+            and step.tool_name is not None
+            and tool_executor.is_sensitive(step.tool_name))
+
+
 async def execute_plan(
     plan: Plan,
     tool_executor: ToolExecutor,
     max_concurrency: Optional[int] = None,
     continue_on_error: bool = False
-) -> Dict[str, Any]:
-    """执行整个计划，返回步骤结果字典（step_id -> result）
+) -> Tuple[Dict[str, Any], List[DeferredStep]]:
+    """执行整个计划，敏感工具步骤延迟执行。
 
     同一层（无互相依赖）的步骤会并行执行。
+    敏感工具步骤不会在此函数中执行，而是收集到 deferred_steps 中返回，
+    由调用方在展示结果后统一处理确认和执行。
 
     Args:
         plan: 要执行的计划
         tool_executor: 工具执行器
         max_concurrency: 最大并行度（None表示不限制）
-        continue_on_error: 为True时，步骤失败不中断整个计划，
-            失败步骤的结果记录为错误信息字符串，依赖失败步骤的后续步骤会被跳过
+        continue_on_error: 为True时，步骤失败不中断整个计划
+
+    Returns:
+        (context, deferred_steps): 已执行步骤结果字典 和 延迟的敏感步骤列表
     """
     # 0. 验证计划
     validate_plan(plan)
 
     context = {}  # 存储每个步骤的结果
     failed_steps = set()  # 记录失败的步骤ID
+    deferred_steps: List[DeferredStep] = []  # 延迟的敏感步骤
 
     # 1. 分层拓扑排序
     try:
@@ -307,7 +329,13 @@ async def execute_plan(
         """检查步骤是否因依赖失败而应跳过"""
         return any(dep in failed_steps for dep in step.depends_on)
 
-    # 2. 逐层执行，同层并行
+    def _defer_step(step: Step) -> None:
+        """将敏感工具步骤加入延迟列表"""
+        resolved_args = resolve_variables(step.tool_args or {}, context)
+        deferred_steps.append(DeferredStep(step=step, resolved_args=resolved_args))
+        context[step.id] = DEFERRED_PLACEHOLDER
+
+    # 2. 逐层执行，同层并行；敏感工具步骤延迟
     for layer in layers:
         if len(layer) == 1:
             step = layer[0]
@@ -316,6 +344,12 @@ async def execute_plan(
                 context[step.id] = error_msg
                 failed_steps.add(step.id)
                 continue
+
+            # 敏感工具步骤延迟
+            if _is_sensitive_tool_step(step, tool_executor):
+                _defer_step(step)
+                continue
+
             try:
                 logger.debug(f"执行步骤 {step.id}: {step.description}")
                 result = await execute_step(step, context, tool_executor)
@@ -327,12 +361,14 @@ async def execute_plan(
                 context[step.id] = f"执行失败: {e}"
                 failed_steps.add(step.id)
         else:
-            # 过滤需要跳过的步骤
+            # 分离敏感步骤和普通步骤
             runnable = []
             for step in layer:
                 if continue_on_error and _should_skip(step):
                     context[step.id] = f"跳过：依赖的步骤失败"
                     failed_steps.add(step.id)
+                elif _is_sensitive_tool_step(step, tool_executor):
+                    _defer_step(step)
                 else:
                     runnable.append(step)
 
@@ -346,7 +382,7 @@ async def execute_plan(
                     return_exceptions=True
                 )
                 for step, result in zip(runnable, results):
-                    if isinstance(result, Exception):
+                    if isinstance(result, BaseException):
                         logger.error(f"步骤 {step.id} 执行失败: {result}")
                         context[step.id] = f"执行失败: {result}"
                         failed_steps.add(step.id)
@@ -358,4 +394,4 @@ async def execute_plan(
                 for step_id, result in results:
                     context[step_id] = result
 
-    return context
+    return context, deferred_steps

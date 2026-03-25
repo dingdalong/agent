@@ -4,7 +4,7 @@
 import asyncio
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
-from src.plan.executor import resolve_variables, execute_step, execute_plan, validate_plan, topological_sort_layered
+from src.plan.executor import resolve_variables, execute_step, execute_plan, validate_plan, topological_sort_layered, DeferredStep
 from src.plan.models import Step, Plan
 from src.plan.exceptions import StepExecutionError, PlanValidationError, DependencyError
 
@@ -280,10 +280,11 @@ async def test_execute_plan_sequential():
     plan = Plan(steps=steps)
 
     mock_executor = AsyncMock()
+    mock_executor.is_sensitive = MagicMock(return_value=False)
     # 为不同工具返回不同结果
     mock_executor.execute.side_effect = ["结果1", "结果2"]
 
-    result = await execute_plan(plan, mock_executor)
+    result, deferred = await execute_plan(plan, mock_executor)
 
     # 验证两个工具都被调用
     assert mock_executor.execute.call_count == 2
@@ -294,6 +295,7 @@ async def test_execute_plan_sequential():
     # 验证结果字典
     assert result["step1"] == "结果1"
     assert result["step2"] == "结果2"
+    assert deferred == []
 
 
 @pytest.mark.asyncio
@@ -315,16 +317,18 @@ async def test_execute_plan_with_user_input():
     plan = Plan(steps=steps)
 
     mock_executor = AsyncMock()
+    mock_executor.is_sensitive = MagicMock(return_value=False)
     mock_executor.execute.return_value = "处理结果"
 
     with patch('src.plan.executor.agent_input', new_callable=AsyncMock) as mock_input:
         mock_input.return_value = "用户提供的数据"
-        result = await execute_plan(plan, mock_executor)
+        result, deferred = await execute_plan(plan, mock_executor)
 
     mock_input.assert_called_once_with("\n助手: 获取输入\n\n你: ")
     mock_executor.execute.assert_called_once_with("process", {})
     assert result["step1"] == "用户提供的数据"
     assert result["step2"] == "处理结果"
+    assert deferred == []
 
 
 @pytest.mark.asyncio
@@ -350,9 +354,10 @@ async def test_execute_plan_variable_chaining():
     plan = Plan(steps=steps)
 
     mock_executor = AsyncMock()
+    mock_executor.is_sensitive = MagicMock(return_value=False)
     mock_executor.execute.side_effect = ["结果1", "结果2"]
 
-    result = await execute_plan(plan, mock_executor)
+    result, deferred = await execute_plan(plan, mock_executor)
 
     # 第二步应该接收到第一步的结果作为参数
     calls = mock_executor.execute.call_args_list
@@ -362,6 +367,7 @@ async def test_execute_plan_variable_chaining():
 
     assert result["step1"] == "结果1"
     assert result["step2"] == "结果2"
+    assert deferred == []
 
 
 def test_resolve_variables_depth_limit():
@@ -465,9 +471,10 @@ async def test_execute_plan_parallel():
         return f"result_{name}"
 
     mock_executor = AsyncMock()
+    mock_executor.is_sensitive = MagicMock(return_value=False)
     mock_executor.execute.side_effect = mock_execute
 
-    result = await execute_plan(plan, mock_executor)
+    result, deferred = await execute_plan(plan, mock_executor)
 
     # a 和 b 应该在 c 之前完成
     assert call_order.index("t3") > call_order.index("t1")
@@ -475,6 +482,7 @@ async def test_execute_plan_parallel():
     assert result["a"] == "result_t1"
     assert result["b"] == "result_t2"
     assert result["c"] == "result_t3"
+    assert deferred == []
 
 
 @pytest.mark.asyncio
@@ -488,12 +496,14 @@ async def test_execute_plan_with_concurrency_limit():
     plan = Plan(steps=steps)
 
     mock_executor = AsyncMock()
+    mock_executor.is_sensitive = MagicMock(return_value=False)
     mock_executor.execute.side_effect = ["r1", "r2", "r3"]
 
-    result = await execute_plan(plan, mock_executor, max_concurrency=1)
+    result, deferred = await execute_plan(plan, mock_executor, max_concurrency=1)
 
     assert len(result) == 3
     assert mock_executor.execute.call_count == 3
+    assert deferred == []
 
 
 @pytest.mark.asyncio

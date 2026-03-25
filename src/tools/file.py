@@ -101,7 +101,8 @@ class FindReplaceArgs(BaseModel):
 
 # === 工具函数 ===
 
-@tool(model=WriteFileArgs, description="创建或覆盖写入文件到工作区", sensitive=True)
+@tool(model=WriteFileArgs, description="创建或覆盖写入文件到工作区", sensitive=True,
+      confirm_template="将内容写入文件 '{filename}'")
 async def write_file(filename: str, content: str) -> str:
     full_path, err = _safe_path(filename)
     if err:
@@ -145,7 +146,8 @@ async def read_file(filename: str, show_line_numbers: bool = False,
         return "".join(selected)
 
 
-@tool(model=DeleteFileArgs, description="删除工作区中的文件", sensitive=True)
+@tool(model=DeleteFileArgs, description="删除工作区中的文件", sensitive=True,
+      confirm_template="删除文件 '{filename}'")
 async def delete_file(filename: str) -> str:
     full_path, err = _safe_path(filename)
     if err:
@@ -194,7 +196,8 @@ async def list_files(subdir: str = "", recursive: bool = False) -> str:
     return "\n".join(entries)
 
 
-@tool(model=AppendFileArgs, description="向工作区文件末尾追加内容", sensitive=True)
+@tool(model=AppendFileArgs, description="向工作区文件末尾追加内容", sensitive=True,
+      confirm_template="向文件 '{filename}' 追加内容")
 async def append_file(filename: str, content: str) -> str:
     full_path, err = _safe_path(filename)
     if err:
@@ -290,7 +293,8 @@ async def find_files(pattern: str, keyword: Optional[str] = None) -> str:
 
 # === 行级编辑工具 ===
 
-@tool(model=InsertLinesArgs, description="在文件的指定行号处插入内容", sensitive=True)
+@tool(model=InsertLinesArgs, description="在文件的指定行号处插入内容", sensitive=True,
+      confirm_template="在文件 '{filename}' 第 {line_number} 行插入内容")
 async def insert_lines(filename: str, line_number: int, content: str) -> str:
     full_path, err = _safe_path(filename)
     if err:
@@ -315,7 +319,8 @@ async def insert_lines(filename: str, line_number: int, content: str) -> str:
     return f"已在第 {line_number} 行处插入 {inserted_count} 行（文件现共 {len(lines)} 行）"
 
 
-@tool(model=DeleteLinesArgs, description="删除文件中指定范围的行", sensitive=True)
+@tool(model=DeleteLinesArgs, description="删除文件中指定范围的行", sensitive=True,
+      confirm_template="删除文件 '{filename}' 第 {start_line}~{end_line} 行")
 async def delete_lines(filename: str, start_line: int, end_line: int) -> str:
     full_path, err = _safe_path(filename)
     if err:
@@ -336,7 +341,8 @@ async def delete_lines(filename: str, start_line: int, end_line: int) -> str:
     return f"已删除第 {start_line}~{end_line} 行（共 {deleted_count} 行，文件现共 {len(lines)} 行）"
 
 
-@tool(model=ReplaceLinesArgs, description="将文件中指定范围的行替换为新内容", sensitive=True)
+@tool(model=ReplaceLinesArgs, description="将文件中指定范围的行替换为新内容", sensitive=True,
+      confirm_template="替换文件 '{filename}' 第 {start_line}~{end_line} 行内容")
 async def replace_lines(filename: str, start_line: int, end_line: int, content: str) -> str:
     full_path, err = _safe_path(filename)
     if err:
@@ -361,7 +367,8 @@ async def replace_lines(filename: str, start_line: int, end_line: int, content: 
     return f"已替换第 {start_line}~{end_line} 行（{old_count} 行 → {new_count} 行，文件现共 {len(lines)} 行）"
 
 
-@tool(model=FindReplaceArgs, description="在文件中查找文本并替换", sensitive=True)
+@tool(model=FindReplaceArgs, description="在文件中查找文本并替换", sensitive=True,
+      confirm_template="在文件 '{filename}' 中将 '{old_text}' 替换为 '{new_text}'")
 async def find_replace(filename: str, old_text: str, new_text: str, replace_all: bool = False) -> str:
     full_path, err = _safe_path(filename)
     if err:

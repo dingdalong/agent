@@ -38,7 +38,7 @@ async def test_handle_planning_request_immediate_confirmation():
          patch('src.plan.integration.classify_user_feedback', new_callable=AsyncMock) as mock_classify:
 
         mock_gen.return_value = mock_plan
-        mock_exec.return_value = mock_result
+        mock_exec.return_value = (mock_result, [])
         mock_classify.return_value = "confirm"
         mock_input.return_value = "确认"
 
@@ -89,7 +89,7 @@ async def test_handle_planning_request_with_adjustment():
 
         mock_gen.return_value = original_plan
         mock_adj.return_value = adjusted_plan
-        mock_exec.return_value = mock_result
+        mock_exec.return_value = (mock_result, [])
         # 第一轮：调整；第二轮：确认
         mock_classify.side_effect = ["adjust", "confirm"]
 
@@ -136,7 +136,7 @@ async def test_handle_planning_request_max_adjustments():
 
         mock_gen.return_value = mock_plan
         mock_adj.return_value = mock_plan
-        mock_exec.return_value = mock_result
+        mock_exec.return_value = (mock_result, [])
         # 3次都判断为调整
         mock_classify.return_value = "adjust"
 
@@ -229,7 +229,7 @@ async def test_handle_planning_request_llm_classification():
          patch('src.plan.integration.classify_user_feedback', new_callable=AsyncMock) as mock_classify:
 
         mock_gen.return_value = mock_plan
-        mock_exec.return_value = mock_result
+        mock_exec.return_value = (mock_result, [])
         mock_classify.return_value = "confirm"
         mock_input.return_value = "没问题，就这样吧"
 
@@ -272,7 +272,7 @@ async def test_handle_planning_request_result_formatting():
          patch('src.plan.integration.classify_user_feedback', new_callable=AsyncMock) as mock_classify:
 
         mock_gen.return_value = mock_plan
-        mock_exec.return_value = mock_result
+        mock_exec.return_value = (mock_result, [])
         mock_classify.return_value = "confirm"
         mock_input.return_value = "确认"
 

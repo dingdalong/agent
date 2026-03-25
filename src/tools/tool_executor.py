@@ -1,7 +1,8 @@
 import inspect
 import asyncio
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from pydantic import ValidationError
+from src.core.io import agent_output, agent_input
 
 class ToolExecutor:
     def __init__(self, registry: Dict[str, Dict[str, Any]]):
@@ -10,8 +11,17 @@ class ToolExecutor:
         """
         self.registry = registry
 
-    async def execute(self, tool_name: str, arguments: Dict[str, Any]) -> str:
-        """异步执行工具，返回结果字符串（错误信息也以字符串返回）"""
+    def is_sensitive(self, tool_name: str) -> bool:
+        """检查工具是否为敏感工具"""
+        info = self.registry.get(tool_name)
+        return info.get("sensitive", False) if info else False
+
+    async def execute(self, tool_name: str, arguments: Dict[str, Any], skip_confirm: bool = False) -> str:
+        """异步执行工具，返回结果字符串（错误信息也以字符串返回）
+
+        Args:
+            skip_confirm: 为 True 时跳过敏感工具确认（用于已预先确认的场景）
+        """
         if tool_name not in self.registry:
             return f"错误：未知工具 '{tool_name}'"
 
@@ -21,8 +31,8 @@ class ToolExecutor:
         sensitive = info.get("sensitive", False)
 
         # 敏感工具确认（异步方式）
-        if sensitive:
-            confirmed = await self._confirm_sensitive(tool_name)
+        if sensitive and not skip_confirm:
+            confirmed = await self._confirm_sensitive(tool_name, arguments)
             if not confirmed:
                 return "用户取消了操作"
 
@@ -57,11 +67,24 @@ class ToolExecutor:
             result = await asyncio.to_thread(func, **validated_args)
         return str(result)
 
-    async def _confirm_sensitive(self, tool_name: str) -> bool:
-        """异步询问用户确认（控制台模式）"""
-        print(f"\n⚠️  工具 '{tool_name}' 需要执行敏感操作。")
-        # 使用 asyncio.to_thread 包装 input 以避免阻塞
-        answer = await asyncio.to_thread(input, "是否允许执行？(y/n): ")
+    def _build_confirm_prompt(self, tool_name: str, arguments: Dict[str, Any]) -> str:
+        """根据工具名和参数生成自然语言确认提示，模板来自工具注册时的 confirm_template"""
+        info = self.registry.get(tool_name)
+        template = info.get("confirm_template") if info else None
+        if template:
+            try:
+                desc = template.format(**arguments)
+                return f"是否允许{desc}？"
+            except KeyError:
+                pass
+        # 未知工具的兜底提示
+        return f"是否允许执行 '{tool_name}'？"
+
+    async def _confirm_sensitive(self, tool_name: str, arguments: Optional[Dict[str, Any]] = None) -> bool:
+        """异步询问用户确认，使用自然语言提示"""
+        prompt = self._build_confirm_prompt(tool_name, arguments or {})
+        await agent_output(f"\n⚠️  {prompt}\n")
+        answer = await agent_input("(y/n): ")
         return answer.strip().lower() == 'y'
 
     def _format_validation_error(self, error: ValidationError) -> str:

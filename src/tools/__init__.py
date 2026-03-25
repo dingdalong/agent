@@ -14,7 +14,8 @@ def tool(
     model: Type[BaseModel],           # 必选，Pydantic 模型类
     name: Optional[str] = None,
     description: Optional[str] = None,
-    sensitive: bool = False
+    sensitive: bool = False,
+    confirm_template: Optional[str] = None
 ):
     """装饰器：注册工具函数，参数由 Pydantic 模型定义
     Args:
@@ -22,6 +23,7 @@ def tool(
         name: 工具名称，默认使用函数名
         description: 工具描述，默认使用函数文档
         sensitive: 是否敏感工具
+        confirm_template: 敏感工具的确认提示模板，支持 {参数名} 占位符
     """
     def decorator(func: Callable):
         tool_name = name or func.__name__
@@ -52,6 +54,7 @@ def tool(
             "description": description or func.__doc__ or "",
             "parameters_schema": parameters_schema,
             "sensitive": sensitive,
+            "confirm_template": confirm_template,
         }
 
         _TOOL_REGISTRY[tool_name] = tool_info

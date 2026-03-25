@@ -6,7 +6,7 @@ from src.core.io import agent_input, agent_output
 from src.plan.models import Plan
 from src.plan.planner import generate_plan, adjust_plan, classify_user_feedback, check_clarification_needed
 from src.tools import ToolDict
-from src.plan.executor import execute_plan
+from src.plan.executor import execute_plan, DeferredStep, DEFERRED_PLACEHOLDER
 from src.plan.exceptions import PlanError
 from config import PLAN_MAX_ADJUSTMENTS, PLAN_MAX_CLARIFICATION_ROUNDS
 
@@ -39,12 +39,56 @@ def _log_plan_detail(plan: Plan) -> None:
 
 
 def format_execution_results(plan: Plan, result_dict: Dict[str, Any]) -> str:
-    """格式化执行结果为易读文本"""
+    """格式化执行结果为易读文本，跳过待确认的占位步骤"""
     output_lines = []
     for step in plan.steps:
         res = result_dict.get(step.id, "无结果")
+        if res == DEFERRED_PLACEHOLDER:
+            continue
         output_lines.append(f"{step.description}: {res}")
     return "\n".join(output_lines)
+
+
+def _format_tool_args(args: Dict[str, Any]) -> str:
+    """将工具参数格式化为用户可读的文本"""
+    if not args:
+        return ""
+    lines = []
+    for key, value in args.items():
+        val_str = str(value)
+        if len(val_str) > 200:
+            val_str = val_str[:200] + "..."
+        lines.append(f"    {key}: {val_str}")
+    return "\n".join(lines)
+
+
+async def _execute_deferred_steps(
+    deferred: List[DeferredStep],
+    tool_executor: ToolExecutor,
+    result_dict: Dict[str, Any],
+) -> None:
+    """逐个展示参数内容、确认并执行延迟的敏感工具步骤，结果写入 result_dict"""
+    if not deferred:
+        return
+    await agent_output(f"\n{OUTPUT_PREFIX}以下操作需要你的确认：\n")
+    for ds in deferred:
+        # 先展示步骤描述和具体参数，让用户看到完整内容
+        await agent_output(f"\n  📌 {ds.step.description}\n")
+        args_display = _format_tool_args(ds.resolved_args)
+        if args_display:
+            await agent_output(f"{args_display}\n")
+        tool_name = ds.step.tool_name
+        assert tool_name is not None  # 由 _is_sensitive_tool_step 保证
+        confirmed = await tool_executor._confirm_sensitive(tool_name, ds.resolved_args)
+        if confirmed:
+            result = await tool_executor.execute(
+                tool_name, ds.resolved_args, skip_confirm=True
+            )
+            result_dict[ds.step.id] = result
+            await agent_output(f"  ✅ {result}\n")
+        else:
+            result_dict[ds.step.id] = "用户取消了操作"
+            await agent_output(f"  ❌ 已取消\n")
 
 async def handle_planning_request(
     user_input: str,
@@ -99,11 +143,20 @@ async def handle_planning_request(
 
         action = await classify_user_feedback(user_feedback, current_plan)
         if action == "confirm":
-            # 确认执行，continue_on_error=True 避免单步失败导致整体崩溃
-            result_dict = await execute_plan(
+            # 阶段 A：执行非敏感步骤
+            result_dict, deferred = await execute_plan(
                 current_plan, tool_executor, continue_on_error=True
             )
-            logger.debug(f"执行结果: {result_dict}")
+            logger.debug(f"执行结果: {result_dict}, 延迟步骤: {len(deferred)}")
+
+            # 展示已完成步骤的结果
+            display = format_execution_results(current_plan, result_dict)
+            if display:
+                await agent_output(f"\n{OUTPUT_PREFIX}{display}\n")
+
+            # 阶段 B：逐个确认并执行敏感步骤
+            await _execute_deferred_steps(deferred, tool_executor, result_dict)
+
             return format_execution_results(current_plan, result_dict)
         else:
             # 调整计划
@@ -115,9 +168,13 @@ async def handle_planning_request(
     await agent_output(f"\n{OUTPUT_PREFIX}已达到最大调整次数，是否仍要执行当前计划？(y/n)\n")
     final_confirm = await agent_input(INPUT_PREFIX)
     if final_confirm.lower() == USER_PROMPT_FINAL_CONFIRM_YES:
-        result_dict = await execute_plan(
+        result_dict, deferred = await execute_plan(
             current_plan, tool_executor, continue_on_error=True
         )
+        display = format_execution_results(current_plan, result_dict)
+        if display:
+            await agent_output(f"\n{OUTPUT_PREFIX}{display}\n")
+        await _execute_deferred_steps(deferred, tool_executor, result_dict)
         return format_execution_results(current_plan, result_dict)
     else:
         return "计划已取消。"
