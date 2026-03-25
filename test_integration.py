@@ -41,9 +41,10 @@ class TestMainMemoryIntegration(unittest.TestCase):
                 agent_registry=Mock(),
                 MultiAgentFlow=Mock(),
             ),
-            "config": types.SimpleNamespace(USER_ID=user_id, MCP_CONFIG_PATH="mcp_servers.json"),
+            "config": types.SimpleNamespace(USER_ID=user_id, MCP_CONFIG_PATH="mcp_servers.json", SKILLS_DIRS=["skills/"]),
             "src.mcp.config": types.SimpleNamespace(load_mcp_config=Mock(return_value={})),
             "src.mcp.manager": types.SimpleNamespace(MCPManager=Mock()),
+            "src.skills": types.SimpleNamespace(SkillManager=Mock()),
         }
 
         original_modules = {name: sys.modules.get(name) for name in stub_modules}
