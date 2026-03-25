@@ -649,9 +649,13 @@ git commit -m "feat(mcp): add MCP routing to ToolExecutor"
 - Modify: `config.py` (add MCP_CONFIG_PATH)
 - Modify: `main.py` (add MCP initialization and cleanup)
 
+**IMPORTANT:** `main.py` 已实现多智能体协作（MultiAgentFlow），不再使用 ChatFlow。
+当前 `main.py` 导入了 `from src.agents import agent_registry, MultiAgentFlow`，
+普通对话分支使用 `MultiAgentFlow`，参数名为 `all_tools`。
+
 - [ ] **Step 1: Add MCP_CONFIG_PATH to config.py**
 
-Add after `USER_ID = os.getenv("USER_ID")` (line 27):
+Add after the multi-agent config section (after `SPECIALIST_MAX_RESULT_LENGTH = 500`, line 43):
 
 ```python
 # MCP 配置
@@ -660,7 +664,7 @@ MCP_CONFIG_PATH = os.getenv("MCP_CONFIG_PATH", "mcp_servers.json")
 
 - [ ] **Step 2: Modify main.py to initialize MCPManager**
 
-Replace the current imports section and `main()` function. New imports to add at the top (after existing imports):
+Add new imports at the top (after existing imports):
 
 ```python
 from src.mcp.config import load_mcp_config
@@ -681,7 +685,7 @@ async def main():
     # 注入 MCP 到现有 tool_executor
     tool_executor.mcp_manager = mcp_manager
 
-    # 合并工具列表
+    # 合并工具列表（本地 tools + MCP tools）
     all_tools = tools + mcp_manager.get_tools_schemas()
 
     print("Agent 已启动，输入 'exit' 退出。")
@@ -701,7 +705,9 @@ async def main():
 
 - [ ] **Step 3: Update handle_input to accept all_tools parameter**
 
-Change `handle_input` signature and update the places that use `tools`:
+Change `handle_input` signature. The function currently uses `tools` in two places:
+PlanningFlow (`available_tools=tools`) and MultiAgentFlow (`all_tools=tools`).
+Both need to use the merged tool list.
 
 ```python
 async def handle_input(user_input: str, all_tools=None):
@@ -714,7 +720,7 @@ async def handle_input(user_input: str, all_tools=None):
         await agent_output(f"\n[安全拦截] {reason}\n")
         return
 
-    # 2. 关键词触发的特殊 Flow（unchanged）
+    # 2. 关键词触发的特殊 Flow（如 /book）（unchanged）
     flow = detect_flow(user_input, tool_executor=tool_executor)
     if flow:
         runner = FSMRunner(flow)
@@ -733,20 +739,21 @@ async def handle_input(user_input: str, all_tools=None):
         if result is not None:
             return
 
-    # 4. 普通对话 → ChatFlow
-    chat_flow = ChatFlow(
+    # 4. 普通对话 → MultiAgentFlow（总控 + 专业 Agent）
+    multi_agent_flow = MultiAgentFlow(
+        registry=agent_registry,
         memory=memory,
         user_facts=user_facts,
         conversation_summaries=conversation_summaries,
-        tools_schema=effective_tools,
+        all_tools=effective_tools,
         tool_executor=tool_executor,
     )
-    chat_flow.model.data["user_input"] = user_input
-    runner = FSMRunner(chat_flow)
+    multi_agent_flow.model.data["user_input"] = user_input
+    runner = FSMRunner(multi_agent_flow)
     await runner.run()
 ```
 
-**Important:** Preserve the existing `if __name__ == "__main__": asyncio.run(main())` at the bottom of `main.py`. Only replace the `main()` function body, not the entry point.
+**Important:** Preserve the existing `if __name__ == "__main__": asyncio.run(main())` at the bottom of `main.py`. Only replace the `main()` and `handle_input()` function bodies.
 
 - [ ] **Step 4: Verify the code runs without MCP config (graceful degradation)**
 
