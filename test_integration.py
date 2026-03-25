@@ -19,31 +19,31 @@ class TestMainMemoryIntegration(unittest.TestCase):
         conversation_buffer_cls = Mock()
 
         stub_modules = {
-            "src.tools": types.SimpleNamespace(tools=[], tool_executor={}),
+            "src.tools": types.SimpleNamespace(tools=[], tool_executor=Mock()),
             "src.core.async_api": types.SimpleNamespace(
                 call_model=AsyncMock(return_value=("stub", {}, "stop")),
-                execute_tool_calls=Mock(return_value=[]),
-                async_input=AsyncMock(return_value=""),
             ),
-            "src.core.performance": types.SimpleNamespace(
-                time_function=Mock(return_value=lambda f: f),
-                async_time_function=Mock(return_value=lambda f: f),
+            "src.core.io": types.SimpleNamespace(
+                agent_input=AsyncMock(return_value=""),
+                agent_output=AsyncMock(),
+            ),
+            "src.core.fsm": types.SimpleNamespace(FSMRunner=Mock()),
+            "src.core.guardrails": types.SimpleNamespace(
+                InputGuardrail=Mock(return_value=Mock(check=Mock(return_value=(True, "")))),
             ),
             "src.memory.memory": types.SimpleNamespace(
                 ConversationBuffer=conversation_buffer_cls,
                 VectorMemory=vector_memory_cls,
             ),
-            "config": types.SimpleNamespace(USER_ID=user_id),
-            "tools.tool_call": types.SimpleNamespace(
-                execute_tool_calls=AsyncMock(return_value=[]),
+            "src.flows": types.SimpleNamespace(detect_flow=Mock(return_value=None)),
+            "src.flows.planning": types.SimpleNamespace(PlanningFlow=Mock()),
+            "src.agents": types.SimpleNamespace(
+                agent_registry=Mock(),
+                MultiAgentFlow=Mock(),
             ),
-            "core.guardrails": types.SimpleNamespace(
-                InputGuardrail=Mock(return_value=Mock(check=Mock(return_value=(True, "")))),
-                OutputGuardrail=Mock(return_value=Mock(check=Mock(return_value=(True, "")))),
-            ),
-            "src.plan.integration": types.SimpleNamespace(
-                handle_planning_request=AsyncMock(return_value=None),
-            ),
+            "config": types.SimpleNamespace(USER_ID=user_id, MCP_CONFIG_PATH="mcp_servers.json"),
+            "src.mcp.config": types.SimpleNamespace(load_mcp_config=Mock(return_value={})),
+            "src.mcp.manager": types.SimpleNamespace(MCPManager=Mock()),
         }
 
         original_modules = {name: sys.modules.get(name) for name in stub_modules}

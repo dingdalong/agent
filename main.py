@@ -106,11 +106,17 @@ async def main():
     tool_executor.mcp_manager = mcp_manager
 
     # 合并工具列表（本地 tools + MCP tools）
-    all_tools = tools + mcp_manager.get_tools_schemas()
+    mcp_schemas = mcp_manager.get_tools_schemas()
+    local_names = {t["function"]["name"] for t in tools}
+    for schema in mcp_schemas:
+        mcp_name = schema["function"]["name"]
+        if mcp_name in local_names:
+            print(f"[警告] MCP 工具 '{mcp_name}' 与本地工具同名，可能产生冲突")
+    all_tools = tools + mcp_schemas
 
     print("Agent 已启动，输入 'exit' 退出。")
-    if mcp_manager.get_tools_schemas():
-        print(f"已加载 {len(mcp_manager.get_tools_schemas())} 个 MCP 工具")
+    if mcp_schemas:
+        print(f"已加载 {len(mcp_schemas)} 个 MCP 工具")
 
     try:
         while True:

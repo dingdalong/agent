@@ -12,6 +12,13 @@ def test_make_tool_name_hyphen_to_underscore():
     assert mgr._make_tool_name("my-remote-api", "query") == "mcp_my_remote_api_query"
 
 
+def test_make_tool_name_special_chars():
+    """Dots, spaces, and other special chars are sanitized to underscores."""
+    mgr = MCPManager()
+    assert mgr._make_tool_name("my.server", "read file") == "mcp_my_server_read_file"
+    assert mgr._make_tool_name("server@v2", "tool#1") == "mcp_server_v2_tool_1"
+
+
 def test_convert_tool_schema():
     mgr = MCPManager()
     class MockTool:
@@ -69,6 +76,18 @@ def test_convert_result_truncation():
     result = mgr._convert_result(MockResult())
     assert result.endswith("...(结果已截断)")
     assert len(result) == 2000 + len("...(结果已截断)")
+
+
+def test_convert_result_empty():
+    """Empty content returns a meaningful message instead of empty string."""
+    mgr = MCPManager()
+    class MockResult:
+        isError = False
+        content = []
+        structuredContent = None
+
+    result = mgr._convert_result(MockResult())
+    assert result == "(执行成功，无输出)"
 
 
 from unittest.mock import AsyncMock

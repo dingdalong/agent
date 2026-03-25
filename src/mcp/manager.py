@@ -1,4 +1,6 @@
+import asyncio
 import logging
+import re
 from contextlib import AsyncExitStack
 from datetime import timedelta
 from typing import Any
@@ -23,9 +25,10 @@ class MCPManager:
         self._tools_schemas: list[dict] = []
 
     def _make_tool_name(self, server_name: str, tool_name: str) -> str:
-        """Create prefixed tool name: mcp_{server}_{tool}. Hyphens converted to underscores."""
-        safe_server = server_name.replace("-", "_")
-        return f"mcp_{safe_server}_{tool_name}"
+        """Create prefixed tool name: mcp_{server}_{tool}. Non-alphanumeric chars converted to underscores."""
+        safe_server = re.sub(r"[^a-zA-Z0-9_]", "_", server_name)
+        safe_tool = re.sub(r"[^a-zA-Z0-9_]", "_", tool_name)
+        return f"mcp_{safe_server}_{safe_tool}"
 
     def _convert_tool_schema(self, server_name: str, tool) -> dict:
         """Convert an MCP Tool to OpenAI function-calling format."""
@@ -55,6 +58,8 @@ class MCPManager:
                 texts.append(f"[{mime} content, {len(item.data)} bytes]")
 
         output = "\n".join(texts)
+        if not output:
+            return "(执行成功，无输出)"
         if len(output) > 2000:
             output = output[:2000] + "...(结果已截断)"
         return output
@@ -63,11 +68,13 @@ class MCPManager:
         """Return all discovered MCP tools in OpenAI format."""
         return list(self._tools_schemas)
 
-    async def connect_all(self, configs: list[MCPServerConfig]) -> None:
+    async def connect_all(self, configs: list[MCPServerConfig], connect_timeout: float = 30.0) -> None:
         """Connect to all configured MCP Servers. Failures are logged and skipped."""
         for config in configs:
             try:
-                await self._connect_one(config)
+                await asyncio.wait_for(self._connect_one(config), timeout=connect_timeout)
+            except asyncio.TimeoutError:
+                logger.warning(f"MCP Server '{config.name}' 连接超时 ({connect_timeout}s)，跳过")
             except Exception as e:
                 logger.warning(f"MCP Server '{config.name}' 连接失败: {e}")
 
