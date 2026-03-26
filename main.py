@@ -5,8 +5,15 @@
 
 import re
 import asyncio
+from pathlib import Path
 
-from src.tools import tools, tool_executor
+from src.tools import (
+    get_registry, discover_tools,
+    ToolExecutor, ToolRouter, LocalToolProvider,
+    sensitive_confirm_middleware, truncate_middleware, error_handler_middleware,
+)
+from src.mcp.provider import MCPToolProvider
+from src.skills.provider import SkillToolProvider
 from src.core.async_api import call_model
 from src.core.io import agent_input, agent_output
 from src.core.fsm import FSMRunner
@@ -49,9 +56,9 @@ async def is_complex_request(text: str) -> bool:
     return "yes" in content.lower()
 
 
-async def handle_input(user_input: str, all_tools=None):
+async def handle_input(user_input: str, router: ToolRouter, skill_manager=None):
     """统一入口：护栏 → Skill 斜杠命令 → Flow 路由 → 执行"""
-    effective_tools = all_tools or tools
+    all_tools = router.get_all_schemas()
 
     # 1. 护栏检查
     passed, reason = input_guard.check(user_input)
@@ -60,7 +67,6 @@ async def handle_input(user_input: str, all_tools=None):
         return
 
     # 2. Skill 斜杠命令检测
-    skill_manager = getattr(tool_executor, "skill_manager", None)
     if skill_manager:
         skill_name = skill_manager.is_slash_command(user_input)
         if skill_name:
@@ -72,8 +78,8 @@ async def handle_input(user_input: str, all_tools=None):
                     registry=agent_registry,
                     memory=buffer,
                     store=store,
-                    all_tools=effective_tools,
-                    tool_executor=tool_executor,
+                    all_tools=all_tools,
+                    tool_executor=router,
                 )
                 multi_agent_flow.model.data["user_input"] = actual_input
                 multi_agent_flow.model.data["skill_content"] = skill_content
@@ -82,17 +88,17 @@ async def handle_input(user_input: str, all_tools=None):
                 return
 
     # 3. 关键词触发的特殊 Flow（如 /book）
-    flow = detect_flow(user_input, tool_executor=tool_executor)
+    flow = detect_flow(user_input, tool_executor=router)
     if flow:
         runner = FSMRunner(flow)
         await runner.run()
         return
 
-    # 3. 复杂请求 → PlanningFlow
+    # 4. 复杂请求 → PlanningFlow
     if await is_complex_request(user_input):
         planning_flow = PlanningFlow(
-            available_tools=effective_tools,
-            tool_executor=tool_executor,
+            available_tools=all_tools,
+            tool_executor=router,
         )
         planning_flow.model.data["original_request"] = user_input
         runner = FSMRunner(planning_flow)
@@ -101,13 +107,13 @@ async def handle_input(user_input: str, all_tools=None):
             return
         # result 为 None 表示模型判断不需要计划，回退到普通对话
 
-    # 4. 普通对话 → MultiAgentFlow（总控 + 专业 Agent）
+    # 5. 普通对话 → MultiAgentFlow（总控 + 专业 Agent）
     multi_agent_flow = MultiAgentFlow(
         registry=agent_registry,
         memory=buffer,
         store=store,
-        all_tools=effective_tools,
-        tool_executor=tool_executor,
+        all_tools=all_tools,
+        tool_executor=router,
     )
     multi_agent_flow.model.data["user_input"] = user_input
     runner = FSMRunner(multi_agent_flow)
@@ -115,33 +121,37 @@ async def handle_input(user_input: str, all_tools=None):
 
 
 async def main():
-    # 初始化 MCP
+    # 1. 发现并注册本地工具
+    discover_tools("src.tools.builtin", Path("src/tools/builtin"))
+
+    # 2. 构建本地工具执行管道
+    registry = get_registry()
+    executor = ToolExecutor(registry)
+    middlewares = [
+        error_handler_middleware(),
+        sensitive_confirm_middleware(registry),
+        truncate_middleware(2000),
+    ]
+    local_provider = LocalToolProvider(registry, executor, middlewares)
+
+    # 3. 构建路由器
+    router = ToolRouter()
+    router.add_provider(local_provider)
+
+    # 4. 初始化 MCP
     mcp_manager = MCPManager()
     await mcp_manager.connect_all(load_mcp_config(MCP_CONFIG_PATH))
+    mcp_schemas = mcp_manager.get_tools_schemas()
+    if mcp_schemas:
+        router.add_provider(MCPToolProvider(mcp_manager))
 
-    # 注入 MCP 到现有 tool_executor
-    tool_executor.mcp_manager = mcp_manager
-
-    # 初始化 Skills
+    # 5. 初始化 Skills
     skill_manager = SkillManager(skill_dirs=SKILLS_DIRS)
     await skill_manager.discover()
-    tool_executor.skill_manager = skill_manager
-
-    # 合并工具列表（本地 tools + MCP tools + Skill 工具）
-    mcp_schemas = mcp_manager.get_tools_schemas()
-    local_names = {t["function"]["name"] for t in tools}
-    for schema in mcp_schemas:
-        mcp_name = schema["function"]["name"]
-        if mcp_name in local_names:
-            print(f"[警告] MCP 工具 '{mcp_name}' 与本地工具同名，可能产生冲突")
-    all_tools = tools + mcp_schemas
-
-    # 添加 activate_skill 工具
-    activate_schema = skill_manager.build_activate_tool_schema()
-    if activate_schema:
-        all_tools.append(activate_schema)
-
     skill_count = len(skill_manager._skills)
+    if skill_count:
+        router.add_provider(SkillToolProvider(skill_manager))
+
     print("Agent 已启动，输入 'exit' 退出。")
     if mcp_schemas:
         print(f"已加载 {len(mcp_schemas)} 个 MCP 工具")
@@ -153,7 +163,7 @@ async def main():
             user_input = await agent_input("\n你: ")
             if user_input.lower() in ["exit", "quit"]:
                 break
-            await handle_input(user_input, all_tools)
+            await handle_input(user_input, router, skill_manager)
             await agent_output("\n")
     finally:
         await mcp_manager.disconnect_all()

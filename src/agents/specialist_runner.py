@@ -15,7 +15,7 @@ from src.agents.registry import AgentDef
 from src.core.async_api import call_model
 from src.core.structured_output import build_output_schema, parse_output
 from src.tools.tool_call import execute_tool_calls
-from src.tools.tool_executor import ToolExecutor
+from src.tools.router import ToolRouter
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +47,7 @@ async def run_specialist(
     agent_def: AgentDef,
     task: str,
     all_tools: list,
-    tool_executor: ToolExecutor,
+    tool_executor: ToolRouter,
     shared_context: dict,
     max_tool_rounds: int = SPECIALIST_MAX_TOOL_ROUNDS,
     max_result_length: int = SPECIALIST_MAX_RESULT_LENGTH,

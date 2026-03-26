@@ -21,7 +21,7 @@ from src.plan.executor import execute_plan, DeferredStep, DEFERRED_PLACEHOLDER
 from src.plan.models import Plan
 from src.plan.exceptions import PlanError
 from src.tools import ToolDict
-from src.tools.tool_executor import ToolExecutor
+from src.tools.router import ToolRouter
 from config import PLAN_MAX_ADJUSTMENTS, PLAN_MAX_CLARIFICATION_ROUNDS
 
 logger = logging.getLogger(__name__)
@@ -61,7 +61,7 @@ def _format_tool_args(args: Dict[str, Any]) -> str:
 class PlanningModel(FlowModel):
     """PlanningFlow 专用 model。"""
 
-    def __init__(self, available_tools: List[ToolDict], tool_executor: ToolExecutor):
+    def __init__(self, available_tools: List[ToolDict], tool_executor: ToolRouter):
         super().__init__()
         self.available_tools = available_tools
         self.tool_executor = tool_executor
@@ -107,7 +107,7 @@ class PlanningFlow(StateMachine):
         | adjusting.to(cancelled)
     )
 
-    def __init__(self, available_tools: List[ToolDict], tool_executor: ToolExecutor):
+    def __init__(self, available_tools: List[ToolDict], tool_executor: ToolRouter):
         model = PlanningModel(available_tools, tool_executor)
         super().__init__(model=model)
 
@@ -258,18 +258,9 @@ class PlanningFlow(StateMachine):
                     await agent_output(f"{args_display}\n")
 
                 tool_name = ds.step.tool_name
-                confirmed = await model.tool_executor._confirm_sensitive(
-                    tool_name, ds.resolved_args
-                )
-                if confirmed:
-                    result = await model.tool_executor.execute(
-                        tool_name, ds.resolved_args, skip_confirm=True
-                    )
-                    model.result_dict[ds.step.id] = result
-                    await agent_output(f"  ✅ {result}\n")
-                else:
-                    model.result_dict[ds.step.id] = "用户取消了操作"
-                    await agent_output(f"  ❌ 已取消\n")
+                result = await model.tool_executor.route(tool_name, ds.resolved_args)
+                model.result_dict[ds.step.id] = result
+                await agent_output(f"  ✅ {result}\n")
 
         model.needs_input = False
 

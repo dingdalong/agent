@@ -3,7 +3,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, List, Tuple
 
-from src.tools.tool_executor import ToolExecutor
+from src.tools.router import ToolRouter
 from src.core.async_api import call_model
 from src.core.io import agent_input
 from src.plan.models import Plan, Step
@@ -152,7 +152,7 @@ def _build_subtask_prompt(step: Step, context: Dict[str, Any]) -> str:
 async def execute_step(
     step: Step,
     context: Dict[str, Any],
-    tool_executor: ToolExecutor,
+    tool_executor: ToolRouter,
     timeout: Optional[float] = None
 ) -> str:
     """执行单个步骤，返回结果字符串
@@ -176,7 +176,7 @@ async def execute_step(
         # 解析参数中的变量
         resolved_args = resolve_variables(step.tool_args or {}, context)
         try:
-            coro = tool_executor.execute(step.tool_name, resolved_args)
+            coro = tool_executor.route(step.tool_name, resolved_args)
             if step_timeout > 0:
                 result = await asyncio.wait_for(coro, timeout=step_timeout)
             else:
@@ -270,7 +270,7 @@ def validate_plan(plan: Plan) -> None:
         raise PlanValidationError("计划验证失败", validation_errors=errors)
 
 
-def _is_sensitive_tool_step(step: Step, tool_executor: ToolExecutor) -> bool:
+def _is_sensitive_tool_step(step: Step, tool_executor: ToolRouter) -> bool:
     """判断步骤是否为敏感工具步骤"""
     return (step.action == ACTION_TOOL
             and step.tool_name is not None
@@ -279,7 +279,7 @@ def _is_sensitive_tool_step(step: Step, tool_executor: ToolExecutor) -> bool:
 
 async def execute_plan(
     plan: Plan,
-    tool_executor: ToolExecutor,
+    tool_executor: ToolRouter,
     max_concurrency: Optional[int] = None,
     continue_on_error: bool = False
 ) -> Tuple[Dict[str, Any], List[DeferredStep]]:

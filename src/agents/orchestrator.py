@@ -26,7 +26,7 @@ from src.core.fsm import FlowModel, OUTPUT_PREFIX
 from src.core.guardrails import OutputGuardrail
 from src.memory import ConversationBuffer, MemoryStore, MemoryType
 from src.tools import ToolDict
-from src.tools.tool_executor import ToolExecutor
+from src.tools.router import ToolRouter
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +42,7 @@ class OrchestratorModel(FlowModel):
         memory: ConversationBuffer,
         store: MemoryStore,
         all_tools: List[ToolDict],
-        tool_executor: ToolExecutor,
+        tool_executor: ToolRouter,
     ):
         super().__init__()
         self.registry = registry
@@ -86,7 +86,7 @@ class MultiAgentFlow(StateMachine):
         memory: ConversationBuffer,
         store: MemoryStore,
         all_tools: List[ToolDict],
-        tool_executor: ToolExecutor,
+        tool_executor: ToolRouter,
     ):
         model = OrchestratorModel(
             registry=registry,
