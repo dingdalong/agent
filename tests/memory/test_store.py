@@ -458,13 +458,9 @@ def _load_main_for_collection_test(user_id="User 42"):
         ),
         "src.mcp.provider": _types.SimpleNamespace(MCPToolProvider=Mock()),
         "src.skills.provider": _types.SimpleNamespace(SkillToolProvider=Mock()),
-        "src.core.async_api": _types.SimpleNamespace(
-            call_model=_AsyncMock(return_value=("stub", {}, "stop")),
-        ),
         "src.core.io": _types.SimpleNamespace(
             agent_input=_AsyncMock(return_value=""), agent_output=_AsyncMock(),
         ),
-        "src.core.fsm": _types.SimpleNamespace(FSMRunner=Mock()),
         "src.core.guardrails": _types.SimpleNamespace(
             InputGuardrail=Mock(return_value=Mock(check=Mock(return_value=(True, "")))),
         ),
@@ -473,9 +469,20 @@ def _load_main_for_collection_test(user_id="User 42"):
             ConversationBuffer=conversation_buffer_cls, summarize_conversation=Mock(),
         ),
         "src.memory.store": _types.SimpleNamespace(MemoryStore=memory_store_cls),
-        "src.flows": _types.SimpleNamespace(detect_flow=Mock(return_value=None)),
-        "src.flows.planning": _types.SimpleNamespace(PlanningFlow=Mock()),
-        "src.agents": _types.SimpleNamespace(agent_registry=Mock(), MultiAgentFlow=Mock()),
+        "src.agents": _types.SimpleNamespace(
+            Agent=Mock(),
+            AgentRegistry=Mock(return_value=Mock()),
+            GraphBuilder=Mock(return_value=Mock(
+                add_agent=Mock(return_value=Mock(
+                    set_entry=Mock(return_value=Mock(
+                        compile=Mock(return_value=Mock()),
+                    )),
+                )),
+            )),
+            GraphEngine=Mock(),
+            RunContext=Mock(),
+            DictState=Mock(),
+        ),
         "config": _types.SimpleNamespace(
             USER_ID=user_id, MCP_CONFIG_PATH="mcp_servers.json", SKILLS_DIRS=["skills/"],
         ),

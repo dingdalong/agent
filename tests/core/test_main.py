@@ -31,14 +31,10 @@ def _load_main_with_stubs(user_id="test_user"):
         ),
         "src.mcp.provider": types.SimpleNamespace(MCPToolProvider=Mock()),
         "src.skills.provider": types.SimpleNamespace(SkillToolProvider=Mock()),
-        "src.core.async_api": types.SimpleNamespace(
-            call_model=AsyncMock(return_value=("stub", {}, "stop")),
-        ),
         "src.core.io": types.SimpleNamespace(
             agent_input=AsyncMock(return_value=""),
             agent_output=AsyncMock(),
         ),
-        "src.core.fsm": types.SimpleNamespace(FSMRunner=Mock()),
         "src.core.guardrails": types.SimpleNamespace(
             InputGuardrail=Mock(return_value=Mock(check=Mock(return_value=(True, "")))),
         ),
@@ -48,11 +44,19 @@ def _load_main_with_stubs(user_id="test_user"):
             summarize_conversation=Mock(),
         ),
         "src.memory.store": types.SimpleNamespace(MemoryStore=memory_store_cls),
-        "src.flows": types.SimpleNamespace(detect_flow=Mock(return_value=None)),
-        "src.flows.planning": types.SimpleNamespace(PlanningFlow=Mock()),
         "src.agents": types.SimpleNamespace(
-            agent_registry=Mock(),
-            MultiAgentFlow=Mock(),
+            Agent=Mock(),
+            AgentRegistry=Mock(return_value=Mock()),
+            GraphBuilder=Mock(return_value=Mock(
+                add_agent=Mock(return_value=Mock(
+                    set_entry=Mock(return_value=Mock(
+                        compile=Mock(return_value=Mock()),
+                    )),
+                )),
+            )),
+            GraphEngine=Mock(),
+            RunContext=Mock(),
+            DictState=Mock(),
         ),
         "config": types.SimpleNamespace(
             USER_ID=user_id, MCP_CONFIG_PATH="mcp_servers.json", SKILLS_DIRS=["skills/"],
