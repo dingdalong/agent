@@ -8,7 +8,7 @@ import pytest
 
 from src.flows.chat import ChatFlow
 from src.core.fsm import FSMRunner
-from src.memory.memory import ConversationBuffer, VectorMemory
+from src.memory import ConversationBuffer, MemoryStore
 from src.tools import tools, tool_executor
 
 logger = logging.getLogger(__name__)
@@ -18,12 +18,11 @@ pytestmark = [pytest.mark.slow, pytest.mark.asyncio]
 
 
 async def _run_chat(user_input: str, memory: ConversationBuffer,
-                    user_facts: VectorMemory, conversation_summaries: VectorMemory) -> str:
+                    store: MemoryStore) -> str:
     """构建 ChatFlow 并执行一轮对话，返回结果。"""
     chat_flow = ChatFlow(
         memory=memory,
-        user_facts=user_facts,
-        conversation_summaries=conversation_summaries,
+        store=store,
         tools_schema=tools,
         tool_executor=tool_executor,
     )
@@ -32,20 +31,18 @@ async def _run_chat(user_input: str, memory: ConversationBuffer,
     return await runner.run()
 
 
-def _make_memories(collection_prefix: str = "perf_test"):
-    """创建测试用的记忆实例。"""
-    user_facts = VectorMemory(collection_name=f"{collection_prefix}_facts")
-    conversation_summaries = VectorMemory(collection_name=f"{collection_prefix}_summaries")
-    return user_facts, conversation_summaries
+def _make_store(collection_prefix: str = "perf_test") -> MemoryStore:
+    """创建测试用的 MemoryStore 实例。"""
+    return MemoryStore(collection_name=f"{collection_prefix}_memories")
 
 
 async def test_single_conversation():
     """测试单轮对话的性能"""
     memory = ConversationBuffer()
-    user_facts, summaries = _make_memories("perf_single")
+    store = _make_store("perf_single")
 
     start = time.perf_counter()
-    response = await _run_chat("你好，我叫大龙，我喜欢喝咖啡", memory, user_facts, summaries)
+    response = await _run_chat("你好，我叫大龙，我喜欢喝咖啡", memory, store)
     elapsed = time.perf_counter() - start
 
     logger.info(f"单轮对话耗时: {elapsed:.2f}s")
@@ -55,7 +52,7 @@ async def test_single_conversation():
 async def test_multiple_conversations():
     """测试多轮对话的性能"""
     memory = ConversationBuffer()
-    user_facts, summaries = _make_memories("perf_multi")
+    store = _make_store("perf_multi")
 
     test_inputs = [
         "你好，我叫大龙",
@@ -68,7 +65,7 @@ async def test_multiple_conversations():
     total_time = 0
     for i, user_input in enumerate(test_inputs):
         start = time.perf_counter()
-        await _run_chat(user_input, memory, user_facts, summaries)
+        await _run_chat(user_input, memory, store)
         elapsed = time.perf_counter() - start
         total_time += elapsed
         logger.info(f"第{i+1}轮: {elapsed:.2f}s")
@@ -85,7 +82,7 @@ async def test_empty_memory():
     print("=== 场景A：空记忆库测试 ===")
 
     memory = ConversationBuffer()
-    user_facts, summaries = _make_memories("perf_empty")
+    store = _make_store("perf_empty")
 
     test_inputs = [
         "你好，我叫小明",
@@ -95,7 +92,7 @@ async def test_empty_memory():
 
     for i, user_input in enumerate(test_inputs):
         start = time.perf_counter()
-        await _run_chat(user_input, memory, user_facts, summaries)
+        await _run_chat(user_input, memory, store)
         elapsed = time.perf_counter() - start
         logger.info(f"空记忆库第{i+1}轮: {elapsed:.2f}s")
         print(f"空记忆库第{i+1}轮: {elapsed:.2f}s")
@@ -107,7 +104,7 @@ async def test_with_existing_memory():
     print("=== 场景B：有记忆库测试 ===")
 
     memory = ConversationBuffer()
-    user_facts, summaries = _make_memories("perf_existing")
+    store = _make_store("perf_existing")
 
     # 先建立一些记忆
     setup_inputs = [
@@ -117,7 +114,7 @@ async def test_with_existing_memory():
         "我是程序员",
     ]
     for user_input in setup_inputs:
-        await _run_chat(user_input, memory, user_facts, summaries)
+        await _run_chat(user_input, memory, store)
 
     # 测试有记忆时的性能
     test_inputs = [
@@ -129,7 +126,7 @@ async def test_with_existing_memory():
 
     for i, user_input in enumerate(test_inputs):
         start = time.perf_counter()
-        await _run_chat(user_input, memory, user_facts, summaries)
+        await _run_chat(user_input, memory, store)
         elapsed = time.perf_counter() - start
         logger.info(f"有记忆库第{i+1}轮: {elapsed:.2f}s")
         print(f"有记忆库第{i+1}轮: {elapsed:.2f}s")
@@ -140,8 +137,8 @@ async def test_long_conversation():
     logger.info("=== 场景C：长对话测试 ===")
     print("=== 场景C：长对话测试 ===")
 
-    memory = ConversationBuffer(max_rounds=3)  # 设置较小的阈值以触发压缩
-    user_facts, summaries = _make_memories("perf_long")
+    memory = ConversationBuffer(max_rounds=3)
+    store = _make_store("perf_long")
 
     long_inputs = [
         "今天天气不错",
@@ -157,7 +154,7 @@ async def test_long_conversation():
     total_time = 0
     for i, user_input in enumerate(long_inputs):
         start = time.perf_counter()
-        await _run_chat(user_input, memory, user_facts, summaries)
+        await _run_chat(user_input, memory, store)
         elapsed = time.perf_counter() - start
         total_time += elapsed
         logger.info(f"长对话第{i+1}轮: {elapsed:.2f}s")

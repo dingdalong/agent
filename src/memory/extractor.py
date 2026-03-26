@@ -1,13 +1,18 @@
-# memory_extractor.py
-import re
-import json
+"""事实提取器：从对话中提取结构化记忆事实。
+
+重构自 memory_extractor.py，修复 include_types bug。
+"""
+
 import hashlib
+import json
 import logging
-from dataclasses import dataclass, field, asdict
+import re
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import List, Dict, Any, Optional, Set, Union
+from typing import Any, Dict, List, Optional, Set
 
 from pydantic import BaseModel
+
 from src.core.async_api import call_model
 from src.core.performance import async_time_function
 from src.core.structured_output import build_output_schema, parse_output
@@ -16,14 +21,17 @@ logger = logging.getLogger(__name__)
 
 
 # ---------- 配置 ----------
+
+
 class ExtractorConfig:
-    """提取器配置常量"""
+    """提取器配置常量。"""
+
     ALLOWED_TYPES = {
         "user": {"personal_info", "preference", "experience", "relationship", "goal", "behavior_pattern"},
         "assistant": {"capability", "version", "limitation", "self_description"},
         "world": {"fact", "definition", "event", "person", "place", "concept"},
         "conversation": {"task_state", "pending_action", "summary", "context"},
-        "interaction": {"feedback", "rating", "correction"}
+        "interaction": {"feedback", "rating", "correction"},
     }
     FLAT_ALLOWED_TYPES = {f"{cat}.{sub}" for cat, subs in ALLOWED_TYPES.items() for sub in subs}
 
@@ -33,15 +41,14 @@ class ExtractorConfig:
 
     CONFIDENCE_THRESHOLD = 0.6
 
-    # 模糊词和肯定词（用于置信度微调）
     FUZZY_WORDS = {"可能", "大概", "也许", "似乎", "我觉得", "我猜", "maybe", "perhaps", "probably"}
     STRONG_WORDS = {"绝对", "肯定", "一定", "definitely", "absolutely", "certainly"}
 
-    # 敏感信息检测正则（示例）
-    SENSITIVE_PATTERNS = [re.compile(r'1[3-9]\d{9}')]  # 手机号
+    SENSITIVE_PATTERNS = [re.compile(r"1[3-9]\d{9}")]
 
 
-# ---------- 虚拟工具输出模型 ----------
+# ---------- 结构化输出模型 ----------
+
 
 class FactItem(BaseModel):
     fact_text: str
@@ -51,27 +58,32 @@ class FactItem(BaseModel):
     speaker: str
     attribute: str
 
+
 class FactsResult(BaseModel):
     facts: List[FactItem]
+
 
 _SUBMIT_FACTS_TOOL = build_output_schema(
     "submit_facts",
     "提交从对话中提取的事实列表",
-    FactsResult
+    FactsResult,
 )
 
 
 # ---------- 数据模型 ----------
+
+
 @dataclass
 class Fact:
-    """表示一条记忆事实"""
+    """表示一条从对话中提取的事实。"""
+
     fact_text: str
     confidence: float
     type: str
     speaker: str
     source: str
     original_utterance: str
-    attribute: str  # 新增：事实所属的具体属性标识，用于版本合并
+    attribute: str
     fact_id: str = field(init=False)
     is_plausible: Optional[bool] = None
     timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
@@ -80,31 +92,22 @@ class Fact:
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
-        if not hasattr(self, 'fact_id') or not self.fact_id:
-            self.fact_id = self._generate_id()
+        self.fact_id = self._generate_id()
 
     def _generate_id(self) -> str:
-        # 使用 attribute 参与 ID 生成，确保同一属性的事实可以相互覆盖
         base = f"{self.fact_text.strip().lower()}|{self.speaker}|{self.attribute}|{self.timestamp}"
-        return hashlib.sha256(base.encode('utf-8')).hexdigest()
+        return hashlib.sha256(base.encode("utf-8")).hexdigest()
 
     def to_dict(self) -> Dict[str, Any]:
-        """转换为字典，便于序列化"""
         return asdict(self)
 
 
 # ---------- 辅助工具 ----------
+
+
 class TextUtils:
     @staticmethod
-    def extract_json(text: str) -> str:
-        """从可能包含 Markdown 代码块的文本中提取 JSON 字符串"""
-        pattern = r'```(?:json)?\s*([\s\S]*?)\s*```'
-        match = re.search(pattern, text)
-        return match.group(1).strip() if match else text.strip()
-
-    @staticmethod
     def adjust_confidence(text: str, base_conf: float) -> float:
-        """根据文本中的模糊/肯定词汇微调置信度"""
         lower = text.lower()
         if any(word in lower for word in ExtractorConfig.FUZZY_WORDS):
             base_conf = max(0.1, base_conf - 0.1)
@@ -114,25 +117,18 @@ class TextUtils:
 
     @staticmethod
     def contains_sensitive(text: str) -> bool:
-        """检查是否包含敏感信息"""
-        for pattern in ExtractorConfig.SENSITIVE_PATTERNS:
-            if pattern.search(text):
-                return True
-        return False
+        return any(p.search(text) for p in ExtractorConfig.SENSITIVE_PATTERNS)
 
 
 class TypeValidator:
-    """类型验证与规范化"""
     @classmethod
     def normalize(cls, raw_type: str) -> Optional[str]:
-        """返回规范的类型字符串，若无效则返回 None"""
         if raw_type in ExtractorConfig.FLAT_ALLOWED_TYPES:
             return raw_type
-        # 尝试补全分类前缀
         for category, subs in ExtractorConfig.ALLOWED_TYPES.items():
             if raw_type in subs:
                 return f"{category}.{raw_type}"
-            if raw_type.startswith(f"{category}.") and raw_type.split('.', 1)[1] in subs:
+            if raw_type.startswith(f"{category}.") and raw_type.split(".", 1)[1] in subs:
                 return raw_type
         return None
 
@@ -144,43 +140,47 @@ class TypeValidator:
 
 
 # ---------- 主要提取器类 ----------
-class FactExtractor:
-    """
-    从对话中提取结构化记忆事实
-    """
 
-    def __init__(self, config: ExtractorConfig = None):
+
+class FactExtractor:
+    """从对话中提取结构化记忆事实。"""
+
+    def __init__(self, config: Optional[ExtractorConfig] = None):
         self.config = config or ExtractorConfig()
-        self.type_validator = TypeValidator()
-        self.text_utils = TextUtils()
-        self.target_types = self._determine_target_types(None)
-        self.prompt = self._build_prompt(self.target_types)
+        self._type_validator = TypeValidator()
+        self._text_utils = TextUtils()
+        # 缓存默认 prompt（include_types=None 时使用）
+        self._default_target_types = self._determine_target_types(None)
+        self._default_prompt = self._build_prompt(self._default_target_types)
 
     @async_time_function()
-    async def extract(self,
-                user_input: str,
-                assistant_response: str = "",
-                source_id: Optional[str] = None,
-                include_types: Optional[Set[str]] = None,
-                enable_sensitive_filter: bool = True) -> List[Fact]:
-        """
-        执行提取流程，返回 Fact 对象列表
-        """
+    async def extract(
+        self,
+        user_input: str,
+        assistant_response: str = "",
+        source_id: Optional[str] = None,
+        include_types: Optional[Set[str]] = None,
+        enable_sensitive_filter: bool = True,
+    ) -> List[Fact]:
+        """执行提取，返回 Fact 列表。"""
+        # 修复：根据 include_types 动态选择 prompt
+        if include_types is None:
+            target_types = self._default_target_types
+            prompt = self._default_prompt
+        else:
+            target_types = self._determine_target_types(include_types)
+            prompt = self._build_prompt(target_types)
 
-        # 调用模型（返回已解析的 List[Dict]）
-        facts_data = await self._call_model(user_input, assistant_response)
+        facts_data = await self._call_model(user_input, assistant_response, prompt)
         if not facts_data:
             return []
 
-        # 构建并验证 Fact 对象
         facts = []
         for raw_fact in facts_data:
-            fact = self._build_fact(raw_fact,
-                                     user_input,
-                                     assistant_response,
-                                     source_id,
-                                     enable_sensitive_filter,
-                                     self.target_types)
+            fact = self._build_fact(
+                raw_fact, user_input, assistant_response,
+                source_id, enable_sensitive_filter, target_types,
+            )
             if fact:
                 facts.append(fact)
         return facts
@@ -192,16 +192,16 @@ class FactExtractor:
 
     def _build_prompt(self, target_types: Set[str]) -> str:
         type_desc = "\n".join(f"  - {t}" for t in sorted(target_types))
-        prompt = f"""你是一个面向长期记忆的信息提取器，任务是从以下对话中提取值得长期保存的知识。请根据内容将知识分类，并严格按照 JSON 格式输出。请仅输出 JSON，不要包含任何其他说明或 Markdown 代码块标记。
+        return f"""你是一个面向长期记忆的信息提取器，任务是从以下对话中提取值得长期保存的知识。请根据内容将知识分类，并严格按照 JSON 格式输出。请仅输出 JSON，不要包含任何其他说明或 Markdown 代码块标记。
 
 可提取的知识类型包括：
 {type_desc}
 
 要求：
 1. 每条知识以简洁的陈述句表达，主语明确。
-   - 对于用户信息，主语应为“用户”。
-   - 对于助手信息，主语应为“助手”。
-   - 对于世界知识，主语应为客观实体（如“巴黎是法国的首都”）。
+   - 对于用户信息，主语应为"用户"。
+   - 对于助手信息，主语应为"助手"。
+   - 对于世界知识，主语应为客观实体（如"巴黎是法国的首都"）。
 2. 忽略一次性任务请求、寒暄、无实质内容。
 3. 为每条知识提供以下字段：
    - fact_text: 陈述句
@@ -209,7 +209,7 @@ class FactExtractor:
    - type: 知识类型（必须从上述列表中选择）
    - is_plausible: true/false/null（常识合理性）
    - speaker: "user" 或 "assistant"（指信息由谁说出）
-   - attribute: 字符串，表示该事实所属的具体属性。例如用户名字的 attribute 可以是 "user.name"；用户对茶的偏好可以是 "user.preference.drink.tea"。同一属性的不同值（如“小明”和“大明”）应使用相同的 attribute，以便后续更新。若事实无明确属性，可使用类型加关键词生成，如 "world.fact.capital"。
+   - attribute: 字符串，表示该事实所属的具体属性。例如用户名字的 attribute 可以是 "user.name"；用户对茶的偏好可以是 "user.preference.drink.tea"。同一属性的不同值应使用相同的 attribute，以便后续更新。
 4. 请调用 submit_facts 工具提交提取结果。
 示例：
 {{
@@ -221,34 +221,25 @@ class FactExtractor:
       "is_plausible": true,
       "speaker": "user",
       "attribute": "user.preference.drink.latte"
-    }},
-    {{
-      "fact_text": "巴黎是法国的首都",
-      "confidence": 0.99,
-      "type": "world.fact",
-      "is_plausible": true,
-      "speaker": "assistant",
-      "attribute": "world.fact.capital.france.paris"
     }}
   ]
 }}
-
 """
-        return prompt
 
     @async_time_function()
-    async def _call_model(self,
-                    user_input: str,
-                    assistant_response: str) -> Optional[List[Dict[str, Any]]]:
+    async def _call_model(
+        self,
+        user_input: str,
+        assistant_response: str,
+        system_prompt: str,
+    ) -> Optional[List[Dict[str, Any]]]:
         try:
-            prompt = [
-                {"role": "system", "content": self.prompt},
-                {"role": "user", "content": f"用户说：{user_input}\n助手说：{assistant_response}"}
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"用户说：{user_input}\n助手说：{assistant_response}"},
             ]
             _, tool_calls, _ = await call_model(
-                prompt, temperature=0.0,
-                tools=[_SUBMIT_FACTS_TOOL],
-                silent=True,
+                messages, temperature=0.0, tools=[_SUBMIT_FACTS_TOOL], silent=True,
             )
             result = parse_output(tool_calls, "submit_facts", FactsResult)
             if result:
@@ -258,74 +249,64 @@ class FactExtractor:
             logger.error(f"Model call failed: {e}")
             return None
 
-    def _build_fact(self,
-                    raw: Dict[str, Any],
-                    user_input: str,
-                    assistant_response: str,
-                    source_id: Optional[str],
-                    sensitive_filter: bool,
-                    target_types: Set[str]) -> Optional[Fact]:
-        # 基础字段提取
+    def _build_fact(
+        self,
+        raw: Dict[str, Any],
+        user_input: str,
+        assistant_response: str,
+        source_id: Optional[str],
+        sensitive_filter: bool,
+        target_types: Set[str],
+    ) -> Optional[Fact]:
         fact_text = str(raw.get("fact_text", "")).strip()
         if not fact_text:
             return None
 
-        # 敏感信息过滤
-        if sensitive_filter and self.text_utils.contains_sensitive(fact_text):
+        if sensitive_filter and self._text_utils.contains_sensitive(fact_text):
             logger.info(f"Sensitive fact discarded: {fact_text}")
             return None
 
-        # 置信度处理
         try:
             confidence = float(raw.get("confidence", 0.5))
             confidence = max(0.0, min(1.0, confidence))
         except (ValueError, TypeError):
             confidence = 0.5
-        confidence = self.text_utils.adjust_confidence(fact_text, confidence)
+        confidence = self._text_utils.adjust_confidence(fact_text, confidence)
 
         if confidence < self.config.CONFIDENCE_THRESHOLD:
             return None
 
-        # 类型验证
         raw_type = str(raw.get("type", "")).strip()
-        validated_type = self.type_validator.normalize(raw_type)
-        if not validated_type or not self.type_validator.is_allowed(validated_type, target_types):
+        validated_type = self._type_validator.normalize(raw_type)
+        if not validated_type or not self._type_validator.is_allowed(validated_type, target_types):
             logger.debug(f"Invalid or excluded type '{raw_type}' for fact: {fact_text}")
             return None
 
-        # 合理性
         is_plausible = raw.get("is_plausible")
         if isinstance(is_plausible, str):
             is_plausible = is_plausible.lower() == "true"
         elif not isinstance(is_plausible, bool):
             is_plausible = None
         if is_plausible is False:
-            return None  # 常识不合理则丢弃
+            return None
 
-        # 发言者
         speaker = str(raw.get("speaker", "user")).strip().lower()
         if speaker not in (self.config.SPEAKER_USER, self.config.SPEAKER_ASSISTANT):
-            logger.warning(f"Unknown speaker '{speaker}', defaulting to user")
             speaker = self.config.SPEAKER_USER
 
-        # 属性（必须提供）
         attribute = str(raw.get("attribute", "")).strip()
         if not attribute:
             logger.warning(f"Missing 'attribute' for fact: {fact_text}, discarding")
-            return None  # 没有属性无法进行版本更新，丢弃
+            return None
 
-        # 原始话语
         original = user_input if speaker == self.config.SPEAKER_USER else assistant_response
 
-        # 元数据增强
         metadata = {
-            "entities": [],  # 可留作后续NER填充
             "negation": self._detect_negation(fact_text),
-            "temporal": "present"
+            "temporal": "present",
         }
 
-        # 构建 Fact 对象
-        fact = Fact(
+        return Fact(
             fact_text=fact_text,
             confidence=confidence,
             type=validated_type,
@@ -334,10 +315,10 @@ class FactExtractor:
             original_utterance=original,
             attribute=attribute,
             is_plausible=is_plausible,
-            metadata=metadata
+            metadata=metadata,
         )
-        return fact
 
-    def _detect_negation(self, text: str) -> bool:
+    @staticmethod
+    def _detect_negation(text: str) -> bool:
         negations = {"不", "没", "不是", "不喜欢", "don't", "doesn't"}
         return any(neg in text.lower() for neg in negations)

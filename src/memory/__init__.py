@@ -1,70 +1,29 @@
-"""
-Memory system for AI Agent.
+"""Memory system for AI Agent.
 
-This package provides memory management components including:
-- Short-term conversation buffer
-- Long-term vector memory with version control
-- Fact extraction from conversations
-- Multi-type memory system (facts, summaries, etc.)
+Components:
+- MemoryStore: 统一向量记忆存储（单 collection，支持版本控制和衰减）
+- ConversationBuffer: 短期对话缓冲（带 token 缓存）
+- MemoryRecord / MemoryType: 统一记忆数据模型
+- FactExtractor: 从对话中提取结构化事实
+- calculate_importance: 记忆衰减权重计算
 """
 
 __all__ = [
-    # From memory.py
+    "MemoryStore",
     "ConversationBuffer",
-    "VectorMemory",
-    "summarize_conversation",
-
-    # From memory_extractor.py
-    "Fact",
-    "FactExtractor",
-    "ExtractorConfig",
-
-    # From memory_types.py
-    "Memory",
+    "MemoryRecord",
     "MemoryType",
-    "FactMemory",
-    "SummaryMemory",
-    "MemoryRegistry",
-
-    # From versioning.py
-    "VersioningStrategy",
-    "FactVersioningStrategy",
-    "SummaryVersioningStrategy",
-    "VersioningStrategyFactory",
-
-    # From serializer.py
-    "MemorySerializer",
-    "flatten_metadata",
+    "FactExtractor",
+    "Fact",
+    "ExtractorConfig",
+    "EmbeddingClient",
+    "calculate_importance",
+    "summarize_conversation",
 ]
 
-# Re-export core components for backward compatibility and convenience
-
-# From memory.py
-from .memory import ConversationBuffer, VectorMemory, summarize_conversation
-
-# From memory_extractor.py
-from .memory_extractor import Fact, FactExtractor, ExtractorConfig
-
-# From memory_types.py
-from .memory_types import (
-    Memory,
-    MemoryType,
-    FactMemory,
-    SummaryMemory,
-    MemoryRegistry,
-)
-
-# From versioning.py
-from .versioning import (
-    VersioningStrategy,
-    FactVersioningStrategy,
-    SummaryVersioningStrategy,
-    VersioningStrategyFactory,
-)
-
-# From serializer.py
-from .serializer import MemorySerializer, flatten_metadata
-
-# Optional: Provide version info
-__version__ = "0.1.0"
-__author__ = "AI Agent Memory System"
+from .buffer import ConversationBuffer, summarize_conversation
+from .decay import calculate_importance
+from .embeddings import EmbeddingClient
+from .extractor import ExtractorConfig, Fact, FactExtractor
+from .store import MemoryStore
+from .types import MemoryRecord, MemoryType

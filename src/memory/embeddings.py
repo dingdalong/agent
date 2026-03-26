@@ -1,45 +1,55 @@
-import requests
-from chromadb.api.types import EmbeddingFunction, Documents, Embeddings
+"""Embedding 客户端，使用 requests.Session 复用连接。"""
 
-class OllamaEmbeddingFunction(EmbeddingFunction):
-    def __init__(self, model_name: str, base_url: str):
-        self.model_name = model_name
-        self.base_url = base_url.rstrip('/')
-        self.api_url = f"{self.base_url}/api/embeddings"
+import logging
+
+import requests
+from chromadb.api.types import Documents, EmbeddingFunction, Embeddings
+
+logger = logging.getLogger(__name__)
+
+
+class EmbeddingClient(EmbeddingFunction):
+    """基于 Ollama API 的 embedding 函数，带连接池。"""
+
+    def __init__(self, model_name: str, base_url: str, max_chars: int = 2048):
+        self._model = model_name
+        self._base_url = base_url.rstrip("/")
+        self._url = f"{self._base_url}/api/embeddings"
+        self._max_chars = max_chars
+        self._session = requests.Session()
 
     @classmethod
     def name(cls) -> str:
-        return "ollama"
+        return "embedding_client"
 
     def get_config(self) -> dict:
         return {
-            "model_name": self.model_name,
-            "base_url": self.base_url,
-            "api_url": self.api_url
+            "model_name": self._model,
+            "base_url": self._base_url,
+            "api_url": self._url,
         }
 
     @classmethod
-    def build_from_config(cls, config: dict) -> "OllamaEmbeddingFunction":
-        return cls(
-            model_name=config["model_name"],
-            base_url=config["base_url"]
-        )
+    def build_from_config(cls, config: dict) -> "EmbeddingClient":
+        return cls(model_name=config["model_name"], base_url=config["base_url"])
 
     def __call__(self, input: Documents) -> Embeddings:
-        # 确保输入是列表
         if isinstance(input, str):
             input = [input]
         embeddings = []
         for text in input:
-            # 对长文本进行简单截断（Ollama 嵌入模型通常有最大 token 限制）
-            truncated = text[:2048]  # 简单按字符截断，可根据需要优化
-            response = requests.post(
-                self.api_url,
-                json={"model": self.model_name, "prompt": truncated}
+            truncated = self._safe_truncate(text, self._max_chars)
+            resp = self._session.post(
+                self._url,
+                json={"model": self._model, "prompt": truncated},
             )
-            if response.status_code == 200:
-                embedding = response.json()["embedding"]
-                embeddings.append(embedding)
-            else:
-                raise Exception(f"Ollama embedding error: {response.text}")
+            resp.raise_for_status()
+            embeddings.append(resp.json()["embedding"])
         return embeddings
+
+    @staticmethod
+    def _safe_truncate(text: str, max_chars: int) -> str:
+        """安全截断，不破坏多字节 UTF-8 字符。"""
+        if len(text) <= max_chars:
+            return text
+        return text[:max_chars]

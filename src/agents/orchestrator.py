@@ -24,7 +24,7 @@ from src.agents.specialist_runner import run_specialist
 from src.core.async_api import call_model
 from src.core.fsm import FlowModel, OUTPUT_PREFIX
 from src.core.guardrails import OutputGuardrail
-from src.memory.memory import ConversationBuffer, VectorMemory
+from src.memory import ConversationBuffer, MemoryStore, MemoryType
 from src.tools import ToolDict
 from src.tools.tool_executor import ToolExecutor
 
@@ -40,16 +40,14 @@ class OrchestratorModel(FlowModel):
         self,
         registry: AgentRegistry,
         memory: ConversationBuffer,
-        user_facts: VectorMemory,
-        conversation_summaries: VectorMemory,
+        store: MemoryStore,
         all_tools: List[ToolDict],
         tool_executor: ToolExecutor,
     ):
         super().__init__()
         self.registry = registry
         self.memory = memory
-        self.user_facts = user_facts
-        self.conversation_summaries = conversation_summaries
+        self.store = store
         self.all_tools = all_tools
         self.tool_executor = tool_executor
 
@@ -86,16 +84,14 @@ class MultiAgentFlow(StateMachine):
         self,
         registry: AgentRegistry,
         memory: ConversationBuffer,
-        user_facts: VectorMemory,
-        conversation_summaries: VectorMemory,
+        store: MemoryStore,
         all_tools: List[ToolDict],
         tool_executor: ToolExecutor,
     ):
         model = OrchestratorModel(
             registry=registry,
             memory=memory,
-            user_facts=user_facts,
-            conversation_summaries=conversation_summaries,
+            store=store,
             all_tools=all_tools,
             tool_executor=tool_executor,
         )
@@ -128,25 +124,15 @@ class MultiAgentFlow(StateMachine):
 
             # 检索长期记忆
             memory_sections = []
-            facts = [
-                item.get("fact") or item.get_content()
-                for item in model.user_facts.search(user_input, n_results=5)
-                if isinstance(item, dict) and item.get("fact")
-                   or hasattr(item, "get_content")
-            ]
-            facts = [f for f in facts if f]
-            if facts:
-                memory_sections.append("以下是你知道的关于用户的信息：\n" + "\n".join(facts))
+            facts = model.store.search(user_input, n=5, memory_type=MemoryType.FACT)
+            fact_texts = [r.content for r in facts if r.content]
+            if fact_texts:
+                memory_sections.append("以下是你知道的关于用户的信息：\n" + "\n".join(fact_texts))
 
-            summaries = [
-                item.get("fact") or (item.get_content() if hasattr(item, "get_content") else "")
-                for item in model.conversation_summaries.search(user_input, n_results=3)
-                if isinstance(item, dict) and item.get("fact")
-                   or hasattr(item, "get_content")
-            ]
-            summaries = [s for s in summaries if s]
-            if summaries:
-                memory_sections.append("相关历史摘要：\n" + "\n".join(summaries))
+            summaries = model.store.search(user_input, n=3, memory_type=MemoryType.SUMMARY)
+            summary_texts = [r.content for r in summaries if r.content]
+            if summary_texts:
+                memory_sections.append("相关历史摘要：\n" + "\n".join(summary_texts))
 
             # 构建系统提示
             system_prompt = model.registry.build_orchestrator_system_prompt()
@@ -326,11 +312,11 @@ class MultiAgentFlow(StateMachine):
 
         # 存储事实到长期记忆
         user_input = model.data.get("user_input", "")
-        await model.user_facts.add_conversation(user_input)
+        await model.store.add_from_conversation(user_input)
 
         # 检查是否需要压缩
         if model.memory.should_compress():
-            await model.memory.compress(model.conversation_summaries)
+            await model.memory.compress(model.store)
 
     async def on_enter_cancelled(self):
         """取消流程。"""

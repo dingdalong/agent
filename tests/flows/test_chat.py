@@ -4,14 +4,15 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from src.flows.chat import ChatFlow, ChatModel, MAX_TOOL_CALLS, _memory_texts
+from src.flows.chat import ChatFlow, ChatModel, MAX_TOOL_CALLS
 from src.core.fsm import FSMRunner, OUTPUT_PREFIX
+from src.memory.types import MemoryRecord, MemoryType
 
 
 def _make_chat_flow(
     user_input="你好",
-    facts_results=None,
-    summaries_results=None,
+    fact_records=None,
+    summary_records=None,
     call_model_returns=None,
 ):
     """构造 ChatFlow 并注入 mock 依赖"""
@@ -21,53 +22,27 @@ def _make_chat_flow(
     ]
     memory.should_compress.return_value = False
 
-    user_facts = MagicMock()
-    user_facts.search.return_value = facts_results or []
-    user_facts.add_conversation = AsyncMock()
-
-    conversation_summaries = MagicMock()
-    conversation_summaries.search.return_value = summaries_results or []
+    store = MagicMock()
+    # search returns MemoryRecord list based on memory_type filter
+    def _mock_search(query, n=5, memory_type=None, type_tag=None):
+        if memory_type == MemoryType.FACT:
+            return fact_records or []
+        if memory_type == MemoryType.SUMMARY:
+            return summary_records or []
+        return (fact_records or []) + (summary_records or [])
+    store.search.side_effect = _mock_search
+    store.add_from_conversation = AsyncMock()
 
     tool_executor = AsyncMock()
 
     flow = ChatFlow(
         memory=memory,
-        user_facts=user_facts,
-        conversation_summaries=conversation_summaries,
+        store=store,
         tools_schema=[],
         tool_executor=tool_executor,
     )
     flow.model.data["user_input"] = user_input
     return flow
-
-
-# ==================== _memory_texts 测试 ====================
-
-
-class TestMemoryTexts:
-    def test_dict_items(self):
-        items = [{"fact": "用户叫大龙"}, {"fact": "喜欢Python"}]
-        assert _memory_texts(items) == ["用户叫大龙", "喜欢Python"]
-
-    def test_dict_without_fact(self):
-        items = [{"other": "data"}, {"fact": None}]
-        assert _memory_texts(items) == []
-
-    def test_object_items(self):
-        obj = MagicMock()
-        obj.get_content.return_value = "历史摘要"
-        assert _memory_texts([obj]) == ["历史摘要"]
-
-    def test_empty_content_filtered(self):
-        obj = MagicMock()
-        obj.get_content.return_value = ""
-        assert _memory_texts([obj]) == []
-
-    def test_mixed_items(self):
-        obj = MagicMock()
-        obj.get_content.return_value = "摘要内容"
-        items = [{"fact": "事实1"}, obj]
-        assert _memory_texts(items) == ["事实1", "摘要内容"]
 
 
 # ==================== ChatModel 测试 ====================
@@ -77,8 +52,7 @@ class TestChatModel:
     def test_init(self):
         model = ChatModel(
             memory=MagicMock(),
-            user_facts=MagicMock(),
-            conversation_summaries=MagicMock(),
+            store=MagicMock(),
             tools_schema=[],
             tool_executor=MagicMock(),
         )
@@ -185,8 +159,8 @@ class TestChatFlowTransitions:
     @pytest.mark.asyncio
     async def test_memory_retrieval_enhances_prompt(self):
         """测试记忆检索结果被加入 system prompt"""
-        facts = [{"fact": "用户叫大龙"}]
-        flow = _make_chat_flow(user_input="你好", facts_results=facts)
+        fact = MemoryRecord(memory_type=MemoryType.FACT, content="用户叫大龙")
+        flow = _make_chat_flow(user_input="你好", fact_records=[fact])
 
         with patch("src.flows.chat.call_model", new_callable=AsyncMock) as mock_call, \
              patch("src.flows.chat.output_guard") as mock_guard:
@@ -234,7 +208,7 @@ class TestChatFlowTransitions:
                  patch("src.core.fsm.agent_input", new_callable=AsyncMock):
                 await runner.run()
 
-        flow.model.user_facts.add_conversation.assert_called_once_with("我叫大龙")
+        flow.model.store.add_from_conversation.assert_called_once_with("我叫大龙")
 
     @pytest.mark.asyncio
     async def test_memory_compression_triggered(self):
@@ -251,9 +225,9 @@ class TestChatFlowTransitions:
             runner = FSMRunner(flow)
             with patch("src.core.fsm.agent_output", new_callable=AsyncMock), \
                  patch("src.core.fsm.agent_input", new_callable=AsyncMock):
-                await runner.run()
+                    await runner.run()
 
-        flow.model.memory.compress.assert_called_once_with(flow.model.conversation_summaries)
+        flow.model.memory.compress.assert_called_once_with(flow.model.store)
 
     @pytest.mark.asyncio
     async def test_output_prefix_set_in_retrieving(self):

@@ -18,8 +18,8 @@ async def validate_imports():
         from src.tools import tools, tool_executor
         print(f"  ✅ src.tools 导入成功: {len(tools)} 个工具")
 
-        from src.memory.memory import ConversationBuffer, VectorMemory
-        print("  ✅ src.memory.memory 导入成功")
+        from src.memory import ConversationBuffer, MemoryStore
+        print("  ✅ src.memory 导入成功")
 
         from config import async_client, client, MODEL_NAME, USER_ID
         print("  ✅ config 导入成功")

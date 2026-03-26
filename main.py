@@ -11,7 +11,7 @@ from src.core.async_api import call_model
 from src.core.io import agent_input, agent_output
 from src.core.fsm import FSMRunner
 from src.core.guardrails import InputGuardrail
-from src.memory.memory import ConversationBuffer, VectorMemory
+from src.memory import ConversationBuffer, MemoryStore
 from src.flows import detect_flow
 from src.flows.planning import PlanningFlow
 from src.agents import agent_registry, MultiAgentFlow
@@ -32,14 +32,9 @@ def _build_collection_name(prefix: str, user_id: str | None) -> str:
     return f"{prefix}_{sanitized_user_id}"[:63].strip("_")
 
 
-# 初始化长期记忆
-user_facts = VectorMemory(collection_name=_build_collection_name("user_facts", USER_ID))
-conversation_summaries = VectorMemory(
-    collection_name=_build_collection_name("conversation_summaries", USER_ID)
-)
-
-# 短期记忆
-memory = ConversationBuffer(max_rounds=10)
+# 初始化记忆系统
+store = MemoryStore(collection_name=_build_collection_name("memories", USER_ID))
+buffer = ConversationBuffer(max_rounds=10)
 
 
 async def is_complex_request(text: str) -> bool:
@@ -75,9 +70,8 @@ async def handle_input(user_input: str, all_tools=None):
                 actual_input = remaining or f"已激活 {skill_name} skill，请按指令执行。"
                 multi_agent_flow = MultiAgentFlow(
                     registry=agent_registry,
-                    memory=memory,
-                    user_facts=user_facts,
-                    conversation_summaries=conversation_summaries,
+                    memory=buffer,
+                    store=store,
                     all_tools=effective_tools,
                     tool_executor=tool_executor,
                 )
@@ -110,9 +104,8 @@ async def handle_input(user_input: str, all_tools=None):
     # 4. 普通对话 → MultiAgentFlow（总控 + 专业 Agent）
     multi_agent_flow = MultiAgentFlow(
         registry=agent_registry,
-        memory=memory,
-        user_facts=user_facts,
-        conversation_summaries=conversation_summaries,
+        memory=buffer,
+        store=store,
         all_tools=effective_tools,
         tool_executor=tool_executor,
     )

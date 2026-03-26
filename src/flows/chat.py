@@ -12,7 +12,7 @@ from src.core.async_api import call_model
 from src.core.fsm import FlowModel, OUTPUT_PREFIX
 from src.core.guardrails import OutputGuardrail
 from src.core.performance import async_time_function
-from src.memory.memory import ConversationBuffer, VectorMemory
+from src.memory import ConversationBuffer, MemoryStore, MemoryType
 from src.tools import ToolDict
 from src.tools.tool_call import execute_tool_calls
 from src.tools.tool_executor import ToolExecutor
@@ -24,35 +24,19 @@ MAX_TOOL_CALLS = 5
 output_guard = OutputGuardrail()
 
 
-def _memory_texts(results) -> List[str]:
-    texts = []
-    for item in results:
-        if isinstance(item, dict):
-            fact = item.get("fact")
-            if fact:
-                texts.append(fact)
-        else:
-            content = item.get_content()
-            if content:
-                texts.append(content)
-    return texts
-
-
 class ChatModel(FlowModel):
     """ChatFlow 专用 model，携带对话所需的所有引用。"""
 
     def __init__(
         self,
         memory: ConversationBuffer,
-        user_facts: VectorMemory,
-        conversation_summaries: VectorMemory,
+        store: MemoryStore,
         tools_schema: List[ToolDict],
         tool_executor: ToolExecutor,
     ):
         super().__init__()
         self.memory = memory
-        self.user_facts = user_facts
-        self.conversation_summaries = conversation_summaries
+        self.store = store
         self.tools_schema = tools_schema
         self.tool_executor = tool_executor
         self.tool_call_count = 0
@@ -101,16 +85,21 @@ class ChatFlow(StateMachine):
         """检索长期记忆，构建增强 system prompt，将用户消息加入短期记忆。"""
         user_input = self.model.data["user_input"]
         memory = self.model.memory
+        store = self.model.store
 
         # 检索记忆
         memory_sections = []
-        facts = _memory_texts(self.model.user_facts.search(user_input, n_results=10))
+        facts = store.search(user_input, n=10, memory_type=MemoryType.FACT)
         if facts:
-            memory_sections.append("以下是你知道的关于用户的信息：\n" + "\n".join(facts))
+            memory_sections.append(
+                "以下是你知道的关于用户的信息：\n" + "\n".join(r.content for r in facts)
+            )
 
-        summaries = _memory_texts(self.model.conversation_summaries.search(user_input, n_results=10))
+        summaries = store.search(user_input, n=5, memory_type=MemoryType.SUMMARY)
         if summaries:
-            memory_sections.append("以下是与当前对话相关的历史摘要：\n" + "\n".join(summaries))
+            memory_sections.append(
+                "以下是与当前对话相关的历史摘要：\n" + "\n".join(r.content for r in summaries)
+            )
 
         enhanced_system = "你是一个很棒的助手！"
         if memory_sections:
@@ -169,6 +158,7 @@ class ChatFlow(StateMachine):
     async def on_enter_done(self):
         """存储记忆，检查护栏，设置最终结果。"""
         memory = self.model.memory
+        store = self.model.store
         user_input = self.model.data["user_input"]
 
         # 工具调用次数超限（正常回复已由 call_model 流式输出）
@@ -181,11 +171,11 @@ class ChatFlow(StateMachine):
         final_response = self.model.data.get("final_response", "")
 
         # 存储事实到长期记忆
-        await self.model.user_facts.add_conversation(user_input)
+        await store.add_from_conversation(user_input)
 
         # 检查是否需要压缩
         if memory.should_compress():
-            await memory.compress(self.model.conversation_summaries)
+            await memory.compress(store)
 
         # 输出护栏
         passed, reason = output_guard.check(final_response)
