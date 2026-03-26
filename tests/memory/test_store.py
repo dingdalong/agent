@@ -4,17 +4,17 @@ Unit tests for MemoryStore (store.py).
 Tests add/search/versioning/cleanup with mocked ChromaDB.
 """
 
-import unittest
 import asyncio
+import pytest
 from datetime import datetime, timezone, timedelta
-from unittest.mock import Mock, patch, MagicMock, AsyncMock
+from unittest.mock import patch, MagicMock, AsyncMock
 
 from src.memory.types import MemoryRecord, MemoryType
 from src.memory.store import MemoryStore
 
 
 def _make_store(mock_collection):
-    """Create a MemoryStore with mocked dependencies."""
+    """Create a MemoryStore with mocked dependencies (for init error tests)."""
     with patch("src.memory.store.chromadb.PersistentClient") as mock_client, \
          patch("src.memory.store.EmbeddingClient"), \
          patch("src.memory.store.FactExtractor"), \
@@ -27,15 +27,10 @@ def _make_store(mock_collection):
     return store
 
 
-class TestMemoryStoreAdd(unittest.TestCase):
+class TestMemoryStoreAdd:
     """Test MemoryStore.add and version control."""
 
-    def setUp(self):
-        self.mock_col = MagicMock()
-        self.mock_col.get.return_value = {"ids": [], "documents": [], "metadatas": []}
-        self.store = _make_store(self.mock_col)
-
-    def test_add_new_fact(self):
+    def test_add_new_fact(self, memory_store, mock_chroma_collection):
         record = MemoryRecord(
             memory_type=MemoryType.FACT,
             content="user likes coffee",
@@ -44,26 +39,26 @@ class TestMemoryStoreAdd(unittest.TestCase):
             attribute="user.preference.drink.coffee",
             confidence=0.9,
         )
-        mid = self.store.add(record)
-        self.mock_col.add.assert_called_once()
-        _, kwargs = self.mock_col.add.call_args
-        self.assertEqual(kwargs["documents"], ["user likes coffee"])
+        mid = memory_store.add(record)
+        mock_chroma_collection.add.assert_called_once()
+        _, kwargs = mock_chroma_collection.add.call_args
+        assert kwargs["documents"] == ["user likes coffee"]
         meta = kwargs["metadatas"][0]
-        self.assertEqual(meta["memory_type"], "fact")
-        self.assertEqual(meta["version"], 1)
-        self.assertTrue(meta["is_active"])
-        self.assertEqual(mid, kwargs["ids"][0])
+        assert meta["memory_type"] == "fact"
+        assert meta["version"] == 1
+        assert meta["is_active"] is True
+        assert mid == kwargs["ids"][0]
 
-    def test_add_new_summary(self):
-        mid = self.store.add_summary("conversation summary", "conv_1", ["point1", "point2"])
-        self.mock_col.add.assert_called_once()
-        _, kwargs = self.mock_col.add.call_args
-        self.assertEqual(kwargs["documents"], ["conversation summary"])
+    def test_add_new_summary(self, memory_store, mock_chroma_collection):
+        mid = memory_store.add_summary("conversation summary", "conv_1", ["point1", "point2"])
+        mock_chroma_collection.add.assert_called_once()
+        _, kwargs = mock_chroma_collection.add.call_args
+        assert kwargs["documents"] == ["conversation summary"]
         meta = kwargs["metadatas"][0]
-        self.assertEqual(meta["memory_type"], "summary")
-        self.assertEqual(meta["conversation_id"], "conv_1")
+        assert meta["memory_type"] == "summary"
+        assert meta["conversation_id"] == "conv_1"
 
-    def test_version_replacement_higher_confidence(self):
+    def test_version_replacement_higher_confidence(self, memory_store, mock_chroma_collection):
         """New record with higher confidence should replace existing."""
         now = datetime.now(timezone.utc)
         existing_meta = {
@@ -77,7 +72,7 @@ class TestMemoryStoreAdd(unittest.TestCase):
             "confidence": 0.7,
             "created_at": (now - timedelta(hours=1)).isoformat(),
         }
-        self.mock_col.get.return_value = {
+        mock_chroma_collection.get.return_value = {
             "ids": ["old_id"],
             "documents": ["old content"],
             "metadatas": [existing_meta],
@@ -91,19 +86,19 @@ class TestMemoryStoreAdd(unittest.TestCase):
             attribute="user.preference.drink.coffee",
             confidence=0.9,
         )
-        self.store.add(record)
+        memory_store.add(record)
 
         # Old should be deactivated
-        self.mock_col.update.assert_called_once()
-        update_kwargs = self.mock_col.update.call_args[1]
-        self.assertEqual(update_kwargs["ids"], ["old_id"])
-        self.assertFalse(update_kwargs["metadatas"][0]["is_active"])
+        mock_chroma_collection.update.assert_called_once()
+        update_kwargs = mock_chroma_collection.update.call_args[1]
+        assert update_kwargs["ids"] == ["old_id"]
+        assert update_kwargs["metadatas"][0]["is_active"] is False
 
         # New should be added with version 2
-        _, add_kwargs = self.mock_col.add.call_args
-        self.assertEqual(add_kwargs["metadatas"][0]["version"], 2)
+        _, add_kwargs = mock_chroma_collection.add.call_args
+        assert add_kwargs["metadatas"][0]["version"] == 2
 
-    def test_skip_lower_confidence(self):
+    def test_skip_lower_confidence(self, memory_store, mock_chroma_collection):
         """New record with lower confidence should be skipped."""
         now = datetime.now(timezone.utc)
         existing_meta = {
@@ -117,7 +112,7 @@ class TestMemoryStoreAdd(unittest.TestCase):
             "confidence": 0.95,
             "created_at": now.isoformat(),
         }
-        self.mock_col.get.return_value = {
+        mock_chroma_collection.get.return_value = {
             "ids": ["existing_id"],
             "documents": ["existing content"],
             "metadatas": [existing_meta],
@@ -131,12 +126,12 @@ class TestMemoryStoreAdd(unittest.TestCase):
             attribute="user.preference.drink.coffee",
             confidence=0.5,
         )
-        result_id = self.store.add(record)
+        result_id = memory_store.add(record)
 
-        self.assertEqual(result_id, "existing_id")
-        self.mock_col.add.assert_not_called()
+        assert result_id == "existing_id"
+        mock_chroma_collection.add.assert_not_called()
 
-    def test_replace_same_confidence_newer_timestamp(self):
+    def test_replace_same_confidence_newer_timestamp(self, memory_store, mock_chroma_collection):
         """Same confidence but newer timestamp should replace."""
         old_time = datetime(2024, 1, 1, tzinfo=timezone.utc)
         existing_meta = {
@@ -150,7 +145,7 @@ class TestMemoryStoreAdd(unittest.TestCase):
             "confidence": 0.8,
             "created_at": old_time.isoformat(),
         }
-        self.mock_col.get.return_value = {
+        mock_chroma_collection.get.return_value = {
             "ids": ["old"],
             "documents": ["old"],
             "metadatas": [existing_meta],
@@ -164,20 +159,15 @@ class TestMemoryStoreAdd(unittest.TestCase):
             attribute="a",
             confidence=0.8,
         )
-        self.store.add(record)
-        self.mock_col.add.assert_called_once()
+        memory_store.add(record)
+        mock_chroma_collection.add.assert_called_once()
 
 
-class TestMemoryStoreSearch(unittest.TestCase):
+class TestMemoryStoreSearch:
     """Test MemoryStore.search."""
 
-    def setUp(self):
-        self.mock_col = MagicMock()
-        self.mock_col.get.return_value = {"ids": [], "documents": [], "metadatas": []}
-        self.store = _make_store(self.mock_col)
-
-    def test_search_returns_records(self):
-        self.mock_col.query.return_value = {
+    def test_search_returns_records(self, memory_store, mock_chroma_collection):
+        mock_chroma_collection.query.return_value = {
             "ids": [["id1", "id2"]],
             "documents": [["fact content", "summary content"]],
             "metadatas": [[
@@ -188,50 +178,50 @@ class TestMemoryStoreSearch(unittest.TestCase):
             "distances": [[0.3, 0.5]],
         }
         # Mock access stats update
-        self.mock_col.get.return_value = {
+        mock_chroma_collection.get.return_value = {
             "ids": ["id1", "id2"],
             "metadatas": [{"access_count": 0}, {"access_count": 2}],
         }
 
-        results = self.store.search("test query")
+        results = memory_store.search("test query")
 
-        self.assertEqual(len(results), 2)
-        self.assertIsInstance(results[0], MemoryRecord)
-        self.assertEqual(results[0].memory_type, MemoryType.FACT)
-        self.assertEqual(results[0].content, "fact content")
-        self.assertEqual(results[1].memory_type, MemoryType.SUMMARY)
+        assert len(results) == 2
+        assert isinstance(results[0], MemoryRecord)
+        assert results[0].memory_type == MemoryType.FACT
+        assert results[0].content == "fact content"
+        assert results[1].memory_type == MemoryType.SUMMARY
 
-    def test_search_with_memory_type_filter(self):
-        self.mock_col.query.return_value = {
+    def test_search_with_memory_type_filter(self, memory_store, mock_chroma_collection):
+        mock_chroma_collection.query.return_value = {
             "ids": [[]], "documents": [[]], "metadatas": [[]], "distances": [[]],
         }
 
-        self.store.search("query", memory_type=MemoryType.FACT)
+        memory_store.search("query", memory_type=MemoryType.FACT)
 
-        _, kwargs = self.mock_col.query.call_args
+        _, kwargs = mock_chroma_collection.query.call_args
         where = kwargs["where"]
         # Should have $and with is_active and memory_type
-        self.assertIn("$and", where)
+        assert "$and" in where
         conditions = where["$and"]
-        self.assertTrue(any(c.get("memory_type") == "fact" for c in conditions))
-        self.assertTrue(any(c.get("is_active") is True for c in conditions))
+        assert any(c.get("memory_type") == "fact" for c in conditions)
+        assert any(c.get("is_active") is True for c in conditions)
 
-    def test_search_with_type_tag_filter(self):
-        self.mock_col.query.return_value = {
+    def test_search_with_type_tag_filter(self, memory_store, mock_chroma_collection):
+        mock_chroma_collection.query.return_value = {
             "ids": [[]], "documents": [[]], "metadatas": [[]], "distances": [[]],
         }
 
-        self.store.search("query", type_tag="user.preference")
+        memory_store.search("query", type_tag="user.preference")
 
-        _, kwargs = self.mock_col.query.call_args
+        _, kwargs = mock_chroma_collection.query.call_args
         where = kwargs["where"]
-        self.assertIn("$and", where)
+        assert "$and" in where
         conditions = where["$and"]
-        self.assertTrue(any(c.get("type_tag") == "user.preference" for c in conditions))
+        assert any(c.get("type_tag") == "user.preference" for c in conditions)
 
-    def test_search_distance_threshold(self):
+    def test_search_distance_threshold(self, memory_store, mock_chroma_collection):
         """Results beyond distance threshold should be excluded."""
-        self.mock_col.query.return_value = {
+        mock_chroma_collection.query.return_value = {
             "ids": [["near", "far"]],
             "documents": [["close result", "far result"]],
             "metadatas": [[
@@ -241,56 +231,51 @@ class TestMemoryStoreSearch(unittest.TestCase):
             "distances": [[0.3, 2.0]],  # 2.0 > threshold (1.1)
         }
         # Mock for access stat update
-        self.mock_col.get.return_value = {
+        mock_chroma_collection.get.return_value = {
             "ids": ["near"],
             "metadatas": [{"access_count": 0}],
         }
 
-        results = self.store.search("query")
+        results = memory_store.search("query")
 
-        self.assertEqual(len(results), 1)
-        self.assertEqual(results[0].content, "close result")
+        assert len(results) == 1
+        assert results[0].content == "close result"
 
-    def test_search_empty_results(self):
-        self.mock_col.query.return_value = {
+    def test_search_empty_results(self, memory_store, mock_chroma_collection):
+        mock_chroma_collection.query.return_value = {
             "ids": [[]], "documents": [[]], "metadatas": [[]], "distances": [[]],
         }
-        results = self.store.search("nothing")
-        self.assertEqual(results, [])
+        results = memory_store.search("nothing")
+        assert results == []
 
-    def test_search_updates_access_stats(self):
-        self.mock_col.query.return_value = {
+    def test_search_updates_access_stats(self, memory_store, mock_chroma_collection):
+        mock_chroma_collection.query.return_value = {
             "ids": [["hit1"]],
             "documents": [["content"]],
             "metadatas": [[{"memory_type": "fact", "is_active": True}]],
             "distances": [[0.2]],
         }
-        self.mock_col.get.return_value = {
+        mock_chroma_collection.get.return_value = {
             "ids": ["hit1"],
             "metadatas": [{"access_count": 3}],
         }
 
-        self.store.search("query")
+        memory_store.search("query")
 
         # update should be called twice: once for search access stats
         # (get is called for access stats)
-        update_calls = self.mock_col.update.call_args_list
-        self.assertTrue(len(update_calls) >= 1)
+        update_calls = mock_chroma_collection.update.call_args_list
+        assert len(update_calls) >= 1
         last_update = update_calls[-1]
         meta = last_update[1]["metadatas"][0]
-        self.assertEqual(meta["access_count"], 4)
+        assert meta["access_count"] == 4
 
 
-class TestMemoryStoreGetMethods(unittest.TestCase):
+class TestMemoryStoreGetMethods:
     """Test get_by_type, get_by_id, get_history."""
 
-    def setUp(self):
-        self.mock_col = MagicMock()
-        self.mock_col.get.return_value = {"ids": [], "documents": [], "metadatas": []}
-        self.store = _make_store(self.mock_col)
-
-    def test_get_by_type(self):
-        self.mock_col.get.return_value = {
+    def test_get_by_type(self, memory_store, mock_chroma_collection):
+        mock_chroma_collection.get.return_value = {
             "ids": ["f1", "f2"],
             "documents": ["fact 1", "fact 2"],
             "metadatas": [
@@ -299,33 +284,33 @@ class TestMemoryStoreGetMethods(unittest.TestCase):
             ],
         }
 
-        results = self.store.get_by_type(MemoryType.FACT)
-        self.assertEqual(len(results), 2)
-        self.assertEqual(results[0].content, "fact 1")
+        results = memory_store.get_by_type(MemoryType.FACT)
+        assert len(results) == 2
+        assert results[0].content == "fact 1"
 
-        _, kwargs = self.mock_col.get.call_args
+        _, kwargs = mock_chroma_collection.get.call_args
         where = kwargs["where"]
-        self.assertIn("$and", where)
+        assert "$and" in where
 
-    def test_get_by_id_found(self):
-        self.mock_col.get.return_value = {
+    def test_get_by_id_found(self, memory_store, mock_chroma_collection):
+        mock_chroma_collection.get.return_value = {
             "ids": ["mem1"],
             "documents": ["content here"],
             "metadatas": [{"memory_type": "fact", "confidence": 0.9}],
         }
 
-        result = self.store.get_by_id("mem1")
-        self.assertIsNotNone(result)
-        self.assertEqual(result.content, "content here")
+        result = memory_store.get_by_id("mem1")
+        assert result is not None
+        assert result.content == "content here"
 
-    def test_get_by_id_not_found(self):
-        self.mock_col.get.return_value = {"ids": [], "documents": [], "metadatas": []}
+    def test_get_by_id_not_found(self, memory_store, mock_chroma_collection):
+        mock_chroma_collection.get.return_value = {"ids": [], "documents": [], "metadatas": []}
 
-        result = self.store.get_by_id("nonexistent")
-        self.assertIsNone(result)
+        result = memory_store.get_by_id("nonexistent")
+        assert result is None
 
-    def test_get_history(self):
-        self.mock_col.get.return_value = {
+    def test_get_history(self, memory_store, mock_chroma_collection):
+        mock_chroma_collection.get.return_value = {
             "ids": ["v2", "v1"],
             "documents": ["new content", "old content"],
             "metadatas": [
@@ -334,25 +319,20 @@ class TestMemoryStoreGetMethods(unittest.TestCase):
             ],
         }
 
-        history = self.store.get_history("x")
-        self.assertEqual(len(history), 2)
+        history = memory_store.get_history("x")
+        assert len(history) == 2
         # Should be sorted by version ascending
-        self.assertEqual(history[0].version, 1)
-        self.assertEqual(history[1].version, 2)
+        assert history[0].version == 1
+        assert history[1].version == 2
 
 
-class TestMemoryStoreDecayAndCleanup(unittest.TestCase):
+class TestMemoryStoreDecayAndCleanup:
     """Test cleanup and recalculate_importance."""
 
-    def setUp(self):
-        self.mock_col = MagicMock()
-        self.mock_col.get.return_value = {"ids": [], "documents": [], "metadatas": []}
-        self.store = _make_store(self.mock_col)
-
-    def test_recalculate_importance(self):
+    def test_recalculate_importance(self, memory_store, mock_chroma_collection):
         now = datetime.now(timezone.utc)
         old_time = (now - timedelta(days=100)).isoformat()
-        self.mock_col.get.return_value = {
+        mock_chroma_collection.get.return_value = {
             "ids": ["r1"],
             "documents": ["old memory"],
             "metadatas": [{
@@ -365,15 +345,15 @@ class TestMemoryStoreDecayAndCleanup(unittest.TestCase):
             }],
         }
 
-        self.store.recalculate_importance()
+        memory_store.recalculate_importance()
 
         # Should have called update with a lower importance value
-        if self.mock_col.update.called:
-            _, kwargs = self.mock_col.update.call_args
+        if mock_chroma_collection.update.called:
+            _, kwargs = mock_chroma_collection.update.call_args
             new_importance = kwargs["metadatas"][0]["importance"]
-            self.assertLess(new_importance, 1.0)
+            assert new_importance < 1.0
 
-    def test_cleanup_deactivates_low_importance(self):
+    def test_cleanup_deactivates_low_importance(self, memory_store, mock_chroma_collection):
         now = datetime.now(timezone.utc)
         very_old = (now - timedelta(days=365)).isoformat()
 
@@ -394,30 +374,25 @@ class TestMemoryStoreDecayAndCleanup(unittest.TestCase):
                 }],
             }
 
-        self.mock_col.get.side_effect = mock_get
+        mock_chroma_collection.get.side_effect = mock_get
 
-        removed = self.store.cleanup(min_importance=0.1)
-        self.assertGreaterEqual(removed, 0)
+        removed = memory_store.cleanup(min_importance=0.1)
+        assert removed >= 0
 
-    def test_delete_and_deactivate(self):
-        self.store.delete("mem1")
-        self.mock_col.delete.assert_called_with(ids=["mem1"])
+    def test_delete_and_deactivate(self, memory_store, mock_chroma_collection):
+        memory_store.delete("mem1")
+        mock_chroma_collection.delete.assert_called_with(ids=["mem1"])
 
-        self.store.deactivate("mem2")
-        self.mock_col.update.assert_called_with(
+        memory_store.deactivate("mem2")
+        mock_chroma_collection.update.assert_called_with(
             ids=["mem2"], metadatas=[{"is_active": False}]
         )
 
 
-class TestMemoryStoreAddFromConversation(unittest.TestCase):
+class TestMemoryStoreAddFromConversation:
     """Test add_from_conversation."""
 
-    def setUp(self):
-        self.mock_col = MagicMock()
-        self.mock_col.get.return_value = {"ids": [], "documents": [], "metadatas": []}
-        self.store = _make_store(self.mock_col)
-
-    def test_add_from_conversation(self):
+    def test_add_from_conversation(self, memory_store, mock_chroma_collection):
         from src.memory.extractor import Fact
 
         mock_facts = [
@@ -431,30 +406,26 @@ class TestMemoryStoreAddFromConversation(unittest.TestCase):
                 attribute="user.preference.drink.coffee",
             )
         ]
-        self.store._extractor.extract = AsyncMock(return_value=mock_facts)
+        memory_store._extractor.extract = AsyncMock(return_value=mock_facts)
 
-        ids = asyncio.run(self.store.add_from_conversation("I like coffee"))
+        ids = asyncio.run(memory_store.add_from_conversation("I like coffee"))
 
-        self.assertEqual(len(ids), 1)
-        self.mock_col.add.assert_called_once()
+        assert len(ids) == 1
+        mock_chroma_collection.add.assert_called_once()
 
-    def test_add_from_conversation_no_facts(self):
-        self.store._extractor.extract = AsyncMock(return_value=[])
+    def test_add_from_conversation_no_facts(self, memory_store, mock_chroma_collection):
+        memory_store._extractor.extract = AsyncMock(return_value=[])
 
-        ids = asyncio.run(self.store.add_from_conversation("hello"))
+        ids = asyncio.run(memory_store.add_from_conversation("hello"))
 
-        self.assertEqual(ids, [])
-        self.mock_col.add.assert_not_called()
+        assert ids == []
+        mock_chroma_collection.add.assert_not_called()
 
 
-class TestMemoryStoreInit(unittest.TestCase):
+class TestMemoryStoreInit:
     """Test MemoryStore initialization."""
 
     def test_missing_env_raises(self):
         with patch("src.memory.store.os.getenv", return_value=None):
-            with self.assertRaisesRegex(ValueError, "OPENAI_MODEL_EMBEDDING"):
+            with pytest.raises(ValueError, match="OPENAI_MODEL_EMBEDDING"):
                 MemoryStore()
-
-
-if __name__ == "__main__":
-    unittest.main()
