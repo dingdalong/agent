@@ -158,3 +158,242 @@ def test_discover_tools_skips_init(tmp_path):
         assert skip_test.real.REAL_LOADED is True
     finally:
         sys.path.remove(str(tmp_path))
+
+
+# === executor tests ===
+
+@pytest.mark.asyncio
+async def test_executor_validates_and_runs():
+    from src.tools.executor import ToolExecutor as NewExecutor
+
+    class AddModel(BaseModel):
+        a: int = Field(description="first number")
+        b: int = Field(description="second number")
+
+    async def add_func(a: int, b: int) -> str:
+        return f"result:{a + b}"
+
+    reg = ToolRegistry()
+    reg.register(ToolEntry(
+        name="add", func=add_func, model=AddModel,
+        description="Add two numbers", parameters_schema=AddModel.model_json_schema(),
+    ))
+    executor = NewExecutor(reg)
+    result = await executor.execute("add", {"a": 3, "b": 4})
+    assert result == "result:7"
+
+
+@pytest.mark.asyncio
+async def test_executor_validation_error():
+    from src.tools.executor import ToolExecutor as NewExecutor
+
+    class StrictModel(BaseModel):
+        count: int = Field(description="must be int")
+
+    async def noop(count: int) -> str:
+        return "ok"
+
+    reg = ToolRegistry()
+    reg.register(ToolEntry(
+        name="strict", func=noop, model=StrictModel,
+        description="strict tool", parameters_schema=StrictModel.model_json_schema(),
+    ))
+    executor = NewExecutor(reg)
+    with pytest.raises(ValueError, match="参数验证失败"):
+        await executor.execute("strict", {"count": "not_a_number"})
+
+
+@pytest.mark.asyncio
+async def test_executor_unknown_tool():
+    from src.tools.executor import ToolExecutor as NewExecutor
+    executor = NewExecutor(ToolRegistry())
+    with pytest.raises(ValueError, match="未注册的工具"):
+        await executor.execute("nonexistent", {})
+
+
+@pytest.mark.asyncio
+async def test_executor_sync_function():
+    from src.tools.executor import ToolExecutor as NewExecutor
+
+    class EchoModel(BaseModel):
+        msg: str = Field(description="message")
+
+    def sync_echo(msg: str) -> str:
+        return f"echo:{msg}"
+
+    reg = ToolRegistry()
+    reg.register(ToolEntry(
+        name="sync_echo", func=sync_echo, model=EchoModel,
+        description="sync echo", parameters_schema=EchoModel.model_json_schema(),
+    ))
+    executor = NewExecutor(reg)
+    result = await executor.execute("sync_echo", {"msg": "hello"})
+    assert result == "echo:hello"
+
+
+# === middleware tests ===
+
+from src.tools.middleware import build_pipeline, truncate_middleware, error_handler_middleware
+
+
+@pytest.mark.asyncio
+async def test_truncate_middleware():
+    async def fake_execute(name: str, args: dict) -> str:
+        return "x" * 100
+
+    pipeline = build_pipeline(fake_execute, [truncate_middleware(max_length=50)])
+    result = await pipeline("test", {})
+    assert len(result) < 100
+    assert "截断" in result
+
+
+@pytest.mark.asyncio
+async def test_truncate_middleware_short_result():
+    async def fake_execute(name: str, args: dict) -> str:
+        return "short"
+
+    pipeline = build_pipeline(fake_execute, [truncate_middleware(max_length=50)])
+    result = await pipeline("test", {})
+    assert result == "short"
+
+
+@pytest.mark.asyncio
+async def test_error_handler_middleware():
+    async def failing_execute(name: str, args: dict) -> str:
+        raise RuntimeError("boom")
+
+    pipeline = build_pipeline(failing_execute, [error_handler_middleware()])
+    result = await pipeline("test", {})
+    assert "执行出错" in result
+    assert "boom" in result
+
+
+@pytest.mark.asyncio
+async def test_middleware_chain_order():
+    async def failing_execute(name: str, args: dict) -> str:
+        raise RuntimeError("inner error")
+
+    pipeline = build_pipeline(
+        failing_execute,
+        [error_handler_middleware(), truncate_middleware(max_length=50)],
+    )
+    result = await pipeline("test", {})
+    assert "执行出错" in result
+
+
+# === router tests ===
+
+from src.tools.router import ToolRouter, LocalToolProvider
+from src.tools.executor import ToolExecutor as NewToolExecutor
+
+
+@pytest.mark.asyncio
+async def test_local_provider_can_handle():
+    class M(BaseModel):
+        v: str = Field(description="v")
+
+    async def fn(v: str) -> str:
+        return v
+
+    reg = ToolRegistry()
+    reg.register(ToolEntry(
+        name="local_tool", func=fn, model=M,
+        description="test", parameters_schema=M.model_json_schema(),
+    ))
+    executor = NewToolExecutor(reg)
+    provider = LocalToolProvider(reg, executor, [error_handler_middleware()])
+    assert provider.can_handle("local_tool") is True
+    assert provider.can_handle("unknown") is False
+
+
+@pytest.mark.asyncio
+async def test_local_provider_execute():
+    class M(BaseModel):
+        v: str = Field(description="v")
+
+    async def fn(v: str) -> str:
+        return f"got:{v}"
+
+    reg = ToolRegistry()
+    reg.register(ToolEntry(
+        name="echo", func=fn, model=M,
+        description="echo", parameters_schema=M.model_json_schema(),
+    ))
+    executor = NewToolExecutor(reg)
+    provider = LocalToolProvider(reg, executor, [error_handler_middleware()])
+    result = await provider.execute("echo", {"v": "hello"})
+    assert result == "got:hello"
+
+
+@pytest.mark.asyncio
+async def test_router_routes_to_provider():
+    class M(BaseModel):
+        v: str = Field(description="v")
+
+    async def fn(v: str) -> str:
+        return f"routed:{v}"
+
+    reg = ToolRegistry()
+    reg.register(ToolEntry(
+        name="routed_tool", func=fn, model=M,
+        description="test", parameters_schema=M.model_json_schema(),
+    ))
+    executor = NewToolExecutor(reg)
+    provider = LocalToolProvider(reg, executor, [error_handler_middleware()])
+    router = ToolRouter()
+    router.add_provider(provider)
+    result = await router.route("routed_tool", {"v": "test"})
+    assert result == "routed:test"
+
+
+@pytest.mark.asyncio
+async def test_router_unknown_tool():
+    router = ToolRouter()
+    result = await router.route("nonexistent", {})
+    assert "未找到" in result
+
+
+def test_router_get_all_schemas():
+    class M(BaseModel):
+        v: str = Field(description="v")
+
+    async def fn(v: str) -> str:
+        return v
+
+    reg = ToolRegistry()
+    reg.register(ToolEntry(
+        name="s1", func=fn, model=M,
+        description="tool 1", parameters_schema=M.model_json_schema(),
+    ))
+    executor = NewToolExecutor(reg)
+    provider = LocalToolProvider(reg, executor, [])
+    router = ToolRouter()
+    router.add_provider(provider)
+    schemas = router.get_all_schemas()
+    assert len(schemas) == 1
+    assert schemas[0]["function"]["name"] == "s1"
+
+
+def test_router_is_sensitive():
+    class M(BaseModel):
+        v: str = Field(description="v")
+
+    async def fn(v: str) -> str:
+        return v
+
+    reg = ToolRegistry()
+    reg.register(ToolEntry(
+        name="safe", func=fn, model=M,
+        description="safe", parameters_schema=M.model_json_schema(), sensitive=False,
+    ))
+    reg.register(ToolEntry(
+        name="danger", func=fn, model=M,
+        description="danger", parameters_schema=M.model_json_schema(), sensitive=True,
+    ))
+    executor = NewToolExecutor(reg)
+    provider = LocalToolProvider(reg, executor, [])
+    router = ToolRouter()
+    router.add_provider(provider)
+    assert router.is_sensitive("safe") is False
+    assert router.is_sensitive("danger") is True
+    assert router.is_sensitive("nonexistent") is False
