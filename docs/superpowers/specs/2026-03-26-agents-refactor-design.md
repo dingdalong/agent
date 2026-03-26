@@ -132,17 +132,19 @@ class HandoffRequest:
     task: str       # 传递的任务描述
 ```
 
-### 4.3 RunContext — 运行时上下文（泛型类型安全）
+### 4.3 RunContext — 运行时上下文（泛型：类型安全 + 依赖注入）
 
 ```python
 StateT = TypeVar("StateT", bound=BaseModel)
+DepsT = TypeVar("DepsT", bound=BaseModel)
 
 @dataclass
-class RunContext(Generic[StateT]):
+class RunContext(Generic[StateT, DepsT]):
     """贯穿整个图执行的共享上下文。
 
-    StateT 是用户定义的 Pydantic Model，约束共享状态的结构。
-    用法：RunContext[MyState]，IDE 自动补全 context.state.xxx。
+    两个泛型参数：
+    - StateT: 共享状态结构，节点间传递数据的唯一通道
+    - DepsT: 外部依赖（工具路由、记忆、数据库等），由使用者定义，框架只负责传递
     """
 
     # 输入
@@ -151,10 +153,8 @@ class RunContext(Generic[StateT]):
     # 共享状态 — 类型安全，由 StateT 约束
     state: StateT
 
-    # 基础设施引用
-    tool_router: ToolRouter | None = None
-    memory: ConversationBuffer | None = None
-    store: MemoryStore | None = None
+    # 外部依赖 — 类型安全，由 DepsT 约束
+    deps: DepsT
 
     # 执行追踪
     trace: list[TraceEvent] = field(default_factory=list)
@@ -173,29 +173,45 @@ class AgentState(BaseModel):
     calendar: CalendarResult | None = None
     final_response: str = ""
 
-# 2. 创建类型安全的 context
-context = RunContext[AgentState](
+# 2. 定义依赖（替代硬编码的 tool_router/memory/store）
+class AgentDeps(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    tool_router: ToolRouter
+    memory: ConversationBuffer
+    store: MemoryStore
+    # 自由扩展 — 加新依赖不用改框架代码
+    # db: Database
+    # http_client: HttpClient
+
+# 3. 创建 context
+context = RunContext[AgentState, AgentDeps](
     input=user_input,
     state=AgentState(),
-    tool_router=router,
+    deps=AgentDeps(tool_router=router, memory=buffer, store=store),
 )
 
-# 3. 节点中使用 — IDE 自动补全，拼错直接报红
-context.state.weather          # ✅ WeatherResult | None
-context.state.weather.temp_c   # ✅ float
-context.state.weathr           # ❌ IDE 立即报错
+# 4. 节点中使用 — 全部类型安全
+context.state.weather.temp_c     # ✅ IDE 补全
+context.deps.tool_router         # ✅ IDE 补全
+context.deps.db                  # ❌ 没定义则立即报错
 ```
 
-对于不需要类型安全的简单场景，提供默认的 `DictState`：
+对于不需要严格类型的简单场景，提供默认类型：
 
 ```python
 class DictState(BaseModel):
     """默认的宽松状态，允许任意 key-value。"""
     model_config = ConfigDict(extra="allow")
 
-# 简单用法 — 和 dict 一样灵活，但仍是 BaseModel
-context = RunContext[DictState](input="...", state=DictState())
-context.state.weather = result  # 动态属性，extra="allow"
+class EmptyDeps(BaseModel):
+    """无外部依赖时使用。"""
+    pass
+
+# 最简用法
+context = RunContext[DictState, EmptyDeps](
+    input="...", state=DictState(), deps=EmptyDeps()
+)
 ```
 
 ### 4.4 TraceEvent — 可观测性
@@ -518,13 +534,15 @@ engine = GraphEngine(registry=registry, hooks=graph_hooks)
 # 3. 编译默认图
 default_graph = build_default_graph(registry)
 
-# 4. 每次请求
+# 4. 初始化依赖（启动时创建一次，所有请求复用）
+deps = AgentDeps(tool_router=router, memory=buffer, store=store)
+
+# 5. 每次请求
 async def handle_input(user_input: str):
-    context = RunContext(
+    context = RunContext[AgentState, AgentDeps](
         input=user_input,
-        tool_router=router,
-        memory=buffer,
-        store=store,
+        state=AgentState(),
+        deps=deps,
     )
     result = await engine.run(default_graph, context)
     return result.output
