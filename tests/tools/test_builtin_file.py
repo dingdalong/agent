@@ -1,6 +1,5 @@
 import pytest
 import os
-import shutil
 from src.tools.builtin.file import (
     write_file, read_file, delete_file, list_files,
     append_file, search_file, find_files, insert_lines, delete_lines,
@@ -12,18 +11,9 @@ WORKSPACE = os.path.abspath("./workspace")
 
 
 @pytest.fixture(autouse=True)
-def setup_workspace():
-    """每个测试前确保 workspace 存在，测试后清理测试文件"""
-    os.makedirs(WORKSPACE, exist_ok=True)
+def _ensure_workspace(workspace_dir):
+    """Delegate to root conftest workspace_dir fixture."""
     yield
-    # 清理测试产生的文件
-    for name in os.listdir(WORKSPACE):
-        if name.startswith("test_"):
-            path = os.path.join(WORKSPACE, name)
-            if os.path.isdir(path):
-                shutil.rmtree(path)
-            else:
-                os.remove(path)
 
 
 # ===================== 辅助函数测试 =====================
