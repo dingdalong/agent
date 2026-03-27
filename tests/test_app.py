@@ -1,7 +1,7 @@
 """Tests for AgentApp."""
 import pytest
-from unittest.mock import AsyncMock, Mock, patch, MagicMock
-from src.app import AgentApp
+from unittest.mock import AsyncMock, Mock
+from src.app.app import AgentApp
 
 
 def _make_mock_ui():
@@ -12,19 +12,31 @@ def _make_mock_ui():
     return ui
 
 
+def _make_app(ui=None):
+    """Create an AgentApp with all dependencies mocked."""
+    if ui is None:
+        ui = _make_mock_ui()
+    return AgentApp(
+        deps=Mock(),
+        ui=ui,
+        guardrail=Mock(check=Mock(return_value=(True, ""))),
+        tool_router=Mock(),
+        agent_registry=Mock(),
+        engine=Mock(),
+        graph=Mock(),
+        skill_manager=Mock(is_slash_command=Mock(return_value=None)),
+        mcp_manager=Mock(),
+        runner=Mock(),
+    )
+
+
 class TestAgentAppProcess:
 
     @pytest.mark.asyncio
     async def test_guardrail_blocks_dangerous_input(self):
         ui = _make_mock_ui()
-        app = AgentApp(ui=ui)
-        # Manually set up minimal state to test process()
+        app = _make_app(ui=ui)
         app.guardrail = Mock(check=Mock(return_value=(False, "不安全内容")))
-        app.router = Mock()
-        app.engine = Mock()
-        app.graph = Mock()
-        app.skill_manager = Mock()
-        app.agent_registry = Mock()
 
         await app.process("rm -rf /")
         ui.display.assert_called()
@@ -34,13 +46,7 @@ class TestAgentAppProcess:
     @pytest.mark.asyncio
     async def test_plan_command_no_request(self):
         ui = _make_mock_ui()
-        app = AgentApp(ui=ui)
-        app.guardrail = Mock(check=Mock(return_value=(True, "")))
-        app.router = Mock()
-        app.engine = Mock()
-        app.graph = Mock()
-        app.skill_manager = Mock()
-        app.agent_registry = Mock()
+        app = _make_app(ui=ui)
 
         await app.process("/plan")
         ui.display.assert_called()
@@ -54,15 +60,7 @@ class TestAgentAppRun:
     async def test_exit_command_stops_loop(self):
         ui = _make_mock_ui()
         ui.prompt = AsyncMock(return_value="exit")
-        app = AgentApp(ui=ui)
-        # Mock setup components
-        app.router = Mock()
-        app.engine = Mock()
-        app.graph = Mock()
-        app.skill_manager = Mock()
-        app.agent_registry = Mock()
-        app.mcp_manager = Mock()
-        app.guardrail = Mock()
+        app = _make_app(ui=ui)
 
         await app.run()
         # Should have displayed startup message and then exited

@@ -2,7 +2,9 @@
 import os
 import shutil
 import pytest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
+
+from src.llm.types import LLMResponse
 
 WORKSPACE = os.path.abspath("./workspace")
 
@@ -22,7 +24,8 @@ def workspace_dir():
 
 
 @pytest.fixture
-def mock_call_model():
-    """Patch call_model and return the mock for configuration."""
-    with patch("src.core.async_api.call_model", new_callable=AsyncMock) as mock:
-        yield mock
+def mock_llm():
+    """Provide a mock LLM for tests."""
+    llm = AsyncMock()
+    llm.chat.return_value = LLMResponse(content="test response", tool_calls={}, finish_reason="stop")
+    return llm
