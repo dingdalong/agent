@@ -7,6 +7,7 @@ from src.agents.agent import Agent, AgentResult, HandoffRequest
 from src.agents.registry import AgentRegistry
 from src.agents.runner import AgentRunner
 from src.agents.context import RunContext, TraceEvent, DictState, EmptyDeps
+from src.agents.deps import AgentDeps
 from src.agents.guardrails import Guardrail, GuardrailResult, run_guardrails
 from src.agents.hooks import AgentHooks, GraphHooks
 from src.agents.graph.types import (
@@ -35,6 +36,7 @@ __all__ = [
     "TraceEvent",
     "DictState",
     "EmptyDeps",
+    "AgentDeps",
     # Guardrails
     "Guardrail",
     "GuardrailResult",

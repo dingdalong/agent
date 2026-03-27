@@ -77,3 +77,26 @@ def test_run_context_add_trace():
     assert len(ctx.trace) == 2
     assert ctx.trace[0].event == "start"
     assert ctx.trace[1].event == "end"
+
+
+# 在文件末尾追加
+
+from src.agents.deps import AgentDeps
+
+
+class TestAgentDeps:
+
+    def test_default_fields_are_none(self):
+        deps = AgentDeps()
+        assert deps.tool_router is None
+        assert deps.agent_registry is None
+        assert deps.graph_engine is None
+        assert deps.ui is None
+
+    def test_accepts_arbitrary_types(self):
+        """AgentDeps should accept non-serializable types via ConfigDict."""
+        class FakeRouter:
+            pass
+        deps = AgentDeps(tool_router=FakeRouter(), ui=FakeRouter())
+        assert deps.tool_router is not None
+        assert deps.ui is not None
