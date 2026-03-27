@@ -1,138 +1,89 @@
-"""
-测试 plan.models 模块
-"""
+"""测试 plan.models 模块"""
 import pytest
 from src.plan.models import Step, Plan
 
 
-def test_step_model():
-    """测试 Step 模型的基本验证"""
-    # 正常工具步骤
-    step = Step(
-        id="step1",
-        description="查询天气",
-        action="tool",
-        tool_name="get_weather",
-        tool_args={"location": "广州"},
-        depends_on=[]
-    )
-    assert step.id == "step1"
-    assert step.action == "tool"
-    assert step.tool_name == "get_weather"
-    assert step.tool_args == {"location": "广州"}
-    assert step.depends_on == []
-
-    # 子任务步骤
-    step2 = Step(
-        id="step2",
-        description="处理子任务",
-        action="subtask",
-        subtask_prompt="需要进一步规划的任务",
-        depends_on=["step1"]
-    )
-    assert step2.action == "subtask"
-    assert step2.subtask_prompt == "需要进一步规划的任务"
-    assert step2.depends_on == ["step1"]
-    assert step2.tool_name is None
-    assert step2.tool_args is None
-
-    # 用户输入步骤
-    step3 = Step(
-        id="step3",
-        description="获取用户偏好",
-        action="user_input",
-        depends_on=[]
-    )
-    assert step3.action == "user_input"
-    assert step3.tool_name is None
-    assert step3.subtask_prompt is None
-
-
-def test_step_model_defaults():
-    """测试 Step 模型的默认值"""
-    step = Step(
-        id="step1",
-        description="测试步骤",
-        action="tool",
-        tool_name="test_tool"
-    )
-    assert step.tool_args is None
-    assert step.subtask_prompt is None
-    assert step.depends_on == []  # default_factory=list
-
-
-def test_step_model_validation():
-    """测试 Step 模型的验证"""
-    # 缺少必填字段
-    with pytest.raises(ValueError):
-        Step(id="step1", description="测试")  # 缺少 action
-
-    # action 必须是有效值（Literal类型限制）
-    with pytest.raises(ValueError):
-        Step(
-            id="step1",
-            description="测试",
-            action="invalid_action"  # Literal类型会拒绝无效值
+class TestStepModel:
+    def test_tool_step(self):
+        """工具步骤：tool_name 有值"""
+        step = Step(
+            id="weather",
+            description="查询天气",
+            tool_name="get_weather",
+            tool_args={"location": "广州"},
         )
+        assert step.id == "weather"
+        assert step.tool_name == "get_weather"
+        assert step.tool_args == {"location": "广州"}
+        assert step.agent_name is None
+        assert step.agent_prompt is None
+        assert step.depends_on == []
+
+    def test_agent_step(self):
+        """Agent 步骤：agent_name 有值"""
+        step = Step(
+            id="draft",
+            description="起草邮件",
+            agent_name="email_agent",
+            agent_prompt="根据天气信息起草一封邮件",
+            depends_on=["weather"],
+        )
+        assert step.agent_name == "email_agent"
+        assert step.agent_prompt == "根据天气信息起草一封邮件"
+        assert step.tool_name is None
+        assert step.depends_on == ["weather"]
+
+    def test_tool_step_defaults(self):
+        """工具步骤默认值"""
+        step = Step(id="s1", description="测试", tool_name="test_tool")
+        assert step.tool_args == {}
+        assert step.depends_on == []
+
+    def test_agent_step_defaults(self):
+        """Agent 步骤默认值"""
+        step = Step(id="s1", description="测试", agent_name="helper")
+        assert step.agent_prompt is None
+        assert step.depends_on == []
+
+    def test_both_tool_and_agent_raises(self):
+        """同时设置 tool_name 和 agent_name 报错"""
+        with pytest.raises(ValueError, match="cannot have both"):
+            Step(
+                id="s1",
+                description="冲突",
+                tool_name="some_tool",
+                agent_name="some_agent",
+            )
+
+    def test_neither_tool_nor_agent_raises(self):
+        """两者都没设置报错"""
+        with pytest.raises(ValueError, match="must have either"):
+            Step(id="s1", description="空步骤")
+
+    def test_variable_references_in_tool_args(self):
+        """tool_args 中的 $step_id.field 变量引用"""
+        step = Step(
+            id="translate",
+            description="翻译",
+            tool_name="translate",
+            tool_args={"text": "$search.results", "lang": "zh"},
+            depends_on=["search"],
+        )
+        assert step.tool_args["text"] == "$search.results"
 
 
-def test_plan_model():
-    """测试 Plan 模型"""
-    step1 = Step(
-        id="step1",
-        description="第一步",
-        action="tool",
-        tool_name="test"
-    )
-    step2 = Step(
-        id="step2",
-        description="第二步",
-        action="user_input",
-        depends_on=["step1"]
-    )
+class TestPlanModel:
+    def test_basic_plan(self):
+        plan = Plan(steps=[
+            Step(id="s1", description="步骤1", tool_name="t1"),
+            Step(id="s2", description="步骤2", tool_name="t2", depends_on=["s1"]),
+        ])
+        assert len(plan.steps) == 2
+        assert plan.context == {}
 
-    plan = Plan(steps=[step1, step2])
-    assert len(plan.steps) == 2
-    assert plan.steps[0].id == "step1"
-    assert plan.steps[1].id == "step2"
-    assert plan.context == {}  # 默认空字典
-
-
-def test_plan_model_with_context():
-    """测试带上下文的 Plan 模型"""
-    step = Step(
-        id="step1",
-        description="测试",
-        action="tool",
-        tool_name="test"
-    )
-    context = {"user_id": "123", "session_id": "abc"}
-    plan = Plan(steps=[step], context=context)
-    assert plan.context == context
-
-
-def test_step_depends_on_validation():
-    """测试 depends_on 字段验证"""
-    # depends_on 应为字符串列表
-    step = Step(
-        id="step1",
-        description="测试",
-        action="tool",
-        tool_name="test",
-        depends_on=["step2", "step3"]
-    )
-    assert step.depends_on == ["step2", "step3"]
-
-    # 空列表
-    step2 = Step(
-        id="step2",
-        description="测试2",
-        action="tool",
-        tool_name="test",
-        depends_on=[]
-    )
-    assert step2.depends_on == []
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+    def test_plan_with_context(self):
+        plan = Plan(
+            steps=[Step(id="s1", description="测试", tool_name="t1")],
+            context={"user_id": "123"},
+        )
+        assert plan.context == {"user_id": "123"}
