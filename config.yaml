@@ -1,0 +1,36 @@
+# ===== 用户配置 =====
+llm:
+  provider: deepseek
+  model: deepseek-chat
+  base_url: https://api.deepseek.com/v1
+
+embedding:
+  provider: ollama
+  model: qwen3-embedding:0.6b
+  base_url: http://127.0.0.1:11434
+
+memory:
+  provider: chroma
+  path: ./chroma_data
+
+user:
+  id: user_001
+
+# ===== 开发者调优（全部可选）=====
+# plan:
+#   max_adjustments: 3
+#   max_clarification_rounds: 3
+# agents:
+#   max_handoffs: 3
+#   max_tool_rounds: 3
+# llm:
+#   concurrency: 5
+#   max_retries: 3
+# tools:
+#   max_output_length: 2000
+# mcp:
+#   config_path: mcp_servers.json
+# skills:
+#   dirs:
+#     - skills/
+#     - .agents/skills/
