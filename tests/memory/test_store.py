@@ -1,5 +1,5 @@
 """
-Unit tests for MemoryStore (store.py).
+Unit tests for MemoryStore (store.py) and ChromaMemoryStore (chroma/store.py).
 
 Tests add/search/versioning/cleanup with mocked ChromaDB.
 """
@@ -11,6 +11,7 @@ from unittest.mock import patch, MagicMock, AsyncMock
 
 from src.memory.types import MemoryRecord, MemoryType
 from src.memory.store import MemoryStore
+from src.memory.chroma.store import ChromaMemoryStore
 
 
 def _make_store(mock_collection):
@@ -24,6 +25,20 @@ def _make_store(mock_collection):
          }.get(k, d)):
         mock_client.return_value.get_or_create_collection.return_value = mock_collection
         store = MemoryStore(collection_name="test_memories")
+    return store
+
+
+def _make_chroma_store(mock_collection):
+    """Create a ChromaMemoryStore with mocked dependencies."""
+    with patch("src.memory.chroma.store.chromadb.PersistentClient") as mock_client, \
+         patch("src.memory.chroma.store.EmbeddingClient"), \
+         patch("src.memory.chroma.store.FactExtractor"), \
+         patch("src.memory.chroma.store.os.getenv", side_effect=lambda k, d=None: {
+             "OPENAI_MODEL_EMBEDDING": "test-model",
+             "OPENAI_MODEL_EMBEDDING_URL": "http://test",
+         }.get(k, d)):
+        mock_client.return_value.get_or_create_collection.return_value = mock_collection
+        store = ChromaMemoryStore(collection_name="test_memories")
     return store
 
 
@@ -431,6 +446,83 @@ class TestMemoryStoreInit:
                 MemoryStore()
 
 
+# === ChromaMemoryStore tests ===
+
+
+class TestChromaMemoryStoreAdd:
+    """Test ChromaMemoryStore.add and version control."""
+
+    def test_add_new_fact(self, chroma_memory_store, mock_chroma_collection):
+        record = MemoryRecord(
+            memory_type=MemoryType.FACT,
+            content="user likes coffee",
+            speaker="user",
+            type_tag="user.preference",
+            attribute="user.preference.drink.coffee",
+            confidence=0.9,
+        )
+        mid = chroma_memory_store.add(record)
+        mock_chroma_collection.add.assert_called_once()
+        _, kwargs = mock_chroma_collection.add.call_args
+        assert kwargs["documents"] == ["user likes coffee"]
+        meta = kwargs["metadatas"][0]
+        assert meta["memory_type"] == "fact"
+        assert meta["version"] == 1
+        assert meta["is_active"] is True
+        assert mid == kwargs["ids"][0]
+
+    def test_add_new_summary(self, chroma_memory_store, mock_chroma_collection):
+        mid = chroma_memory_store.add_summary("conversation summary", "conv_1", ["point1", "point2"])
+        mock_chroma_collection.add.assert_called_once()
+        _, kwargs = mock_chroma_collection.add.call_args
+        assert kwargs["documents"] == ["conversation summary"]
+        meta = kwargs["metadatas"][0]
+        assert meta["memory_type"] == "summary"
+        assert meta["conversation_id"] == "conv_1"
+
+
+class TestChromaMemoryStoreSearch:
+    """Test ChromaMemoryStore.search."""
+
+    def test_search_returns_records(self, chroma_memory_store, mock_chroma_collection):
+        mock_chroma_collection.query.return_value = {
+            "ids": [["id1", "id2"]],
+            "documents": [["fact content", "summary content"]],
+            "metadatas": [[
+                {"memory_type": "fact", "is_active": True, "confidence": 0.9,
+                 "speaker": "user", "type_tag": "user.pref", "attribute": "user.pref.x"},
+                {"memory_type": "summary", "is_active": True, "conversation_id": "conv1"},
+            ]],
+            "distances": [[0.3, 0.5]],
+        }
+        mock_chroma_collection.get.return_value = {
+            "ids": ["id1", "id2"],
+            "metadatas": [{"access_count": 0}, {"access_count": 2}],
+        }
+
+        results = chroma_memory_store.search("test query")
+
+        assert len(results) == 2
+        assert isinstance(results[0], MemoryRecord)
+        assert results[0].memory_type == MemoryType.FACT
+
+    def test_search_empty_results(self, chroma_memory_store, mock_chroma_collection):
+        mock_chroma_collection.query.return_value = {
+            "ids": [[]], "documents": [[]], "metadatas": [[]], "distances": [[]],
+        }
+        results = chroma_memory_store.search("nothing")
+        assert results == []
+
+
+class TestChromaMemoryStoreInit:
+    """Test ChromaMemoryStore initialization."""
+
+    def test_missing_env_raises(self):
+        with patch("src.memory.chroma.store.os.getenv", return_value=None):
+            with pytest.raises(ValueError, match="OPENAI_MODEL_EMBEDDING"):
+                ChromaMemoryStore()
+
+
 # === Collection name tests ===
 
 
@@ -447,3 +539,11 @@ class TestBuildCollectionName:
     def test_collection_name_empty_user_id(self):
         from src.memory.utils import build_collection_name
         assert build_collection_name("memories", "") == "memories"
+
+    def test_chroma_collection_name_includes_sanitized_user_id(self):
+        from src.memory.chroma.utils import build_collection_name
+        assert build_collection_name("user_facts", "User/ABC 123") == "user_facts_user_abc_123"
+
+    def test_chroma_collection_name_no_user_id(self):
+        from src.memory.chroma.utils import build_collection_name
+        assert build_collection_name("memories", None) == "memories"

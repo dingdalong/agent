@@ -9,8 +9,8 @@ from typing import TYPE_CHECKING, Any
 
 import tiktoken
 
-from src.core.async_api import call_model
-from src.core.performance import async_time_function
+from src.llm.base import LLMProvider
+from src.utils.performance import async_time_function
 
 if TYPE_CHECKING:
     from .store import MemoryStore
@@ -25,7 +25,10 @@ def _count_tokens(text: str) -> int:
 
 
 @async_time_function()
-async def summarize_conversation(messages: list[dict[str, Any]]) -> str:
+async def summarize_conversation(
+    messages: list[dict[str, Any]],
+    llm: LLMProvider,
+) -> str:
     """调用模型生成对话摘要。"""
     prompt = (
         "请将以下对话内容总结为一段简洁的摘要，保留关键信息（如用户偏好、重要事实、已完成的步骤）。"
@@ -40,11 +43,11 @@ async def summarize_conversation(messages: list[dict[str, Any]]) -> str:
         elif role == "assistant":
             prompt += f"助手：{content}\n"
 
-    response, _, _ = await call_model(
+    response = await llm.chat(
         messages=[{"role": "user", "content": prompt}],
         silent=True,
     )
-    return response
+    return response.content
 
 
 class ConversationBuffer:
@@ -90,7 +93,11 @@ class ConversationBuffer:
         return self._total_tokens() > self.max_tokens
 
     @async_time_function()
-    async def compress(self, store: "MemoryStore") -> None:
+    async def compress(
+        self,
+        store: "MemoryStore",
+        llm: LLMProvider,
+    ) -> None:
         """压缩最早的对话为摘要并存入 MemoryStore。"""
         if len(self._messages) < 4:
             return
@@ -101,7 +108,7 @@ class ConversationBuffer:
         remaining_msgs = self._messages[compress_count:]
         remaining_tokens = self._token_cache[compress_count:]
 
-        summary = await summarize_conversation(old_msgs)
+        summary = await summarize_conversation(old_msgs, llm=llm)
 
         store.add_summary(
             summary_text=summary,

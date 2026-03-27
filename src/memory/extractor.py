@@ -9,13 +9,13 @@ import logging
 import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Set
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set
 
 from pydantic import BaseModel
 
-from src.core.async_api import call_model
-from src.core.performance import async_time_function
-from src.core.structured_output import build_output_schema, parse_output
+from src.llm.base import LLMProvider
+from src.llm.structured import build_output_schema, parse_output
+from src.utils.performance import async_time_function
 
 logger = logging.getLogger(__name__)
 
@@ -145,8 +145,13 @@ class TypeValidator:
 class FactExtractor:
     """从对话中提取结构化记忆事实。"""
 
-    def __init__(self, config: Optional[ExtractorConfig] = None):
+    def __init__(
+        self,
+        config: Optional[ExtractorConfig] = None,
+        llm: Optional[LLMProvider] = None,
+    ):
         self.config = config or ExtractorConfig()
+        self._llm = llm
         self._type_validator = TypeValidator()
         self._text_utils = TextUtils()
         # 缓存默认 prompt（include_types=None 时使用）
@@ -238,9 +243,12 @@ class FactExtractor:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": f"用户说：{user_input}\n助手说：{assistant_response}"},
             ]
-            _, tool_calls, _ = await call_model(
+            if self._llm is None:
+                raise RuntimeError("FactExtractor requires an LLMProvider instance (llm=...)")
+            response = await self._llm.chat(
                 messages, temperature=0.0, tools=[_SUBMIT_FACTS_TOOL], silent=True,
             )
+            tool_calls = response.tool_calls
             result = parse_output(tool_calls, "submit_facts", FactsResult)
             if result:
                 return [item.model_dump() for item in result.facts]
