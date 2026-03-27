@@ -10,7 +10,7 @@ from .parser import find_skill_md, parse_frontmatter, read_skill_info
 
 logger = logging.getLogger(__name__)
 
-_RESERVED_COMMANDS = {"plan", "book"}
+_RESERVED_COMMANDS = {"book"}
 _SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv"}
 _MAX_SCAN_DIRS = 2000
 
