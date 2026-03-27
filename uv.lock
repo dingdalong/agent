@@ -17,7 +17,6 @@ dependencies = [
     { name = "openai" },
     { name = "pydantic" },
     { name = "python-dotenv" },
-    { name = "python-statemachine" },
     { name = "pyyaml" },
     { name = "requests" },
     { name = "tiktoken" },
@@ -38,7 +37,6 @@ requires-dist = [
     { name = "openai", specifier = ">=2.26.0" },
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "python-dotenv", specifier = ">=0.19.0" },
-    { name = "python-statemachine", specifier = ">=3.0.0" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "requests", specifier = ">=2.32.5" },
     { name = "tiktoken", specifier = ">=0.12.0" },
@@ -1430,15 +1428,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/94/01/979e98d542a70714b0cb2b6728ed0b7c46792b695e3eaec3e20711271ca3/python_multipart-0.0.22.tar.gz", hash = "sha256:7340bef99a7e0032613f56dc36027b959fd3b30a787ed62d310e951f7c3a3a58", size = 37612, upload-time = "2026-01-25T10:15:56.219Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/1b/d0/397f9626e711ff749a95d96b7af99b9c566a9bb5129b8e4c10fc4d100304/python_multipart-0.0.22-py3-none-any.whl", hash = "sha256:2b2cd894c83d21bf49d702499531c7bafd057d730c201782048f7945d82de155", size = 24579, upload-time = "2026-01-25T10:15:54.811Z" },
-]
-
-[[package]]
-name = "python-statemachine"
-version = "3.0.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/f4/a6/d0626b1efb56d9502fe8686fa5dbf23d444b5985adac974be2aa8780c956/python_statemachine-3.0.0.tar.gz", hash = "sha256:91523f9ead73c1d6fecc975d5c6e0bfe363fbf537c5f0bf309bcd0f94f9441b2", size = 852800, upload-time = "2026-02-24T18:06:04.908Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/a2/ba/9863be42c209d66623e188223484c1502f25a2412f258f00505c613f6e5d/python_statemachine-3.0.0-py3-none-any.whl", hash = "sha256:f967ee864cfd26375c91f49560e790357613482811efcec8b2020c1f874a5eaf", size = 103801, upload-time = "2026-02-24T18:06:03.31Z" },
 ]
 
 [[package]]

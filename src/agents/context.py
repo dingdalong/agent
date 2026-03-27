@@ -18,12 +18,6 @@ class DictState(BaseModel):
     model_config = ConfigDict(extra="allow")
 
 
-class EmptyDeps(BaseModel):
-    """无外部依赖时使用。"""
-
-    pass
-
-
 @dataclass
 class TraceEvent:
     """一次执行事件的记录。"""

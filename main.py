@@ -1,15 +1,12 @@
-# main.py
 """Agent 入口。"""
 
 import asyncio
 
-from src.app import AgentApp
-from src.interfaces.cli import CLIInterface
+from src.app import create_app
 
 
 async def main():
-    app = AgentApp(ui=CLIInterface())
-    await app.setup()
+    app = await create_app()
     try:
         await app.run()
     finally:

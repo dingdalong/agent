@@ -13,7 +13,7 @@ from typing import Any
 import chromadb
 from chromadb.config import Settings
 
-from src.core.performance import async_time_function, time_function
+from src.utils.performance import async_time_function, time_function
 
 from .decay import calculate_importance
 from .embeddings import EmbeddingClient

@@ -9,10 +9,9 @@ from typing import Any
 
 from src.agents.agent import Agent, AgentResult, HandoffRequest
 from src.agents.context import RunContext, TraceEvent
-from src.agents.guardrails import run_guardrails
 from src.agents.registry import AgentRegistry
-from src.core.async_api import call_model
-from src.core.structured_output import build_output_schema, parse_output
+from src.guardrails import run_guardrails
+from src.llm.structured import build_output_schema, parse_output
 
 logger = logging.getLogger(__name__)
 
@@ -72,11 +71,12 @@ class AgentRunner:
         # 6. 工具调用循环
         final_text = ""
         for round_idx in range(self.max_tool_rounds):
-            content, tool_calls, _ = await call_model(
+            response = await context.deps.llm.chat(
                 messages,
                 tools=all_tools,
                 silent=True,
             )
+            content, tool_calls = response.content, response.tool_calls
 
             if not tool_calls:
                 final_text = content
@@ -149,8 +149,8 @@ class AgentRunner:
                 })
         else:
             # 超过 max_tool_rounds
-            content, _, _ = await call_model(messages, silent=True)
-            final_text = content
+            response = await context.deps.llm.chat(messages, silent=True)
+            final_text = response.content
 
         # 截断
         if len(final_text) > self.max_result_length:
@@ -169,12 +169,12 @@ class AgentRunner:
                 f"将结果整理为 {agent.output_model.__name__} 结构",
                 agent.output_model,
             )
-            _, struct_calls, _ = await call_model(
+            struct_response = await context.deps.llm.chat(
                 messages + [{"role": "user", "content": "请将结果整理为结构化数据。"}],
                 tools=[output_schema],
                 silent=True,
             )
-            parsed = parse_output(struct_calls, "agent_output", agent.output_model)
+            parsed = parse_output(struct_response.tool_calls, "agent_output", agent.output_model)
             if parsed is not None:
                 structured_data = parsed.model_dump()
 

@@ -20,7 +20,9 @@ from src.plan.planner import (
 )
 from src.plan.compiler import PlanCompiler
 from src.tools.router import ToolRouter
-from config import PLAN_MAX_CLARIFICATION_ROUNDS, PLAN_MAX_ADJUSTMENTS
+# Module defaults (overridable via config.yaml plan section)
+PLAN_MAX_CLARIFICATION_ROUNDS = 3
+PLAN_MAX_ADJUSTMENTS = 3
 
 
 class PlanFlow:
