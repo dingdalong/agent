@@ -1,12 +1,14 @@
-"""AgentHooks + GraphHooks 测试。"""
+"""AgentHooks 测试。"""
 import pytest
+
+from src.agents.deps import AgentDeps
 
 
 @pytest.mark.asyncio
 async def test_agent_hooks_on_start():
     from src.agents.hooks import AgentHooks
     from src.agents.agent import Agent
-    from src.agents.context import RunContext, DictState, EmptyDeps
+    from src.agents.context import RunContext, DictState
 
     calls = []
 
@@ -15,7 +17,7 @@ async def test_agent_hooks_on_start():
 
     hooks = AgentHooks(on_start=on_start)
     agent = Agent(name="test", description="test", instructions="test")
-    ctx = RunContext(input="hi", state=DictState(), deps=EmptyDeps())
+    ctx = RunContext(input="hi", state=DictState(), deps=AgentDeps())
 
     await hooks.on_start(agent, ctx)
     assert calls == [("start", "test")]
@@ -25,7 +27,7 @@ async def test_agent_hooks_on_start():
 async def test_agent_hooks_on_end():
     from src.agents.hooks import AgentHooks
     from src.agents.agent import Agent, AgentResult
-    from src.agents.context import RunContext, DictState, EmptyDeps
+    from src.agents.context import RunContext, DictState
 
     calls = []
 
@@ -34,7 +36,7 @@ async def test_agent_hooks_on_end():
 
     hooks = AgentHooks(on_end=on_end)
     agent = Agent(name="test", description="test", instructions="test")
-    ctx = RunContext(input="hi", state=DictState(), deps=EmptyDeps())
+    ctx = RunContext(input="hi", state=DictState(), deps=AgentDeps())
     result = AgentResult(text="done")
 
     await hooks.on_end(agent, ctx, result)
@@ -45,41 +47,11 @@ async def test_agent_hooks_on_end():
 async def test_agent_hooks_none_is_noop():
     from src.agents.hooks import AgentHooks
     from src.agents.agent import Agent
-    from src.agents.context import RunContext, DictState, EmptyDeps
+    from src.agents.context import RunContext, DictState
 
     hooks = AgentHooks()  # all None
     agent = Agent(name="test", description="test", instructions="test")
-    ctx = RunContext(input="hi", state=DictState(), deps=EmptyDeps())
+    ctx = RunContext(input="hi", state=DictState(), deps=AgentDeps())
 
     # Should not raise
     await hooks.on_start(agent, ctx)
-
-
-@pytest.mark.asyncio
-async def test_graph_hooks_on_node_start():
-    from src.agents.hooks import GraphHooks
-    from src.agents.context import RunContext, DictState, EmptyDeps
-
-    calls = []
-
-    async def on_node_start(node_name, ctx):
-        calls.append(node_name)
-
-    hooks = GraphHooks(on_node_start=on_node_start)
-    ctx = RunContext(input="hi", state=DictState(), deps=EmptyDeps())
-
-    await hooks.on_node_start("weather", ctx)
-    assert calls == ["weather"]
-
-
-@pytest.mark.asyncio
-async def test_graph_hooks_none_is_noop():
-    from src.agents.hooks import GraphHooks
-    from src.agents.context import RunContext, DictState, EmptyDeps
-
-    hooks = GraphHooks()
-    ctx = RunContext(input="hi", state=DictState(), deps=EmptyDeps())
-
-    # Should not raise
-    await hooks.on_graph_start(ctx)
-    await hooks.on_node_start("x", ctx)

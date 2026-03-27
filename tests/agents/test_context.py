@@ -3,6 +3,8 @@ import time
 import pytest
 from pydantic import BaseModel, ConfigDict
 
+from src.agents.deps import AgentDeps
+
 
 class MyState(BaseModel):
     counter: int = 0
@@ -31,18 +33,18 @@ def test_run_context_typed_deps():
 
 
 def test_run_context_defaults():
-    from src.agents.context import RunContext, DictState, EmptyDeps
+    from src.agents.context import RunContext, DictState
 
-    ctx = RunContext(input="test", state=DictState(), deps=EmptyDeps())
+    ctx = RunContext(input="test", state=DictState(), deps=AgentDeps())
     assert ctx.current_agent == ""
     assert ctx.depth == 0
     assert ctx.trace == []
 
 
 def test_run_context_dict_state_allows_extra():
-    from src.agents.context import RunContext, DictState, EmptyDeps
+    from src.agents.context import RunContext, DictState
 
-    ctx = RunContext(input="test", state=DictState(), deps=EmptyDeps())
+    ctx = RunContext(input="test", state=DictState(), deps=AgentDeps())
     ctx.state.weather = {"temp": 25}
     assert ctx.state.weather == {"temp": 25}
 
@@ -69,9 +71,9 @@ def test_trace_event_with_data():
 
 
 def test_run_context_add_trace():
-    from src.agents.context import RunContext, DictState, EmptyDeps, TraceEvent
+    from src.agents.context import RunContext, DictState, TraceEvent
 
-    ctx = RunContext(input="test", state=DictState(), deps=EmptyDeps())
+    ctx = RunContext(input="test", state=DictState(), deps=AgentDeps())
     ctx.trace.append(TraceEvent(node="a", event="start", timestamp=1.0))
     ctx.trace.append(TraceEvent(node="a", event="end", timestamp=2.0))
     assert len(ctx.trace) == 2
@@ -79,19 +81,16 @@ def test_run_context_add_trace():
     assert ctx.trace[1].event == "end"
 
 
-# 在文件末尾追加
-
-from src.agents.deps import AgentDeps
-
-
 class TestAgentDeps:
 
     def test_default_fields_are_none(self):
         deps = AgentDeps()
+        assert deps.llm is None
         assert deps.tool_router is None
         assert deps.agent_registry is None
         assert deps.graph_engine is None
         assert deps.ui is None
+        assert deps.memory is None
 
     def test_accepts_arbitrary_types(self):
         """AgentDeps should accept non-serializable types via ConfigDict."""
