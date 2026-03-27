@@ -195,7 +195,11 @@ async def run_plan_flow(
     ctx = RunContext(
         input=user_input,
         state=DictState(),
-        deps=AgentDeps(tool_router=tool_router),
+        deps=AgentDeps(
+            tool_router=tool_router,
+            agent_registry=agent_registry,
+            graph_engine=engine,
+        ),
     )
     result = await engine.run(compiled_graph, ctx)
 
@@ -249,7 +253,11 @@ async def handle_input(
                 ctx = RunContext(
                     input=actual_input,
                     state=DictState(),
-                    deps=AgentDeps(tool_router=router),
+                    deps=AgentDeps(
+                        tool_router=router,
+                        agent_registry=skill_registry,
+                        graph_engine=skill_engine,
+                    ),
                 )
                 result = await skill_engine.run(skill_graph, ctx)
                 await agent_output(f"\n{result.output}\n")
