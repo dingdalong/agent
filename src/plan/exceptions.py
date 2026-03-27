@@ -1,6 +1,6 @@
 """计划模块的自定义异常类"""
 
-from config import PLAN_MAX_RAW_RESPONSE_LENGTH
+_MAX_RAW_RESPONSE_LENGTH = 500
 
 
 class PlanError(Exception):
@@ -17,7 +17,7 @@ class JSONParseError(PlanError):
 
     def __str__(self) -> str:
         base = super().__str__()
-        if self.raw_response and len(self.raw_response) < PLAN_MAX_RAW_RESPONSE_LENGTH:
+        if self.raw_response and len(self.raw_response) < _MAX_RAW_RESPONSE_LENGTH:
             return f"{base} (原始响应: {self.raw_response})"
         elif self.raw_response:
             return f"{base} (原始响应过长，已截断)"

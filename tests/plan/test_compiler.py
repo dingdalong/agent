@@ -6,10 +6,8 @@ from unittest.mock import AsyncMock, MagicMock
 from src.plan.models import Step, Plan
 from src.plan.compiler import PlanCompiler, resolve_variables
 from src.plan.exceptions import CompileError
-from src.agents import (
-    AgentRegistry, Agent, RunContext, DictState, GraphEngine,
-    NodeResult, FunctionNode,
-)
+from src.agents import AgentRegistry, Agent, RunContext, DictState
+from src.graph import GraphEngine, NodeResult, FunctionNode
 
 
 # === resolve_variables 单元测试 ===
@@ -184,7 +182,7 @@ class TestPlanCompilerExecution:
             Step(id="weather", description="查天气", tool_name="get_weather", tool_args={"location": "广州"}),
         ])
         graph = compiler.compile(plan)
-        engine = GraphEngine(registry=registry)
+        engine = GraphEngine()
 
         from pydantic import ConfigDict
         from pydantic import BaseModel
@@ -225,7 +223,7 @@ class TestPlanCompilerExecution:
             ),
         ])
         graph = compiler.compile(plan)
-        engine = GraphEngine(registry=registry)
+        engine = GraphEngine()
 
         from pydantic import ConfigDict, BaseModel
 

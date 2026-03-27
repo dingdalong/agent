@@ -3,11 +3,11 @@ import logging
 from typing import Literal, Optional
 
 from pydantic import BaseModel
-from src.core.async_api import call_model
+from src.llm.base import LLMProvider
 from src.plan.models import Plan, Step
 from src.plan.exceptions import JSONParseError, APIGenerationError, PlanError
 from src.tools import ToolDict
-from src.core.structured_output import build_output_schema, parse_output
+from src.llm.structured import build_output_schema, parse_output
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +118,7 @@ def parse_plan_from_tool_calls(tool_calls: dict[int, dict[str, str]]) -> Optiona
 
 # === 核心功能 ===
 
-async def classify_user_feedback(user_feedback: str, plan: Plan) -> str:
+async def classify_user_feedback(user_feedback: str, plan: Plan, *, llm: LLMProvider) -> str:
     """使用 LLM 判断用户反馈是确认还是调整"""
     plan_summary = "\n".join(
         f"{i}. {step.description}" for i, step in enumerate(plan.steps, 1)
@@ -128,13 +128,13 @@ async def classify_user_feedback(user_feedback: str, plan: Plan) -> str:
     )
 
     try:
-        _, tool_calls, _ = await call_model(
+        response = await llm.chat(
             [{"role": "user", "content": prompt}],
             temperature=0,
             tools=[_CLASSIFY_FEEDBACK_TOOL],
             silent=True,
         )
-        result = parse_output(tool_calls, "classify_feedback", FeedbackClassification)
+        result = parse_output(response.tool_calls, "classify_feedback", FeedbackClassification)
         if result and result.action in ("confirm", "adjust"):
             return result.action
         return "adjust"
@@ -143,18 +143,19 @@ async def classify_user_feedback(user_feedback: str, plan: Plan) -> str:
         return "adjust"
 
 
-async def check_clarification_needed(user_input: str, gathered_info: str = "") -> Optional[str]:
+async def check_clarification_needed(user_input: str, gathered_info: str = "", *, llm: LLMProvider) -> Optional[str]:
     """判断信息是否充足。充足返回 None，否则返回追问内容。"""
     user_message = f"用户原始请求：{user_input}\n\n已收集的信息：\n{gathered_info or '（暂无）'}"
 
     try:
-        response, _, _ = await call_model([
+        response = await llm.chat([
             {"role": "system", "content": CLARIFICATION_SYSTEM_PROMPT},
             {"role": "user", "content": user_message},
         ], temperature=0)
-        if response.strip().upper() == "READY":
+        text = response.content
+        if text.strip().upper() == "READY":
             return None
-        return response
+        return text
     except Exception as e:
         logger.warning(f"信息充分性判断失败: {e}，跳过")
         return None
@@ -165,6 +166,8 @@ async def generate_plan(
     available_tools: list[ToolDict],
     available_agents: list[str],
     context: str = "",
+    *,
+    llm: LLMProvider,
 ) -> Optional[Plan]:
     """生成计划。LLM 判断不需要时返回 None。"""
     agent_list_text = _build_agent_list_text(available_agents)
@@ -174,7 +177,7 @@ async def generate_plan(
     user_prompt = f"用户请求：{user_input}\n{context}"
 
     try:
-        content, tool_calls, _ = await call_model(
+        response = await llm.chat(
             [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -182,6 +185,7 @@ async def generate_plan(
             tools=plan_tools,
             silent=True,
         )
+        content, tool_calls = response.content, response.tool_calls
     except Exception as e:
         raise APIGenerationError(f"API调用失败: {e}", api_error=e) from e
 
@@ -200,6 +204,8 @@ async def adjust_plan(
     feedback: str,
     available_tools: list[ToolDict],
     available_agents: list[str],
+    *,
+    llm: LLMProvider,
 ) -> Plan:
     """根据反馈调整计划。失败时返回原计划。"""
     agent_list_text = _build_agent_list_text(available_agents)
@@ -219,7 +225,7 @@ async def adjust_plan(
 用户反馈：{feedback}"""
 
     try:
-        content, tool_calls, _ = await call_model(
+        response = await llm.chat(
             [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -227,6 +233,7 @@ async def adjust_plan(
             tools=plan_tools,
             silent=True,
         )
+        content, tool_calls = response.content, response.tool_calls
     except Exception as e:
         logger.error(f"API调用失败: {e}")
         return current_plan

@@ -12,6 +12,7 @@ def _make_flow(ui=None):
         agent_registry=Mock(all_agents=Mock(return_value=[])),
         engine=Mock(),
         ui=ui or AsyncMock(),
+        llm=AsyncMock(),
     )
 
 

@@ -9,7 +9,8 @@ from __future__ import annotations
 from src.agents.context import RunContext, DictState
 from src.agents.deps import AgentDeps
 from src.agents.registry import AgentRegistry
-from src.agents.graph.engine import GraphEngine
+from src.graph import GraphEngine
+from src.llm.base import LLMProvider
 from src.plan.models import Plan
 from src.plan.planner import (
     generate_plan,
@@ -31,11 +32,13 @@ class PlanFlow:
         agent_registry: AgentRegistry,
         engine: GraphEngine,
         ui,
+        llm: LLMProvider,
     ):
         self.tool_router = tool_router
         self.agent_registry = agent_registry
         self.engine = engine
         self.ui = ui
+        self.llm = llm
 
     async def run(self, user_input: str) -> str:
         """执行完整计划流程，返回结果文本。"""
@@ -45,7 +48,7 @@ class PlanFlow:
         # 1. 澄清循环
         gathered = ""
         for _ in range(PLAN_MAX_CLARIFICATION_ROUNDS):
-            question = await check_clarification_needed(user_input, gathered)
+            question = await check_clarification_needed(user_input, gathered, llm=self.llm)
             if question is None:
                 break
             await self.ui.display(f"\n{question}\n")
@@ -54,7 +57,7 @@ class PlanFlow:
 
         # 2. 生成计划
         context = gathered if gathered else ""
-        plan = await generate_plan(user_input, available_tools, available_agents, context)
+        plan = await generate_plan(user_input, available_tools, available_agents, context, llm=self.llm)
         if plan is None:
             return "这个请求不需要多步计划，我直接回答。"
 
@@ -64,11 +67,11 @@ class PlanFlow:
             await self.ui.display(f"\n执行计划：\n{plan_display}\n")
             feedback_input = await self.ui.prompt("\n确认执行？(输入 '确认' 或修改意见): ")
 
-            action = await classify_user_feedback(feedback_input, plan)
+            action = await classify_user_feedback(feedback_input, plan, llm=self.llm)
             if action == "confirm":
                 break
             plan = await adjust_plan(
-                user_input, plan, feedback_input, available_tools, available_agents
+                user_input, plan, feedback_input, available_tools, available_agents, llm=self.llm
             )
 
         # 4. 编译并执行

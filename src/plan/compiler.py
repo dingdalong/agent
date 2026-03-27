@@ -9,8 +9,8 @@ from typing import Any
 from src.plan.models import Plan, Step
 from src.plan.exceptions import CompileError
 from src.agents.context import RunContext, DictState
-from src.agents.graph.types import FunctionNode, NodeResult, CompiledGraph, Edge, ParallelGroup
-from src.agents.graph.builder import GraphBuilder
+from src.graph.types import FunctionNode, NodeResult, CompiledGraph, Edge, ParallelGroup
+from src.graph.builder import GraphBuilder
 from src.agents.registry import AgentRegistry
 from src.agents.runner import AgentRunner
 from src.tools.router import ToolRouter
