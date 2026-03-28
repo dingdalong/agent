@@ -58,8 +58,28 @@ class AgentRunner:
         task = context.input
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": task},
         ]
+
+        # 注入长期记忆上下文
+        memory_context = getattr(context.state, "memory_context", None)
+        if memory_context:
+            messages.append({
+                "role": "system",
+                "content": f"[相关记忆]\n{memory_context}",
+            })
+
+        # 注入对话历史
+        conversation_history = getattr(context.state, "conversation_history", None)
+        if conversation_history:
+            for msg in conversation_history:
+                if msg.get("role") == "system":
+                    continue
+                messages.append(msg)
+            # 避免重复添加当前用户消息
+            if not conversation_history or conversation_history[-1].get("content") != task:
+                messages.append({"role": "user", "content": task})
+        else:
+            messages.append({"role": "user", "content": task})
 
         # 5. 构建工具列表
         tools = self._build_tools(agent, context)

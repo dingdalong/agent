@@ -27,6 +27,9 @@
 
 ## 开发规范
 
+- 每次开始任务时，需要先检查是否有相应的文档
+- 如果文档与代码逻辑出现冲突，以代码实现为准
+- 代码需要有简介的注释，对于复杂算法可以详细一些
 - 每次完成任务后，如有必要，同步更新相关文档和测试用例
 - 类型安全：所有函数签名必须有类型注解，使用 Protocol 而非具体类型，善用 TypedDict / dataclass / Pydantic model 定义数据结构
 
@@ -41,7 +44,6 @@ uv run pytest -m slow      # 运行慢速/集成测试
 
 ## 当前状态
 
-- 记忆系统已实现但未接入主流程（`bootstrap.py` 未注入 memory 到 AgentDeps）
 - weather / calendar / email 专家智能体的工具是占位符（`get_weather`, `create_event`, `send_email` 未注册）
 - 参见 `TODO` 文件了解未来计划
 

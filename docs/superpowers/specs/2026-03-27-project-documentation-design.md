@@ -94,7 +94,6 @@ docs/
    - `uv run python main.py` — 启动 agent
    - `uv run pytest` — 运行测试
 7. **当前状态**：
-   - 记忆系统已实现但未接入主流程（bootstrap.py 未注入 memory）
    - weather/calendar/email 专家智能体的工具是占位符
    - 参见 TODO 文件了解未来计划
 8. **文件导航**：

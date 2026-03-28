@@ -199,7 +199,6 @@ uv run pytest -m slow      # 运行慢速/集成测试
 
 ## 当前状态
 
-- 记忆系统已实现但未接入主流程（`bootstrap.py` 未注入 memory 到 AgentDeps）
 - weather / calendar / email 专家智能体的工具是占位符（`get_weather`, `create_event`, `send_email` 未注册）
 - 参见 `TODO` 文件了解未来计划
 
@@ -897,9 +896,6 @@ importance = confidence × recency_weight × frequency_weight
 
 调用 Ollama API 生成向量，支持连接复用。
 
-## 当前状态
-
-记忆系统已完整实现，但 **未接入主流程**。`bootstrap.py` 中未将 ChromaMemoryStore 注入到 AgentDeps.memory。
 ```
 
 - [ ] **Step 4: 创建 tools.md**

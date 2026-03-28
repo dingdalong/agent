@@ -60,7 +60,3 @@ importance = confidence × recency_weight × frequency_weight
 ### Embedding（`src/memory/chroma/embeddings.py`）
 
 调用 Ollama API 生成向量，支持连接复用。
-
-## 当前状态
-
-记忆系统已完整实现，但 **未接入主流程**。`bootstrap.py` 中未将 ChromaMemoryStore 注入到 AgentDeps.memory。

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from src.config import load_config
@@ -25,8 +26,12 @@ from src.guardrails import InputGuardrail
 from src.agents import AgentRegistry, AgentRunner
 from src.graph import GraphEngine
 from src.agents.deps import AgentDeps
+from src.memory import ChromaMemoryStore, ConversationBuffer
+from src.memory.utils import build_collection_name
 from src.app.presets import build_default_graph
 from src.app.app import AgentApp
+
+logger = logging.getLogger(__name__)
 
 
 async def create_app(config_path: str = "config.yaml") -> AgentApp:
@@ -82,7 +87,42 @@ async def create_app(config_path: str = "config.yaml") -> AgentApp:
     if skill_manager._skills:
         tool_router.add_provider(SkillToolProvider(skill_manager))
 
-    # 5. Agents
+    # 5. Memory
+    embedding_cfg = raw.get("embedding", {})
+    memory_cfg = raw.get("memory", {})
+    user_cfg = raw.get("user", {})
+    memory_store = None
+    conversation_buffer = None
+
+    if (
+        memory_cfg.get("provider") == "chroma"
+        and embedding_cfg.get("model")
+        and embedding_cfg.get("base_url")
+    ):
+        try:
+            collection_name = build_collection_name(
+                "memories", user_cfg.get("id", "default_user")
+            )
+            memory_store = ChromaMemoryStore(
+                embedding_model=embedding_cfg["model"],
+                embedding_url=embedding_cfg["base_url"],
+                collection_name=collection_name,
+                persist_dir=memory_cfg.get("path", "./chroma_data"),
+                llm=llm,
+            )
+            logger.info("[记忆系统] ChromaMemoryStore 已初始化")
+        except Exception:
+            logger.warning("[记忆系统] 初始化失败，降级为无记忆模式", exc_info=True)
+            memory_store = None
+
+    if memory_store is not None:
+        agent_cfg_buf = raw.get("agents", {})
+        conversation_buffer = ConversationBuffer(
+            max_rounds=agent_cfg_buf.get("max_conversation_rounds", 10),
+            max_tokens=agent_cfg_buf.get("max_conversation_tokens", 4096),
+        )
+
+    # 6. Agents
     agent_cfg = raw.get("agents", {})
     agent_registry = AgentRegistry()
     runner = AgentRunner(
@@ -92,13 +132,14 @@ async def create_app(config_path: str = "config.yaml") -> AgentApp:
     graph = build_default_graph(agent_registry, runner=runner)
     engine = GraphEngine(max_handoff_depth=agent_cfg.get("max_handoffs", 10))
 
-    # 6. Deps
+    # 7. Deps
     deps = AgentDeps(
         llm=llm,
         tool_router=tool_router,
         agent_registry=agent_registry,
         graph_engine=engine,
         ui=ui,
+        memory=memory_store,
     )
 
     return AgentApp(
@@ -112,4 +153,5 @@ async def create_app(config_path: str = "config.yaml") -> AgentApp:
         skill_manager=skill_manager,
         mcp_manager=mcp_manager,
         runner=runner,
+        conversation_buffer=conversation_buffer,
     )

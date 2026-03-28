@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import logging
+from typing import TYPE_CHECKING
+
 from src.interfaces.base import UserInterface
 from src.guardrails import InputGuardrail
 from src.agents import RunContext, DictState, AgentDeps, AgentRegistry, AgentRunner
@@ -12,6 +15,12 @@ from src.skills.manager import SkillManager
 from src.mcp.manager import MCPManager
 from src.plan.flow import PlanFlow
 from src.app.presets import build_skill_graph
+
+if TYPE_CHECKING:
+    from src.memory.buffer import ConversationBuffer
+    from src.memory.types import MemoryRecord
+
+logger = logging.getLogger(__name__)
 
 
 class AgentApp:
@@ -37,6 +46,7 @@ class AgentApp:
         skill_manager: SkillManager,
         mcp_manager: MCPManager,
         runner: AgentRunner,
+        conversation_buffer: ConversationBuffer | None = None,
     ):
         self.deps = deps
         self.ui = ui
@@ -48,6 +58,7 @@ class AgentApp:
         self.skill_manager = skill_manager
         self.mcp_manager = mcp_manager
         self.runner = runner
+        self.conversation_buffer = conversation_buffer
 
     async def process(self, user_input: str) -> None:
         """处理单条用户消息。"""
@@ -101,15 +112,34 @@ class AgentApp:
                 agent_registry=skill_registry,
                 graph_engine=skill_engine,
                 ui=self.ui,
+                memory=self.deps.memory,
             ),
         )
         result = await skill_engine.run(skill_graph, ctx)
         await self.ui.display(f"\n{result.output}\n")
 
     async def _handle_normal(self, user_input: str) -> None:
+        state = DictState()
+
+        # --- Pre-turn: 记忆检索 ---
+        if self.conversation_buffer is not None:
+            self.conversation_buffer.add_user_message(user_input)
+
+        if self.deps.memory is not None:
+            try:
+                memories: list[MemoryRecord] = self.deps.memory.search(user_input, n=5)
+                if memories:
+                    state.memory_context = self._format_memories(memories)
+            except Exception:
+                logger.warning("[记忆系统] 检索失败，跳过", exc_info=True)
+
+        if self.conversation_buffer is not None:
+            state.conversation_history = self.conversation_buffer.get_messages_for_api()
+
+        # --- Execution ---
         ctx = RunContext(
             input=user_input,
-            state=DictState(),
+            state=state,
             deps=self.deps,
         )
         result = await self.engine.run(self.graph, ctx)
@@ -117,6 +147,42 @@ class AgentApp:
         if isinstance(output, dict):
             output = output.get("text", str(output))
         await self.ui.display(f"\n{output}\n")
+
+        # --- Post-turn: 记忆存储 ---
+        if self.conversation_buffer is not None:
+            self.conversation_buffer.add_assistant_message(
+                {"role": "assistant", "content": output}
+            )
+
+        if self.deps.memory is not None:
+            try:
+                await self.deps.memory.add_from_conversation(
+                    user_input=user_input,
+                    assistant_response=output,
+                )
+            except Exception:
+                logger.warning("[记忆系统] 事实提取失败，跳过", exc_info=True)
+
+        if (
+            self.conversation_buffer is not None
+            and self.deps.memory is not None
+            and self.conversation_buffer.should_compress()
+        ):
+            try:
+                await self.conversation_buffer.compress(
+                    store=self.deps.memory,
+                    llm=self.deps.llm,
+                )
+            except Exception:
+                logger.warning("[记忆系统] 对话压缩失败，跳过", exc_info=True)
+
+    def _format_memories(self, memories: list[MemoryRecord]) -> str:
+        """将 MemoryRecord 列表格式化为 LLM 上下文字符串。"""
+        lines = []
+        for m in memories:
+            prefix = "[事实]" if m.memory_type.value == "fact" else "[摘要]"
+            lines.append(f"{prefix} {m.content}")
+        return "\n".join(lines)
 
     async def run(self) -> None:
         """CLI 主循环。"""
@@ -128,4 +194,16 @@ class AgentApp:
             await self.process(user_input)
 
     async def shutdown(self) -> None:
+        if (
+            self.conversation_buffer is not None
+            and self.deps.memory is not None
+            and len(self.conversation_buffer.messages) > 0
+        ):
+            try:
+                await self.conversation_buffer.compress(
+                    store=self.deps.memory,
+                    llm=self.deps.llm,
+                )
+            except Exception:
+                logger.warning("[记忆系统] 退出时对话压缩失败", exc_info=True)
         await self.mcp_manager.disconnect_all()
