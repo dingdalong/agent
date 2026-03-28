@@ -8,7 +8,7 @@ from typing import Any
 
 from src.plan.models import Plan, Step
 from src.plan.exceptions import CompileError
-from src.agents.context import RunContext, DictState
+from src.agents.context import RunContext, DynamicState
 from src.graph.types import FunctionNode, NodeResult, CompiledGraph, Edge, ParallelGroup
 from src.graph.builder import GraphBuilder
 from src.agents.registry import AgentRegistry
@@ -44,7 +44,7 @@ def resolve_variables(obj: Any, context: dict) -> Any:
 
 
 def _state_to_dict(state: Any) -> dict:
-    """将 DictState（Pydantic extra='allow'）转为普通 dict。"""
+    """将 DynamicState（Pydantic extra='allow'）转为普通 dict。"""
     if hasattr(state, "model_extra") and state.model_extra:
         return dict(state.model_extra)
     return {}

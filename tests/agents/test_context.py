@@ -33,18 +33,18 @@ def test_run_context_typed_deps():
 
 
 def test_run_context_defaults():
-    from src.agents.context import RunContext, DictState
+    from src.agents.context import RunContext, DynamicState
 
-    ctx = RunContext(input="test", state=DictState(), deps=AgentDeps())
+    ctx = RunContext(input="test", state=DynamicState(), deps=AgentDeps())
     assert ctx.current_agent == ""
     assert ctx.depth == 0
     assert ctx.trace == []
 
 
 def test_run_context_dict_state_allows_extra():
-    from src.agents.context import RunContext, DictState
+    from src.agents.context import RunContext, DynamicState
 
-    ctx = RunContext(input="test", state=DictState(), deps=AgentDeps())
+    ctx = RunContext(input="test", state=DynamicState(), deps=AgentDeps())
     ctx.state.weather = {"temp": 25}
     assert ctx.state.weather == {"temp": 25}
 
@@ -71,9 +71,9 @@ def test_trace_event_with_data():
 
 
 def test_run_context_add_trace():
-    from src.agents.context import RunContext, DictState, TraceEvent
+    from src.agents.context import RunContext, DynamicState, TraceEvent
 
-    ctx = RunContext(input="test", state=DictState(), deps=AgentDeps())
+    ctx = RunContext(input="test", state=DynamicState(), deps=AgentDeps())
     ctx.trace.append(TraceEvent(node="a", event="start", timestamp=1.0))
     ctx.trace.append(TraceEvent(node="a", event="end", timestamp=2.0))
     assert len(ctx.trace) == 2

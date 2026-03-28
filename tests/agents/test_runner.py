@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 from pydantic import BaseModel, ConfigDict
 
 from src.agents.agent import Agent, AgentResult, HandoffRequest
-from src.agents.context import RunContext, DictState
+from src.agents.context import RunContext, DynamicState
 from src.agents.deps import AgentDeps
 from src.agents.registry import AgentRegistry
 from src.llm.types import LLMResponse
@@ -73,7 +73,7 @@ async def test_runner_simple_response(simple_agent, mock_router, mock_llm):
 
     ctx = RunContext(
         input="hello",
-        state=DictState(),
+        state=DynamicState(),
         deps=AgentDeps(llm=mock_llm, tool_router=mock_router),
     )
 
@@ -98,7 +98,7 @@ async def test_runner_tool_call_loop(simple_agent, mock_router, mock_llm):
 
     ctx = RunContext(
         input="weather in Beijing",
-        state=DictState(),
+        state=DynamicState(),
         deps=AgentDeps(llm=mock_llm, tool_router=mock_router),
     )
 
@@ -124,7 +124,7 @@ async def test_runner_handoff_detection(handoff_agent, mock_router, mock_llm, re
 
     ctx = RunContext(
         input="book a meeting",
-        state=DictState(),
+        state=DynamicState(),
         deps=AgentDeps(llm=mock_llm, tool_router=mock_router),
     )
 
@@ -154,7 +154,7 @@ async def test_runner_max_rounds(simple_agent, mock_router, mock_llm):
 
     ctx = RunContext(
         input="loop",
-        state=DictState(),
+        state=DynamicState(),
         deps=AgentDeps(llm=mock_llm, tool_router=mock_router),
     )
 
@@ -181,7 +181,7 @@ async def test_runner_dynamic_instructions(mock_router, mock_llm):
     )
     ctx = RunContext(
         input="test input",
-        state=DictState(),
+        state=DynamicState(),
         deps=AgentDeps(llm=mock_llm, tool_router=mock_router),
     )
 

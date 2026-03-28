@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 from src.plan.models import Step, Plan
 from src.plan.compiler import PlanCompiler, resolve_variables
 from src.plan.exceptions import CompileError
-from src.agents import AgentRegistry, Agent, RunContext, DictState
+from src.agents import AgentRegistry, Agent, RunContext, DynamicState
 from src.graph import GraphEngine, NodeResult, FunctionNode
 
 
@@ -191,7 +191,7 @@ class TestPlanCompilerExecution:
             model_config = ConfigDict(arbitrary_types_allowed=True)
             tool_router: object = None
 
-        ctx = RunContext(input="test", state=DictState(), deps=TestDeps(tool_router=router))
+        ctx = RunContext(input="test", state=DynamicState(), deps=TestDeps(tool_router=router))
         result = await engine.run(graph, ctx)
 
         router.route.assert_called_once_with("get_weather", {"location": "广州"})
@@ -231,7 +231,7 @@ class TestPlanCompilerExecution:
             model_config = ConfigDict(arbitrary_types_allowed=True)
             tool_router: object = None
 
-        ctx = RunContext(input="test", state=DictState(), deps=TestDeps(tool_router=router))
+        ctx = RunContext(input="test", state=DynamicState(), deps=TestDeps(tool_router=router))
         result = await engine.run(graph, ctx)
 
         assert "sunny" in str(result.output)

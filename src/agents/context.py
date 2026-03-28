@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Generic, TypeVar
+from typing import Any, Generic, TypeVar
 
 from pydantic import BaseModel, ConfigDict
 
@@ -12,10 +12,25 @@ StateT = TypeVar("StateT", bound=BaseModel)
 DepsT = TypeVar("DepsT", bound=BaseModel)
 
 
-class DictState(BaseModel):
-    """默认的宽松状态，允许任意 key-value。"""
+class DynamicState(BaseModel):
+    """动态宽松状态，允许任意 key-value。
+
+    用于 Plan/Skill 等场景，节点名在运行时才确定，
+    GraphEngine._write_state 通过 setattr 动态写入。
+    """
 
     model_config = ConfigDict(extra="allow")
+
+
+class AppState(DynamicState):
+    """主对话流程的状态，显式声明已知字段。
+
+    继承 DynamicState 保留 extra="allow"，
+    使 GraphEngine._write_state 仍可动态写入节点输出。
+    """
+
+    memory_context: str | None = None
+    conversation_history: list[dict[str, Any]] | None = None
 
 
 @dataclass

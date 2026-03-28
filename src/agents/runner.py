@@ -8,7 +8,7 @@ import time
 from typing import Any
 
 from src.agents.agent import Agent, AgentResult, HandoffRequest
-from src.agents.context import RunContext, TraceEvent
+from src.agents.context import RunContext, TraceEvent, AppState
 from src.agents.registry import AgentRegistry
 from src.guardrails import run_guardrails
 from src.llm.structured import build_output_schema, parse_output
@@ -60,16 +60,19 @@ class AgentRunner:
             {"role": "system", "content": system_prompt},
         ]
 
-        # 注入长期记忆上下文
-        memory_context = getattr(context.state, "memory_context", None)
+        # 注入长期记忆上下文和对话历史（AppState 有显式字段，其他 state 类型走 getattr）
+        if isinstance(context.state, AppState):
+            memory_context = context.state.memory_context
+            conversation_history = context.state.conversation_history
+        else:
+            memory_context = getattr(context.state, "memory_context", None)
+            conversation_history = getattr(context.state, "conversation_history", None)
+
         if memory_context:
             messages.append({
                 "role": "system",
                 "content": f"[相关记忆]\n{memory_context}",
             })
-
-        # 注入对话历史
-        conversation_history = getattr(context.state, "conversation_history", None)
         if conversation_history:
             for msg in conversation_history:
                 if msg.get("role") == "system":

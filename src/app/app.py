@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 from src.interfaces.base import UserInterface
 from src.guardrails import InputGuardrail
-from src.agents import RunContext, DictState, AgentDeps, AgentRegistry, AgentRunner
+from src.agents import RunContext, DynamicState, AppState, AgentDeps, AgentRegistry, AgentRunner
 from src.agents.node import AgentNode
 from src.graph import GraphEngine, CompiledGraph
 from src.tools.router import ToolRouter
@@ -105,7 +105,7 @@ class AgentApp:
         skill_engine = GraphEngine()
         ctx = RunContext(
             input=actual_input,
-            state=DictState(),
+            state=DynamicState(),
             deps=AgentDeps(
                 llm=self.deps.llm,
                 tool_router=self.tool_router,
@@ -119,7 +119,7 @@ class AgentApp:
         await self.ui.display(f"\n{result.output}\n")
 
     async def _handle_normal(self, user_input: str) -> None:
-        state = DictState()
+        state = AppState()
 
         # --- Pre-turn: 记忆检索 ---
         if self.conversation_buffer is not None:

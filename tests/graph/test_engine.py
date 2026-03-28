@@ -11,7 +11,7 @@ from src.graph.hooks import GraphHooks
 
 # --- Test helpers: agent-agnostic context ---
 
-class DictState(BaseModel):
+class DynamicState(BaseModel):
     """宽松状态，允许任意 key-value。"""
     model_config = ConfigDict(extra="allow")
 
@@ -20,7 +20,7 @@ class DictState(BaseModel):
 class SimpleContext:
     """Agent 无关的简单上下文，用于测试 GraphEngine。"""
     input: str = "test"
-    state: DictState = field(default_factory=DictState)
+    state: DynamicState = field(default_factory=DynamicState)
     trace: list = field(default_factory=list)
     depth: int = 0
 

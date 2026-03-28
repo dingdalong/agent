@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from src.agents.context import RunContext, DictState
+from src.agents.context import RunContext, DynamicState
 from src.agents.deps import AgentDeps
 from src.agents.registry import AgentRegistry
 from src.graph import GraphEngine
@@ -82,7 +82,7 @@ class PlanFlow:
 
         ctx = RunContext(
             input=user_input,
-            state=DictState(),
+            state=DynamicState(),
             deps=AgentDeps(
                 llm=self.llm,
                 tool_router=self.tool_router,
