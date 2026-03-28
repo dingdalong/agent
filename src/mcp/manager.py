@@ -3,11 +3,13 @@ import logging
 import re
 from contextlib import AsyncExitStack
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 
 from mcp import ClientSession
 from mcp.client.stdio import stdio_client, StdioServerParameters
 from mcp.client.streamable_http import streamablehttp_client
+from mcp.types import ListRootsResult, Root
 
 from .config import MCPServerConfig
 
@@ -95,8 +97,18 @@ class MCPManager:
             # streamablehttp_client yields 3 values: (read, write, get_session_id)
             read_stream, write_stream, _ = await self._exit_stack.enter_async_context(transport)
 
+        # 构建 roots 回调，让 server 知道客户端授权的目录
+        roots_callback = None
+        if config.roots:
+            roots = [
+                Root(uri=Path(r).resolve().as_uri(), name=r)
+                for r in config.roots
+            ]
+            async def roots_callback(_ctx: Any) -> ListRootsResult:
+                return ListRootsResult(roots=roots)
+
         session = await self._exit_stack.enter_async_context(
-            ClientSession(read_stream, write_stream)
+            ClientSession(read_stream, write_stream, list_roots_callback=roots_callback)
         )
         await session.initialize()
 

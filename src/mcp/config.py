@@ -17,6 +17,7 @@ class MCPServerConfig:
     url: str | None = None
     enabled: bool = True
     timeout: float = 30.0
+    roots: list[str] = field(default_factory=list)  # 客户端声明的根目录列表
 
 
 def load_mcp_config(path: str) -> list[MCPServerConfig]:
@@ -34,6 +35,9 @@ def load_mcp_config(path: str) -> list[MCPServerConfig]:
     except (json.JSONDecodeError, OSError) as e:
         logger.warning(f"MCP 配置文件读取失败: {path}, {e}")
         return []
+
+    # 顶层 roots 供所有 server 共享
+    global_roots: list[str] = data.get("roots", [])
 
     servers_data = data.get("mcpServers", {})
     configs = []
@@ -67,6 +71,7 @@ def load_mcp_config(path: str) -> list[MCPServerConfig]:
             url=server_dict.get("url"),
             enabled=enabled,
             timeout=server_dict.get("timeout", 30.0),
+            roots=server_dict.get("roots", global_roots),
         )
         configs.append(config)
 
