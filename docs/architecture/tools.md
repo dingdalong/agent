@@ -54,7 +54,8 @@ async def calculate(args: CalculateInput) -> str:
 | 工具 | 文件 | 功能 |
 |------|------|------|
 | `calculate` | `src/tools/builtin/calculator.py` | AST 安全数学计算 |
-| `read_file` / `write_file` | `src/tools/builtin/file.py` | 沙箱文件读写 |
+
+文件操作（读写、编辑、搜索等）由 MCP 服务 `desktop-commander` 提供，不再作为内置工具。
 
 ## 数据流
 

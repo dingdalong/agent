@@ -10,13 +10,14 @@
 你: 帮我算一下 (123 + 456) * 789
 ```
 
-### 文件读写（file）
+### 文件操作（desktop-commander）
 
-沙箱化的文件操作，限制在 `workspace/` 目录内。
+通过 MCP 服务 [Desktop Commander](https://github.com/wonderwhy-er/DesktopCommanderMCP) 提供文件读写、编辑、搜索、目录管理、终端命令等能力。
 
 ```
 你: 读取 workspace/notes.txt 的内容
 你: 把这段内容写入 workspace/output.txt
+你: 在 workspace 中搜索包含 TODO 的文件
 ```
 
 ## MCP 工具集成
@@ -30,10 +31,10 @@
 ```json
 {
   "mcpServers": {
-    "filesystem": {
+    "desktop-commander": {
       "transport": "stdio",
       "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+      "args": ["-y", "@wonderwhy-er/desktop-commander@latest"],
       "env": {}
     }
   }

@@ -1,10 +1,10 @@
 {
   "roots": ["./workspace"],
   "mcpServers": {
-    "filesystem": {
+    "desktop-commander": {
       "transport": "stdio",
       "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "./workspace"],
+      "args": ["-y", "@wonderwhy-er/desktop-commander@latest"],
       "env": {}
     }
   }

@@ -7,10 +7,10 @@ def test_load_stdio_config(tmp_path):
     config_file = tmp_path / "mcp_servers.json"
     config_file.write_text(json.dumps({
         "mcpServers": {
-            "filesystem": {
+            "desktop-commander": {
                 "transport": "stdio",
                 "command": "npx",
-                "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+                "args": ["-y", "@wonderwhy-er/desktop-commander@latest"],
                 "env": {"DEBUG": "1"}
             }
         }
@@ -18,10 +18,10 @@ def test_load_stdio_config(tmp_path):
     configs = load_mcp_config(str(config_file))
     assert len(configs) == 1
     c = configs[0]
-    assert c.name == "filesystem"
+    assert c.name == "desktop-commander"
     assert c.transport == "stdio"
     assert c.command == "npx"
-    assert c.args == ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+    assert c.args == ["-y", "@wonderwhy-er/desktop-commander@latest"]
     assert c.env == {"DEBUG": "1"}
     assert c.enabled is True
     assert c.timeout == 30.0
