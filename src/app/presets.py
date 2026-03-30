@@ -1,4 +1,8 @@
-"""Agent 预设定义与图构建。"""
+"""Agent 预设定义与图构建。
+
+orchestrator 的 handoff 列表和路由指令根据传入的 category_summaries
+与 business_agents 动态生成，不再硬编码占位 Agent。
+"""
 
 from __future__ import annotations
 
@@ -9,42 +13,32 @@ from src.agents.context import RunContext
 from src.graph.types import NodeResult, CompiledGraph
 from src.graph.builder import GraphBuilder
 
-
 _ORCHESTRATOR_BASE_INSTRUCTIONS = (
     "你是一个智能助手。根据用户的请求选择合适的操作：\n"
-    "- 天气相关问题，交给 weather_agent\n"
-    "- 日历/日程相关问题，交给 calendar_agent\n"
-    "- 邮件相关问题，交给 email_agent\n"
-    "- 需要多步骤协作的复杂任务（如查天气然后发邮件），交给 planner\n"
+    "{handoff_instructions}"
+    "- 需要多步骤协作的复杂任务，交给 planner\n"
     "- 其他问题，直接回答用户\n"
 )
-
-_SPECIALIST_AGENTS = [
-    Agent(
-        name="weather_agent",
-        description="处理天气查询",
-        instructions="你是天气助手。使用 get_weather 工具查询天气信息并回复用户。",
-        tools=["get_weather"],
-    ),
-    Agent(
-        name="calendar_agent",
-        description="管理日历事件",
-        instructions="你是日历助手。使用 create_event 工具帮用户管理日历事件。",
-        tools=["create_event"],
-    ),
-    Agent(
-        name="email_agent",
-        description="发送邮件",
-        instructions="你是邮件助手。使用 send_email 工具帮用户发送邮件。",
-        tools=["send_email"],
-    ),
-]
 
 _PLANNER_AGENT = Agent(
     name="planner",
     description="处理需要多步骤的复杂任务，生成计划并按步骤执行",
     instructions="",
 )
+
+
+def _build_handoff_instructions(
+    category_summaries: list[dict[str, str]],
+    business_agents: list[dict[str, str]] | None = None,
+) -> str:
+    """根据分类摘要和业务 Agent 列表生成 handoff 路由指令。"""
+    lines: list[str] = []
+    for s in category_summaries:
+        lines.append(f"- {s['description']}相关，交给 {s['name']}")
+    if business_agents:
+        for a in business_agents:
+            lines.append(f"- {a['description']}相关，交给 {a['name']}")
+    return "\n".join(lines) + "\n" if lines else ""
 
 
 def _make_planner_node_fn():
@@ -68,19 +62,29 @@ def _register_and_build(
     registry: AgentRegistry,
     runner=None,
     skill_content: str | None = None,
+    category_summaries: list[dict[str, str]] | None = None,
+    business_agents: list[dict[str, str]] | None = None,
 ) -> CompiledGraph:
-    for agent in _SPECIALIST_AGENTS:
-        registry.register(agent)
-
-    instructions = _ORCHESTRATOR_BASE_INSTRUCTIONS
+    """内部构建函数：注册 orchestrator + planner，编译图。"""
+    summaries = category_summaries or []
+    handoff_instructions = _build_handoff_instructions(summaries, business_agents)
+    instructions = _ORCHESTRATOR_BASE_INSTRUCTIONS.format(
+        handoff_instructions=handoff_instructions
+    )
     if skill_content:
         instructions = f"{skill_content}\n\n{instructions}"
+
+    # 动态构建 handoff 列表
+    handoffs = [s["name"] for s in summaries]
+    if business_agents:
+        handoffs.extend(a["name"] for a in business_agents)
+    handoffs.append("planner")
 
     orchestrator = Agent(
         name="orchestrator",
         description="总控 Agent，负责路由和直接回答",
         instructions=instructions,
-        handoffs=["weather_agent", "calendar_agent", "email_agent", "planner"],
+        handoffs=handoffs,
     )
     registry.register(orchestrator)
     registry.register(_PLANNER_AGENT)
@@ -92,9 +96,33 @@ def _register_and_build(
     return builder.compile()
 
 
-def build_default_graph(registry: AgentRegistry, runner=None) -> CompiledGraph:
-    return _register_and_build(registry, runner=runner)
+def build_default_graph(
+    registry: AgentRegistry,
+    runner=None,
+    category_summaries: list[dict[str, str]] | None = None,
+    business_agents: list[dict[str, str]] | None = None,
+) -> CompiledGraph:
+    """构建默认图（无 skill 前缀指令）。"""
+    return _register_and_build(
+        registry,
+        runner=runner,
+        category_summaries=category_summaries,
+        business_agents=business_agents,
+    )
 
 
-def build_skill_graph(registry: AgentRegistry, skill_content: str, runner=None) -> CompiledGraph:
-    return _register_and_build(registry, runner=runner, skill_content=skill_content)
+def build_skill_graph(
+    registry: AgentRegistry,
+    skill_content: str,
+    runner=None,
+    category_summaries: list[dict[str, str]] | None = None,
+    business_agents: list[dict[str, str]] | None = None,
+) -> CompiledGraph:
+    """构建技能图（skill 内容作为指令前缀）。"""
+    return _register_and_build(
+        registry,
+        runner=runner,
+        skill_content=skill_content,
+        category_summaries=category_summaries,
+        business_agents=business_agents,
+    )

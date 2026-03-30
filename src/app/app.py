@@ -99,9 +99,23 @@ class AgentApp:
             return
         remaining = user_input[len(f"/{skill_name}"):].strip()
         actual_input = remaining or f"已激活 {skill_name} skill，请按指令执行。"
+        # 从主 registry 获取分类摘要，传递给 skill 图
+        category_summaries: list[dict[str, str]] = []
+        if (
+            hasattr(self.agent_registry, "_category_resolver")
+            and self.agent_registry._category_resolver
+        ):
+            category_summaries = (
+                self.agent_registry._category_resolver.get_all_summaries()
+            )
         skill_registry = AgentRegistry()
         skill_runner = AgentRunner(registry=skill_registry)
-        skill_graph = build_skill_graph(skill_registry, skill_content, runner=skill_runner)
+        skill_graph = build_skill_graph(
+            skill_registry,
+            skill_content,
+            runner=skill_runner,
+            category_summaries=category_summaries,
+        )
         skill_engine = GraphEngine()
         ctx = RunContext(
             input=actual_input,
