@@ -2,6 +2,8 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 from src.tools.categories import CategoryResolver
+from src.agents.registry import AgentRegistry
+from src.agents.deps import AgentDeps
 
 
 @pytest.fixture
@@ -81,3 +83,68 @@ async def test_execute_unknown_agent(provider):
     provider._registry.get = MagicMock(return_value=None)
     result = await provider.execute("delegate_tool_unknown", {"task": "test"})
     assert "错误" in result
+
+
+@pytest.mark.asyncio
+async def test_execute_ensures_mcp_connection():
+    """execute 应在运行 agent 前确保 MCP server 已连接。"""
+    from src.tools.delegate import DelegateToolProvider
+    from src.agents.agent import AgentResult
+
+    cats = {
+        "tool_files": {
+            "description": "文件操作",
+            "tools": {
+                "mcp_desktop_commander_read_file": "Read file",
+                "mcp_desktop_commander_write_file": "Write file",
+            },
+        },
+    }
+    test_resolver = CategoryResolver(cats)
+    test_registry = AgentRegistry()
+    test_registry.set_category_resolver(test_resolver)
+    test_runner = AsyncMock()
+    test_runner.run = AsyncMock(return_value=AgentResult(text="done"))
+    test_deps = AgentDeps()
+
+    mock_mcp = AsyncMock()
+    mock_mcp.ensure_servers_for_tools = AsyncMock()
+
+    provider = DelegateToolProvider(
+        resolver=test_resolver,
+        runner=test_runner,
+        registry=test_registry,
+        deps=test_deps,
+        mcp_manager=mock_mcp,
+    )
+    await provider.execute("delegate_tool_files", {"task": "read something"})
+    mock_mcp.ensure_servers_for_tools.assert_called_once_with([
+        "mcp_desktop_commander_read_file",
+        "mcp_desktop_commander_write_file",
+    ])
+
+
+@pytest.mark.asyncio
+async def test_execute_no_mcp_manager_still_works():
+    """没有 mcp_manager 时（纯本地工具）execute 仍正常工作。"""
+    from src.tools.delegate import DelegateToolProvider
+    from src.agents.agent import AgentResult
+
+    cats = {
+        "tool_calc": {"description": "计算", "tools": {"calc": "Calculate"}},
+    }
+    test_resolver = CategoryResolver(cats)
+    test_registry = AgentRegistry()
+    test_registry.set_category_resolver(test_resolver)
+    test_runner = AsyncMock()
+    test_runner.run = AsyncMock(return_value=AgentResult(text="42"))
+    test_deps = AgentDeps()
+
+    provider = DelegateToolProvider(
+        resolver=test_resolver,
+        runner=test_runner,
+        registry=test_registry,
+        deps=test_deps,
+    )
+    result = await provider.execute("delegate_tool_calc", {"task": "1+1"})
+    assert result == "42"

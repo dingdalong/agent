@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from src.agents.deps import AgentDeps
     from src.agents.registry import AgentRegistry
     from src.agents.runner import AgentRunner
+    from src.mcp.manager import MCPManager
     from src.tools.categories import CategoryResolver
 
 DELEGATE_PREFIX = "delegate_"
@@ -35,11 +36,13 @@ class DelegateToolProvider:
         runner: AgentRunner,
         registry: AgentRegistry,
         deps: AgentDeps,
+        mcp_manager: MCPManager | None = None,
     ) -> None:
         self._resolver = resolver
         self._runner = runner
         self._registry = registry
         self._deps = deps
+        self._mcp_manager = mcp_manager
 
     def can_handle(self, tool_name: str) -> bool:
         """判断 tool_name 是否为已知的 delegate 工具。"""
@@ -74,13 +77,19 @@ class DelegateToolProvider:
         return schemas
 
     async def execute(self, tool_name: str, arguments: dict[str, Any]) -> str:
-        """委派执行：创建子 RunContext 并驱动 AgentRunner。"""
+        """委派执行：按需连接 MCP server，创建子 RunContext 并驱动 AgentRunner。"""
         from src.agents.context import DynamicState, RunContext
 
         agent_name = tool_name[len(DELEGATE_PREFIX):]
         agent = self._registry.get(agent_name)
         if agent is None:
             return f"错误：找不到 agent {agent_name}"
+
+        # 按需连接该 agent 所需的 MCP server
+        if self._mcp_manager:
+            mcp_tools = [t for t in agent.tools if t.startswith("mcp_")]
+            if mcp_tools:
+                await self._mcp_manager.ensure_servers_for_tools(mcp_tools)
 
         sub_ctx: RunContext = RunContext(
             input=arguments.get("task", ""),
