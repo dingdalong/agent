@@ -122,14 +122,38 @@ async def create_app(config_path: str = "config.yaml") -> AgentApp:
             max_tokens=agent_cfg_buf.get("max_conversation_tokens", 4096),
         )
 
+    # 5.5 Tool Categories
+    from src.tools.categories import load_categories, CategoryResolver
+
+    categories_path = raw.get("tools", {}).get(
+        "categories_path", "tool_categories.json"
+    )
+    category_resolver = None
+    category_summaries: list[dict[str, str]] = []
+
+    categories = load_categories(categories_path)
+    if categories:
+        category_resolver = CategoryResolver(categories)
+        category_summaries = category_resolver.get_all_summaries()
+        logger.info("[工具分类] 加载 %d 个类别", len(categories))
+    else:
+        logger.info("[工具分类] 未找到分类配置，跳过")
+
     # 6. Agents
     agent_cfg = raw.get("agents", {})
     agent_registry = AgentRegistry()
+    if category_resolver:
+        agent_registry.set_category_resolver(category_resolver)
+
     runner = AgentRunner(
         registry=agent_registry,
         max_tool_rounds=agent_cfg.get("max_tool_rounds", 10),
     )
-    graph = build_default_graph(agent_registry, runner=runner)
+    graph = build_default_graph(
+        agent_registry,
+        runner=runner,
+        category_summaries=category_summaries,
+    )
     engine = GraphEngine(max_handoff_depth=agent_cfg.get("max_handoffs", 10))
 
     # 7. Deps
@@ -141,6 +165,18 @@ async def create_app(config_path: str = "config.yaml") -> AgentApp:
         ui=ui,
         memory=memory_store,
     )
+
+    # 7.5 Delegate Tool Provider
+    from src.tools.delegate import DelegateToolProvider
+
+    if category_resolver:
+        delegate_provider = DelegateToolProvider(
+            resolver=category_resolver,
+            runner=runner,
+            registry=agent_registry,
+            deps=deps,
+        )
+        tool_router.add_provider(delegate_provider)
 
     return AgentApp(
         deps=deps,
