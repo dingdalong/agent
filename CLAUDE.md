@@ -41,6 +41,8 @@ uv sync                    # 安装依赖
 uv run python main.py      # 启动 agent
 uv run pytest              # 运行测试
 uv run pytest -m slow      # 运行慢速/集成测试
+uv run python -m src.tools.classify          # 工具分类
+uv run python -m src.tools.classify --force   # 强制重分类
 ```
 
 ## 当前状态
@@ -56,4 +58,5 @@ uv run pytest -m slow      # 运行慢速/集成测试
 - 图引擎：`src/graph/engine.py`（GraphEngine）、`src/graph/builder.py`（GraphBuilder）
 - 规划：`src/plan/flow.py`（PlanFlow 5 阶段）、`src/plan/compiler.py`（Plan → CompiledGraph）
 - 记忆：`src/memory/chroma/store.py`（ChromaDB 存储）、`src/memory/extractor.py`（事实提取）、`src/memory/decay.py`（重要性衰减）
+- 工具分类：`src/tools/categories.py`（CategoryResolver + 配置加载）、`src/tools/classifier.py`（分类流水线）、`src/tools/classify.py`（CLI 入口）、`src/tools/delegate.py`（DelegateToolProvider）
 - 配置：`config.yaml`、`.env`

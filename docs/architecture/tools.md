@@ -58,6 +58,41 @@ async def calculate(args: CalculateInput) -> str:
 
 文件操作（读写、编辑、搜索等）由 MCP 服务 `desktop-commander` 提供，不再作为内置工具。
 
+## 工具分类系统
+
+### 配置格式（`tool_categories.json`）
+
+存储每个工具的分类结果，结构为工具名到类别信息的映射：
+
+```json
+{
+  "calculate": { "category": "math", "description": "数学计算" },
+  "delegate_weather": { "category": "weather", "description": "天气查询" }
+}
+```
+
+文件由分类流水线生成，运行时由 CategoryResolver 读取。
+
+### 分类流水线（`src/tools/classifier.py`）
+
+使用 LLM 对所有已注册工具按功能分组，输出写入 `tool_categories.json`。通过 CLI 触发：
+
+```bash
+uv run python -m src.tools.classify          # 增量分类（跳过已有条目）
+uv run python -m src.tools.classify --force  # 强制重分类所有工具
+```
+
+### CategoryResolver（`src/tools/categories.py`）
+
+启动时读取 `tool_categories.json`，按类别将工具分组。当某类别被实际调用时，按需创建对应的 Tool Agent（懒加载），避免预先实例化所有 Agent。
+
+### DelegateToolProvider（`src/tools/delegate.py`）
+
+将 Tool Agent 包装为标准 ToolProvider，对外暴露 `delegate_<agent_name>(task=...)` 形式的工具。两种调用方式：
+
+- **handoff**：主 Agent 将控制权完全移交给 Tool Agent，适合长流程子任务
+- **delegate tool**：主 Agent 通过工具调用方式委托，Tool Agent 返回结果后主 Agent 继续
+
 ## 数据流
 
 ```
