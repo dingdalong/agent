@@ -17,7 +17,7 @@ class ToolProvider(Protocol):
 
 四种实现：
 - `LocalToolProvider` — 本地 @tool 装饰器注册的工具
-- `MCPToolProvider`（`src/mcp/provider.py`）— MCP 服务器提供的工具
+- `MCPToolProvider`（`src/mcp/provider.py`）— MCP 服务器提供的工具（按需连接：启动时只加载配置，工具被调用时才连接对应 server）
 - `SkillToolProvider`（`src/skills/provider.py`）— 技能提供的工具
 - `DelegateToolProvider`（`src/tools/delegate.py`）— 将 Tool Agent 包装为可调用工具，支持 `delegate_<agent_name>(task=...)` 形式的复合调用
 
@@ -62,12 +62,21 @@ async def calculate(args: CalculateInput) -> str:
 
 ### 配置格式（`tool_categories.json`）
 
-存储每个工具的分类结果，结构为工具名到类别信息的映射：
+存储工具分类结果。`tools` 字段为 `dict[str, str]`（工具名 → 一行描述），供 orchestrator 路由时使用：
 
 ```json
 {
-  "calculate": { "category": "math", "description": "数学计算" },
-  "delegate_weather": { "category": "weather", "description": "天气查询" }
+  "version": 2,
+  "max_tools_per_category": 8,
+  "categories": {
+    "file_operations": {
+      "description": "文件与目录管理：读取、写入、创建、移动文件和目录，获取文件元信息",
+      "tools": {
+        "mcp_desktop_commander_read_file": "Read complete contents of a file",
+        "mcp_desktop_commander_write_file": "Create or overwrite a file with content"
+      }
+    }
+  }
 }
 ```
 
@@ -88,7 +97,7 @@ uv run python -m src.tools.classify --force  # 强制重分类所有工具
 
 ### DelegateToolProvider（`src/tools/delegate.py`）
 
-将 Tool Agent 包装为标准 ToolProvider，对外暴露 `delegate_<agent_name>(task=...)` 形式的工具。两种调用方式：
+将 Tool Agent 包装为标准 ToolProvider，对外暴露 `delegate_<agent_name>(task=...)` 形式的工具。执行时自动触发 MCP 按需连接：检测 agent 工具列表中的 `mcp_` 前缀工具，调用 `MCPManager.ensure_servers_for_tools()` 连接所需 server。两种调用方式：
 
 - **handoff**：主 Agent 将控制权完全移交给 Tool Agent，适合长流程子任务
 - **delegate tool**：主 Agent 通过工具调用方式委托，Tool Agent 返回结果后主 Agent 继续
