@@ -233,3 +233,28 @@ async def test_ensure_servers_for_tools_longest_prefix_match():
 
     await mgr.ensure_servers_for_tools(["mcp_foo_bar_some_tool"])
     assert connected == ["foo_bar"]
+
+
+# ---------------------------------------------------------------------------
+# Task 3: connect_all uses stored configs
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_connect_all_uses_stored_configs():
+    """connect_all 不再需要 configs 参数，使用构造时存储的配置。"""
+    configs = [
+        MCPServerConfig(name="server-a", transport="stdio", command="echo"),
+        MCPServerConfig(name="server-b", transport="stdio", command="echo"),
+    ]
+    mgr = MCPManager(configs=configs)
+    connected: list[str] = []
+
+    async def fake_connect_one(config: MCPServerConfig) -> None:
+        safe = re.sub(r"[^a-zA-Z0-9_]", "_", config.name)
+        mgr._sessions[safe] = "fake"
+        connected.append(config.name)
+
+    mgr._connect_one = fake_connect_one
+
+    await mgr.connect_all()
+    assert set(connected) == {"server-a", "server-b"}

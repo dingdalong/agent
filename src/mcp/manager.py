@@ -109,9 +109,9 @@ class MCPManager:
         for safe_name in needed:
             await self.connect_server(safe_name)
 
-    async def connect_all(self, configs: list[MCPServerConfig], connect_timeout: float = 30.0) -> None:
+    async def connect_all(self, connect_timeout: float = 30.0) -> None:
         """Connect to all configured MCP Servers. Failures are logged and skipped."""
-        for config in configs:
+        for config in self._configs.values():
             try:
                 await asyncio.wait_for(self._connect_one(config), timeout=connect_timeout)
             except asyncio.TimeoutError:

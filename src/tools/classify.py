@@ -88,8 +88,8 @@ async def run_classify(force: bool = False, output: str = DEFAULT_OUTPUT) -> Non
         from src.mcp.manager import MCPManager
 
         mcp_config_path = raw.get("mcp", {}).get("config_path", "mcp_servers.json")
-        mcp_manager = MCPManager()
-        await mcp_manager.connect_all(load_mcp_config(mcp_config_path))
+        mcp_manager = MCPManager(configs=load_mcp_config(mcp_config_path))
+        await mcp_manager.connect_all()
         mcp_schemas = mcp_manager.get_tools_schemas()
     except Exception:
         logger.warning("MCP 连接失败，仅使用本地工具", exc_info=True)

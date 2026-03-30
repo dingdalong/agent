@@ -75,8 +75,8 @@ async def create_app(config_path: str = "config.yaml") -> AgentApp:
 
     # 3. MCP
     mcp_config_path = raw.get("mcp", {}).get("config_path", "mcp_servers.json")
-    mcp_manager = MCPManager()
-    await mcp_manager.connect_all(load_mcp_config(mcp_config_path))
+    mcp_manager = MCPManager(configs=load_mcp_config(mcp_config_path))
+    await mcp_manager.connect_all()
     if mcp_manager.get_tools_schemas():
         tool_router.add_provider(MCPToolProvider(mcp_manager))
 
