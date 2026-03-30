@@ -154,12 +154,12 @@ async def test_connect_server_idempotent():
     assert mgr._sessions["test_server"] == "fake_session"
 
 
-def test_connect_server_unknown_name_raises():
+@pytest.mark.asyncio
+async def test_connect_server_unknown_name_raises():
     """传入未知 server name 应报错。"""
     mgr = MCPManager()
-    import asyncio
     with pytest.raises(KeyError):
-        asyncio.get_event_loop().run_until_complete(mgr.connect_server("nonexistent"))
+        await mgr.connect_server("nonexistent")
 
 
 # ---------------------------------------------------------------------------

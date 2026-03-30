@@ -30,17 +30,23 @@ class MCPManager:
             re.sub(r"[^a-zA-Z0-9_]", "_", cfg.name): cfg
             for cfg in (configs or [])
         }
+        self._connect_locks: dict[str, asyncio.Lock] = {}
 
     async def connect_server(self, safe_name: str) -> None:
-        """按需连接单个 MCP Server（幂等）。
+        """按需连接单个 MCP Server（幂等，并发安全）。
 
         已连接的 server 直接返回；未知 safe_name 抛出 KeyError。
+        使用 per-server Lock 防止并发重复连接。
         """
         if safe_name in self._sessions:
             return
         if safe_name not in self._configs:
             raise KeyError(f"未知 MCP Server: '{safe_name}'")
-        await self._connect_one(self._configs[safe_name])
+        lock = self._connect_locks.setdefault(safe_name, asyncio.Lock())
+        async with lock:
+            if safe_name in self._sessions:
+                return
+            await self._connect_one(self._configs[safe_name])
 
     def _make_tool_name(self, server_name: str, tool_name: str) -> str:
         """Create prefixed tool name: mcp_{server}_{tool}. Non-alphanumeric chars converted to underscores."""
@@ -92,6 +98,7 @@ class MCPManager:
         仅处理以 "mcp_" 开头的工具名；非 MCP 工具静默忽略。
         使用最长前缀匹配避免 "foo" 与 "foo_bar" 歧义：按 safe_name 长度降序
         检查每个已配置 server 的 "mcp_{safe_name}_" 前缀是否匹配工具名。
+        连接失败的 server 会被记录并跳过，不影响其他 server。
         """
         # 按 safe_name 长度降序排列，确保最长前缀优先匹配
         sorted_keys = sorted(self._configs.keys(), key=len, reverse=True)
@@ -107,7 +114,12 @@ class MCPManager:
                     break  # 最长前缀已找到，不再继续
 
         for safe_name in needed:
-            await self.connect_server(safe_name)
+            try:
+                await self.connect_server(safe_name)
+            except Exception as e:
+                config = self._configs.get(safe_name)
+                name = config.name if config else safe_name
+                logger.warning(f"MCP Server '{name}' 按需连接失败: {e}")
 
     async def connect_all(self, connect_timeout: float = 30.0) -> None:
         """Connect to all configured MCP Servers. Failures are logged and skipped."""
@@ -161,19 +173,20 @@ class MCPManager:
                 break
             cursor = result.nextCursor
 
-        # Register tools
+        # Register tools — 统一使用 safe_name 作为内部 key
+        safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", config.name)
         registered_count = 0
         for tool in tools:
             full_name = self._make_tool_name(config.name, tool.name)
             if full_name in self._tool_map:
                 logger.warning(f"MCP 工具名冲突: {full_name}，跳过来自 '{config.name}' 的 '{tool.name}'")
                 continue
-            self._tool_map[full_name] = (config.name, tool.name)
+            self._tool_map[full_name] = (safe_name, tool.name)
             self._tools_schemas.append(self._convert_tool_schema(config.name, tool))
             registered_count += 1
 
-        self._sessions[config.name] = session
-        self._timeouts[config.name] = config.timeout
+        self._sessions[safe_name] = session
+        self._timeouts[safe_name] = config.timeout
         logger.info(f"MCP Server '{config.name}' 已连接，发现 {registered_count} 个工具")
 
     async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> str:

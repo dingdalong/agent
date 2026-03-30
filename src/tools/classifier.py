@@ -98,7 +98,7 @@ def parse_classify_response(raw: str) -> dict[str, dict[str, Any]]:
 
     支持直接 JSON 和 ````` ```json ``` ````` 代码块两种格式。
 
-    返回叶子类别映射: ``tool_{name}`` -> ``{"description": str, "tools": list[str]}``。
+    返回叶子类别映射: ``tool_{name}`` -> ``{"description": str, "tools": dict[str, str]}``。
 
     Raises:
         ValueError: JSON 解析失败。
@@ -158,7 +158,7 @@ def build_split_prompt(
 def parse_split_response(raw: str) -> dict[str, dict[str, Any]]:
     """解析拆分响应 JSON。
 
-    返回子类别映射: ``name`` -> ``{"description": str, "tools": list[str]}``。
+    返回子类别映射: ``name`` -> ``{"description": str, "tools": dict[str, str]}``。
 
     Raises:
         ValueError: JSON 解析失败。
@@ -197,7 +197,7 @@ async def classify_tools(
         max_per_category: 每个类别最多包含的工具数。
 
     Returns:
-        叶子类别映射: ``tool_{name}`` -> ``{"description": str, "tools": list[str]}``。
+        叶子类别映射: ``tool_{name}`` -> ``{"description": str, "tools": dict[str, str]}``。
     """
     if not schemas:
         return {}
