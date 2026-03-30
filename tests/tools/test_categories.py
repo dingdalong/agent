@@ -107,3 +107,36 @@ def test_validate_categories_unknown_tools():
     categories = {"tool_a": {"description": "A", "tools": ["t1", "unknown"]}}
     errors = validate_categories(categories, {"t1"})
     assert any("unknown" in e for e in errors)
+
+
+def test_flatten_categories_instructions_passthrough(tmp_path: Path):
+    """instructions 字段应完整透传到叶子节点条目。"""
+    import json
+    from src.tools.categories import load_categories
+
+    config = {
+        "categories": {
+            "terminal": {
+                "description": "终端操作",
+                "tools": ["execute_command"],
+                "instructions": "只在必要时使用",
+            }
+        }
+    }
+    p = tmp_path / "tool_categories.json"
+    p.write_text(json.dumps(config), encoding="utf-8")
+
+    result = load_categories(p)
+    assert "tool_terminal" in result
+    assert result["tool_terminal"].get("instructions") == "只在必要时使用"
+
+
+def test_validate_categories_invalid_snake_case_name():
+    """类别名包含大写字母或连字符时，应产生校验错误。"""
+    from src.tools.categories import validate_categories
+
+    categories = {
+        "tool_Bad-Name": {"description": "错误命名示例", "tools": ["t1"]},
+    }
+    errors = validate_categories(categories, {"t1"})
+    assert any("Bad-Name" in e or "tool_Bad-Name" in e for e in errors)
