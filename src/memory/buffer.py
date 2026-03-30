@@ -80,8 +80,8 @@ class ConversationBuffer:
     def add_user_message(self, content: str) -> None:
         self._append({"role": "user", "content": content})
 
-    def add_assistant_message(self, message: dict[str, Any]) -> None:
-        self._append(message)
+    def add_assistant_message(self, content: str) -> None:
+        self._append({"role": "assistant", "content": content})
 
     def add_tool_message(self, tool_call_id: str, content: str) -> None:
         self._append({"role": "tool", "tool_call_id": tool_call_id, "content": content})

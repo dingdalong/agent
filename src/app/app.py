@@ -157,9 +157,7 @@ class AgentApp:
 
         # --- Post-turn: 记忆存储 ---
         if self.conversation_buffer is not None:
-            self.conversation_buffer.add_assistant_message(
-                {"role": "assistant", "content": output}
-            )
+            self.conversation_buffer.add_assistant_message(output)
 
         if self.deps.memory is not None:
             try:
