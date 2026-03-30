@@ -42,6 +42,12 @@ class ToolRouter:
                 return await provider.execute(tool_name, arguments)
         return f"错误：未找到工具 '{tool_name}'"
 
+    async def ensure_tools(self, tool_names: list[str]) -> None:
+        """通知各 provider 预加载指定工具（如按需连接 MCP server）。"""
+        for provider in self._providers:
+            if hasattr(provider, "ensure_tools"):
+                await provider.ensure_tools(tool_names)
+
     def get_all_schemas(self) -> list[ToolDict]:
         schemas: list[ToolDict] = []
         for provider in self._providers:

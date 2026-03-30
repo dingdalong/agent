@@ -97,7 +97,7 @@ uv run python -m src.tools.classify --force  # 强制重分类所有工具
 
 ### DelegateToolProvider（`src/tools/delegate.py`）
 
-将 Tool Agent 包装为标准 ToolProvider，对外暴露 `delegate_<agent_name>(task=...)` 形式的工具。执行时自动触发 MCP 按需连接：检测 agent 工具列表中的 `mcp_` 前缀工具，调用 `MCPManager.ensure_servers_for_tools()` 连接所需 server。两种调用方式：
+将 Tool Agent 包装为标准 ToolProvider，对外暴露 `delegate_<agent_name>(task=...)` 形式的工具。MCP 按需连接由 `AgentRunner.run()` 统一触发：在构建工具列表前调用 `ToolRouter.ensure_tools(agent.tools)`，通知 `MCPToolProvider` 连接所需 server，确保 handoff 和 delegate 两种调用方式都能正确获取 MCP 工具 schema。两种调用方式：
 
 - **handoff**：主 Agent 将控制权完全移交给 Tool Agent，适合长流程子任务
 - **delegate tool**：主 Agent 通过工具调用方式委托，Tool Agent 返回结果后主 Agent 继续
@@ -105,7 +105,10 @@ uv run python -m src.tools.classify --force  # 强制重分类所有工具
 ## 数据流
 
 ```
-LLM 返回 tool_calls
+AgentRunner.run(agent, context)
+  → ToolRouter.ensure_tools(agent.tools)         # 按需连接 MCP server
+  → ToolRouter.get_all_schemas() → 过滤 agent.tools → LLM 可见工具列表
+  → LLM 返回 tool_calls
   → AgentRunner 解析
   → ToolRouter.route(name, args)
     → provider.can_handle(name)?

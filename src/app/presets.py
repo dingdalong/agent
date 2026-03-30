@@ -91,6 +91,16 @@ def _register_and_build(
 
     builder = GraphBuilder()
     builder.add_node(AgentNode(agent=orchestrator, runner=runner))
+    # 为每个 category agent 添加 graph node，使 handoff 可达
+    for s in summaries:
+        agent = registry.get(s["name"])
+        if agent:
+            builder.add_node(AgentNode(agent=agent, runner=runner))
+    if business_agents:
+        for a in business_agents:
+            agent = registry.get(a["name"])
+            if agent:
+                builder.add_node(AgentNode(agent=agent, runner=runner))
     builder.add_function("planner", _make_planner_node_fn())
     builder.set_entry("orchestrator")
     return builder.compile()

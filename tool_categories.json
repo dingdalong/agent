@@ -3,70 +3,70 @@
   "max_tools_per_category": 8,
   "categories": {
     "calculation": {
-      "description": "Basic mathematical calculation tool",
+      "description": "用于安全计算数学表达式的独立计算工具。",
       "tools": {
-        "calculator": "Perform basic math calculations"
+        "calculator": "安全计算数学表达式"
       }
     },
     "configuration_management": {
-      "description": "Tools for managing Desktop Commander server configuration and settings",
+      "description": "用于获取、设置和管理 Desktop Commander 服务器配置的工具，包括安全设置、目录访问权限、文件操作限制和客户端信息等。",
       "tools": {
-        "mcp_desktop_commander_get_config": "Get current server configuration",
-        "mcp_desktop_commander_set_config_value": "Set a server configuration value"
+        "mcp_desktop_commander_get_config": "获取完整的服务器配置信息，包括阻止的命令、默认shell、允许的目录、文件读写行数限制、遥测设置、客户端信息和系统详情。",
+        "mcp_desktop_commander_set_config_value": "设置特定的配置值，如阻止的命令列表、默认shell、允许的目录、文件读写行数限制和遥测启用状态。"
+      }
+    },
+    "directory_operations": {
+      "description": "用于目录创建、列出目录内容和文件系统导航的工具，支持递归列出和目录访问控制。",
+      "tools": {
+        "mcp_desktop_commander_create_directory": "创建新目录或确保目录存在，支持创建嵌套目录。",
+        "mcp_desktop_commander_list_directory": "获取指定路径下文件和目录的详细列表，支持递归列出和深度控制，有限制大目录显示的保护机制。"
       }
     },
     "file_editing": {
-      "description": "Tools for making surgical edits to various file formats",
+      "description": "用于精确编辑文件内容的工具，支持文本文件、Excel文件和DOCX文件的查找替换操作。",
       "tools": {
-        "mcp_desktop_commander_edit_block": "Edit a block of text in a file"
+        "mcp_desktop_commander_edit_block": "对文件进行精确编辑，支持文本文件的查找替换、Excel文件的区域更新和DOCX文件的XML查找替换。"
       }
     },
     "file_operations": {
-      "description": "Tools for reading, writing, and manipulating files and directories",
+      "description": "用于文件读写、创建、移动、删除和获取文件信息的工具，支持多种文件格式（文本、Excel、PDF、DOCX、图像等）和分块操作。",
       "tools": {
-        "mcp_desktop_commander_read_file": "Read complete contents of a file",
-        "mcp_desktop_commander_read_multiple_files": "Read contents of multiple files at once",
-        "mcp_desktop_commander_write_file": "Create or overwrite a file with content",
-        "mcp_desktop_commander_write_pdf": "Write content to a PDF file",
-        "mcp_desktop_commander_create_directory": "Create a new directory",
-        "mcp_desktop_commander_list_directory": "List contents of a directory",
-        "mcp_desktop_commander_move_file": "Move or rename a file or directory",
-        "mcp_desktop_commander_get_file_info": "Get metadata about a file"
+        "mcp_desktop_commander_read_file": "读取文件内容，支持文本、Excel、PDF、DOCX、图像等多种格式，支持分页和偏移量读取，可读取URL内容。",
+        "mcp_desktop_commander_read_multiple_files": "同时读取多个文件的内容，支持文本和图像文件，单个文件读取失败不影响整体操作。",
+        "mcp_desktop_commander_write_file": "写入或追加文件内容，支持文本和Excel格式，建议分块写入（每块25-30行）。",
+        "mcp_desktop_commander_write_pdf": "创建新的PDF文件或修改现有PDF，支持Markdown内容、页面删除和插入操作。",
+        "mcp_desktop_commander_move_file": "移动或重命名文件和目录，源和目标都必须在允许的目录内。",
+        "mcp_desktop_commander_get_file_info": "获取文件或目录的详细元数据，包括大小、创建时间、修改时间、权限、类型、行数（文本文件）和工作表信息（Excel文件）。"
       }
     },
     "file_search": {
-      "description": "Tools for searching files and content with streaming and pagination",
+      "description": "用于在文件系统中进行搜索的工具，支持按文件名和内容搜索，提供流式结果和搜索会话管理。",
       "tools": {
-        "mcp_desktop_commander_start_search": "Start a file content search",
-        "mcp_desktop_commander_get_more_search_results": "Get next page of search results",
-        "mcp_desktop_commander_stop_search": "Stop an ongoing search",
-        "mcp_desktop_commander_list_searches": "List active searches"
+        "mcp_desktop_commander_start_search": "启动流式搜索，可按文件名或内容搜索，支持正则表达式和字面匹配，返回搜索会话ID。",
+        "mcp_desktop_commander_get_more_search_results": "从活动搜索中获取更多结果，支持基于偏移量的分页和尾部读取。",
+        "mcp_desktop_commander_stop_search": "停止活动搜索，优雅终止后台搜索进程。",
+        "mcp_desktop_commander_list_searches": "列出所有活动搜索，显示搜索ID、类型、模式、状态和运行时间。"
       }
     },
     "process_management": {
-      "description": "Tools for running, interacting with, and managing terminal processes",
+      "description": "用于启动、交互、监控和终止终端进程的工具，支持REPL环境、本地文件分析和数据处理的交互式工作流。",
       "tools": {
-        "mcp_desktop_commander_start_process": "Start a new terminal process",
-        "mcp_desktop_commander_read_process_output": "Read output from a running process",
-        "mcp_desktop_commander_interact_with_process": "Send input to a running process",
-        "mcp_desktop_commander_force_terminate": "Force terminate a process",
-        "mcp_desktop_commander_list_sessions": "List active terminal sessions",
-        "mcp_desktop_commander_list_processes": "List running processes",
-        "mcp_desktop_commander_kill_process": "Kill a process by PID"
+        "mcp_desktop_commander_start_process": "启动新的终端进程，支持REPL环境，用于本地文件分析和数据处理，是访问本地文件的主要工具。",
+        "mcp_desktop_commander_read_process_output": "读取运行中进程的输出，支持分页和偏移量读取，可检测进程状态。",
+        "mcp_desktop_commander_interact_with_process": "向运行中进程发送输入并自动接收响应，用于交互式文件分析和数据处理。",
+        "mcp_desktop_commander_force_terminate": "强制终止运行的终端会话。",
+        "mcp_desktop_commander_list_sessions": "列出所有活动终端会话，显示PID、阻塞状态和运行时间。",
+        "mcp_desktop_commander_list_processes": "列出所有运行中的进程，显示PID、命令名、CPU和内存使用情况。",
+        "mcp_desktop_commander_kill_process": "通过PID终止运行中的进程。"
       }
     },
-    "system_monitoring": {
-      "description": "Tools for monitoring system usage, statistics, and tool history",
+    "system_monitoring_and_feedback": {
+      "description": "用于获取使用统计、工具调用历史、提供反馈和访问预设提示的工具，支持调试和用户反馈收集。",
       "tools": {
-        "mcp_desktop_commander_get_usage_stats": "Get system usage statistics",
-        "mcp_desktop_commander_get_recent_tool_calls": "Get recent tool call history"
-      }
-    },
-    "user_interaction": {
-      "description": "Tools for user feedback and onboarding prompts",
-      "tools": {
-        "mcp_desktop_commander_give_feedback_to_desktop_commander": "Submit feedback to Desktop Commander",
-        "mcp_desktop_commander_get_prompts": "Get available onboarding prompts"
+        "mcp_desktop_commander_get_usage_stats": "获取使用统计信息，包括工具使用情况、成功/失败率和性能指标。",
+        "mcp_desktop_commander_get_recent_tool_calls": "获取最近工具调用历史，包括参数和输出，用于上下文恢复和调试。",
+        "mcp_desktop_commander_give_feedback_to_desktop_commander": "在浏览器中打开反馈表单，提供关于Desktop Commander的反馈。",
+        "mcp_desktop_commander_get_prompts": "通过ID检索特定的Desktop Commander入门提示并执行，支持5个预设任务选项。"
       }
     }
   }

@@ -84,7 +84,11 @@ class AgentRunner:
         else:
             messages.append({"role": "user", "content": task})
 
-        # 5. 构建工具列表
+        # 5. 按需连接 MCP server，然后构建工具列表
+        if agent.tools:
+            tool_router = getattr(context.deps, "tool_router", None)
+            if tool_router:
+                await tool_router.ensure_tools(agent.tools)
         tools = self._build_tools(agent, context)
         handoff_tools = self._build_handoff_tools(agent)
         all_tools = tools + handoff_tools
