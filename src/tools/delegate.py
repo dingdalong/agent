@@ -93,7 +93,7 @@ class DelegateToolProvider:
         return self._resolver.can_resolve(agent_name)
 
     def get_schemas(self) -> list[ToolDict]:
-        """为每个可委派的 Tool Agent 生成 function-calling schema。"""
+        """为每个可委派的 Tool Agent 生成结构化委托 schema。"""
         schemas: list[ToolDict] = []
         for summary in self._resolver.get_all_summaries():
             name = summary["name"]
@@ -102,16 +102,28 @@ class DelegateToolProvider:
                 "type": "function",
                 "function": {
                     "name": f"{DELEGATE_PREFIX}{name}",
-                    "description": f"委派任务给{desc}专家",
+                    "description": DELEGATE_DESCRIPTION_TEMPLATE.format(description=desc),
                     "parameters": {
                         "type": "object",
                         "properties": {
+                            "objective": {
+                                "type": "string",
+                                "description": "你的最终目标是什么（为什么需要这次委托）",
+                            },
                             "task": {
                                 "type": "string",
-                                "description": "需要完成的具体任务描述",
+                                "description": "你需要对方具体做什么",
+                            },
+                            "context": {
+                                "type": "string",
+                                "description": "当前已知的相关信息。只填你确定知道的，不要猜测。",
+                            },
+                            "expected_result": {
+                                "type": "string",
+                                "description": "你期望对方完成后告诉你什么。如果不确定，可简要描述即可。",
                             },
                         },
-                        "required": ["task"],
+                        "required": ["objective", "task"],
                     },
                 },
             })

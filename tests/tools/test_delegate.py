@@ -58,8 +58,9 @@ def test_get_schemas(provider):
     terminal_schema = next(s for s in schemas if s["function"]["name"] == "delegate_tool_terminal")
     assert terminal_schema["type"] == "function"
     params = terminal_schema["function"]["parameters"]
+    assert "objective" in params["properties"]
     assert "task" in params["properties"]
-    assert "task" in params["required"]
+    assert set(params["required"]) == {"objective", "task"}
 
 
 @pytest.mark.asyncio
@@ -256,3 +257,26 @@ def test_build_receiving_input_empty_string_treated_as_missing():
     )
     assert "相关上下文" not in result
     assert "期望结果" not in result
+
+
+def test_get_schemas_has_structured_fields(provider):
+    """schema 应包含 objective/task/context/expected_result 四个字段。"""
+    schemas = provider.get_schemas()
+    terminal_schema = next(s for s in schemas if s["function"]["name"] == "delegate_tool_terminal")
+    params = terminal_schema["function"]["parameters"]
+    props = params["properties"]
+
+    assert "objective" in props
+    assert "task" in props
+    assert "context" in props
+    assert "expected_result" in props
+    # objective 和 task 必填，context 和 expected_result 可选
+    assert set(params["required"]) == {"objective", "task"}
+
+
+def test_get_schemas_description_uses_template(provider):
+    """schema description 应包含委托引导语。"""
+    schemas = provider.get_schemas()
+    terminal_schema = next(s for s in schemas if s["function"]["name"] == "delegate_tool_terminal")
+    desc = terminal_schema["function"]["description"]
+    assert "确保对方无需额外信息就能执行任务" in desc
