@@ -97,13 +97,16 @@ RECEIVING_TEMPLATE = (
     "{context_line}"
     "{expected_result_line}"
     "\n"
-    "请完成任务并直接返回结果。\n"
-    "如果信息不足以完成任务，请明确列出缺少的信息，不要猜测或假设。"
+    "完成后请按以下格式返回：\n"
+    "第一行标注任务状态：已完成 / 信息不足 / 失败\n"
+    "之后是具体结果或需要补充的信息。\n"
+    "不要猜测或假设缺失的信息。"
 )
 ```
 
 - `context_line` / `expected_result_line`：有值时显示 `"相关上下文：{context}\n"`，无值时不显示
-- 最后一句确保接收方在信息不足时**报告缺失**而非编造
+- 任务状态标记（`已完成` / `信息不足` / `失败`）作为返回结果的第一行，让调用方 LLM 立即判断下一步动作
+- 状态标记是 prompt 约定（自然语言），不是结构化数据 — 给 LLM 看的，不是给代码解析的
 
 ### ID 关联
 
@@ -146,8 +149,10 @@ DelegateToolProvider.execute()              → 内部驱动 Weather Agent
    请完成任务并直接返回结果。
    如果信息不足以完成任务，请明确列出缺少的信息，不要猜测或假设。"
 
-→ Weather Agent 返回："北京明天晴，最高25°C，微风，非常适合户外游览。"
-→ Triage Agent 拿到结果，继续向用户回复。
+→ Weather Agent 返回：
+  "已完成
+   北京明天晴，最高25°C，微风，非常适合户外游览。"
+→ Triage Agent 看到"已完成"，直接用结果向用户回复。
 ```
 
 ### 场景 2：信息不足 — Triage 能判断
@@ -175,10 +180,12 @@ DelegateToolProvider.execute()              → 内部驱动 Weather Agent
   （context 和 expected_result 未填，因为确实不知道更多）
 
 → Weather Agent 收到任务，判断缺少必要信息
-→ 返回："无法完成任务，需要以下信息：1.查询地点（城市名称） 2.查询日期"
+→ 返回：
+  "信息不足
+   需要以下信息：1.查询地点（城市名称） 2.查询日期"
 
 → 该结果作为 tool result 回到 Triage Agent 的 messages
-→ Triage Agent 的 LLM 理解后向用户提问：
+→ Triage Agent 看到"信息不足"，向用户提问：
   "请问您要查哪个城市、哪天的天气？"
 ```
 
