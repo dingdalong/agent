@@ -8,17 +8,17 @@ from src.graph.types import NodeResult
 
 
 class AgentNode:
-    """包装一个 Agent，内部用 AgentRunner 驱动。"""
+    """包装一个 Agent，通过 context.deps.runner 驱动。"""
 
-    def __init__(self, agent: Any, runner: Any = None):
+    def __init__(self, agent: Any):
         self.name: str = agent.name
         self.agent = agent
-        self.runner = runner
 
     async def execute(self, context: Any) -> NodeResult:
-        if self.runner is None:
-            raise RuntimeError(f"AgentNode '{self.name}' has no runner assigned")
-        result = await self.runner.run(self.agent, context)
+        runner = getattr(context.deps, "runner", None)
+        if runner is None:
+            raise RuntimeError(f"AgentNode({self.name}): deps.runner is None")
+        result = await runner.run(self.agent, context)
         return NodeResult(
             output={"text": result.text, "data": result.data},
             handoff=result.handoff,
