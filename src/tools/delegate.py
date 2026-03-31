@@ -43,7 +43,11 @@ class DelegateToolProvider:
         self._registry = registry
         self._deps = deps
         self._mcp_manager = mcp_manager
-        self._current_delegate_depth: int = 0  # 由 ToolRouter 在每次 run 前同步
+        self._delegate_depth: int = 0
+
+    def set_delegate_depth(self, depth: int) -> None:
+        """设置当前委派深度，由 ToolRouter 在每次 run 前同步。"""
+        self._delegate_depth = depth
 
     def can_handle(self, tool_name: str) -> bool:
         """判断 tool_name 是否为已知的 delegate 工具。"""
@@ -96,7 +100,7 @@ class DelegateToolProvider:
             input=arguments.get("task", ""),
             state=DynamicState(),
             deps=self._deps,
-            delegate_depth=self._current_delegate_depth + 1,
+            delegate_depth=self._delegate_depth + 1,
         )
         result = await self._runner.run(agent, sub_ctx)
         return result.text

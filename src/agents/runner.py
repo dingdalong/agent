@@ -84,14 +84,11 @@ class AgentRunner:
         else:
             messages.append({"role": "user", "content": task})
 
-        # 5. 按需连接 MCP server，然后构建工具列表
-        if agent.tools:
-            tool_router = getattr(context.deps, "tool_router", None)
-            if tool_router:
-                await tool_router.ensure_tools(agent.tools)
-        # 同步 delegate 深度到 tool_router，供 DelegateToolProvider 使用
+        # 5. 按需连接 MCP server，同步 delegate 深度，然后构建工具列表
         tool_router = getattr(context.deps, "tool_router", None)
-        if tool_router and hasattr(tool_router, "set_delegate_depth"):
+        if tool_router:
+            if agent.tools:
+                await tool_router.ensure_tools(agent.tools)
             tool_router.set_delegate_depth(context.delegate_depth)
         tools = self._build_tools(agent, context)
         handoff_tools = self._build_handoff_tools(agent)

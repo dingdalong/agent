@@ -31,6 +31,7 @@ def mock_router():
             },
         }
     ])
+    router.set_delegate_depth = MagicMock()  # 同步方法，避免 RuntimeWarning
     return router
 
 
@@ -207,6 +208,7 @@ async def test_runner_sets_delegate_depth_on_router(mock_llm):
 
     mock_router = AsyncMock()
     mock_router.route = AsyncMock(return_value="2")
+    mock_router.set_delegate_depth = MagicMock()
     mock_router.get_all_schemas = MagicMock(return_value=[
         {
             "type": "function",

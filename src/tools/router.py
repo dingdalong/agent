@@ -57,8 +57,8 @@ class ToolRouter:
     def set_delegate_depth(self, depth: int) -> None:
         """同步 delegate 深度到 DelegateToolProvider。"""
         for provider in self._providers:
-            if hasattr(provider, "_current_delegate_depth"):
-                provider._current_delegate_depth = depth
+            if hasattr(provider, "set_delegate_depth"):
+                provider.set_delegate_depth(depth)
 
     def is_sensitive(self, tool_name: str) -> bool:
         for provider in self._providers:

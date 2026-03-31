@@ -181,7 +181,7 @@ async def test_execute_propagates_delegate_depth():
 
 @pytest.mark.asyncio
 async def test_execute_propagates_parent_delegate_depth():
-    """当 _current_delegate_depth 已非零时，子 RunContext 应继续递增。"""
+    """当 delegate_depth 已非零时，子 RunContext 应继续递增。"""
     from src.tools.delegate import DelegateToolProvider
     from src.agents.agent import AgentResult
 
@@ -201,7 +201,7 @@ async def test_execute_propagates_parent_delegate_depth():
         registry=test_registry,
         deps=test_deps,
     )
-    provider._current_delegate_depth = 1
+    provider.set_delegate_depth(1)
     await provider.execute("delegate_tool_terminal", {"task": "run ls"})
 
     call_args = test_runner.run.call_args
