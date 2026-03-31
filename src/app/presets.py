@@ -60,7 +60,6 @@ def _make_planner_node_fn():
 
 def _register_and_build(
     registry: AgentRegistry,
-    runner=None,
     skill_content: str | None = None,
     category_summaries: list[dict[str, str]] | None = None,
     business_agents: list[dict[str, str]] | None = None,
@@ -90,17 +89,17 @@ def _register_and_build(
     registry.register(_PLANNER_AGENT)
 
     builder = GraphBuilder()
-    builder.add_node(AgentNode(agent=orchestrator, runner=runner))
+    builder.add_node(AgentNode(agent=orchestrator))
     # 为每个 category agent 添加 graph node，使 handoff 可达
     for s in summaries:
         agent = registry.get(s["name"])
         if agent:
-            builder.add_node(AgentNode(agent=agent, runner=runner))
+            builder.add_node(AgentNode(agent=agent))
     if business_agents:
         for a in business_agents:
             agent = registry.get(a["name"])
             if agent:
-                builder.add_node(AgentNode(agent=agent, runner=runner))
+                builder.add_node(AgentNode(agent=agent))
     builder.add_function("planner", _make_planner_node_fn())
     builder.set_entry("orchestrator")
     return builder.compile()
@@ -108,14 +107,12 @@ def _register_and_build(
 
 def build_default_graph(
     registry: AgentRegistry,
-    runner=None,
     category_summaries: list[dict[str, str]] | None = None,
     business_agents: list[dict[str, str]] | None = None,
 ) -> CompiledGraph:
     """构建默认图（无 skill 前缀指令）。"""
     return _register_and_build(
         registry,
-        runner=runner,
         category_summaries=category_summaries,
         business_agents=business_agents,
     )
@@ -124,14 +121,12 @@ def build_default_graph(
 def build_skill_graph(
     registry: AgentRegistry,
     skill_content: str,
-    runner=None,
     category_summaries: list[dict[str, str]] | None = None,
     business_agents: list[dict[str, str]] | None = None,
 ) -> CompiledGraph:
     """构建技能图（skill 内容作为指令前缀）。"""
     return _register_and_build(
         registry,
-        runner=runner,
         skill_content=skill_content,
         category_summaries=category_summaries,
         business_agents=business_agents,
