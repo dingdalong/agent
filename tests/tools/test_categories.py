@@ -237,3 +237,91 @@ def test_category_resolver_get_all_summaries():
     assert names == {"tool_terminal", "tool_calc"}
     descs = {s["description"] for s in summaries}
     assert descs == {"终端操作", "计算"}
+
+
+# ---------------------------------------------------------------------------
+# Task 2: get_delegate_names() 测试
+# ---------------------------------------------------------------------------
+
+
+def test_category_resolver_get_delegate_names_excludes_self():
+    """get_delegate_names 返回其他分类的 delegate 工具名，排除自身。"""
+    from src.tools.categories import CategoryResolver
+
+    cats = {
+        "tool_terminal": {"description": "终端操作", "tools": {"exec": "Execute"}},
+        "tool_calc": {"description": "计算", "tools": {"calc": "Calculate"}},
+        "tool_files": {"description": "文件操作", "tools": {"read": "Read file"}},
+    }
+    resolver = CategoryResolver(cats)
+    names = resolver.get_delegate_names(exclude="tool_terminal")
+
+    assert "delegate_tool_calc" in names
+    assert "delegate_tool_files" in names
+    assert "delegate_tool_terminal" not in names
+    assert len(names) == 2
+
+
+def test_category_resolver_get_delegate_names_single_category():
+    """只有一个分类时，排除自身后返回空列表。"""
+    from src.tools.categories import CategoryResolver
+
+    cats = {"tool_only": {"description": "唯一", "tools": {"t1": "Tool"}}}
+    resolver = CategoryResolver(cats)
+    names = resolver.get_delegate_names(exclude="tool_only")
+    assert names == []
+
+
+# ---------------------------------------------------------------------------
+# Task 3: build_instructions() with delegate support 测试
+# ---------------------------------------------------------------------------
+
+
+def test_category_resolver_build_instructions_with_delegates():
+    """传入 delegate_summaries 时，指令中包含协作能力段落。"""
+    from src.tools.categories import CategoryResolver
+
+    cats = {
+        "tool_terminal": {"description": "终端操作", "tools": {"exec": "Execute"}},
+        "tool_calc": {"description": "计算", "tools": {"calc": "Calculate"}},
+    }
+    resolver = CategoryResolver(cats)
+    delegate_summaries = [{"name": "tool_calc", "description": "计算"}]
+    instructions = resolver.build_instructions("tool_terminal", delegate_summaries=delegate_summaries)
+
+    assert "终端操作" in instructions
+    assert "exec" in instructions
+    assert "协作能力" in instructions
+    assert "delegate_tool_calc" in instructions
+    assert "计算" in instructions
+
+
+def test_category_resolver_build_instructions_without_delegates():
+    """不传 delegate_summaries 时，不包含协作能力段落（向后兼容）。"""
+    from src.tools.categories import CategoryResolver
+
+    cats = {"tool_terminal": {"description": "终端操作", "tools": {"exec": "Execute"}}}
+    resolver = CategoryResolver(cats)
+    instructions = resolver.build_instructions("tool_terminal")
+
+    assert "终端操作" in instructions
+    assert "协作能力" not in instructions
+
+
+def test_category_resolver_build_instructions_custom_ignores_delegates():
+    """有自定义 instructions 时，delegate_summaries 不影响结果。"""
+    from src.tools.categories import CategoryResolver
+
+    cats = {
+        "tool_terminal": {
+            "description": "终端操作",
+            "tools": {"exec": "Execute"},
+            "instructions": "自定义指令",
+        }
+    }
+    resolver = CategoryResolver(cats)
+    instructions = resolver.build_instructions(
+        "tool_terminal",
+        delegate_summaries=[{"name": "tool_calc", "description": "计算"}],
+    )
+    assert instructions == "自定义指令"

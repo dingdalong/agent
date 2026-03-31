@@ -144,10 +144,18 @@ def validate_categories(
 # ---------------------------------------------------------------------------
 
 _TOOL_AGENT_INSTRUCTIONS_TEMPLATE = (
-    "你是{description}方面的专家。\n"
-    "使用你拥有的工具完成用户交给你的任务。\n"
-    "可用工具：{tool_names}。\n"
-    "只使用你拥有的工具，完成任务后返回结果摘要。"
+    "你是{description}方面的专家。\n\n"
+    "## 你的工具\n"
+    "{tool_names}\n\n"
+    "{delegate_section}"
+    "完成任务后返回结果摘要。"
+)
+
+_DELEGATE_SECTION_TEMPLATE = (
+    "## 协作能力\n"
+    "如果任务需要你不具备的能力，可以通过以下委派工具请求其他专家协助：\n"
+    "{delegate_descriptions}\n"
+    "委派时，用 task 参数清晰描述你需要的具体结果，对方会返回结果供你继续工作。\n\n"
 )
 
 
@@ -170,19 +178,50 @@ class CategoryResolver:
         """返回指定类别的原始条目，不存在时返回 None。"""
         return self._categories.get(agent_name)
 
-    def build_instructions(self, agent_name: str) -> str:
+    def get_delegate_names(self, exclude: str) -> list[str]:
+        """返回除 exclude 外所有分类的 delegate 工具名。
+
+        例如 exclude="tool_terminal" 时，返回
+        ["delegate_tool_calc", "delegate_tool_files", ...]。
+        """
+        return [
+            f"delegate_{name}"
+            for name in self._categories
+            if name != exclude
+        ]
+
+    def build_instructions(
+        self,
+        agent_name: str,
+        delegate_summaries: list[dict[str, str]] | None = None,
+    ) -> str:
         """构建指定类别的 agent 系统指令。
 
         若类别条目中包含自定义 instructions 则直接使用，
-        否则根据模板自动生成。
+        否则根据模板自动生成。可选传入 delegate_summaries
+        生成协作能力段落。
 
         Raises:
             KeyError: agent_name 不在已知类别中。
         """
         cat = self._categories[agent_name]
-        return cat.get("instructions") or _TOOL_AGENT_INSTRUCTIONS_TEMPLATE.format(
+        if cat.get("instructions"):
+            return cat["instructions"]
+
+        delegate_section = ""
+        if delegate_summaries:
+            lines = [
+                f"- delegate_{s['name']}: {s['description']}专家"
+                for s in delegate_summaries
+            ]
+            delegate_section = _DELEGATE_SECTION_TEMPLATE.format(
+                delegate_descriptions="\n".join(lines),
+            )
+
+        return _TOOL_AGENT_INSTRUCTIONS_TEMPLATE.format(
             description=cat["description"],
             tool_names="、".join(cat["tools"].keys()),
+            delegate_section=delegate_section,
         )
 
     def get_all_summaries(self) -> list[dict[str, str]]:
