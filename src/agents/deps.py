@@ -15,3 +15,4 @@ class AgentDeps(BaseModel):
     graph_engine: Any = None     # GraphEngine
     ui: Any = None               # UserInterface
     memory: Any = None           # MemoryProvider
+    runner: Any = None           # AgentRunner
