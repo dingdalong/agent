@@ -1,5 +1,7 @@
 """SkillToolProvider — 将 SkillManager 适配为 ToolProvider。"""
 
+from typing import Any
+
 from src.tools.schemas import ToolDict
 
 
@@ -12,7 +14,7 @@ class SkillToolProvider:
     def can_handle(self, tool_name: str) -> bool:
         return tool_name == "activate_skill"
 
-    async def execute(self, tool_name: str, arguments: dict) -> str:
+    async def execute(self, tool_name: str, arguments: dict, context: Any = None) -> str:
         result = self._manager.activate(arguments.get("name", ""))
         return result if result else "未找到指定的 Skill"
 

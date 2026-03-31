@@ -1,5 +1,7 @@
 """MCPToolProvider — 将 MCPManager 适配为 ToolProvider。"""
 
+from typing import Any
+
 from src.tools.schemas import ToolDict
 
 
@@ -12,7 +14,7 @@ class MCPToolProvider:
     def can_handle(self, tool_name: str) -> bool:
         return tool_name.startswith("mcp_")
 
-    async def execute(self, tool_name: str, arguments: dict) -> str:
+    async def execute(self, tool_name: str, arguments: dict, context: Any = None) -> str:
         return await self._manager.call_tool(tool_name, arguments)
 
     async def ensure_tools(self, tool_names: list[str]) -> None:
