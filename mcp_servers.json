@@ -6,6 +6,13 @@
       "command": "npx",
       "args": ["-y", "@wonderwhy-er/desktop-commander@latest"],
       "env": {}
+    },
+    "playwright": {
+      "transport": "stdio",
+      "command": "npx",
+      "args": [
+        "@playwright/mcp@latest"
+      ]
     }
   }
 }
