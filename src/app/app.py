@@ -123,7 +123,10 @@ class AgentApp:
             ),
         )
         result = await skill_engine.run(skill_graph, ctx)
-        await self.ui.display(f"\n{result.output}\n")
+        output = result.output
+        if isinstance(output, dict):
+            output = output.get("text", str(output))
+        await self.ui.display(f"\n{output}\n")
 
     async def _handle_normal(self, user_input: str) -> None:
         state = AppState()
