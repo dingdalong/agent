@@ -66,29 +66,79 @@ Layer 3（应用层）:
 
 ## 1. 结构化消息协议
 
+设计目标：强制发送方把需求描述清楚，提高接收方执行成功率。沿用现有 delegate 的
+4 字段协议（objective / task / context / expected_result），将其提升为所有 agent
+间通信的统一标准。
+
 ### 1.1 AgentMessage
 
-agent 间通信的统一输入。
+agent 间通信的统一输入。4 个语义字段强制发送方回答 WHY / WHAT / WITH / EXPECT：
 
 ```python
 # src/graph/messages.py
 
 @dataclass
 class AgentMessage:
-    task: str                                           # 要做什么（自然语言描述）
-    context: dict[str, Any] = field(default_factory=dict)  # 结构化上下文数据
-    sender: str | None = None                           # 发送方 agent 名称
+    objective: str                                      # WHY：最终目标（为什么需要这次协作）
+    task: str                                           # WHAT：具体任务（需要对方做什么）
+    context: dict[str, Any] | str = ""                  # WITH：已知的相关信息（结构化 dict 或自然语言）
+    expected_result: str | None = None                  # EXPECT：期望对方返回什么（对齐输出预期）
+    sender: str | None = None                           # FROM：发送方 agent 名称
 ```
 
-### 1.2 AgentResponse
+与现有 delegate schema 的字段一一对应：
 
-agent 间通信的统一输出。
+| AgentMessage 字段 | 现有 delegate schema | 描述 |
+|---|---|---|
+| `objective` | `objective` — "你的最终目标是什么（为什么需要这次委托）" | 必填 |
+| `task` | `task` — "你需要对方具体做什么" | 必填 |
+| `context` | `context` — "当前已知的相关信息。只填你确定知道的，不要猜测。" | 可选 |
+| `expected_result` | `expected_result` — "你期望对方完成后告诉你什么" | 可选 |
+
+### 1.2 接收方模板
+
+沿用现有 `RECEIVING_TEMPLATE` 的设计，将 `AgentMessage` 格式化为接收方 prompt：
+
+```python
+RECEIVING_TEMPLATE = (
+    "你收到了一个委托任务：\n"
+    "最终目标：{objective}\n"
+    "具体任务：{task}\n"
+    "{context_line}"
+    "{expected_result_line}"
+    "\n"
+    "完成后请按以下格式返回：\n"
+    "第一行标注任务状态：已完成 / 信息不足 / 失败\n"
+    "之后是具体结果或需要补充的信息。\n"
+    "不要猜测或假设缺失的信息。"
+)
+
+def format_for_receiver(message: AgentMessage) -> str:
+    """将 AgentMessage 格式化为接收方的 prompt 输入。"""
+    context_line = ""
+    if message.context:
+        ctx = message.context if isinstance(message.context, str) else json.dumps(message.context, ensure_ascii=False)
+        context_line = f"相关上下文：{ctx}\n"
+    expected_line = f"期望结果：{message.expected_result}\n" if message.expected_result else ""
+    return RECEIVING_TEMPLATE.format(
+        objective=message.objective,
+        task=message.task,
+        context_line=context_line,
+        expected_result_line=expected_line,
+    )
+```
+
+Handoff 和 Delegate 的接收方都使用此模板，确保消息格式一致。
+
+### 1.3 AgentResponse
+
+agent 间通信的统一输出。`status` 对应现有模板要求的 "已完成 / 信息不足 / 失败"：
 
 ```python
 class ResponseStatus(Enum):
-    COMPLETED = "completed"
-    FAILED = "failed"
-    NEEDS_INPUT = "needs_input"
+    COMPLETED = "completed"       # 已完成
+    FAILED = "failed"             # 失败
+    NEEDS_INPUT = "needs_input"   # 信息不足
 
 @dataclass
 class AgentResponse:
@@ -98,7 +148,41 @@ class AgentResponse:
     sender: str | None = None                           # 响应方 agent 名称
 ```
 
-### 1.3 与现有类型的关系
+### 1.4 工具 schema 生成
+
+delegate 和 handoff 的工具 schema 都从 `AgentMessage` 字段自动生成，保持一致：
+
+```python
+def build_message_schema() -> dict:
+    """生成 AgentMessage 对应的 JSON Schema，供工具 schema 复用。"""
+    return {
+        "type": "object",
+        "properties": {
+            "objective": {
+                "type": "string",
+                "description": "你的最终目标是什么（为什么需要这次协作）",
+            },
+            "task": {
+                "type": "string",
+                "description": "你需要对方具体做什么",
+            },
+            "context": {
+                "type": "string",
+                "description": "当前已知的相关信息。只填你确定知道的，不要猜测。",
+            },
+            "expected_result": {
+                "type": "string",
+                "description": "你期望对方完成后告诉你什么。如果不确定，可简要描述即可。",
+            },
+        },
+        "required": ["objective", "task"],
+    }
+```
+
+`DelegateToolProvider.get_schemas()` 和 handoff 工具的 schema 生成都调用
+`build_message_schema()`，确保字段定义和描述完全一致。
+
+### 1.5 与现有类型的关系
 
 - `AgentResult`（runner 内部返回类型）改为持有 `AgentResponse`：
   ```python
@@ -356,10 +440,12 @@ class DelegateToolProvider:
     async def execute(self, name: str, args: dict, context: RunContext) -> str:
         agent_name = name.removeprefix(DELEGATE_PREFIX)
 
-        # 1. 构造结构化消息
+        # 1. 从工具参数构造 AgentMessage（字段与 schema 一一对应）
         message = AgentMessage(
+            objective=args.get("objective", args.get("task", "")),
             task=args["task"],
-            context=args.get("context", {}),
+            context=args.get("context", ""),
+            expected_result=args.get("expected_result"),
             sender=context.current_agent_name,
         )
 
@@ -367,7 +453,7 @@ class DelegateToolProvider:
         agent = self.registry.get(agent_name)
         sub_graph = GraphBuilder().add_node(agent_name, AgentNode(agent)).set_entry(agent_name).build()
 
-        # 3. 通过引擎执行
+        # 3. 通过引擎执行（接收方通过 format_for_receiver(message) 获得格式化 prompt）
         sub_ctx = RunContext(
             input=message,
             state=DynamicState(),
@@ -380,6 +466,21 @@ class DelegateToolProvider:
         response = AgentResponse.from_graph_result(result)
         context.state[f"delegate_{agent_name}"] = response.data
         return response.text
+
+    def get_schemas(self) -> list[ToolDict]:
+        """复用 build_message_schema() 生成统一的 4 字段 schema。"""
+        schemas = []
+        for summary in self._resolver.get_all_summaries():
+            name, desc = summary["name"], summary["description"]
+            schemas.append({
+                "type": "function",
+                "function": {
+                    "name": f"{DELEGATE_PREFIX}{name}",
+                    "description": DELEGATE_DESCRIPTION_TEMPLATE.format(description=desc),
+                    "parameters": build_message_schema(),
+                },
+            })
+        return schemas
 ```
 
 ### 4.3 并行 Delegate
