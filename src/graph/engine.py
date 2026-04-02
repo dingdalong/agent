@@ -42,9 +42,11 @@ class GraphEngine:
         self,
         hooks: GraphHooks | None = None,
         max_handoff_depth: int = 10,
+        max_parallel_width: int = 5,
     ):
         self.hooks = hooks or GraphHooks()
         self.max_handoff_depth = max_handoff_depth
+        self.max_parallel_width = max_parallel_width
 
     async def run(self, graph: CompiledGraph, context: Any) -> GraphResult:
         """执行编译后的图。"""
@@ -63,8 +65,30 @@ class GraphEngine:
                 for name, node_result in results.items():
                     last_output = node_result.output
                     self._write_state(context, name, node_result.output)
+                    self._write_last_output(context, node_result.output)
                     visited.add(name)
                 pending = [parallel_group.then]
+
+            elif len(pending) > 1:
+                # 多个 pending 节点且无 ParallelGroup — 并行执行
+                to_run = pending[:self.max_parallel_width]
+                if len(pending) > self.max_parallel_width:
+                    logger.warning(
+                        "Parallel width %d exceeds limit %d, executing first %d",
+                        len(pending), self.max_parallel_width, self.max_parallel_width,
+                    )
+                results = await self._run_parallel(to_run, graph, context)
+                next_pending: list[str] = []
+                for name, node_result in results.items():
+                    last_output = node_result.output
+                    self._write_state(context, name, node_result.output)
+                    self._write_last_output(context, node_result.output)
+                    visited.add(name)
+                    resolved = self._resolve_edges(name, node_result, graph, context)
+                    next_pending.extend(resolved)
+                # 去重但保持顺序
+                pending = list(dict.fromkeys(next_pending))
+
             else:
                 current_name = pending.pop(0)
                 if current_name in visited and current_name != graph.entry:
@@ -78,6 +102,7 @@ class GraphEngine:
                 node_result = await self._execute_node(node, context)
                 last_output = node_result.output
                 self._write_state(context, current_name, node_result.output)
+                self._write_last_output(context, node_result.output)
                 visited.add(current_name)
 
                 # 处理 handoff
@@ -176,6 +201,31 @@ class GraphEngine:
             if pending_set & set(group.nodes):
                 return group
         return None
+
+    def _write_last_output(self, context: Any, output: Any) -> None:
+        """将最新的节点输出写入 state._last_output，供 TerminalNode 等引用。"""
+        try:
+            setattr(context.state, "_last_output", output)
+        except (AttributeError, ValueError):
+            pass
+
+    def _merge_parallel_outputs(
+        self, names: list[str], results: list[NodeResult],
+    ) -> dict:
+        """合并并行节点的输出。"""
+        texts = []
+        data = {}
+        for name, nr in zip(names, results):
+            output = nr.output
+            if isinstance(output, dict):
+                texts.append(f"[{name}] {output.get('text', '')}")
+                data[name] = output.get("data", {})
+            elif hasattr(output, "text"):
+                texts.append(f"[{name}] {output.text}")
+                data[name] = getattr(output, "data", {})
+            else:
+                texts.append(f"[{name}] {output}")
+        return {"text": "\n".join(texts), "data": data}
 
     def _write_state(self, context: Any, node_name: str, output: Any) -> None:
         try:

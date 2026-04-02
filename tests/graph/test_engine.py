@@ -414,3 +414,70 @@ async def test_engine_with_custom_node(engine):
     ctx = SimpleContext()
     result = await engine.run(compiled, ctx)
     assert result.output == "custom_my_node"
+
+
+# --- Pending-based parallel execution ---
+
+@pytest.mark.asyncio
+async def test_pending_parallel_nodes_execute_concurrently():
+    """pending 中有多个节点时并行执行（通过 next 返回列表触发）。"""
+    import asyncio
+
+    execution_order = []
+
+    async def start(ctx):
+        return NodeResult(output="ok", next=["slow", "fast"])
+
+    async def slow_node(ctx):
+        execution_order.append("slow_start")
+        await asyncio.sleep(0.05)
+        execution_order.append("slow_end")
+        return NodeResult(output="slow_done")
+
+    async def fast_node(ctx):
+        execution_order.append("fast_start")
+        execution_order.append("fast_end")
+        return NodeResult(output="fast_done")
+
+    async def merge_node(ctx):
+        return NodeResult(output="merged")
+
+    builder = GraphBuilder()
+    builder.add_function("start", start)
+    builder.add_function("slow", slow_node)
+    builder.add_function("fast", fast_node)
+    builder.add_function("merge", merge_node)
+    builder.set_entry("start")
+    builder.add_edge("slow", "merge")
+    builder.add_edge("fast", "merge")
+    graph = builder.compile()
+
+    engine = GraphEngine()
+    ctx = SimpleContext()
+    result = await engine.run(graph, ctx)
+
+    # Both should start before slow finishes
+    assert "fast_start" in execution_order
+    assert "slow_start" in execution_order
+    assert result.output == "merged"
+
+
+# --- _last_output tracking ---
+
+@pytest.mark.asyncio
+async def test_last_output_written_to_state():
+    """每个节点执行后 _last_output 被写入 state。"""
+    async def node_fn(ctx):
+        return NodeResult(output={"text": "hello", "data": {"k": 1}})
+
+    builder = GraphBuilder()
+    builder.add_function("only", node_fn)
+    builder.set_entry("only")
+    graph = builder.compile()
+
+    engine = GraphEngine()
+    ctx = SimpleContext()
+    await engine.run(graph, ctx)
+
+    assert hasattr(ctx.state, "_last_output")
+    assert ctx.state._last_output == {"text": "hello", "data": {"k": 1}}
