@@ -94,6 +94,8 @@ class AgentRunner:
         else:
             messages.append({"role": "user", "content": task})
 
+        history_end_idx = len(messages)
+
         # 5. 按需连接 MCP server，然后构建工具列表
         tool_router = getattr(context.deps, "tool_router", None)
         if tool_router:
@@ -147,6 +149,7 @@ class AgentRunner:
                             timestamp=time.time(), source=agent.name,
                             from_agent=agent.name, to_agent=target_name, task=message.task,
                         ))
+                    self._persist_turns(context, messages, history_end_idx, content or "")
                     return AgentResult(
                         response=AgentResponse(text=content or "", sender=agent.name),
                         handoff=handoff,
@@ -208,6 +211,9 @@ class AgentRunner:
             response = await context.deps.llm.chat(messages, silent=True)
             final_text = response.content
 
+        # 持久化对话轮次，供后续节点参考
+        self._persist_turns(context, messages, history_end_idx, final_text)
+
         # 截断
         if len(final_text) > self.max_result_length:
             final_text = final_text[: self.max_result_length] + "...(已截断)"
@@ -245,6 +251,76 @@ class AgentRunner:
             ))
 
         return result
+
+    def _persist_turns(
+        self,
+        context: RunContext,
+        messages: list[dict[str, Any]],
+        history_end_idx: int,
+        final_text: str = "",
+    ) -> None:
+        """将本轮有意义的对话写回 conversation_history，供后续节点参考。
+
+        只保留：用户消息、ask_user 问答、最终助手回复，
+        跳过内部工具调用细节，保持历史简洁。
+        """
+        new_turns: list[dict[str, Any]] = []
+        ask_user_ids: set[str] = set()
+
+        for msg in messages[history_end_idx:]:
+            role = msg.get("role")
+            content = msg.get("content")
+
+            if role == "user" and content:
+                new_turns.append({"role": "user", "content": content})
+            elif role == "assistant":
+                has_ask_user = False
+                for tc in msg.get("tool_calls", []):
+                    func = tc.get("function", {})
+                    if func.get("name") == "ask_user":
+                        has_ask_user = True
+                        ask_user_ids.add(tc["id"])
+                        try:
+                            args = json.loads(func.get("arguments", "{}"))
+                        except json.JSONDecodeError:
+                            args = {}
+                        question = args.get("question", "")
+                        if question:
+                            parts = [p for p in [content, question] if p]
+                            new_turns.append({
+                                "role": "assistant",
+                                "content": "\n".join(parts),
+                            })
+                            content = None  # 避免下面重复添加
+                # 非 ask_user 的纯文本回复
+                if content and not has_ask_user:
+                    new_turns.append({"role": "assistant", "content": content})
+            elif role == "tool":
+                # 只保留 ask_user 的结果（用户的实际回答）
+                if msg.get("tool_call_id") in ask_user_ids and content:
+                    new_turns.append({"role": "user", "content": content})
+
+        # 追加最终回复
+        if final_text and (not new_turns or new_turns[-1].get("content") != final_text):
+            new_turns.append({"role": "assistant", "content": final_text})
+
+        if not new_turns:
+            return
+
+        # 写回 conversation_history
+        if isinstance(context.state, AppState):
+            if context.state.conversation_history is None:
+                context.state.conversation_history = []
+            context.state.conversation_history.extend(new_turns)
+        else:
+            history = getattr(context.state, "conversation_history", None)
+            if history is None:
+                history = []
+                try:
+                    setattr(context.state, "conversation_history", history)
+                except (AttributeError, ValueError):
+                    return
+            history.extend(new_turns)
 
     def _build_tools(self, agent: Agent, context: RunContext) -> list[dict]:
         """从 deps.tool_router 过滤 agent 允许的工具。
