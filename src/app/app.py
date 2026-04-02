@@ -181,6 +181,10 @@ class AgentApp:
         output = result.output
         if isinstance(output, dict):
             output = output.get("text", str(output))
+        elif hasattr(output, "text"):
+            output = output.text
+        else:
+            output = str(output)
         await self.ui.display(f"\n{output}\n")
 
         # --- Post-turn: 记忆存储 ---
