@@ -119,6 +119,83 @@ class TestWorkflowCompiler:
         # agent 的 instructions 应该包含约束
         assert "Always be careful" in agent_node.agent.instructions
 
+    def test_action_before_decision_gets_hint(self):
+        """ACTION 后继为 DECISION 时，agent instructions 中注入决策提示。"""
+        plan = WorkflowPlan(
+            name="test",
+            steps=[
+                WorkflowStep(id="explore", name="Explore", instructions="look around",
+                             step_type=StepType.ACTION),
+                WorkflowStep(id="decide", name="Ready?", instructions="",
+                             step_type=StepType.DECISION),
+            ],
+            transitions=[
+                WorkflowTransition(from_step="explore", to_step="decide"),
+                WorkflowTransition(from_step="decide", to_step="explore", condition="no"),
+            ],
+            entry_step="explore",
+        )
+        compiler = WorkflowCompiler()
+        graph = compiler.compile(plan, agent_factory=make_agent)
+        agent_node = graph.nodes["explore"]
+        assert "严禁" in agent_node.agent.instructions
+        assert "以陈述句结尾" in agent_node.agent.instructions
+
+    def test_action_not_before_decision_no_hint(self):
+        """ACTION 后继为非 DECISION 时，不注入决策提示。"""
+        plan = WorkflowPlan(
+            name="test",
+            steps=[
+                WorkflowStep(id="s1", name="S1", instructions="do",
+                             step_type=StepType.ACTION),
+                WorkflowStep(id="s2", name="S2", instructions="more",
+                             step_type=StepType.ACTION),
+            ],
+            transitions=[WorkflowTransition(from_step="s1", to_step="s2")],
+            entry_step="s1",
+        )
+        compiler = WorkflowCompiler()
+        graph = compiler.compile(plan, agent_factory=make_agent)
+        agent_node = graph.nodes["s1"]
+        assert "不要向用户提问" not in agent_node.agent.instructions
+
+    def test_decision_question_falls_back_to_step_name(self):
+        """DECISION 节点 instructions 为空时，question 使用原始 step.name。"""
+        plan = WorkflowPlan(
+            name="test",
+            steps=[
+                WorkflowStep(id="visual_questions_ahead_", name="Visual questions ahead?",
+                             instructions="", step_type=StepType.DECISION),
+                WorkflowStep(id="s1", name="S1", instructions="yes path",
+                             step_type=StepType.ACTION),
+            ],
+            transitions=[
+                WorkflowTransition(from_step="visual_questions_ahead_", to_step="s1",
+                                   condition="yes"),
+            ],
+            entry_step="visual_questions_ahead_",
+        )
+        compiler = WorkflowCompiler()
+        graph = compiler.compile(plan, agent_factory=make_agent)
+        decision_node = graph.nodes["visual_questions_ahead_"]
+        assert decision_node.question == "Visual questions ahead?"
+
+    def test_decision_question_uses_instructions_when_present(self):
+        """DECISION 节点有 instructions 时，question 使用 instructions。"""
+        plan = WorkflowPlan(
+            name="test",
+            steps=[
+                WorkflowStep(id="d1", name="Ready?", instructions="Is everything ready?",
+                             step_type=StepType.DECISION),
+            ],
+            transitions=[],
+            entry_step="d1",
+        )
+        compiler = WorkflowCompiler()
+        graph = compiler.compile(plan, agent_factory=make_agent)
+        decision_node = graph.nodes["d1"]
+        assert decision_node.question == "Is everything ready?"
+
     def test_agent_name_differs_from_step_id(self):
         """agent.name 与 step.id 不同时，节点仍以 step.id 注册。"""
         plan = WorkflowPlan(

@@ -34,10 +34,19 @@ class WorkflowCompiler:
             lines = "\n".join(f"- {c}" for c in plan.constraints)
             constraint_prefix = f"## 约束\n{lines}\n\n"
 
+        # 预建 step_id → step 映射，用于查找后继节点类型
+        step_map = {s.id: s for s in plan.steps}
+
         for step in plan.steps:
             match step.step_type:
                 case StepType.ACTION:
                     instructions = constraint_prefix + step.instructions
+                    # 如果后继是 DECISION 节点，注入约束：不要自行生成选项
+                    decision_hint = self._build_decision_hint(
+                        step.id, plan, step_map,
+                    )
+                    if decision_hint:
+                        instructions += decision_hint
                     agent = agent_factory(step.id, instructions)
                     node = AgentNode(agent)
                     # 确保节点名称与 step.id 一致，不依赖 agent.name
@@ -52,7 +61,7 @@ class WorkflowCompiler:
                     ]
                     node = DecisionNode(
                         name=step.id,
-                        question=step.instructions,
+                        question=step.instructions or step.name,
                         branches=branches,
                     )
                     builder.add_node(node)
@@ -75,6 +84,34 @@ class WorkflowCompiler:
 
         builder.set_entry(plan.entry_step)
         return builder.compile()
+
+    @staticmethod
+    def _build_decision_hint(
+        step_id: str,
+        plan: WorkflowPlan,
+        step_map: dict[str, Any],
+    ) -> str:
+        """若 ACTION 的后继是 DECISION，返回约束提示；否则返回空串。"""
+        for t in plan.transitions:
+            if t.from_step == step_id:
+                successor = step_map.get(t.to_step)
+                if successor and successor.step_type == StepType.DECISION:
+                    question = successor.instructions or successor.name
+                    branches = [
+                        tr.condition
+                        for tr in plan.transitions
+                        if tr.from_step == successor.id and tr.condition
+                    ]
+                    branch_text = "、".join(branches) if branches else ""
+                    return (
+                        f"\n\n## ⚠️ 输出格式约束（必须遵守）\n"
+                        f"你的回复**必须以陈述句结尾**，严禁以问句结尾。\n"
+                        f"**严禁**向用户提问、征求意见或列出选项供用户选择。\n"
+                        f"完成任务后直接给出结论即可。\n"
+                        f"系统会在你回复后自动询问用户「{question}」"
+                        f"（{branch_text}），无需你代劳。"
+                    )
+        return ""
 
     def _compile_subworkflow(
         self,

@@ -16,21 +16,39 @@ class DecisionNode:
     branches: list[str]
 
     async def execute(self, context: Any) -> NodeResult:
-        # 用编号列表避免 label 中的逗号导致歧义
         options_lines = "\n".join(
             f"  {i + 1}. {branch}" for i, branch in enumerate(self.branches)
         )
-        prompt = (
-            f"Based on the current state, choose the next action.\n\n"
-            f"Current state: {context.input}\n"
-            f"Options:\n{options_lines}\n\n"
-            f"Reply with ONLY the exact option text (not the number)."
-        )
-        messages = [{"role": "user", "content": prompt}]
-        response = await context.deps.llm.chat(messages)
-        choice = response.content.strip().strip('"').strip("'")
-        # 模糊匹配：LLM 可能只返回 label 的一部分
-        matched = self._match_branch(choice)
+        # question 为空时 fallback 到节点名称
+        display_question = self.question or self.name
+
+        ui = getattr(context.deps, "ui", None)
+        if ui is not None:
+            # 用户决策模式：展示选项，等待用户选择
+            await ui.display(f"\n{display_question}\n{options_lines}")
+            answer = (await ui.prompt("请选择 (输入编号或选项文本): ")).strip()
+            # 支持编号选择
+            if answer.isdigit():
+                idx = int(answer) - 1
+                if 0 <= idx < len(self.branches):
+                    matched = self.branches[idx]
+                else:
+                    matched = self._match_branch(answer)
+            else:
+                matched = self._match_branch(answer)
+        else:
+            # 无 UI 时降级为 LLM 自动决策
+            prompt = (
+                f"Based on the current state, choose the next action.\n\n"
+                f"Current state: {context.input}\n"
+                f"Options:\n{options_lines}\n\n"
+                f"Reply with ONLY the exact option text (not the number)."
+            )
+            messages = [{"role": "user", "content": prompt}]
+            response = await context.deps.llm.chat(messages)
+            choice = response.content.strip().strip('"').strip("'")
+            matched = self._match_branch(choice)
+
         return NodeResult(
             output=AgentResponse(
                 text=matched,
