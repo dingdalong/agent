@@ -25,6 +25,7 @@ from src.llm.structured import build_output_schema, parse_output
 logger = logging.getLogger(__name__)
 
 HANDOFF_PREFIX = "transfer_to_"
+SYSTEM_TOOLS = {"ask_user"}
 
 
 class AgentRunner:
@@ -248,17 +249,23 @@ class AgentRunner:
     def _build_tools(self, agent: Agent, context: RunContext) -> list[dict]:
         """从 deps.tool_router 过滤 agent 允许的工具。
 
-        当 context.delegate_depth >= 1 时，过滤掉所有 delegate_ 前缀的工具，
-        防止被委派的 agent 再次委派（递归深度限制）。
+        - 系统工具（SYSTEM_TOOLS）始终包含，所有 agent 可用
+        - 当 context.delegate_depth >= 1 时，过滤掉所有 delegate_ 前缀的工具
         """
         tool_router = getattr(context.deps, "tool_router", None)
-        if not tool_router or not agent.tools:
+        if not tool_router:
             return []
         all_schemas = tool_router.get_all_schemas()
-        allowed = set(agent.tools)
-        # 委派深度 >= 1 时，移除所有 delegate 工具
+
+        if not agent.tools:
+            return [s for s in all_schemas if s["function"]["name"] in SYSTEM_TOOLS]
+
+        allowed = set(agent.tools) | SYSTEM_TOOLS
         if context.delegate_depth >= 1:
-            allowed = {name for name in allowed if not name.startswith("delegate_")}
+            allowed = {
+                name for name in allowed
+                if not name.startswith("delegate_")
+            }
         return [s for s in all_schemas if s["function"]["name"] in allowed]
 
     def _build_handoff_tools(self, agent: Agent, context: RunContext) -> list[dict]:

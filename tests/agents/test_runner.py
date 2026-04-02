@@ -393,3 +393,68 @@ async def test_runner_emits_handoff_event(handoff_agent, mock_router, mock_llm, 
     assert "handoff" in type_names
     handoff_events = [e for e in received if e.type == "handoff"]
     assert handoff_events[0].to_agent == "calendar_agent"
+
+
+def test_build_tools_includes_system_tools_when_agent_has_tools():
+    """agent.tools 非空时，_build_tools 应自动包含系统工具 ask_user。"""
+    from src.agents.runner import AgentRunner
+
+    mock_router = MagicMock()
+    mock_router.get_all_schemas = MagicMock(return_value=[
+        {"type": "function", "function": {"name": "exec", "description": "Execute", "parameters": {}}},
+        {"type": "function", "function": {"name": "ask_user", "description": "Ask user", "parameters": {}}},
+    ])
+
+    agent = Agent(name="test", description="Test", instructions="Test.", tools=["exec"])
+    ctx = RunContext(input="test", state=DynamicState(), deps=AgentDeps(tool_router=mock_router), delegate_depth=0)
+
+    runner = AgentRunner()
+    tools = runner._build_tools(agent, ctx)
+
+    names = [t["function"]["name"] for t in tools]
+    assert "exec" in names
+    assert "ask_user" in names
+
+
+def test_build_tools_includes_system_tools_when_agent_has_no_tools():
+    """agent.tools 为空时，_build_tools 应只返回系统工具。"""
+    from src.agents.runner import AgentRunner
+
+    mock_router = MagicMock()
+    mock_router.get_all_schemas = MagicMock(return_value=[
+        {"type": "function", "function": {"name": "exec", "description": "Execute", "parameters": {}}},
+        {"type": "function", "function": {"name": "ask_user", "description": "Ask user", "parameters": {}}},
+    ])
+
+    agent = Agent(name="orchestrator", description="Orch", instructions="Route.", tools=[])
+    ctx = RunContext(input="test", state=DynamicState(), deps=AgentDeps(tool_router=mock_router), delegate_depth=0)
+
+    runner = AgentRunner()
+    tools = runner._build_tools(agent, ctx)
+
+    names = [t["function"]["name"] for t in tools]
+    assert "ask_user" in names
+    assert "exec" not in names
+
+
+def test_build_tools_system_tools_not_filtered_by_delegate_depth():
+    """delegate_depth >= 1 时，系统工具 ask_user 不应被过滤。"""
+    from src.agents.runner import AgentRunner
+
+    mock_router = MagicMock()
+    mock_router.get_all_schemas = MagicMock(return_value=[
+        {"type": "function", "function": {"name": "exec", "description": "Execute", "parameters": {}}},
+        {"type": "function", "function": {"name": "delegate_tool_calc", "description": "Delegate", "parameters": {}}},
+        {"type": "function", "function": {"name": "ask_user", "description": "Ask user", "parameters": {}}},
+    ])
+
+    agent = Agent(name="test", description="Test", instructions="Test.", tools=["exec", "delegate_tool_calc"])
+    ctx = RunContext(input="test", state=DynamicState(), deps=AgentDeps(tool_router=mock_router), delegate_depth=1)
+
+    runner = AgentRunner()
+    tools = runner._build_tools(agent, ctx)
+
+    names = [t["function"]["name"] for t in tools]
+    assert "exec" in names
+    assert "ask_user" in names
+    assert "delegate_tool_calc" not in names
