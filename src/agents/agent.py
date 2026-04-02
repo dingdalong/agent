@@ -7,22 +7,31 @@ from typing import Any, Callable, Optional, Type
 
 from pydantic import BaseModel
 
+from src.graph.messages import AgentMessage, AgentResponse
+
 
 @dataclass
 class HandoffRequest:
-    """Agent 请求将任务交接到另一个 agent。"""
+    """Agent 请求将任务永久交接到另一个 agent。"""
 
     target: str
-    task: str
+    message: AgentMessage
 
 
 @dataclass
 class AgentResult:
     """单个 agent 的执行结果。"""
 
-    text: str
-    data: dict = field(default_factory=dict)
+    response: AgentResponse
     handoff: Optional[HandoffRequest] = None
+
+    @property
+    def text(self) -> str:
+        return self.response.text
+
+    @property
+    def data(self) -> dict:
+        return self.response.data
 
 
 @dataclass

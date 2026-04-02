@@ -58,8 +58,9 @@ def test_agent_dynamic_instructions():
 
 def test_agent_result():
     from src.agents.agent import AgentResult
+    from src.graph.messages import AgentResponse
 
-    result = AgentResult(text="hello")
+    result = AgentResult(response=AgentResponse(text="hello"))
     assert result.text == "hello"
     assert result.data == {}
     assert result.handoff is None
@@ -67,16 +68,23 @@ def test_agent_result():
 
 def test_agent_result_with_handoff():
     from src.agents.agent import AgentResult, HandoffRequest
+    from src.graph.messages import AgentMessage, AgentResponse
 
-    handoff = HandoffRequest(target="calendar", task="book meeting")
-    result = AgentResult(text="transferring", handoff=handoff)
+    msg = AgentMessage(objective="book meeting", task="book meeting")
+    handoff = HandoffRequest(target="calendar", message=msg)
+    result = AgentResult(
+        response=AgentResponse(text="transferring"),
+        handoff=handoff,
+    )
     assert result.handoff.target == "calendar"
-    assert result.handoff.task == "book meeting"
+    assert result.handoff.message.task == "book meeting"
 
 
 def test_handoff_request():
     from src.agents.agent import HandoffRequest
+    from src.graph.messages import AgentMessage
 
-    req = HandoffRequest(target="email_agent", task="send report")
+    msg = AgentMessage(objective="send report", task="send report")
+    req = HandoffRequest(target="email_agent", message=msg)
     assert req.target == "email_agent"
-    assert req.task == "send report"
+    assert req.message.task == "send report"
