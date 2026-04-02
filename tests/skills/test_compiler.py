@@ -9,9 +9,15 @@ from src.agents.node import AgentNode
 
 
 def make_agent(name: str, instructions: str):
-    """创建简单 Agent 用于测试。"""
+    """创建简单 Agent 用于测试（name == step_id）。"""
     from src.agents.agent import Agent
     return Agent(name=name, description="test", instructions=instructions)
+
+
+def make_prefixed_agent(step_id: str, instructions: str):
+    """模拟 app.py 的真实 factory：agent.name != step_id。"""
+    from src.agents.agent import Agent
+    return Agent(name=f"step_{step_id}", description="test", instructions=instructions)
 
 
 class TestWorkflowCompiler:
@@ -112,3 +118,22 @@ class TestWorkflowCompiler:
         agent_node = graph.nodes["s1"]
         # agent 的 instructions 应该包含约束
         assert "Always be careful" in agent_node.agent.instructions
+
+    def test_agent_name_differs_from_step_id(self):
+        """agent.name 与 step.id 不同时，节点仍以 step.id 注册。"""
+        plan = WorkflowPlan(
+            name="test",
+            steps=[
+                WorkflowStep(id="main", name="Main", instructions="do",
+                             step_type=StepType.ACTION),
+                WorkflowStep(id="end", name="End", instructions="",
+                             step_type=StepType.TERMINAL),
+            ],
+            transitions=[WorkflowTransition(from_step="main", to_step="end")],
+            entry_step="main",
+        )
+        compiler = WorkflowCompiler()
+        # make_prefixed_agent 产生 agent.name="step_main"，不等于 step.id="main"
+        graph = compiler.compile(plan, agent_factory=make_prefixed_agent)
+        assert "main" in graph.nodes
+        assert graph.entry == "main"

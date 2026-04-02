@@ -39,7 +39,10 @@ class WorkflowCompiler:
                 case StepType.ACTION:
                     instructions = constraint_prefix + step.instructions
                     agent = agent_factory(step.id, instructions)
-                    builder.add_node(AgentNode(agent))
+                    node = AgentNode(agent)
+                    # 确保节点名称与 step.id 一致，不依赖 agent.name
+                    node.name = step.id
+                    builder.add_node(node)
 
                 case StepType.DECISION:
                     branches = [
