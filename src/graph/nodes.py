@@ -49,12 +49,41 @@ class DecisionNode:
             choice = response.content.strip().strip('"').strip("'")
             matched = self._match_branch(choice)
 
+        # 将决策问答写入 conversation_history，供后续节点参考
+        self._persist_decision(context, display_question, options_lines, matched)
+
         return NodeResult(
             output=AgentResponse(
                 text=matched,
                 data={"chosen_branch": matched},
             ),
         )
+
+    @staticmethod
+    def _persist_decision(
+        context: Any, question: str, options_lines: str, matched: str,
+    ) -> None:
+        """将决策的问题和用户选择追加到 conversation_history。"""
+        from src.agents.context import AppState
+
+        new_turns = [
+            {"role": "assistant", "content": f"{question}\n{options_lines}"},
+            {"role": "user", "content": matched},
+        ]
+
+        if isinstance(context.state, AppState):
+            if context.state.conversation_history is None:
+                context.state.conversation_history = []
+            context.state.conversation_history.extend(new_turns)
+        else:
+            history = getattr(context.state, "conversation_history", None)
+            if history is None:
+                history = []
+                try:
+                    setattr(context.state, "conversation_history", history)
+                except (AttributeError, ValueError):
+                    return
+            history.extend(new_turns)
 
     def _match_branch(self, choice: str) -> str:
         """将 LLM 回复匹配到最佳 branch label。"""

@@ -131,6 +131,80 @@ class TestDecisionNodeUserInteraction:
         assert "Visual questions ahead?" in displayed
 
 
+class TestDecisionNodePersistsHistory:
+    """DecisionNode 应将用户选择写入 conversation_history，供后续节点参考。"""
+
+    def _make_ctx(self, user_answer: str) -> MockContext:
+        mock_ui = AsyncMock()
+        mock_ui.prompt.return_value = user_answer
+        ctx = MockContext()
+        ctx.deps.ui = mock_ui
+        return ctx
+
+    @pytest.mark.asyncio
+    async def test_user_choice_persisted_to_conversation_history(self):
+        """用户通过 UI 选择后，问题和回答应写入 conversation_history。"""
+        node = DecisionNode(name="d", question="Choose plan:", branches=["yes", "no"])
+        ctx = self._make_ctx("1")
+        await node.execute(ctx)
+
+        history = ctx.state.conversation_history
+        assert history is not None
+        assert len(history) == 2
+        assert history[0]["role"] == "assistant"
+        assert "Choose plan:" in history[0]["content"]
+        assert history[1]["role"] == "user"
+        assert history[1]["content"] == "yes"
+
+    @pytest.mark.asyncio
+    async def test_unmatched_choice_persisted_as_is(self):
+        """用户输入不匹配任何分支时，原始输入仍应写入 history。"""
+        node = DecisionNode(name="d", question="Pick:", branches=["yes", "no"])
+        ctx = self._make_ctx("设计一：网格法")
+        await node.execute(ctx)
+
+        history = ctx.state.conversation_history
+        assert history is not None
+        assert history[1]["role"] == "user"
+        assert history[1]["content"] == "设计一：网格法"
+
+    @pytest.mark.asyncio
+    async def test_appends_to_existing_history(self):
+        """已有 conversation_history 时，应追加而非覆盖。"""
+        node = DecisionNode(name="d", question="Ready?", branches=["yes", "no"])
+        ctx = self._make_ctx("yes")
+        ctx.state.conversation_history = [
+            {"role": "assistant", "content": "previous"},
+        ]
+        await node.execute(ctx)
+
+        history = ctx.state.conversation_history
+        assert len(history) == 3  # 1 existing + 2 new
+        assert history[0]["content"] == "previous"
+
+    @pytest.mark.asyncio
+    async def test_llm_fallback_also_persists_history(self):
+        """无 UI 时 LLM 决策也应写入 conversation_history。"""
+        mock_response = MagicMock()
+        mock_response.content = "yes"
+        mock_response.tool_calls = {}
+        mock_llm = AsyncMock()
+        mock_llm.chat.return_value = mock_response
+        ctx = MockContext()
+        ctx.deps.llm = mock_llm
+        ctx.deps.ui = None
+
+        node = DecisionNode(name="d", question="Ready?", branches=["yes", "no"])
+        await node.execute(ctx)
+
+        history = ctx.state.conversation_history
+        assert history is not None
+        assert len(history) == 2
+        assert history[0]["role"] == "assistant"
+        assert history[1]["role"] == "user"
+        assert history[1]["content"] == "yes"
+
+
 class TestTerminalNode:
     @pytest.mark.asyncio
     async def test_passes_through_last_output(self):
