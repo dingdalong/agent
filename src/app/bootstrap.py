@@ -25,6 +25,8 @@ from src.skills.provider import SkillToolProvider
 from src.guardrails import InputGuardrail
 from src.agents import AgentRegistry, AgentRunner
 from src.graph import GraphEngine
+from src.events.bus import EventBus
+from src.events.levels import EventLevel
 from src.agents.deps import AgentDeps
 from src.memory import ChromaMemoryStore, ConversationBuffer
 from src.memory.utils import build_collection_name
@@ -51,6 +53,10 @@ async def create_app(config_path: str = "config.yaml") -> AgentApp:
     llm_cfg = raw.get("llm", {})
     ui = CLIInterface()
 
+    # 0. EventBus
+    events_cfg = raw.get("events", {})
+    event_bus = EventBus(level=EventLevel.from_str(events_cfg.get("level", "progress")))
+
     # 1. LLM
     llm = OpenAIProvider(
         api_key=llm_cfg.get("api_key", ""),
@@ -58,7 +64,7 @@ async def create_app(config_path: str = "config.yaml") -> AgentApp:
         model=llm_cfg.get("model", ""),
         concurrency=llm_cfg.get("concurrency", 5),
         max_retries=llm_cfg.get("max_retries", 3),
-        on_chunk=ui.display,
+        event_bus=event_bus,
     )
 
     # 2. Tools
@@ -147,12 +153,13 @@ async def create_app(config_path: str = "config.yaml") -> AgentApp:
 
     runner = AgentRunner(
         max_tool_rounds=agent_cfg.get("max_tool_rounds", 10),
+        event_bus=event_bus,
     )
     graph = build_default_graph(
         agent_registry,
         category_summaries=category_summaries,
     )
-    engine = GraphEngine(max_handoff_depth=agent_cfg.get("max_handoffs", 10))
+    engine = GraphEngine(event_bus=event_bus, max_handoff_depth=agent_cfg.get("max_handoffs", 10))
 
     # 7. Deps
     deps = AgentDeps(
@@ -189,4 +196,5 @@ async def create_app(config_path: str = "config.yaml") -> AgentApp:
         conversation_buffer=conversation_buffer,
         category_summaries=category_summaries,
         category_resolver=category_resolver,
+        event_bus=event_bus,
     )

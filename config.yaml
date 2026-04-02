@@ -34,3 +34,5 @@ user:
 #   dirs:
 #     - skills/
 #     - .agents/skills/
+# events:
+#   level: progress   # progress | detail | trace

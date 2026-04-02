@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING
 
+from src.events.bus import EventBus
 from src.interfaces.base import UserInterface
 from src.guardrails import InputGuardrail
 from src.agents import RunContext, DynamicState, AppState, AgentDeps, AgentRegistry, AgentRunner
@@ -49,6 +51,7 @@ class AgentApp:
         conversation_buffer: ConversationBuffer | None = None,
         category_summaries: list[dict[str, str]] | None = None,
         category_resolver: CategoryResolver | None = None,
+        event_bus: EventBus | None = None,
     ):
         self.deps = deps
         self.ui = ui
@@ -63,6 +66,7 @@ class AgentApp:
         self.conversation_buffer = conversation_buffer
         self._category_summaries: list[dict[str, str]] = category_summaries or []
         self._category_resolver = category_resolver
+        self.event_bus = event_bus
 
     async def process(self, user_input: str) -> None:
         """处理单条用户消息。"""
@@ -223,12 +227,26 @@ class AgentApp:
 
     async def run(self) -> None:
         """CLI 主循环。"""
+        # 启动事件消费
+        consumer_task = None
+        if self.event_bus:
+            async def _consume():
+                async for event in self.event_bus.subscribe():
+                    await self.ui.on_event(event)
+            consumer_task = asyncio.create_task(_consume())
+
         await self.ui.display("Agent 已启动，输入 'exit' 退出。\n")
-        while True:
-            user_input = await self.ui.prompt("\n你: ")
-            if user_input.strip().lower() in ("exit", "quit"):
-                break
-            await self.process(user_input)
+        try:
+            while True:
+                user_input = await self.ui.prompt("\n你: ")
+                if user_input.strip().lower() in ("exit", "quit"):
+                    break
+                await self.process(user_input)
+        finally:
+            if self.event_bus:
+                self.event_bus.close()
+            if consumer_task:
+                await consumer_task
 
     async def shutdown(self) -> None:
         if (
