@@ -254,7 +254,7 @@ class FactExtractor:
             if self._llm is None:
                 raise RuntimeError("FactExtractor requires an LLMProvider instance (llm=...)")
             response = await self._llm.chat(
-                messages, temperature=0.0, tools=[_SUBMIT_FACTS_TOOL], silent=True,
+                messages, temperature=0.0, tools=[_SUBMIT_FACTS_TOOL],
             )
             tool_calls = response.tool_calls
             result = parse_output(tool_calls, "submit_facts", FactsResult)

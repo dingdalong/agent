@@ -27,7 +27,7 @@ class DecisionNode:
             f"Reply with ONLY the exact option text (not the number)."
         )
         messages = [{"role": "user", "content": prompt}]
-        response = await context.deps.llm.chat(messages, silent=True)
+        response = await context.deps.llm.chat(messages)
         choice = response.content.strip().strip('"').strip("'")
         # 模糊匹配：LLM 可能只返回 label 的一部分
         matched = self._match_branch(choice)

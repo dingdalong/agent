@@ -45,7 +45,6 @@ async def summarize_conversation(
 
     response = await llm.chat(
         messages=[{"role": "user", "content": prompt}],
-        silent=True,
     )
     return response.content
 

@@ -132,7 +132,6 @@ async def classify_user_feedback(user_feedback: str, plan: Plan, *, llm: LLMProv
             [{"role": "user", "content": prompt}],
             temperature=0,
             tools=[_CLASSIFY_FEEDBACK_TOOL],
-            silent=True,
         )
         result = parse_output(response.tool_calls, "classify_feedback", FeedbackClassification)
         if result and result.action in ("confirm", "adjust"):
@@ -183,7 +182,6 @@ async def generate_plan(
                 {"role": "user", "content": user_prompt},
             ],
             tools=plan_tools,
-            silent=True,
         )
         content, tool_calls = response.content, response.tool_calls
     except Exception as e:
@@ -231,7 +229,6 @@ async def adjust_plan(
                 {"role": "user", "content": user_prompt},
             ],
             tools=plan_tools,
-            silent=True,
         )
         content, tool_calls = response.content, response.tool_calls
     except Exception as e:

@@ -189,7 +189,11 @@ class AgentApp:
             output = output.text
         else:
             output = str(output)
-        await self.ui.display(f"\n{output}\n")
+        # 流式模式下 TokenDelta 已逐字输出，只补换行；无 EventBus 时才整体打印
+        if self.event_bus:
+            await self.ui.display("\n")
+        else:
+            await self.ui.display(f"\n{output}\n")
 
         # --- Post-turn: 记忆存储 ---
         if self.conversation_buffer is not None:

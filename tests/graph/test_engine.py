@@ -344,7 +344,7 @@ async def test_graph_result_contains_state(engine):
 @pytest.mark.asyncio
 async def test_event_bus_emits_lifecycle_events():
     """EventBus 应在图/节点开始和结束时发出事件。"""
-    bus = EventBus(level=EventLevel.PROGRESS)
+    bus = EventBus(level=EventLevel.TRACE)
     received = []
 
     async def consumer():

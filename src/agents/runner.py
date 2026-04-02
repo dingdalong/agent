@@ -113,7 +113,6 @@ class AgentRunner:
             response = await context.deps.llm.chat(
                 messages,
                 tools=all_tools,
-                silent=True,
             )
             content, tool_calls = response.content, response.tool_calls
 
@@ -208,7 +207,7 @@ class AgentRunner:
                 })
         else:
             # 超过 max_tool_rounds
-            response = await context.deps.llm.chat(messages, silent=True)
+            response = await context.deps.llm.chat(messages)
             final_text = response.content
 
         # 持久化对话轮次，供后续节点参考
