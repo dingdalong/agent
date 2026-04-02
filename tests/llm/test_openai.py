@@ -7,7 +7,7 @@ import pytest
 from openai import APIConnectionError, RateLimitError
 
 from src.events.bus import EventBus
-from src.events.types import TokenDelta
+from src.events.types import TokenDelta, ThinkingDelta
 from src.llm.openai import OpenAIProvider
 from src.llm.types import LLMResponse
 
@@ -16,11 +16,12 @@ from src.llm.types import LLMResponse
 # Helpers to build fake stream chunks
 # ---------------------------------------------------------------------------
 
-def _make_chunk(content=None, tool_calls=None, finish_reason=None):
+def _make_chunk(content=None, tool_calls=None, finish_reason=None, reasoning_content=None):
     """Build a minimal fake OpenAI stream chunk."""
     delta = MagicMock()
     delta.content = content
     delta.tool_calls = tool_calls or []
+    delta.reasoning_content = reasoning_content
 
     choice = MagicMock()
     choice.delta = delta
@@ -363,6 +364,56 @@ class TestEventBusEmission:
 
         chunks = [
             _make_chunk(content="Hello"),
+            _make_chunk(finish_reason="stop"),
+        ]
+        mock_create = AsyncMock(return_value=_async_iter(chunks))
+        p._client.chat.completions.create = mock_create
+
+        await p.chat(messages=[], silent=True)
+
+        bus.emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_thinking_delta_emitted_for_reasoning_content(self):
+        """DeepSeek reasoning_content 应触发 ThinkingDelta 事件。"""
+        bus = MagicMock(spec=EventBus)
+        bus.emit = AsyncMock()
+        with patch("src.llm.openai.AsyncOpenAI"):
+            p = OpenAIProvider(
+                api_key="k", base_url="u", model="m", event_bus=bus
+            )
+
+        chunks = [
+            _make_chunk(content=None, reasoning_content="让我想想"),
+            _make_chunk(content="答案是42"),
+            _make_chunk(finish_reason="stop"),
+        ]
+        mock_create = AsyncMock(return_value=_async_iter(chunks))
+        p._client.chat.completions.create = mock_create
+
+        await p.chat(messages=[])
+
+        emitted = [call.args[0] for call in bus.emit.call_args_list]
+        thinking_events = [e for e in emitted if isinstance(e, ThinkingDelta)]
+        token_events = [e for e in emitted if isinstance(e, TokenDelta)]
+
+        assert len(thinking_events) == 1
+        assert thinking_events[0].content == "让我想想"
+        assert len(token_events) == 1
+        assert token_events[0].delta == "答案是42"
+
+    @pytest.mark.asyncio
+    async def test_thinking_delta_not_emitted_when_silent(self):
+        bus = MagicMock(spec=EventBus)
+        bus.emit = AsyncMock()
+        with patch("src.llm.openai.AsyncOpenAI"):
+            p = OpenAIProvider(
+                api_key="k", base_url="u", model="m", event_bus=bus
+            )
+
+        chunks = [
+            _make_chunk(reasoning_content="thinking..."),
+            _make_chunk(content="answer"),
             _make_chunk(finish_reason="stop"),
         ]
         mock_create = AsyncMock(return_value=_async_iter(chunks))

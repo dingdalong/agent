@@ -7,7 +7,7 @@ import time
 from openai import AsyncOpenAI, APIConnectionError, RateLimitError, APIError
 
 from src.events.bus import EventBus
-from src.events.types import TokenDelta
+from src.events.types import TokenDelta, ThinkingDelta
 from src.llm.types import LLMResponse
 
 logger = logging.getLogger(__name__)
@@ -79,6 +79,15 @@ class OpenAIProvider:
 
         async for chunk in stream:
             delta = chunk.choices[0].delta
+
+            # 思考内容（DeepSeek reasoning_content）
+            reasoning = getattr(delta, "reasoning_content", None)
+            if reasoning and not silent and self._bus:
+                await self._bus.emit(ThinkingDelta(
+                    timestamp=time.time(),
+                    source=self.model,
+                    content=reasoning,
+                ))
 
             if delta.content:
                 if not (delta.tool_calls and delta.content.isspace()):
