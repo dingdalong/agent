@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Optional, Protocol, runtime_checkable
+from typing import Any, Awaitable, Callable, Optional, Protocol, runtime_checkable  # noqa: F401 — Callable used by FunctionNode
 
 
 @dataclass
@@ -43,10 +43,10 @@ class FunctionNode:
 
 @dataclass
 class Edge:
-    """节点间的连接。"""
-    source: str
-    target: str
-    condition: Optional[Callable[..., bool]] = None
+    """节点间的连接。condition 为字符串标签，用于匹配 DecisionNode 的 chosen_branch。"""
+    from_node: str
+    to_node: str
+    condition: Optional[str] = None
 
 
 @dataclass

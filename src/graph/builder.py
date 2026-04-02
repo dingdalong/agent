@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Awaitable, Callable, Optional
+from typing import Awaitable, Callable
 
 from src.graph.types import (
     CompiledGraph,
@@ -42,10 +42,10 @@ class GraphBuilder:
         self,
         source: str,
         target: str,
-        condition: Optional[Callable[..., bool]] = None,
+        condition: str | None = None,
     ) -> GraphBuilder:
-        """添加一条边（可选条件）。"""
-        self._edges.append(Edge(source=source, target=target, condition=condition))
+        """添加一条边（可选字符串条件，匹配 DecisionNode 的 chosen_branch）。"""
+        self._edges.append(Edge(from_node=source, to_node=target, condition=condition))
         return self
 
     def add_parallel(self, nodes: list[str], then: str) -> GraphBuilder:
@@ -61,10 +61,10 @@ class GraphBuilder:
             raise ValueError(f"Entry node '{self._entry}' not found in registered nodes.")
 
         for edge in self._edges:
-            if edge.source not in self._nodes:
-                raise ValueError(f"Edge source '{edge.source}' not found in registered nodes.")
-            if edge.target not in self._nodes:
-                raise ValueError(f"Edge target '{edge.target}' not found in registered nodes.")
+            if edge.from_node not in self._nodes:
+                raise ValueError(f"Edge source '{edge.from_node}' not found in registered nodes.")
+            if edge.to_node not in self._nodes:
+                raise ValueError(f"Edge target '{edge.to_node}' not found in registered nodes.")
 
         for pg in self._parallel_groups:
             for node_name in pg.nodes:

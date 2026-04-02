@@ -140,7 +140,7 @@ class TestPlanCompilerCompile:
         ])
         graph = compiler.compile(plan)
         assert graph.entry == "s1"
-        edge_pairs = [(e.source, e.target) for e in graph.edges]
+        edge_pairs = [(e.from_node, e.to_node) for e in graph.edges]
         assert ("s1", "s2") in edge_pairs
 
     def test_parallel_steps(self):

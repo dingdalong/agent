@@ -134,7 +134,8 @@ async def test_explicit_next_routing(engine):
 @pytest.mark.asyncio
 async def test_conditional_edge(engine):
     async def check(ctx):
-        return NodeResult(output="checked")
+        # 返回 chosen_branch 供条件边匹配
+        return NodeResult(output={"chosen_branch": "go_a"})
 
     async def path_a(ctx):
         return NodeResult(output="took path A")
@@ -147,8 +148,8 @@ async def test_conditional_edge(engine):
     graph.add_function("path_a", path_a)
     graph.add_function("path_b", path_b)
     graph.set_entry("check")
-    graph.add_edge("check", "path_a", condition=lambda ctx: ctx.state.check == "checked")
-    graph.add_edge("check", "path_b", condition=lambda ctx: ctx.state.check != "checked")
+    graph.add_edge("check", "path_a", condition="go_a")
+    graph.add_edge("check", "path_b", condition="go_b")
     compiled = graph.compile()
 
     ctx = SimpleContext()

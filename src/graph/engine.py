@@ -105,7 +105,7 @@ class GraphEngine:
                     continue
 
                 # 按边路由
-                next_nodes = self._resolve_edges(current_name, graph, context)
+                next_nodes = self._resolve_edges(current_name, node_result, graph, context)
                 pending = next_nodes
 
         result = GraphResult(
@@ -141,15 +141,32 @@ class GraphEngine:
         return dict(results)
 
     def _resolve_edges(
-        self, source: str, graph: CompiledGraph, context: Any,
+        self, source: str, node_result: NodeResult, graph: CompiledGraph, context: Any,
     ) -> list[str]:
-        next_nodes = []
-        for edge in graph.edges:
-            if edge.source != source:
-                continue
-            if edge.condition is None or edge.condition(context):
-                next_nodes.append(edge.target)
-        return next_nodes
+        """根据边的 condition 字符串匹配决定下一步。"""
+        candidates = [e for e in graph.edges if e.from_node == source]
+        if not candidates:
+            return []
+
+        unconditional = [e for e in candidates if e.condition is None]
+        conditional = [e for e in candidates if e.condition is not None]
+
+        if conditional:
+            chosen_branch = ""
+            if isinstance(node_result.output, dict):
+                chosen_branch = node_result.output.get("chosen_branch", "")
+            elif hasattr(node_result.output, "data"):
+                chosen_branch = node_result.output.data.get("chosen_branch", "")
+            matched = [e for e in conditional if e.condition == chosen_branch]
+            if not matched:
+                logger.warning(
+                    "No exact branch match for '%s', using first conditional edge",
+                    chosen_branch,
+                )
+                matched = [conditional[0]]
+            return [e.to_node for e in matched]
+
+        return [e.to_node for e in unconditional]
 
     def _find_parallel_group(
         self, pending: list[str], groups: list[ParallelGroup],

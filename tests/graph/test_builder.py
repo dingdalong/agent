@@ -55,8 +55,8 @@ def test_builder_add_edge():
     graph.add_edge("fn_a", "fn_b")
     compiled = graph.compile()
     assert len(compiled.edges) == 1
-    assert compiled.edges[0].source == "fn_a"
-    assert compiled.edges[0].target == "fn_b"
+    assert compiled.edges[0].from_node == "fn_a"
+    assert compiled.edges[0].to_node == "fn_b"
 
 
 def test_builder_add_conditional_edge():
@@ -64,9 +64,9 @@ def test_builder_add_conditional_edge():
     graph.add_function("fn_a", dummy_fn)
     graph.add_function("fn_b", another_fn)
     graph.set_entry("fn_a")
-    graph.add_edge("fn_a", "fn_b", condition=lambda ctx: True)
+    graph.add_edge("fn_a", "fn_b", condition="yes")
     compiled = graph.compile()
-    assert compiled.edges[0].condition is not None
+    assert compiled.edges[0].condition == "yes"
 
 
 def test_builder_add_parallel():

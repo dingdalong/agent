@@ -76,16 +76,15 @@ def test_node_result_with_handoff():
 
 
 def test_edge_unconditional():
-    edge = Edge(source="a", target="b")
-    assert edge.source == "a"
-    assert edge.target == "b"
+    edge = Edge(from_node="a", to_node="b")
+    assert edge.from_node == "a"
+    assert edge.to_node == "b"
     assert edge.condition is None
 
 
 def test_edge_conditional():
-    edge = Edge(source="a", target="b", condition=lambda ctx: True)
-    assert edge.condition is not None
-    assert edge.condition(None) is True
+    edge = Edge(from_node="a", to_node="b", condition="yes")
+    assert edge.condition == "yes"
 
 
 def test_parallel_group():
