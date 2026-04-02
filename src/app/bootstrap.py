@@ -31,6 +31,8 @@ from src.agents.deps import AgentDeps
 from src.memory import ChromaMemoryStore, ConversationBuffer
 from src.memory.utils import build_collection_name
 from src.app.presets import build_default_graph
+from src.utils.interaction import UserInteractionService
+from src.tools.user_input import UserInputToolProvider
 from src.app.app import AgentApp
 
 logger = logging.getLogger(__name__)
@@ -68,16 +70,18 @@ async def create_app(config_path: str = "config.yaml") -> AgentApp:
     )
 
     # 2. Tools
+    interaction = UserInteractionService(ui)
     discover_tools("src.tools.builtin", Path("src/tools/builtin"))
     registry = get_registry()
     executor = ToolExecutor(registry)
     middlewares = [
         error_handler_middleware(),
-        sensitive_confirm_middleware(registry, ui),
+        sensitive_confirm_middleware(registry, interaction),
         truncate_middleware(raw.get("tools", {}).get("max_output_length", 2000)),
     ]
     tool_router = ToolRouter()
     tool_router.add_provider(LocalToolProvider(registry, executor, middlewares))
+    tool_router.add_provider(UserInputToolProvider(interaction))
 
     # 3. MCP — 只加载配置，不连接。连接在 DelegateToolProvider.execute 中按需触发
     mcp_config_path = raw.get("mcp", {}).get("config_path", "mcp_servers.json")
