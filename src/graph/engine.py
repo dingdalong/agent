@@ -11,7 +11,8 @@ from typing import Any, Generic, TypeVar
 from pydantic import BaseModel
 
 from src.graph.types import CompiledGraph, GraphNode, NodeResult, ParallelGroup
-from src.graph.hooks import GraphHooks
+from src.events.bus import EventBus
+from src.events.types import GraphStarted, GraphEnded, NodeStarted, NodeEnded, ErrorOccurred
 
 logger = logging.getLogger(__name__)
 
@@ -40,17 +41,18 @@ class GraphEngine:
 
     def __init__(
         self,
-        hooks: GraphHooks | None = None,
+        event_bus: EventBus | None = None,
         max_handoff_depth: int = 10,
         max_parallel_width: int = 5,
     ):
-        self.hooks = hooks or GraphHooks()
+        self._bus = event_bus
         self.max_handoff_depth = max_handoff_depth
         self.max_parallel_width = max_parallel_width
 
     async def run(self, graph: CompiledGraph, context: Any) -> GraphResult:
         """执行编译后的图。"""
-        await self.hooks.on_graph_start(context)
+        if self._bus:
+            await self._bus.emit(GraphStarted(timestamp=time.time(), source="graph"))
 
         last_output: Any = None
         pending: list[str] = [graph.entry]
@@ -140,19 +142,36 @@ class GraphEngine:
             state=context.state,
             trace=list(getattr(context, "trace", [])),
         )
-        await self.hooks.on_graph_end(context, result)
+        if self._bus:
+            await self._bus.emit(GraphEnded(timestamp=time.time(), source="graph", output=result.output))
         return result
 
     async def _execute_node(self, node: GraphNode, context: Any) -> NodeResult:
-        await self.hooks.on_node_start(node.name, context)
+        if self._bus:
+            node_type = type(node).__name__.replace("Node", "").lower()
+            await self._bus.emit(NodeStarted(
+                timestamp=time.time(), source=node.name, node_type=node_type,
+            ))
         self._add_trace(context, node.name, "start")
         try:
             result = await node.execute(context)
         except Exception as e:
             self._add_trace(context, node.name, "error", {"error": str(e)})
+            if self._bus:
+                await self._bus.emit(ErrorOccurred(
+                    timestamp=time.time(), source=node.name, error=str(e),
+                ))
             raise
         self._add_trace(context, node.name, "end")
-        await self.hooks.on_node_end(node.name, context, result)
+        if self._bus:
+            summary = ""
+            if isinstance(result.output, str):
+                summary = result.output[:100]
+            elif isinstance(result.output, dict):
+                summary = str(result.output)[:100]
+            await self._bus.emit(NodeEnded(
+                timestamp=time.time(), source=node.name, output_summary=summary,
+            ))
         return result
 
     async def _run_parallel(

@@ -1,4 +1,5 @@
-"""GraphEngine 执行测试 — 顺序、并行、条件、handoff、hooks、tracing。"""
+"""GraphEngine 执行测试 — 顺序、并行、条件、handoff、EventBus、tracing。"""
+import asyncio
 import pytest
 from dataclasses import dataclass, field
 from typing import Any
@@ -7,8 +8,9 @@ from pydantic import BaseModel, ConfigDict
 from src.graph.types import NodeResult, FunctionNode
 from src.graph.builder import GraphBuilder
 from src.graph.engine import GraphEngine, GraphResult
-from src.graph.hooks import GraphHooks
 from src.graph.messages import AgentMessage
+from src.events.bus import EventBus
+from src.events.levels import EventLevel
 
 
 # --- Test helpers: agent-agnostic context ---
@@ -337,31 +339,22 @@ async def test_graph_result_contains_state(engine):
     assert isinstance(result.trace, list)
 
 
-# --- Graph hooks ---
+# --- EventBus lifecycle ---
 
 @pytest.mark.asyncio
-async def test_graph_hooks_called():
-    calls = []
+async def test_event_bus_emits_lifecycle_events():
+    """EventBus 应在图/节点开始和结束时发出事件。"""
+    bus = EventBus(level=EventLevel.PROGRESS)
+    received = []
 
-    async def on_graph_start(ctx):
-        calls.append("graph_start")
+    async def consumer():
+        async for event in bus.subscribe():
+            received.append(event)
 
-    async def on_graph_end(ctx, result):
-        calls.append("graph_end")
+    task = asyncio.create_task(consumer())
+    await asyncio.sleep(0)
 
-    async def on_node_start(name, ctx):
-        calls.append(f"node_start:{name}")
-
-    async def on_node_end(name, ctx, result):
-        calls.append(f"node_end:{name}")
-
-    hooks = GraphHooks(
-        on_graph_start=on_graph_start,
-        on_graph_end=on_graph_end,
-        on_node_start=on_node_start,
-        on_node_end=on_node_end,
-    )
-    engine = GraphEngine(hooks=hooks)
+    engine = GraphEngine(event_bus=bus)
 
     async def step(ctx):
         return NodeResult(output="done")
@@ -374,17 +367,20 @@ async def test_graph_hooks_called():
     ctx = SimpleContext()
     await engine.run(compiled, ctx)
 
-    assert "graph_start" in calls
-    assert "graph_end" in calls
-    assert "node_start:step" in calls
-    assert "node_end:step" in calls
+    bus.close()
+    await task
+
+    type_names = [e.type for e in received]
+    assert "graph_started" in type_names
+    assert "graph_ended" in type_names
+    assert "node_started" in type_names
+    assert "node_ended" in type_names
 
 
 @pytest.mark.asyncio
-async def test_hooks_default_noop():
-    """GraphHooks with no callbacks should not raise."""
-    hooks = GraphHooks()
-    engine = GraphEngine(hooks=hooks)
+async def test_engine_without_event_bus():
+    """不传 EventBus 时 engine 正常运行（不 emit 事件）。"""
+    engine = GraphEngine()
 
     async def step(ctx):
         return NodeResult(output="done")
