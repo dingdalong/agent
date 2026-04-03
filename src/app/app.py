@@ -101,11 +101,17 @@ class AgentApp:
         workflow = parser.parse(content, skill_name)
 
         # 3. 定义 agent_factory
+        # 将原始需求注入 system prompt 作为背景上下文，
+        # agent.task 作为步骤触发消息（替代 context.input）
         def make_step_agent(step_id: str, instructions: str) -> Agent:
             return Agent(
                 name=f"step_{step_id}",
                 description=f"Workflow step: {step_id}",
-                instructions=instructions,
+                instructions=(
+                    f"## 用户初始需求\n{actual_input}\n\n"
+                    f"## 当前步骤指令\n{instructions}"
+                ),
+                task="请执行当前工作流步骤。",
                 handoffs=[],
             )
 

@@ -64,8 +64,8 @@ class AgentRunner:
         else:
             system_prompt = agent.instructions
 
-        # 4. 构建 messages
-        task = context.input
+        # 4. 构建 messages（工作流步骤使用 agent.task 替代 context.input）
+        task = getattr(agent, "task", None) or context.input
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": system_prompt},
         ]

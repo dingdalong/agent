@@ -53,6 +53,7 @@ class Agent:
     name: str
     description: str
     instructions: str | Callable[..., str]
+    task: str | None = None  # 工作流步骤专用：覆盖 context.input 作为 user message
     tools: list[str] = field(default_factory=list)
     handoffs: list[str] = field(default_factory=list)
     output_model: Optional[Type[BaseModel]] = None
