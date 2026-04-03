@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from src.config import load_config
+from src.config import load_config, AppConfig
 from src.tools.decorator import get_registry
 from src.tools.discovery import discover_tools
 from src.tools.classifier import classify_tools
@@ -78,10 +78,11 @@ def _build_output(
 
 async def run_classify(force: bool = False, output: str = DEFAULT_OUTPUT) -> None:
     """分类主流程。"""
-    raw = load_config()
+    config = load_config()
+    raw = config.raw
 
     # 1. Local tools
-    discover_tools("src.tools.builtin", Path("src/tools/builtin"))
+    discover_tools("src.tools.builtin", config.resolve("src/tools/builtin"))
     local_schemas = get_registry().get_schemas()
 
     # 2. MCP tools
@@ -91,7 +92,7 @@ async def run_classify(force: bool = False, output: str = DEFAULT_OUTPUT) -> Non
         from src.mcp.config import load_mcp_config
         from src.mcp.manager import MCPManager
 
-        mcp_config_path = raw.get("mcp", {}).get("config_path", "mcp_servers.json")
+        mcp_config_path = str(config.resolve(raw.get("mcp", {}).get("config_path", "mcp_servers.json")))
         mcp_manager = MCPManager(configs=load_mcp_config(mcp_config_path))
         await mcp_manager.connect_all()
         mcp_schemas = mcp_manager.get_tools_schemas()
