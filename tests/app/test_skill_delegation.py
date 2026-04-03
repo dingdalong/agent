@@ -207,8 +207,8 @@ class TestSkillWorkflowIntegration:
         assert plan.transitions[0].from_step == plan.steps[0].id
         assert plan.transitions[0].to_step == plan.steps[1].id
 
-        def make_agent(step_id, instructions):
-            return Agent(name=step_id, description="t", instructions=instructions)
+        def make_agent(step_id, step_name, checklist_desc):
+            return Agent(name=step_id, description="t", instructions=checklist_desc)
 
         compiler = WorkflowCompiler()
         graph = compiler.compile(plan, agent_factory=make_agent)

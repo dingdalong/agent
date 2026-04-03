@@ -96,26 +96,33 @@ class AgentApp:
         remaining = user_input[len(f"/{skill_name}"):].strip()
         actual_input = remaining or f"已激活 {skill_name} skill，请按指令执行。"
 
-        # 2. 解析 → WorkflowPlan
+        # 2. 解析 → WorkflowPlan（携带 full_body）
         parser = SkillWorkflowParser()
         workflow = parser.parse(content, skill_name)
 
-        # 3. 定义 agent_factory
-        # 将原始需求注入 system prompt 作为背景上下文，
-        # agent.task 作为步骤触发消息（替代 context.input）
-        def make_step_agent(step_id: str, instructions: str) -> Agent:
+        # 3. 构建共享 system prompt（所有步骤相同，prompt cache 友好）
+        constraint_text = ""
+        if workflow.constraints:
+            lines = "\n".join(f"- {c}" for c in workflow.constraints)
+            constraint_text = f"\n\n## 约束\n{lines}"
+
+        shared_system_prompt = (
+            f"## 技能文档\n{workflow.full_body}"
+            f"\n\n## 用户需求\n{actual_input}"
+            f"{constraint_text}"
+        )
+
+        # 4. agent_factory：共享 instructions，步骤信息在 task 中
+        def make_step_agent(step_id: str, step_name: str, checklist_desc: str) -> Agent:
             return Agent(
                 name=f"step_{step_id}",
                 description=f"Workflow step: {step_id}",
-                instructions=(
-                    f"## 用户初始需求\n{actual_input}\n\n"
-                    f"## 当前步骤指令\n{instructions}"
-                ),
-                task="请执行当前工作流步骤。",
+                instructions=shared_system_prompt,
+                task=f"请执行步骤「{step_name}」：{checklist_desc}",
                 handoffs=[],
             )
 
-        # 4. 编译 → CompiledGraph
+        # 5. 编译 → CompiledGraph
         compiler = WorkflowCompiler()
         skill_graph = compiler.compile(
             workflow,
@@ -123,7 +130,7 @@ class AgentApp:
             skill_manager=self.skill_manager,
         )
 
-        # 5. 构建隔离的执行上下文
+        # 6. 构建隔离的执行上下文
         skill_engine = GraphEngine()
         ctx = RunContext(
             input=actual_input,
@@ -131,10 +138,10 @@ class AgentApp:
             deps=self.deps,
         )
 
-        # 6. 执行
+        # 7. 执行
         result = await skill_engine.run(skill_graph, ctx)
 
-        # 7. 输出
+        # 8. 输出
         output = result.output
         if isinstance(output, dict):
             text = output.get("text", str(output))
