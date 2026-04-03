@@ -23,16 +23,10 @@ class WorkflowCompiler:
     def compile(
         self,
         plan: WorkflowPlan,
-        agent_factory: Callable[[str, str], Agent],
+        agent_factory: Callable[[str, str, str], Agent],  # (step_id, step_name, checklist_desc)
         skill_manager: SkillManager | None = None,
     ) -> CompiledGraph:
         builder = GraphBuilder()
-
-        # 将约束拼接为前缀，注入每个 ACTION 步骤的 instructions
-        constraint_prefix = ""
-        if plan.constraints:
-            lines = "\n".join(f"- {c}" for c in plan.constraints)
-            constraint_prefix = f"## 约束\n{lines}\n\n"
 
         # 预建 step_id → step 映射，用于查找后继节点类型
         step_map = {s.id: s for s in plan.steps}
@@ -40,14 +34,15 @@ class WorkflowCompiler:
         for step in plan.steps:
             match step.step_type:
                 case StepType.ACTION:
-                    instructions = constraint_prefix + step.instructions
-                    # 如果后继是 DECISION 节点，注入约束：不要自行生成选项
+                    # checklist_desc 作为 agent.task（user message），约束由 app 层注入
+                    checklist_desc = step.instructions
+                    # 如果后继是 DECISION 节点，将格式约束追加到 checklist_desc
                     decision_hint = self._build_decision_hint(
                         step.id, plan, step_map,
                     )
                     if decision_hint:
-                        instructions += decision_hint
-                    agent = agent_factory(step.id, instructions)
+                        checklist_desc += decision_hint
+                    agent = agent_factory(step.id, step.name, checklist_desc)
                     node = AgentNode(agent)
                     # 确保节点名称与 step.id 一致，不依赖 agent.name
                     node.name = step.id
@@ -117,7 +112,7 @@ class WorkflowCompiler:
         self,
         skill_name: str,
         skill_manager: SkillManager | None,
-        agent_factory: Callable[[str, str], Agent],
+        agent_factory: Callable[[str, str, str], Agent],  # (step_id, step_name, checklist_desc)
     ) -> CompiledGraph:
         if skill_manager is None:
             raise ValueError(

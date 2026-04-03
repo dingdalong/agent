@@ -8,16 +8,18 @@ from src.graph.nodes import DecisionNode, SubgraphNode, TerminalNode
 from src.agents.node import AgentNode
 
 
-def make_agent(name: str, instructions: str):
+def make_agent(step_id: str, step_name: str, checklist_desc: str):
     """创建简单 Agent 用于测试（name == step_id）。"""
     from src.agents.agent import Agent
-    return Agent(name=name, description="test", instructions=instructions)
+    return Agent(name=step_id, description="test", instructions="skill body here",
+                 task=f"请执行步骤「{step_name}」：{checklist_desc}")
 
 
-def make_prefixed_agent(step_id: str, instructions: str):
+def make_prefixed_agent(step_id: str, step_name: str, checklist_desc: str):
     """模拟 app.py 的真实 factory：agent.name != step_id。"""
     from src.agents.agent import Agent
-    return Agent(name=f"step_{step_id}", description="test", instructions=instructions)
+    return Agent(name=f"step_{step_id}", description="test", instructions="skill body here",
+                 task=f"请执行步骤「{step_name}」：{checklist_desc}")
 
 
 class TestWorkflowCompiler:
@@ -104,7 +106,8 @@ class TestWorkflowCompiler:
         graph = compiler.compile(plan, agent_factory=make_agent)
         assert graph.entry == "start"
 
-    def test_constraints_injected_into_instructions(self):
+    def test_constraints_not_injected_by_compiler(self):
+        """重构后约束由 app.py 的 shared_system_prompt 注入，compiler 不再处理。"""
         plan = WorkflowPlan(
             name="test",
             steps=[WorkflowStep(id="s1", name="S1", instructions="do it",
@@ -116,11 +119,11 @@ class TestWorkflowCompiler:
         compiler = WorkflowCompiler()
         graph = compiler.compile(plan, agent_factory=make_agent)
         agent_node = graph.nodes["s1"]
-        # agent 的 instructions 应该包含约束
-        assert "Always be careful" in agent_node.agent.instructions
+        # compiler 不再注入约束到 agent.instructions
+        assert "Always be careful" not in agent_node.agent.instructions
 
-    def test_action_before_decision_gets_hint(self):
-        """ACTION 后继为 DECISION 时，agent instructions 中注入决策提示。"""
+    def test_action_before_decision_gets_hint_in_task(self):
+        """ACTION 后继为 DECISION 时，decision hint 注入 agent.task。"""
         plan = WorkflowPlan(
             name="test",
             steps=[
@@ -138,8 +141,8 @@ class TestWorkflowCompiler:
         compiler = WorkflowCompiler()
         graph = compiler.compile(plan, agent_factory=make_agent)
         agent_node = graph.nodes["explore"]
-        assert "严禁" in agent_node.agent.instructions
-        assert "以陈述句结尾" in agent_node.agent.instructions
+        assert "严禁" in agent_node.agent.task
+        assert "以陈述句结尾" in agent_node.agent.task
 
     def test_action_not_before_decision_no_hint(self):
         """ACTION 后继为非 DECISION 时，不注入决策提示。"""
@@ -157,7 +160,7 @@ class TestWorkflowCompiler:
         compiler = WorkflowCompiler()
         graph = compiler.compile(plan, agent_factory=make_agent)
         agent_node = graph.nodes["s1"]
-        assert "不要向用户提问" not in agent_node.agent.instructions
+        assert "严禁" not in agent_node.agent.task
 
     def test_decision_question_falls_back_to_step_name(self):
         """DECISION 节点 instructions 为空时，question 使用原始 step.name。"""
