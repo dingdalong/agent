@@ -57,15 +57,18 @@ class SkillWorkflowParser:
     def parse(self, content: str, skill_name: str) -> WorkflowPlan:
         dot_block = self._extract_dot(content)
         checklist = self._extract_checklist(content)
-        sections = self._extract_sections(content)
         constraints = self._extract_constraints(content)
+        body = self._extract_body(content)
 
         if dot_block:
-            return self._parse_dot(dot_block, checklist, sections, constraints, skill_name)
+            plan = self._parse_dot(dot_block, checklist, constraints, skill_name)
         elif checklist:
-            return self._parse_checklist(checklist, sections, constraints, skill_name)
+            plan = self._parse_checklist(checklist, constraints, skill_name)
         else:
-            return self._parse_fallback(content, skill_name)
+            plan = self._parse_fallback(content, skill_name)
+
+        plan.full_body = body
+        return plan
 
     def _extract_dot(self, content: str) -> str | None:
         match = re.search(r"```dot\s*\n(.*?)```", content, re.DOTALL)
@@ -74,18 +77,12 @@ class SkillWorkflowParser:
     def _extract_checklist(self, content: str) -> list[tuple[str, str]]:
         return _CHECKLIST_RE.findall(content)
 
-    def _extract_sections(self, content: str) -> dict[str, str]:
-        """提取 **Name:** 或 ## Name 格式的 section 内容。"""
-        result: dict[str, str] = {}
-        # 匹配 **Name:** 段落
-        bold_sections = re.findall(
-            r"\*\*([^*]+?)(?:：|:)\*\*\s*\n(.*?)(?=\n\*\*[^*]+?(?:：|:)\*\*|\n##|\Z)",
-            content,
-            re.DOTALL,
-        )
-        for name, body in bold_sections:
-            result[name.strip()] = body.strip()
-        return result
+    def _extract_body(self, content: str) -> str:
+        """提取 SKILL.md 正文（去掉 YAML frontmatter）。"""
+        if content.startswith("---"):
+            parts = content.split("---", 2)
+            return parts[2].strip() if len(parts) > 2 else content
+        return content
 
     def _extract_constraints(self, content: str) -> list[str]:
         """提取 Key Principles / Anti-Pattern 等约束 section 的列表项。"""
@@ -101,7 +98,7 @@ class SkillWorkflowParser:
 
     def _parse_dot(
         self, dot: str, checklist: list[tuple[str, str]],
-        sections: dict[str, str], constraints: list[str], skill_name: str,
+        constraints: list[str], skill_name: str,
     ) -> WorkflowPlan:
         checklist_map = {name.strip(): desc.strip() for name, desc in checklist}
         steps: list[WorkflowStep] = []
@@ -124,7 +121,7 @@ class SkillWorkflowParser:
                 step_type = StepType.SUBWORKFLOW
 
             step_id = _slugify(name)
-            instructions = sections.get(name, checklist_map.get(name, ""))
+            instructions = checklist_map.get(name, "")
 
             steps.append(WorkflowStep(
                 id=step_id,
@@ -161,7 +158,7 @@ class SkillWorkflowParser:
 
     def _parse_checklist(
         self, checklist: list[tuple[str, str]],
-        sections: dict[str, str], constraints: list[str], skill_name: str,
+        constraints: list[str], skill_name: str,
     ) -> WorkflowPlan:
         steps: list[WorkflowStep] = []
         transitions: list[WorkflowTransition] = []
@@ -169,7 +166,7 @@ class SkillWorkflowParser:
         for i, (name, desc) in enumerate(checklist):
             name = name.strip()
             step_id = _slugify(name)
-            instructions = sections.get(name, desc.strip())
+            instructions = desc.strip()
             steps.append(WorkflowStep(
                 id=step_id,
                 name=name,

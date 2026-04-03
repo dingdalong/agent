@@ -121,11 +121,14 @@ class TestDotGraphParsing:
         assert len(plan.constraints) >= 1
         assert any("careful" in c for c in plan.constraints)
 
-    def test_instructions_from_sections(self):
+    def test_instructions_from_checklist(self):
+        """重构后 instructions 只包含 checklist 概要，不再匹配 section 内容。"""
         parser = SkillWorkflowParser()
         plan = parser.parse(SAMPLE_SKILL_WITH_DOT, "test-skill")
         by_name = {s.name: s for s in plan.steps}
-        assert "first thing carefully" in by_name["Step one"].instructions
+        # instructions 来自 checklist 概要，不再来自 **Step one:** section
+        assert by_name["Step one"].instructions == "do first thing"
+        assert by_name["Step two"].instructions == "do second thing"
 
 
 class TestChecklistOnlyParsing:
