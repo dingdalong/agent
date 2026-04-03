@@ -1,5 +1,7 @@
 """配置加载器 — 读 config.yaml + .env，返回 AppConfig。"""
 
+from __future__ import annotations
+
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,12 +24,12 @@ class AppConfig:
     data_dir: Path
     raw: dict = field(default_factory=dict)
 
-    def resolve(self, relative: str) -> Path:
+    def resolve(self, relative: str | Path) -> Path:
         """相对于 workspace 解析路径，绝对路径原样返回。"""
         p = Path(relative)
         return p if p.is_absolute() else (self.workspace / p).resolve()
 
-    def resolve_data(self, relative: str) -> Path:
+    def resolve_data(self, relative: str | Path) -> Path:
         """相对于 data_dir 解析路径，绝对路径原样返回。"""
         p = Path(relative)
         return p if p.is_absolute() else (self.data_dir / p).resolve()

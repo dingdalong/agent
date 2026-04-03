@@ -1,6 +1,5 @@
 """AppConfig 和 load_config 测试。"""
 import yaml
-import pytest
 from pathlib import Path
 
 from src.config import AppConfig, load_config
@@ -79,3 +78,20 @@ class TestLoadConfig:
         config_file.write_text(yaml.dump({}))
         config = load_config(str(config_file))
         assert config.raw["llm"]["api_key"] == "sk-test-key"
+
+    def test_data_dir_relative_to_custom_workspace(self, tmp_path: Path):
+        """data_dir 相对于 workspace 解析，而非 config 目录。"""
+        project_dir = tmp_path / "my_project"
+        project_dir.mkdir()
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(yaml.dump({"workspace": "my_project", "data_dir": "my_data"}))
+        config = load_config(str(config_file))
+        assert config.data_dir == (project_dir / "my_data").resolve()
+
+    def test_yaml_value_not_overridden_by_env(self, tmp_path: Path, monkeypatch):
+        """YAML 中有值时，.env 不覆盖。"""
+        monkeypatch.setenv("OPENAI_API_KEY", "env-key")
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(yaml.dump({"llm": {"api_key": "yaml-key"}}))
+        config = load_config(str(config_file))
+        assert config.raw["llm"]["api_key"] == "yaml-key"
