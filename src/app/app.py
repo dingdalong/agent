@@ -7,12 +7,9 @@ import logging
 from typing import TYPE_CHECKING
 
 from src.events.bus import EventBus
-from src.interfaces.base import UserInterface
-from src.guardrails import InputGuardrail
-from src.agents import RunContext, DynamicState, AppState, AgentDeps, AgentRegistry, AgentRunner
-from src.agents.node import AgentNode
+from src.guardrails import Guardrail, run_guardrails
+from src.agents import RunContext, DynamicState, AppState, AgentDeps
 from src.graph import GraphEngine, CompiledGraph
-from src.tools.router import ToolRouter
 from src.skills.manager import SkillManager
 from src.mcp.manager import MCPManager
 from src.plan.flow import PlanFlow
@@ -20,7 +17,6 @@ from src.plan.flow import PlanFlow
 if TYPE_CHECKING:
     from src.memory.buffer import ConversationBuffer
     from src.memory.types import MemoryRecord
-    from src.tools.categories import CategoryResolver
 
 logger = logging.getLogger(__name__)
 
@@ -39,40 +35,26 @@ class AgentApp:
     def __init__(
         self,
         deps: AgentDeps,
-        ui: UserInterface,
-        guardrail: InputGuardrail,
-        tool_router: ToolRouter,
-        agent_registry: AgentRegistry,
-        engine: GraphEngine,
+        input_guardrails: list[Guardrail],
         graph: CompiledGraph,
         skill_manager: SkillManager,
         mcp_manager: MCPManager,
-        runner: AgentRunner,
         conversation_buffer: ConversationBuffer | None = None,
-        category_summaries: list[dict[str, str]] | None = None,
-        category_resolver: CategoryResolver | None = None,
         event_bus: EventBus | None = None,
     ):
         self.deps = deps
-        self.ui = ui
-        self.guardrail = guardrail
-        self.tool_router = tool_router
-        self.agent_registry = agent_registry
-        self.engine = engine
+        self.input_guardrails = input_guardrails
         self.graph = graph
         self.skill_manager = skill_manager
         self.mcp_manager = mcp_manager
-        self.runner = runner
         self.conversation_buffer = conversation_buffer
-        self._category_summaries: list[dict[str, str]] = category_summaries or []
-        self._category_resolver = category_resolver
         self.event_bus = event_bus
 
     async def process(self, user_input: str) -> None:
         """处理单条用户消息。"""
-        passed, reason = self.guardrail.check(user_input)
-        if not passed:
-            await self.ui.display(f"\n[安全拦截] {reason}\n")
+        block = await run_guardrails(self.input_guardrails, None, user_input)
+        if block:
+            await self.deps.ui.display(f"\n[安全拦截] {block.message}\n")
             return
 
         if user_input.strip().startswith("/plan"):
@@ -89,17 +71,17 @@ class AgentApp:
     async def _handle_plan(self, user_input: str) -> None:
         plan_request = user_input.strip()[5:].strip()
         if not plan_request:
-            await self.ui.display("\n请在 /plan 后输入你的请求\n")
+            await self.deps.ui.display("\n请在 /plan 后输入你的请求\n")
             return
         plan_flow = PlanFlow(
             llm=self.deps.llm,
-            tool_router=self.tool_router,
-            agent_registry=self.agent_registry,
-            engine=self.engine,
-            ui=self.ui,
+            tool_router=self.deps.tool_router,
+            agent_registry=self.deps.agent_registry,
+            engine=self.deps.graph_engine,
+            ui=self.deps.ui,
         )
         result = await plan_flow.run(plan_request)
-        await self.ui.display(f"\n{result}\n")
+        await self.deps.ui.display(f"\n{result}\n")
 
     async def _handle_skill(self, user_input: str, skill_name: str) -> None:
         """通过 SkillWorkflowParser + WorkflowCompiler 执行 skill 工作流。"""
@@ -155,7 +137,7 @@ class AgentApp:
         else:
             text = str(output)
 
-        await self.ui.display(f"\n{text}\n")
+        await self.deps.ui.display(f"\n{text}\n")
 
     async def _handle_normal(self, user_input: str) -> None:
         state = AppState()
@@ -181,7 +163,7 @@ class AgentApp:
             state=state,
             deps=self.deps,
         )
-        result = await self.engine.run(self.graph, ctx)
+        result = await self.deps.graph_engine.run(self.graph, ctx)
         output = result.output
         if isinstance(output, dict):
             output = output.get("text", str(output))
@@ -191,9 +173,9 @@ class AgentApp:
             output = str(output)
         # 流式模式下 TokenDelta 已逐字输出，只补换行；无 EventBus 时才整体打印
         if self.event_bus:
-            await self.ui.display("\n")
+            await self.deps.ui.display("\n")
         else:
-            await self.ui.display(f"\n{output}\n")
+            await self.deps.ui.display(f"\n{output}\n")
 
         # --- Post-turn: 记忆存储 ---
         if self.conversation_buffer is not None:
@@ -236,13 +218,13 @@ class AgentApp:
         if self.event_bus:
             async def _consume():
                 async for event in self.event_bus.subscribe():
-                    await self.ui.on_event(event)
+                    await self.deps.ui.on_event(event)
             consumer_task = asyncio.create_task(_consume())
 
-        await self.ui.display("Agent 已启动，输入 'exit' 退出。\n")
+        await self.deps.ui.display("Agent 已启动，输入 'exit' 退出。\n")
         try:
             while True:
-                user_input = await self.ui.prompt("\n你: ")
+                user_input = await self.deps.ui.prompt("\n你: ")
                 if user_input.strip().lower() in ("exit", "quit"):
                     break
                 await self.process(user_input)

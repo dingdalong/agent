@@ -16,7 +16,7 @@ from src.agents.registry import AgentRegistry
 from src.agents.runner import AgentRunner
 from src.graph import GraphEngine
 from src.tools.categories import CategoryResolver
-from src.tools.delegate import DelegateToolProvider
+from src.agents.delegate import DelegateToolProvider
 from src.tools.router import ToolRouter
 from src.app.presets import build_skill_graph
 from src.llm.types import LLMResponse

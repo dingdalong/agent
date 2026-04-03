@@ -4,7 +4,7 @@ import re
 from contextlib import AsyncExitStack
 from datetime import timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from mcp import ClientSession
 from mcp.client.stdio import stdio_client, StdioServerParameters
@@ -19,18 +19,25 @@ logger = logging.getLogger(__name__)
 class MCPManager:
     """Manages MCP Server connections, tool discovery, and tool call routing."""
 
-    def __init__(self, configs: list[MCPServerConfig] | None = None):
+    def __init__(
+        self,
+        configs: list[MCPServerConfig] | None = None,
+        max_output_length: int = 2000,
+        on_tools_discovered: Callable[[str, list[str]], None] | None = None,
+    ):
         self._exit_stack = AsyncExitStack()
         self._sessions: dict[str, ClientSession] = {}
         self._tool_map: dict[str, tuple[str, str]] = {}  # full_name -> (server_name, original_name)
         self._timeouts: dict[str, float] = {}
         self._tools_schemas: list[dict] = []
+        self._max_output_length = max_output_length
         # 按 safe_name 存储配置，供 connect_server 按需连接使用
         self._configs: dict[str, MCPServerConfig] = {
             re.sub(r"[^a-zA-Z0-9_]", "_", cfg.name): cfg
             for cfg in (configs or [])
         }
         self._connect_locks: dict[str, asyncio.Lock] = {}
+        self._on_tools_discovered = on_tools_discovered
 
     async def connect_server(self, safe_name: str) -> None:
         """按需连接单个 MCP Server（幂等，并发安全）。
@@ -84,8 +91,8 @@ class MCPManager:
         output = "\n".join(texts)
         if not output:
             return "(执行成功，无输出)"
-        if len(output) > 2000:
-            output = output[:2000] + "...(结果已截断)"
+        if len(output) > self._max_output_length:
+            output = output[:self._max_output_length] + "...(结果已截断)"
         return output
 
     def get_tools_schemas(self) -> list[dict]:
@@ -188,6 +195,10 @@ class MCPManager:
         self._sessions[safe_name] = session
         self._timeouts[safe_name] = config.timeout
         logger.info(f"MCP Server '{config.name}' 已连接，发现 {registered_count} 个工具")
+
+        if self._on_tools_discovered:
+            discovered = [name for name, (sn, _) in self._tool_map.items() if sn == safe_name]
+            self._on_tools_discovered(safe_name, discovered)
 
     async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> str:
         """Route a tool call to the appropriate MCP Server session."""

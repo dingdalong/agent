@@ -59,3 +59,31 @@ class RunContext(Generic[StateT, DepsT]):
     current_agent: str = ""
     depth: int = 0
     delegate_depth: int = 0  # 委派深度：0=顶层，≥1=被 delegate 调用
+
+    def get_memory_context(self) -> str | None:
+        """读取 state 中的 memory_context，兼容 AppState 和动态 state。"""
+        if isinstance(self.state, AppState):
+            return self.state.memory_context
+        return getattr(self.state, "memory_context", None)
+
+    def get_conversation_history(self) -> list[dict[str, Any]] | None:
+        """读取 state 中的 conversation_history，兼容 AppState 和动态 state。"""
+        if isinstance(self.state, AppState):
+            return self.state.conversation_history
+        return getattr(self.state, "conversation_history", None)
+
+    def extend_history(self, turns: list[dict[str, Any]]) -> None:
+        """将新对话轮次追加到 state 的 conversation_history。"""
+        if isinstance(self.state, AppState):
+            if self.state.conversation_history is None:
+                self.state.conversation_history = []
+            self.state.conversation_history.extend(turns)
+        else:
+            history = getattr(self.state, "conversation_history", None)
+            if history is None:
+                history = []
+                try:
+                    setattr(self.state, "conversation_history", history)
+                except (AttributeError, ValueError):
+                    return
+            history.extend(turns)

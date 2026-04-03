@@ -9,7 +9,7 @@ from src.agents.deps import AgentDeps
 from src.agents.registry import AgentRegistry
 from src.agents.runner import AgentRunner
 from src.tools.categories import CategoryResolver
-from src.tools.delegate import DelegateToolProvider
+from src.agents.delegate import DelegateToolProvider
 from src.tools.router import ToolRouter
 from src.llm.types import LLMResponse
 

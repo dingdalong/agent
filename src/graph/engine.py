@@ -116,7 +116,10 @@ class GraphEngine:
                     elif target in graph.nodes:
                         # 使用结构化消息的 task 字段作为下一个节点的输入
                         handoff_msg = getattr(node_result.handoff, "message", None)
-                        context.input = handoff_msg.task if handoff_msg else node_result.handoff.task
+                        if handoff_msg:
+                            context.input = handoff_msg.task
+                        else:
+                            logger.warning("HandoffRequest missing message, using original input")
                         pending = [target]
                         continue
                     else:

@@ -8,7 +8,7 @@ import time
 from typing import Any
 
 from src.agents.agent import Agent, AgentResult, HandoffRequest
-from src.agents.context import RunContext, TraceEvent, AppState
+from src.agents.context import RunContext, TraceEvent
 from src.events.bus import EventBus
 from src.events.types import (
     AgentStarted,
@@ -70,13 +70,9 @@ class AgentRunner:
             {"role": "system", "content": system_prompt},
         ]
 
-        # 注入长期记忆上下文和对话历史（AppState 有显式字段，其他 state 类型走 getattr）
-        if isinstance(context.state, AppState):
-            memory_context = context.state.memory_context
-            conversation_history = context.state.conversation_history
-        else:
-            memory_context = getattr(context.state, "memory_context", None)
-            conversation_history = getattr(context.state, "conversation_history", None)
+        # 注入长期记忆上下文和对话历史
+        memory_context = context.get_memory_context()
+        conversation_history = context.get_conversation_history()
 
         if memory_context:
             messages.append({
@@ -227,12 +223,17 @@ class AgentRunner:
         if agent.output_model is not None:
             output_schema = build_output_schema(
                 "agent_output",
-                f"将结果整理为 {agent.output_model.__name__} 结构",
+                f"从文本中提取结构化数据，填入 {agent.output_model.__name__} 格式",
                 agent.output_model,
             )
+            struct_messages: list[dict[str, Any]] = [
+                {"role": "system", "content": f"从以下文本中提取结构化数据，填入 {agent.output_model.__name__} 格式。"},
+                {"role": "user", "content": final_text},
+            ]
             struct_response = await context.deps.llm.chat(
-                messages + [{"role": "user", "content": "请将结果整理为结构化数据。"}],
+                struct_messages,
                 tools=[output_schema],
+                tool_choice={"type": "function", "function": {"name": "agent_output"}},
                 silent=True,
             )
             parsed = parse_output(struct_response.tool_calls, "agent_output", agent.output_model)
@@ -306,20 +307,7 @@ class AgentRunner:
         if not new_turns:
             return
 
-        # 写回 conversation_history
-        if isinstance(context.state, AppState):
-            if context.state.conversation_history is None:
-                context.state.conversation_history = []
-            context.state.conversation_history.extend(new_turns)
-        else:
-            history = getattr(context.state, "conversation_history", None)
-            if history is None:
-                history = []
-                try:
-                    setattr(context.state, "conversation_history", history)
-                except (AttributeError, ValueError):
-                    return
-            history.extend(new_turns)
+        context.extend_history(new_turns)
 
     def _build_tools(self, agent: Agent, context: RunContext) -> list[dict]:
         """从 deps.tool_router 过滤 agent 允许的工具。

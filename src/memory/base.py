@@ -1,10 +1,11 @@
 """MemoryProvider Protocol — 记忆存储的抽象接口。"""
 
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from src.memory.types import MemoryRecord, MemoryType
 
 
+@runtime_checkable
 class MemoryProvider(Protocol):
     """记忆存储的抽象接口。
 

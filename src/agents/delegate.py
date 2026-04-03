@@ -5,15 +5,20 @@
 任务意图，接收方通过 prompt 模板获得完整的任务上下文。
 
 协议设计详见 docs/superpowers/specs/2026-03-31-structured-delegation-protocol-design.md
-
-本模块位于 Layer 1（src/tools/），对 Layer 2 的依赖
-（RunContext、AgentRunner、AgentRegistry）仅在 execute() 运行时才导入，
-不违反分层约束。
 """
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from src.agents.context import DynamicState, RunContext
+from src.agents.node import AgentNode
+from src.graph.builder import GraphBuilder
+from src.graph.messages import (
+    AgentMessage,
+    AgentResponse,
+    build_message_schema,
+    format_for_receiver,
+)
 from src.tools.schemas import ToolDict
 
 if TYPE_CHECKING:
@@ -55,8 +60,6 @@ class DelegateToolProvider:
 
     def get_schemas(self) -> list[ToolDict]:
         """为每个可委派的 Tool Agent 生成结构化委托 schema。"""
-        from src.graph.messages import build_message_schema
-
         schemas: list[ToolDict] = []
         for summary in self._resolver.get_all_summaries():
             name = summary["name"]
@@ -108,9 +111,6 @@ class DelegateToolProvider:
         if tool_name == "parallel_delegate":
             return await self._execute_parallel(arguments, context)
 
-        from src.agents.context import DynamicState, RunContext
-        from src.graph.messages import AgentMessage, AgentResponse, format_for_receiver
-
         agent_name = tool_name[len(DELEGATE_PREFIX):]
 
         registry = getattr(context.deps, "agent_registry", None)
@@ -153,9 +153,6 @@ class DelegateToolProvider:
             )
             result = await runner.run(agent, sub_ctx)
             return result.text
-
-        from src.agents.node import AgentNode
-        from src.graph.builder import GraphBuilder
 
         receiving_input = format_for_receiver(message)
         sub_graph = (

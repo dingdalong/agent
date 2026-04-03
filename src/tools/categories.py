@@ -139,6 +139,60 @@ def validate_categories(
     return errors
 
 
+def validate_categories_startup(
+    categories: dict[str, CategoryEntry],
+    available_tool_names: set[str],
+) -> tuple[list[str], list[str]]:
+    """启动时校验分类配置。
+
+    两类检查：
+    1. 格式校验（所有分类）：description 非空、snake_case、无重复工具
+    2. 存在性校验：非 mcp_ 前缀的工具检查是否已注册
+
+    返回 (errors, pending_mcp_tools)：
+    - errors：格式错误和非 MCP 工具不存在的错误
+    - pending_mcp_tools：等待 MCP 连接后再校验的工具名列表
+    """
+    errors: list[str] = []
+    seen_tools: dict[str, str] = {}
+    pending_mcp_tools: list[str] = []
+
+    for cat_name, cat in categories.items():
+        if not cat.get("description", "").strip():
+            errors.append(f"类别 {cat_name} 缺少 description")
+
+        raw_name = cat_name.removeprefix("tool_")
+        if not re.match(r"^[a-z][a-z0-9_]*$", raw_name):
+            errors.append(f"类别名 {cat_name} 不合法（需要 snake_case）")
+
+        for tool_name in cat.get("tools", {}).keys():
+            if tool_name in seen_tools:
+                errors.append(
+                    f"工具 {tool_name} 重复出现在 {seen_tools[tool_name]} 和 {cat_name}"
+                )
+            seen_tools[tool_name] = cat_name
+
+            if tool_name.startswith("mcp_"):
+                pending_mcp_tools.append(tool_name)
+            elif tool_name not in available_tool_names:
+                errors.append(f"工具 {tool_name} 不存在于当前已注册的工具中")
+
+    return errors, pending_mcp_tools
+
+
+def validate_mcp_tools(
+    categories: dict[str, CategoryEntry],
+    available_tool_names: set[str],
+) -> list[str]:
+    """MCP 连接后校验：检查分类中 mcp_ 前缀工具是否已注册。"""
+    errors: list[str] = []
+    for cat_name, cat in categories.items():
+        for tool_name in cat.get("tools", {}).keys():
+            if tool_name.startswith("mcp_") and tool_name not in available_tool_names:
+                errors.append(f"MCP 工具 {tool_name}（类别 {cat_name}）未在已连接的 MCP Server 中发现")
+    return errors
+
+
 # ---------------------------------------------------------------------------
 # CategoryResolver — 按需解析分类条目
 # ---------------------------------------------------------------------------

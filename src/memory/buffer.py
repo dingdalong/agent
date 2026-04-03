@@ -13,7 +13,7 @@ from src.llm.base import LLMProvider
 from src.utils.performance import async_time_function
 
 if TYPE_CHECKING:
-    from .store import MemoryStore
+    from .chroma.store import ChromaMemoryStore
 
 logger = logging.getLogger(__name__)
 
@@ -94,10 +94,10 @@ class ConversationBuffer:
     @async_time_function()
     async def compress(
         self,
-        store: "MemoryStore",
+        store: "ChromaMemoryStore",
         llm: LLMProvider,
     ) -> None:
-        """压缩最早的对话为摘要并存入 MemoryStore。"""
+        """压缩最早的对话为摘要并存入 ChromaMemoryStore。"""
         if len(self._messages) < 4:
             return
 

@@ -22,7 +22,7 @@ from src.mcp.manager import MCPManager
 from src.mcp.provider import MCPToolProvider
 from src.skills.manager import SkillManager
 from src.skills.provider import SkillToolProvider
-from src.guardrails import InputGuardrail
+from src.guardrails import build_input_guardrails
 from src.agents import AgentRegistry, AgentRunner
 from src.graph import GraphEngine
 from src.events.bus import EventBus
@@ -70,6 +70,7 @@ async def create_app(config_path: str = "config.yaml") -> AgentApp:
     )
 
     # 2. Tools
+    max_output_length = raw.get("tools", {}).get("max_output_length", 2000)
     interaction = UserInteractionService(ui)
     discover_tools("src.tools.builtin", Path("src/tools/builtin"))
     registry = get_registry()
@@ -77,7 +78,7 @@ async def create_app(config_path: str = "config.yaml") -> AgentApp:
     middlewares = [
         error_handler_middleware(),
         sensitive_confirm_middleware(registry, interaction),
-        truncate_middleware(raw.get("tools", {}).get("max_output_length", 2000)),
+        truncate_middleware(max_output_length),
     ]
     tool_router = ToolRouter()
     tool_router.add_provider(LocalToolProvider(registry, executor, middlewares))
@@ -86,7 +87,7 @@ async def create_app(config_path: str = "config.yaml") -> AgentApp:
     # 3. MCP — 只加载配置，不连接。连接在 DelegateToolProvider.execute 中按需触发
     mcp_config_path = raw.get("mcp", {}).get("config_path", "mcp_servers.json")
     mcp_configs = load_mcp_config(mcp_config_path)
-    mcp_manager = MCPManager(configs=mcp_configs)
+    mcp_manager = MCPManager(configs=mcp_configs, max_output_length=max_output_length)
     if mcp_configs:
         tool_router.add_provider(MCPToolProvider(mcp_manager))
 
@@ -133,7 +134,12 @@ async def create_app(config_path: str = "config.yaml") -> AgentApp:
         )
 
     # 5.5 Tool Categories
-    from src.tools.categories import load_categories, CategoryResolver
+    from src.tools.categories import (
+        load_categories,
+        CategoryResolver,
+        validate_categories_startup,
+        validate_mcp_tools,
+    )
 
     categories_path = raw.get("tools", {}).get(
         "categories_path", "tool_categories.json"
@@ -143,9 +149,28 @@ async def create_app(config_path: str = "config.yaml") -> AgentApp:
 
     categories = load_categories(categories_path)
     if categories:
+        # 阶段一：启动时校验（格式 + 非 MCP 工具存在性）
+        available = {s["function"]["name"] for s in tool_router.get_all_schemas()}
+        errors, pending_mcp = validate_categories_startup(categories, available)
+        for err in errors:
+            logger.warning("[工具分类] %s", err)
+        if pending_mcp:
+            logger.debug("[工具分类] %d 个 MCP 工具待连接后校验", len(pending_mcp))
+
         category_resolver = CategoryResolver(categories)
         category_summaries = category_resolver.get_all_summaries()
         logger.info("[工具分类] 加载 %d 个类别", len(categories))
+
+        # 阶段二：MCP 连接后校验分类中引用的 MCP 工具
+        _cats = categories  # 闭包捕获
+
+        def _on_mcp_tools_discovered(_server: str, _tools: list[str]) -> None:
+            all_mcp = {s["function"]["name"] for s in tool_router.get_all_schemas() if s["function"]["name"].startswith("mcp_")}
+            errs = validate_mcp_tools(_cats, all_mcp)
+            for err in errs:
+                logger.warning("[工具分类] %s", err)
+
+        mcp_manager._on_tools_discovered = _on_mcp_tools_discovered
     else:
         logger.info("[工具分类] 未找到分类配置，跳过")
 
@@ -157,6 +182,7 @@ async def create_app(config_path: str = "config.yaml") -> AgentApp:
 
     runner = AgentRunner(
         max_tool_rounds=agent_cfg.get("max_tool_rounds", 10),
+        max_result_length=agent_cfg.get("max_result_length", 4000),
         event_bus=event_bus,
     )
     graph = build_default_graph(
@@ -165,7 +191,17 @@ async def create_app(config_path: str = "config.yaml") -> AgentApp:
     )
     engine = GraphEngine(event_bus=event_bus, max_handoff_depth=agent_cfg.get("max_handoffs", 10))
 
-    # 7. Deps
+    # 7. Deps（runtime_checkable Protocol 做 isinstance 断言）
+    from src.llm.base import LLMProvider
+    from src.interfaces.base import UserInterface
+    from src.memory.base import MemoryProvider
+    assert isinstance(llm, LLMProvider), f"llm must implement LLMProvider, got {type(llm)}"
+    assert isinstance(ui, UserInterface), f"ui must implement UserInterface, got {type(ui)}"
+    if memory_store is not None:
+        assert isinstance(memory_store, MemoryProvider), (
+            f"memory must implement MemoryProvider, got {type(memory_store)}"
+        )
+
     deps = AgentDeps(
         llm=llm,
         tool_router=tool_router,
@@ -177,7 +213,7 @@ async def create_app(config_path: str = "config.yaml") -> AgentApp:
     )
 
     # 7.5 Delegate Tool Provider
-    from src.tools.delegate import DelegateToolProvider
+    from src.agents.delegate import DelegateToolProvider
 
     if category_resolver:
         delegate_provider = DelegateToolProvider(
@@ -188,17 +224,10 @@ async def create_app(config_path: str = "config.yaml") -> AgentApp:
 
     return AgentApp(
         deps=deps,
-        ui=ui,
-        guardrail=InputGuardrail(),
-        tool_router=tool_router,
-        agent_registry=agent_registry,
-        engine=engine,
+        input_guardrails=build_input_guardrails(),
         graph=graph,
         skill_manager=skill_manager,
         mcp_manager=mcp_manager,
-        runner=runner,
         conversation_buffer=conversation_buffer,
-        category_summaries=category_summaries,
-        category_resolver=category_resolver,
         event_bus=event_bus,
     )

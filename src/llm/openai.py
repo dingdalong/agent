@@ -42,7 +42,7 @@ class OpenAIProvider:
         messages: list[dict],
         tools: list[dict] | None = None,
         temperature: float = 1.0,
-        tool_choice: str | None = None,
+        tool_choice: str | dict | None = None,
         silent: bool = False,
     ) -> LLMResponse:
         """流式调用 LLM，返回完整响应。"""

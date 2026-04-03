@@ -2,6 +2,8 @@
 import pytest
 from unittest.mock import AsyncMock, Mock
 from src.app.app import AgentApp
+from src.guardrails import build_input_guardrails
+from src.guardrails.base import Guardrail, GuardrailResult
 
 
 def _make_mock_ui():
@@ -12,21 +14,21 @@ def _make_mock_ui():
     return ui
 
 
-def _make_app(ui=None):
+def _make_app(ui=None, input_guardrails=None):
     """Create an AgentApp with all dependencies mocked."""
     if ui is None:
         ui = _make_mock_ui()
+    deps = Mock()
+    deps.ui = ui
+    deps.tool_router = Mock()
+    deps.agent_registry = Mock()
+    deps.graph_engine = Mock()
     return AgentApp(
-        deps=Mock(),
-        ui=ui,
-        guardrail=Mock(check=Mock(return_value=(True, ""))),
-        tool_router=Mock(),
-        agent_registry=Mock(),
-        engine=Mock(),
+        deps=deps,
+        input_guardrails=input_guardrails or [],
         graph=Mock(),
         skill_manager=Mock(is_slash_command=Mock(return_value=None)),
         mcp_manager=Mock(),
-        runner=Mock(),
     )
 
 
@@ -35,8 +37,7 @@ class TestAgentAppProcess:
     @pytest.mark.asyncio
     async def test_guardrail_blocks_dangerous_input(self):
         ui = _make_mock_ui()
-        app = _make_app(ui=ui)
-        app.guardrail = Mock(check=Mock(return_value=(False, "不安全内容")))
+        app = _make_app(ui=ui, input_guardrails=build_input_guardrails())
 
         await app.process("rm -rf /")
         ui.display.assert_called()

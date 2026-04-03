@@ -8,6 +8,7 @@ from typing import Callable, Optional, Type
 from pydantic import BaseModel
 
 from src.graph.messages import AgentMessage, AgentResponse
+from src.guardrails.base import Guardrail
 
 
 @dataclass
@@ -55,5 +56,5 @@ class Agent:
     tools: list[str] = field(default_factory=list)
     handoffs: list[str] = field(default_factory=list)
     output_model: Optional[Type[BaseModel]] = None
-    input_guardrails: list = field(default_factory=list)
-    output_guardrails: list = field(default_factory=list)
+    input_guardrails: list[Guardrail] = field(default_factory=list)
+    output_guardrails: list[Guardrail] = field(default_factory=list)

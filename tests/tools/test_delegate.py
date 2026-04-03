@@ -46,7 +46,7 @@ def mock_context(mock_deps):
 
 @pytest.fixture
 def provider(resolver):
-    from src.tools.delegate import DelegateToolProvider
+    from src.agents.delegate import DelegateToolProvider
     return DelegateToolProvider(resolver=resolver)
 
 
@@ -97,7 +97,7 @@ async def test_execute_unknown_agent(provider, mock_context):
 @pytest.mark.asyncio
 async def test_execute_ensures_mcp_connection():
     """execute 应在运行 agent 前确保 MCP server 已连接。"""
-    from src.tools.delegate import DelegateToolProvider
+    from src.agents.delegate import DelegateToolProvider
     from src.agents.agent import AgentResult
 
     cats = {
@@ -138,7 +138,7 @@ async def test_execute_ensures_mcp_connection():
 @pytest.mark.asyncio
 async def test_execute_no_mcp_manager_still_works():
     """没有 mcp_manager 时（纯本地工具）execute 仍正常工作。"""
-    from src.tools.delegate import DelegateToolProvider
+    from src.agents.delegate import DelegateToolProvider
     from src.agents.agent import AgentResult
 
     cats = {
@@ -164,7 +164,7 @@ async def test_execute_no_mcp_manager_still_works():
 @pytest.mark.asyncio
 async def test_execute_propagates_delegate_depth():
     """execute 创建的子 RunContext 应将 delegate_depth 递增。"""
-    from src.tools.delegate import DelegateToolProvider
+    from src.agents.delegate import DelegateToolProvider
     from src.agents.agent import AgentResult
 
     cats = {
@@ -193,7 +193,7 @@ async def test_execute_propagates_delegate_depth():
 @pytest.mark.asyncio
 async def test_execute_propagates_parent_delegate_depth():
     """当 delegate_depth 已非零时，子 RunContext 应继续递增。"""
-    from src.tools.delegate import DelegateToolProvider
+    from src.agents.delegate import DelegateToolProvider
     from src.agents.agent import AgentResult
 
     cats = {
@@ -335,7 +335,7 @@ async def test_execute_backward_compat_task_only(provider, mock_runner, mock_con
 @pytest.mark.asyncio
 async def test_execute_uses_engine_when_available():
     """deps 中同时有 graph_engine 和 runner 时，应通过 engine 执行。"""
-    from src.tools.delegate import DelegateToolProvider
+    from src.agents.delegate import DelegateToolProvider
     from src.agents.agent import AgentResult
     from src.graph.engine import GraphResult
     from pydantic import BaseModel, ConfigDict

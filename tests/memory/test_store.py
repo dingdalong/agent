@@ -1,5 +1,5 @@
 """
-Unit tests for MemoryStore (store.py) and ChromaMemoryStore (chroma/store.py).
+Unit tests for ChromaMemoryStore (chroma/store.py).
 
 Tests add/search/versioning/cleanup with mocked ChromaDB.
 """
@@ -10,17 +10,16 @@ from datetime import datetime, timezone, timedelta
 from unittest.mock import patch, MagicMock, AsyncMock
 
 from src.memory.types import MemoryRecord, MemoryType
-from src.memory.store import MemoryStore
 from src.memory.chroma.store import ChromaMemoryStore
 
 
 def _make_store(mock_collection):
-    """Create a MemoryStore with mocked dependencies."""
+    """Create a ChromaMemoryStore with mocked dependencies."""
     with patch("src.memory.chroma.store.chromadb.PersistentClient") as mock_client, \
          patch("src.memory.chroma.store.EmbeddingClient"), \
          patch("src.memory.chroma.store.FactExtractor"):
         mock_client.return_value.get_or_create_collection.return_value = mock_collection
-        store = MemoryStore(
+        store = ChromaMemoryStore(
             embedding_model="test-model",
             embedding_url="http://test",
             collection_name="test_memories",
@@ -437,14 +436,6 @@ class TestMemoryStoreAddFromConversation:
         mock_chroma_collection.add.assert_not_called()
 
 
-class TestMemoryStoreInit:
-    """Test MemoryStore initialization (alias for ChromaMemoryStore)."""
-
-    def test_memory_store_is_chroma_alias(self):
-        """MemoryStore is a re-export of ChromaMemoryStore."""
-        assert MemoryStore is ChromaMemoryStore
-
-
 # === ChromaMemoryStore tests ===
 
 
@@ -550,10 +541,3 @@ class TestBuildCollectionName:
         from src.memory.utils import build_collection_name
         assert build_collection_name("memories", "") == "memories"
 
-    def test_chroma_collection_name_includes_sanitized_user_id(self):
-        from src.memory.chroma.utils import build_collection_name
-        assert build_collection_name("user_facts", "User/ABC 123") == "user_facts_user_abc_123"
-
-    def test_chroma_collection_name_no_user_id(self):
-        from src.memory.chroma.utils import build_collection_name
-        assert build_collection_name("memories", None) == "memories"

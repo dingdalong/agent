@@ -2,7 +2,6 @@
 import pytest
 from unittest.mock import MagicMock, patch
 
-from src.memory.store import MemoryStore
 from src.memory.chroma.store import ChromaMemoryStore
 
 
@@ -16,12 +15,12 @@ def mock_chroma_collection():
 
 @pytest.fixture
 def memory_store(mock_chroma_collection):
-    """Create a MemoryStore (alias for ChromaMemoryStore) with mocked dependencies."""
+    """Create a ChromaMemoryStore with mocked dependencies."""
     with patch("src.memory.chroma.store.chromadb.PersistentClient") as mock_client, \
          patch("src.memory.chroma.store.EmbeddingClient"), \
          patch("src.memory.chroma.store.FactExtractor"):
         mock_client.return_value.get_or_create_collection.return_value = mock_chroma_collection
-        store = MemoryStore(
+        store = ChromaMemoryStore(
             embedding_model="test-model",
             embedding_url="http://test",
             collection_name="test_memories",

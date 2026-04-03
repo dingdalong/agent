@@ -29,18 +29,24 @@ def time_function(log_threshold=1.0):
     return decorator
 
 
-def async_time_function():
-    """异步函数计时装饰器"""
+def async_time_function(log_threshold=1.0):
+    """异步函数计时装饰器。
+
+    Args:
+        log_threshold: 超过此阈值（秒）时记录为 WARNING 级别
+    """
     def decorator(func):
         @functools.wraps(func)
         async def async_wrapper(*args, **kwargs):
-            start_time = time.time()
+            start = time.perf_counter()
             try:
                 result = await func(*args, **kwargs)
                 return result
             finally:
-                end_time = time.time()
-                duration = end_time - start_time
-                print(f"[性能] {func.__name__} 耗时: {duration:.3f}秒")
+                elapsed = time.perf_counter() - start
+                if elapsed > log_threshold:
+                    logger.warning(f"SLOW: {func.__name__} took {elapsed:.2f}s")
+                else:
+                    logger.debug(f"TIMING: {func.__name__} took {elapsed:.3f}s")
         return async_wrapper
     return decorator
