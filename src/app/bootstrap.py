@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 
-from src.config import load_config
+from src.config import load_config, AppConfig
 from src.llm.openai import OpenAIProvider
 from src.interfaces.cli import CLIInterface
 from src.tools.decorator import get_registry
@@ -38,7 +37,7 @@ from src.app.app import AgentApp
 logger = logging.getLogger(__name__)
 
 
-async def create_app(config_path: str = "config.yaml") -> AgentApp:
+async def create_app(config: AppConfig | None = None) -> AgentApp:
     """应用组装入口 — 整个框架唯一的具体实现实例化点。
 
     组装流程：
@@ -51,7 +50,9 @@ async def create_app(config_path: str = "config.yaml") -> AgentApp:
     7. 组装 AgentDeps 依赖容器
     8. 返回 AgentApp 实例
     """
-    raw = load_config(config_path)
+    if config is None:
+        config = load_config()
+    raw = config.raw
     llm_cfg = raw.get("llm", {})
     ui = CLIInterface()
 
@@ -72,7 +73,7 @@ async def create_app(config_path: str = "config.yaml") -> AgentApp:
     # 2. Tools
     max_output_length = raw.get("tools", {}).get("max_output_length", 2000)
     interaction = UserInteractionService(ui)
-    discover_tools("src.tools.builtin", Path("src/tools/builtin"))
+    discover_tools("src.tools.builtin", config.resolve("src/tools/builtin"))
     registry = get_registry()
     executor = ToolExecutor(registry)
     middlewares = [
@@ -85,7 +86,7 @@ async def create_app(config_path: str = "config.yaml") -> AgentApp:
     tool_router.add_provider(UserInputToolProvider(interaction))
 
     # 3. MCP — 只加载配置，不连接。连接在 DelegateToolProvider.execute 中按需触发
-    mcp_config_path = raw.get("mcp", {}).get("config_path", "mcp_servers.json")
+    mcp_config_path = str(config.resolve(raw.get("mcp", {}).get("config_path", "mcp_servers.json")))
     mcp_configs = load_mcp_config(mcp_config_path)
     mcp_manager = MCPManager(configs=mcp_configs, max_output_length=max_output_length)
     if mcp_configs:
@@ -93,7 +94,7 @@ async def create_app(config_path: str = "config.yaml") -> AgentApp:
 
     # 4. Skills
     skill_dirs = raw.get("skills", {}).get("dirs", ["skills/", ".agents/skills/"])
-    skill_manager = SkillManager(skill_dirs=skill_dirs)
+    skill_manager = SkillManager(skill_dirs=[str(config.resolve(d)) for d in skill_dirs])
     await skill_manager.discover()
     if skill_manager._skills:
         tool_router.add_provider(SkillToolProvider(skill_manager))
@@ -118,7 +119,7 @@ async def create_app(config_path: str = "config.yaml") -> AgentApp:
                 embedding_model=embedding_cfg["model"],
                 embedding_url=embedding_cfg["base_url"],
                 collection_name=collection_name,
-                persist_dir=memory_cfg.get("path", "./chroma_data"),
+                persist_dir=str(config.resolve_data(memory_cfg.get("path", "chroma"))),
                 llm=llm,
             )
             logger.info("[记忆系统] ChromaMemoryStore 已初始化")
@@ -141,9 +142,9 @@ async def create_app(config_path: str = "config.yaml") -> AgentApp:
         validate_mcp_tools,
     )
 
-    categories_path = raw.get("tools", {}).get(
+    categories_path = str(config.resolve(raw.get("tools", {}).get(
         "categories_path", "tool_categories.json"
-    )
+    )))
     category_resolver = None
     category_summaries: list[dict[str, str]] = []
 
