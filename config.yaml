@@ -1,7 +1,11 @@
+# ===== 目录配置 =====
+# workspace: .              # 用户项目目录（相对于本文件所在目录），默认 "."
+# data_dir: .agent_data     # 系统数据目录（相对于 workspace），默认 ".agent_data"
+
 # ===== 用户配置 =====
 llm:
   provider: deepseek
-  model: deepseek-chat
+  model: deepseek-reasoner
   base_url: https://api.deepseek.com/v1
 
 embedding:
@@ -11,7 +15,7 @@ embedding:
 
 memory:
   provider: chroma
-  path: ./chroma_data
+  path: chroma              # 相对于 data_dir 解析
 
 user:
   id: user_001
@@ -35,4 +39,4 @@ user:
 #     - skills/
 #     - .agents/skills/
 events:
-    level: progress   # progress(流式回答+思考) | detail(+工具/Agent) | trace(+图/节点调试)
+    level: trace   # progress(流式回答+思考) | detail(+工具/Agent) | trace(+图/节点调试)
