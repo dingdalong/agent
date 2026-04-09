@@ -1,0 +1,17 @@
+llm_provider:
+  deepseek:
+    models: # 可用模型
+      - deepseek-reasoner
+      - deepseek-chat
+    base_url: https://api.deepseek.com/v1
+
+llm:
+  default: # 默认模型
+    provider: deepseek # 模型提供商
+    model: deepseek-reasoner # 模型名称
+    concurrency: 5 # 最大并发数量
+    max_retries: 3 # 重试次数
+
+
+events:
+    level: progress   # progress | detail | trace
