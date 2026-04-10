@@ -25,3 +25,5 @@ def load_config(ptch: str = "config.yaml") -> dict:
     override(config["llm_provider"]["deepseek"], "api_key", "DEEPSEEK_API_KEY")
 
     return config
+
+config = load_config()

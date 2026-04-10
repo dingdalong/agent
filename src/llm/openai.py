@@ -9,6 +9,7 @@ from openai import AsyncOpenAI, APIConnectionError, RateLimitError, APIError
 from src.events import EventBus
 from src.events.types import ResponseDelta, ThinkingDelta
 from src.llm.base import LLMResponse
+from src.tools import ToolDict
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +41,7 @@ class OpenAIProvider:
     async def chat(
         self,
         messages: list[dict],
-        tools: list[dict] | None = None,
+        tools: list[ToolDict] | None = None,
         temperature: float = 1.0,
         tool_choice: str | dict | None = None,
     ) -> LLMResponse | None:
