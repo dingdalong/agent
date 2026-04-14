@@ -44,7 +44,7 @@ class OpenAIProvider:
         tools: list[ToolDict] | None = None,
         temperature: float = 1.0,
         tool_choice: str | dict | None = None,
-    ) -> LLMResponse | None:
+    ) -> LLMResponse:
         """流式调用 LLM，返回完整响应。"""
         async with self._semaphore:
             for attempt in range(self.max_retries):
@@ -68,6 +68,7 @@ class OpenAIProvider:
 
                 except APIError:
                     raise
+            raise RuntimeError("LLM chat: 所有重试均失败")
 
     async def _parse_stream(
         self, stream

@@ -28,7 +28,7 @@ class LLMProvider(Protocol):
         tools: list[dict] | None = None,
         temperature: float = 1.0,
         tool_choice: str | dict | None = None,
-    ) -> LLMResponse | None: ...
+    ) -> LLMResponse: ...
 
 def build_output_schema(name: str, description: str, model: Type[BaseModel]) -> dict:
     """从 Pydantic 模型构建结构化输出的 tool schema。"""

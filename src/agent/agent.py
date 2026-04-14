@@ -37,8 +37,7 @@ class Agent:
         final_text = ""
         for round_idx in range(max_tool_rounds):
             response = await llm.chat(messages, tool_list)
-            if response is not None:
-                content, tool_calls, = response.content, response.tool_calls
+            content, tool_calls = response.content, response.tool_calls
 
             if not tool_calls:
                 final_text = content
@@ -75,7 +74,6 @@ class Agent:
         else:
             # 超过 max_tool_rounds
             response = await llm.chat(messages)
-            if response is not None:
-                final_text = response.content
+            final_text = response.content
 
         return final_text
