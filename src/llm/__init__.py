@@ -1,3 +1,3 @@
-from src.llm.base import LLMProvider
+from src.llm.base import LLMProvider, LLMResponse
 
-__all__ = ["LLMProvider"]
+__all__ = ["LLMProvider", "LLMResponse"]

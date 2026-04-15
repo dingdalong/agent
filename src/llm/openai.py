@@ -5,17 +5,20 @@ import logging
 import time
 
 from openai import AsyncOpenAI, APIConnectionError, RateLimitError, APIError
+from pydantic import BaseModel
 
 from src.events import EventBus
 from src.events.types import ResponseDelta, ThinkingDelta
-from src.llm.base import LLMResponse
+from src.llm.base import LLMProvider, LLMResponse
 from src.tools import ToolDict
 
 logger = logging.getLogger(__name__)
 
 
-class OpenAIProvider:
-    """基于 OpenAI SDK 的 LLM Provider。"""
+class OpenAIProvider(LLMProvider):
+    """OpenAI Provider。支持原生结构化输出 (response_format)。"""
+
+    supports_native_structured_output = True
 
     def __init__(
         self,
@@ -44,19 +47,30 @@ class OpenAIProvider:
         tools: list[ToolDict] | None = None,
         temperature: float = 1.0,
         tool_choice: str | dict | None = None,
+        output_schema: type[BaseModel] | None = None,
     ) -> LLMResponse:
         """流式调用 LLM，返回完整响应。"""
         async with self._semaphore:
             for attempt in range(self.max_retries):
                 try:
-                    response = await self._client.chat.completions.create(
-                        model=self.model,
-                        messages=messages,
-                        tools=tools,
-                        stream=True,
-                        temperature=temperature,
-                        tool_choice=tool_choice or ("auto" if tools else None),
-                    )
+                    kwargs: dict = {
+                        "model": self.model,
+                        "messages": messages,
+                        "tools": tools,
+                        "stream": True,
+                        "temperature": temperature,
+                        "tool_choice": tool_choice or ("auto" if tools else None),
+                    }
+                    if output_schema is not None:
+                        kwargs["response_format"] = {
+                            "type": "json_schema",
+                            "json_schema": {
+                                "name": "structured_output",
+                                "schema": output_schema.model_json_schema(),
+                                "strict": True,
+                            },
+                        }
+                    response = await self._client.chat.completions.create(**kwargs)
                     return await self._parse_stream(response)
 
                 except (APIConnectionError, RateLimitError, asyncio.TimeoutError) as e:

@@ -1,38 +1,27 @@
-from typing import Protocol, runtime_checkable
-from typing import Dict, Optional, Type
+"""LLM Provider 抽象基类与结构化输出支持。"""
+
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Type
 from pydantic import BaseModel, ValidationError
-import json, logging
+import json
+import logging
+import re
 
 logger = logging.getLogger(__name__)
 
 @dataclass
 class LLMResponse:
-    """非流式 LLM 响应。"""
+    """LLM 响应。"""
     content: str
     tool_calls: dict[int, dict[str, str]] = field(default_factory=dict)
     finish_reason: Optional[str] = None
     assistant_message: Optional[dict] = None
 
-@runtime_checkable
-class LLMProvider(Protocol):
-    """所有 LLM 实现必须满足的协议。
+# ---- 结构化输出辅助函数 ----
 
-    消费者（AgentRunner, planner, extractor, buffer）依赖此协议，
-    不关心底层是 OpenAI、Claude 还是本地模型。
-    """
-
-    async def chat(
-        self,
-        messages: list[dict],
-        tools: list[dict] | None = None,
-        temperature: float = 1.0,
-        tool_choice: str | dict | None = None,
-    ) -> LLMResponse: ...
-
-def build_output_schema(name: str, description: str, model: Type[BaseModel]) -> dict:
-    """从 Pydantic 模型构建结构化输出的 tool schema。"""
+def _build_output_schema(name: str, description: str, model: Type[BaseModel]) -> dict:
+    """从 Pydantic 模型构建 function-calling 格式的 tool schema。"""
     schema = model.model_json_schema()
     schema.pop("title", None)
     schema.pop("description", None)
@@ -45,8 +34,8 @@ def build_output_schema(name: str, description: str, model: Type[BaseModel]) -> 
         },
     }
 
-def parse_output(
-    tool_calls: Dict[int, Dict[str, str]],
+def _parse_output(
+    tool_calls: dict[int, dict[str, str]],
     name: str,
     model: Type[BaseModel],
 ) -> Optional[BaseModel]:
@@ -60,3 +49,65 @@ def parse_output(
                 logger.warning(f"结构化输出 '{name}' 解析失败: {e}")
                 return None
     return None
+
+def _parse_json_from_text(text: str, model_cls: Type[BaseModel]) -> Optional[BaseModel]:
+    """从 LLM 文本响应中提取 JSON 并解析为 Pydantic 模型。"""
+    # 优先匹配 ```json ... ``` 代码块
+    match = re.search(r'```(?:json)?\s*\n?(.*?)\n?```', text, re.DOTALL)
+    if match:
+        try:
+            return model_cls(**json.loads(match.group(1)))
+        except (json.JSONDecodeError, ValueError):
+            pass
+    # 尝试匹配裸 JSON 对象
+    match = re.search(r'\{.*\}', text, re.DOTALL)
+    if match:
+        try:
+            return model_cls(**json.loads(match.group()))
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return None
+
+
+class LLMProvider(ABC):
+    """所有 LLM 实现的抽象基类。"""
+
+    supports_native_structured_output: bool = False
+
+    @abstractmethod
+    async def chat(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        temperature: float = 1.0,
+        tool_choice: str | dict | None = None,
+        output_schema: Type[BaseModel] | None = None,
+    ) -> LLMResponse: ...
+
+    async def structured_chat(
+        self,
+        messages: list[dict],
+        output_schema: Type[BaseModel],
+        schema_name: str = "structured_output",
+        schema_description: str = "结构化输出",
+        temperature: float = 1.0,
+    ) -> Optional[BaseModel]:
+        """从对话历史中提取结构化输出。
+
+        默认实现：Two-Pass（fake-tool + forced tool_choice）。
+        支持原生结构化输出的 Provider 应覆盖此方法。
+        """
+        output_tool = _build_output_schema(schema_name, schema_description, output_schema)
+
+        response = await self.chat(
+            messages,
+            tools=[output_tool],
+            #tool_choice={"type": "function", "function": {"name": schema_name}},
+            temperature=temperature,
+        )
+
+        result = _parse_output(response.tool_calls, schema_name, output_schema)
+        if result is not None:
+            return result
+
+        return _parse_json_from_text(response.content, output_schema)

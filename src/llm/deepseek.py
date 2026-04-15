@@ -1,4 +1,4 @@
-"""OpenAI SDK 实现的 LLM Provider。"""
+"""DeepSeek LLM Provider。"""
 
 import asyncio
 import logging
@@ -6,14 +6,16 @@ import time
 from src.singleton import event_bus
 from openai import AsyncOpenAI, APIConnectionError, RateLimitError, APIError
 from src.events.types import ResponseDelta, ThinkingDelta
-from src.llm.base import LLMResponse
+from src.llm.base import LLMProvider, LLMResponse
 from src.tools import ToolDict
 
 logger = logging.getLogger(__name__)
 
 
-class DeepSeekProvider:
+class DeepSeekProvider(LLMProvider):
     """基于 OpenAI SDK 的 LLM Provider。"""
+
+    supports_native_structured_output = False
 
     def __init__(
         self,
@@ -40,6 +42,7 @@ class DeepSeekProvider:
         tools: list[ToolDict] | None = None,
         temperature: float = 1.0,
         tool_choice: str | dict | None = None,
+        output_schema=None,
     ) -> LLMResponse:
         """流式调用 LLM，返回完整响应。"""
         async with self._semaphore:
