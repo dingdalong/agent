@@ -96,6 +96,6 @@ class ToolsMgr:
             return f"错误：未知工具 '{tool_name}'"
 
         tool = self._tools[tool_name]
-        return await tool(arguments)
+        return await tool(**arguments)
 
 tools_mgr = ToolsMgr()

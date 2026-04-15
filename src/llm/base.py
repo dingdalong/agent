@@ -13,6 +13,7 @@ class LLMResponse:
     content: str
     tool_calls: dict[int, dict[str, str]] = field(default_factory=dict)
     finish_reason: Optional[str] = None
+    assistant_message: Optional[dict] = None
 
 @runtime_checkable
 class LLMProvider(Protocol):

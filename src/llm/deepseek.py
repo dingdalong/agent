@@ -3,10 +3,8 @@
 import asyncio
 import logging
 import time
-
+from src.singleton import event_bus
 from openai import AsyncOpenAI, APIConnectionError, RateLimitError, APIError
-
-from src.events import EventBus
 from src.events.types import ResponseDelta, ThinkingDelta
 from src.llm.base import LLMResponse
 from src.tools import ToolDict
@@ -14,7 +12,7 @@ from src.tools import ToolDict
 logger = logging.getLogger(__name__)
 
 
-class OpenAIProvider:
+class DeepSeekProvider:
     """基于 OpenAI SDK 的 LLM Provider。"""
 
     def __init__(
@@ -25,12 +23,10 @@ class OpenAIProvider:
         concurrency: int = 5,
         max_retries: int = 3,
         timeout: float = 120.0,
-        event_bus: EventBus | None = None,
     ):
         self.model = model
         self.max_retries = max_retries
         self._semaphore = asyncio.Semaphore(concurrency)
-        self._bus = event_bus
         self._client = AsyncOpenAI(
             api_key=api_key,
             base_url=base_url,
@@ -85,22 +81,20 @@ class OpenAIProvider:
             reasoning = getattr(delta, "reasoning_content", None)
             if reasoning:
                 reasoning_parts.append(reasoning)
-                if self._bus:
-                    await self._bus.emit(ThinkingDelta(
-                        timestamp=time.time(),
-                        source=self.model,
-                        content=reasoning,
-                    ))
+                await event_bus.emit(ThinkingDelta(
+                    timestamp=time.time(),
+                    source=self.model,
+                    content=reasoning,
+                ))
 
             if delta.content:
                 if not (delta.tool_calls and delta.content.isspace()):
                     content_parts.append(delta.content)
-                    if self._bus:
-                        await self._bus.emit(ResponseDelta(
-                            timestamp=time.time(),
-                            source=self.model,
-                            content=delta.content,
-                        ))
+                    await event_bus.emit(ResponseDelta(
+                        timestamp=time.time(),
+                        source=self.model,
+                        content=delta.content,
+                    ))
 
             if delta.tool_calls:
                 for tool_chunk in delta.tool_calls:

@@ -43,19 +43,7 @@ class Agent:
                 final_text = content
                 break
 
-            assistant_msg: dict[str, Any] = {
-                "role": "assistant",
-                "content": content if content else None,
-                "tool_calls": [
-                    {
-                        "id": tc["id"],
-                        "type": "function",
-                        "function": {"name": tc["name"], "arguments": tc["arguments"]},
-                    }
-                    for tc in tool_calls.values()
-                ],
-            }
-            messages.append(assistant_msg)
+            messages.append(response.assistant_message)
 
             for tc in tool_calls.values():
                 tool_name = tc["name"]
