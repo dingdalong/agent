@@ -3,7 +3,7 @@ from typing import Callable, Any, Type
 from pydantic import BaseModel, ValidationError
 from src.singleton import ui, event_bus, llm
 from src.config import config
-from src.tools import tools_mgr
+from src.tools import tools_mgr, ToolDict
 import json
 import logging
 

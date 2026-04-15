@@ -15,6 +15,7 @@ class CLIInterface:
     def __init__(self) -> None:
         self._in_thinking = False  # 是否正在输出思考流
         self._in_response = False  # 是否正在输出回应流
+        self._ask_lock = asyncio.Lock()
 
     async def input(self, message: str) -> str:
         return await asyncio.to_thread(input, message)
@@ -58,3 +59,8 @@ class CLIInterface:
                     print("\n💭 ", end="", flush=True)
                     self._in_thinking = True
                 print(c, end="", flush=True)
+
+    async def ask(self, question: str) -> str:
+        async with self._ask_lock:
+            await self.output(f"\n🤖提问: {question}")
+            return await self.input("\n你的回答: ")

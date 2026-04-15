@@ -22,3 +22,7 @@ class UserInterface(Protocol):
     async def on_event(self, event: Event) -> None:
         """处理 EventBus 事件，各终端实现自己的展示逻辑。"""
         ...
+
+    async def ask(self, message: str) -> str:
+        """询问用户并返回回答"""
+        ...
