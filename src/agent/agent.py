@@ -175,11 +175,11 @@ class Agent:
             response = await llm.chat(messages, self._tool_list, output_schema=schema_cls)
             content, tool_calls = response.content, response.tool_calls
 
+            messages.append(response.assistant_message)
+
             if not tool_calls:
                 final_text = content
                 break
-
-            messages.append(response.assistant_message)
 
             for tc in tool_calls.values():
                 tool_name = tc["name"]
