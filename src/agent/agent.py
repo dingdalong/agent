@@ -3,7 +3,8 @@ from typing import Callable, Any, Type
 from pydantic import BaseModel, ValidationError
 from src.singleton import ui, event_bus, llm
 from src.config import config
-from src.tools import tools_mgr, ToolDict
+from src.tools import tools_mgr as _global_tools_mgr, ToolDict
+from src.tools.tools_mgr import ToolsMgr
 import json
 import logging
 
@@ -32,6 +33,12 @@ class Agent:
     name: str
     description: str
     prompt: str | Callable[..., str]
+    tools_mgr: ToolsMgr | None = field(default=None, repr=False)
+    _tool_list: list[ToolDict] = field(default_factory=list, init=False, repr=False)
+
+    def __post_init__(self):
+        if self.tools_mgr is None : self.tools_mgr = _global_tools_mgr
+        self._tool_list = self.tools_mgr.get_schemas()
 
     async def run(
         self,
@@ -48,11 +55,10 @@ class Agent:
             {"role": "user", "content": input},
         ]
 
-        tool_list = tools_mgr.get_schemas()
         schema_cls = struct_output.model_cls if struct_output else None
         final_text = ""
         for round_idx in range(max_tool_rounds):
-            response = await llm.chat(messages, tool_list, output_schema=schema_cls)
+            response = await llm.chat(messages, self._tool_list, output_schema=schema_cls)
             content, tool_calls = response.content, response.tool_calls
 
             if not tool_calls:
@@ -68,7 +74,7 @@ class Agent:
                 except json.JSONDecodeError:
                     args = {}
 
-                result_text = await tools_mgr.execute(tool_name, args)
+                result_text = await self.tools_mgr.execute(tool_name, args)
 
                 messages.append({
                     "role": "tool",
