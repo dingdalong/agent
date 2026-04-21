@@ -6,7 +6,7 @@ ui = CLIInterface()
 from src.events import EventBus, EventLevel
 event_bus = EventBus(level=EventLevel.from_str(config["events"].get("level", "progress")))
 
-from llm.deepseek import DeepSeekProvider
+from src.llm.deepseek import DeepSeekProvider
 default_llm_cfg = config["llm"]["default"]
 
 llm_provider_cfg = config["llm_provider"][default_llm_cfg["provider"]]

@@ -40,6 +40,15 @@ class Agent:
         if self.tools_mgr is None : self.tools_mgr = _global_tools_mgr
         self._tool_list = self.tools_mgr.get_schemas()
 
+    async def clear_reasoning_content(self, messages):
+        for message in messages:
+            # 处理对象（有 reasoning_content 属性）
+            if hasattr(message, 'reasoning_content'):
+                message.reasoning_content = None
+            # 处理字典（有 'reasoning_content' 键）
+            elif isinstance(message, dict) and 'reasoning_content' in message:
+                message['reasoning_content'] = None
+
     async def run(
         self,
         input: str,
@@ -85,6 +94,9 @@ class Agent:
             # 超过 max_tool_rounds
             response = await llm.chat(messages)
             final_text = response.content
+
+        #移除思考内容
+        await self.clear_reasoning_content(messages)
 
         # 结构化输出解析
         if struct_output is not None:
