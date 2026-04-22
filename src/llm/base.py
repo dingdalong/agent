@@ -78,6 +78,7 @@ class LLMProvider(ABC):
     async def chat(
         self,
         messages: list[dict],
+        prompt: list[dict] | None = None,
         tools: list[dict] | None = None,
         temperature: float = 1.0,
         tool_choice: str | dict | None = None,
@@ -86,8 +87,9 @@ class LLMProvider(ABC):
 
     async def structured_chat(
         self,
-        messages: list[dict],
         output_schema: Type[BaseModel],
+        messages: list[dict],
+        prompt: list[dict] | None = None,
         schema_name: str = "structured_output",
         schema_description: str = "结构化输出",
         temperature: float = 1.0,
@@ -101,6 +103,7 @@ class LLMProvider(ABC):
 
         response = await self.chat(
             messages,
+            prompt,
             tools=[output_tool],
             #tool_choice={"type": "function", "function": {"name": schema_name}},
             temperature=temperature,

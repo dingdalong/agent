@@ -20,3 +20,6 @@ llm = DeepSeekProvider(
     concurrency = default_llm_cfg["concurrency"],
     max_retries = default_llm_cfg["max_retries"],
 )
+
+from src.compact import CompactMgr
+compact = CompactMgr()

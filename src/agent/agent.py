@@ -1,12 +1,15 @@
 from dataclasses import dataclass, field
 from typing import Callable, Any, Type
 from pydantic import BaseModel, ValidationError
-from src.singleton import ui, event_bus, llm, todo
+from src.singleton import ui, event_bus, llm, todo, compact
 from src.config import config
 from src.tools import tools_mgr as _global_tools_mgr, ToolDict
 from src.tools.tools_mgr import ToolsMgr
+from src.compact import CompactState
+from src.events.types import CompactDelta
 import json
 import logging
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -33,12 +36,15 @@ class Agent:
     name: str
     description: str
     prompt: str
+    _prompt: list[dict] = field(default_factory=list[dict], init=False, repr=False)
     tools_mgr: ToolsMgr | None = field(default=None, repr=False)
     _tool_list: list[ToolDict] = field(default_factory=list, init=False, repr=False)
 
     def __post_init__(self):
         if self.tools_mgr is None : self.tools_mgr = _global_tools_mgr
         self._tool_list = self.tools_mgr.get_schemas()
+        self._prompt = []
+        self._prompt.append({"role": "system", "content": self.prompt})
 
     async def normalize_messages(self, messages: list) -> list:
         """在发送至 OpenAI API 前清理消息列表。
@@ -157,6 +163,7 @@ class Agent:
         self,
         input: str,
         messages: list[dict],
+        state: CompactState,
         struct_output: StructOutputConfig | None = None,
     ) -> str | BaseModel:
         messages.append({"role": "user", "content": input})
@@ -164,9 +171,19 @@ class Agent:
 
         final_text = ""
         rounds_without_todo = 0
+        manual_compact = False
+        compact_focus = None
         for round_idx in range(max_tool_rounds):
+            messages[:] = await compact.micro_compact(messages)
+            if compact.is_need_compact(messages):
+                await event_bus.emit(CompactDelta(
+                    timestamp=time.time(),
+                    source=self.name,
+                    content="auto manual",
+                ))
+                messages[:] = await compact.compact_history(messages, state)
             messages[:] = await self.normalize_messages(messages)
-            response = await llm.chat(messages, self._tool_list, output_schema=schema_cls)
+            response = await llm.chat(prompt=self._prompt, messages=messages, tools=self._tool_list, output_schema=schema_cls)
             content, tool_calls = response.content, response.tool_calls
 
             messages.append(response.assistant_message)
@@ -180,9 +197,11 @@ class Agent:
                 tool_name = tc["name"]
                 if tool_name == "todo_write":
                     used_todo = True
-
                 try:
                     args = json.loads(tc["arguments"])
+                    if tool_name == "compact":
+                        manual_compact = True
+                        compact_focus = args.get("focus")
                 except json.JSONDecodeError:
                     args = {}
 
@@ -197,9 +216,17 @@ class Agent:
             rounds_without_todo = 0 if used_todo else rounds_without_todo + 1
             if todo.has_open_items() and rounds_without_todo >= 3:
                 messages.append({"role": "user", "content": [{"type": "text", "text": "<reminder>Update your todos.</reminder>"}]})
+
+            if manual_compact:
+                await event_bus.emit(CompactDelta(
+                    timestamp=time.time(),
+                    source=self.name,
+                    content="llm manual",
+                ))
+                messages[:] = await compact.compact_history(messages, state, focus=compact_focus)
         else:
             # 超过 max_tool_rounds
-            response = await llm.chat(messages)
+            response = await llm.chat(prompt=self._prompt, messages=messages)
             final_text = response.content
 
         #移除思考内容
@@ -215,8 +242,9 @@ class Agent:
                     logger.debug(f"原生结构化输出解析失败，回退到 structured_chat: {e}")
             # 非原生 或 解析失败：Two-Pass 兜底
             result = await llm.structured_chat(
-                messages=messages,
                 output_schema=struct_output.model_cls,
+                messages=messages,
+                prompt=self._prompt,
                 schema_name=struct_output.schema_name,
                 schema_description=struct_output.schema_desc,
             )

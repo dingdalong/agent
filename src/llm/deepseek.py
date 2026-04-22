@@ -39,6 +39,7 @@ class DeepSeekProvider(LLMProvider):
     async def chat(
         self,
         messages: list[dict],
+        prompt: list[dict] | None = None,
         tools: list[ToolDict] | None = None,
         temperature: float = 1.0,
         tool_choice: str | dict | None = None,
@@ -50,7 +51,7 @@ class DeepSeekProvider(LLMProvider):
                 try:
                     response = await self._client.chat.completions.create(
                         model=self.model,
-                        messages=messages,
+                        messages=prompt + messages if prompt is not None else messages,
                         tools=tools,
                         stream=True,
                         temperature=temperature,

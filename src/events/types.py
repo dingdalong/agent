@@ -35,12 +35,17 @@ class ThinkingDelta(Event):
     level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
     type: Literal["thinking_delta"] = field(default="thinking_delta", init=False)
 
-
 @dataclass
 class ErrorOccurred(Event):
     error: str = ""
     level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
     type: Literal["error"] = field(default="error", init=False)
+
+@dataclass
+class CompactDelta(Event):
+    content: str = ""
+    level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
+    type: Literal["compact_delta"] = field(default="compact_delta", init=False)
 
 # 联合类型
 AgentEvent = Union[

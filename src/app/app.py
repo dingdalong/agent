@@ -1,6 +1,7 @@
 import asyncio, logging
 from src.singleton import ui, event_bus, llm
 from src.agent import Agent
+from src.compact import CompactState
 
 logger = logging.getLogger(__name__)
 
@@ -19,16 +20,16 @@ class AgentApp:
 
         await ui.output("Agent 已启动，输入 'exit' 退出。\n")
         try:
-            prompt = "你是一个有用的助手"
+            prompt = "你是一个有用的助手，你的名字叫小糖果"
             agent = Agent("总控", "入口", prompt)
+            compact_state = CompactState()
             history = []
-            history.append({"role": "system", "content": prompt})
             while True:
                 user_input = await ui.input("\n\n你: ")
                 if user_input.strip().lower() in ("exit", "quit"):
                     break
 
-                await agent.run(user_input, history)
+                await agent.run(user_input, history, compact_state)
                 #final_text = extract_text(history[-1]["content"])
                 #if final_text:
                 #    print(final_text)
