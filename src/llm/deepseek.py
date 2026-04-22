@@ -3,7 +3,6 @@
 import asyncio
 import logging
 import time
-from src.singleton import event_bus
 from openai import AsyncOpenAI, APIConnectionError, RateLimitError, APIError
 from src.events.types import ResponseDelta, ThinkingDelta
 from src.llm.base import LLMProvider, LLMResponse
@@ -15,25 +14,14 @@ logger = logging.getLogger(__name__)
 class DeepSeekProvider(LLMProvider):
     """基于 OpenAI SDK 的 LLM Provider。"""
 
-    supports_native_structured_output = False
-
-    def __init__(
-        self,
-        api_key: str,
-        base_url: str,
-        model: str,
-        concurrency: int = 5,
-        max_retries: int = 3,
-        timeout: float = 120.0,
-    ):
-        self.model = model
-        self.max_retries = max_retries
-        self._semaphore = asyncio.Semaphore(concurrency)
+    def __post_init__(self):
+        super().__post_init__()
+        self.supports_native_structured_output = False
         self._client = AsyncOpenAI(
-            api_key=api_key,
-            base_url=base_url,
-            timeout=timeout,
-            max_retries=2,
+            api_key=self.api_key,
+            base_url=self.base_url,
+            timeout=self.timeout,
+            max_retries=self.max_retries,
         )
 
     async def chat(
@@ -85,7 +73,7 @@ class DeepSeekProvider(LLMProvider):
             reasoning = getattr(delta, "reasoning_content", None)
             if reasoning:
                 reasoning_parts.append(reasoning)
-                await event_bus.emit(ThinkingDelta(
+                await self.event_bus.emit(ThinkingDelta(
                     timestamp=time.time(),
                     source=self.model,
                     content=reasoning,
@@ -94,7 +82,7 @@ class DeepSeekProvider(LLMProvider):
             if delta.content:
                 if not (delta.tool_calls and delta.content.isspace()):
                     content_parts.append(delta.content)
-                    await event_bus.emit(ResponseDelta(
+                    await self.event_bus.emit(ResponseDelta(
                         timestamp=time.time(),
                         source=self.model,
                         content=delta.content,

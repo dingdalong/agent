@@ -9,16 +9,19 @@ event_bus = EventBus(level=EventLevel.from_str(config["events"].get("level", "pr
 from src.todo import TodoManager
 todo = TodoManager()
 
-from src.llm.deepseek import DeepSeekProvider
-default_llm_cfg = config["llm"]["default"]
+from src.llm import get_provider
 
-llm_provider_cfg = config["llm_provider"][default_llm_cfg["provider"]]
-llm = DeepSeekProvider(
+default_llm_cfg = config["llm"]["default"]
+llm_provider_name = default_llm_cfg["provider"]
+llm_provider_cfg = config["llm_provider"][llm_provider_name]
+LLMProvider = get_provider(llm_provider_name)
+llm = LLMProvider(
     api_key = llm_provider_cfg["api_key"],
     base_url = llm_provider_cfg["base_url"],
     model = default_llm_cfg["model"],
     concurrency = default_llm_cfg["concurrency"],
     max_retries = default_llm_cfg["max_retries"],
+    event_bus = event_bus,
 )
 
 from src.compact import CompactMgr

@@ -7,6 +7,8 @@ from pydantic import BaseModel, ValidationError
 import json
 import logging
 import re
+import asyncio
+from src.events import EventBus
 
 logger = logging.getLogger(__name__)
 
@@ -68,11 +70,20 @@ def _parse_json_from_text(text: str, model_cls: Type[BaseModel]) -> Optional[Bas
             pass
     return None
 
-
+@dataclass
 class LLMProvider(ABC):
     """所有 LLM 实现的抽象基类。"""
-
+    api_key: str
+    base_url: str
+    model: str
+    event_bus: EventBus
+    concurrency: int = 5
+    max_retries: int = 3
+    timeout: float = 120.0
     supports_native_structured_output: bool = False
+
+    def __post_init__(self):
+        self._semaphore = asyncio.Semaphore(self.concurrency)
 
     @abstractmethod
     async def chat(

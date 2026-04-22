@@ -18,32 +18,20 @@ logger = logging.getLogger(__name__)
 class OpenAIProvider(LLMProvider):
     """OpenAI Provider。支持原生结构化输出 (response_format)。"""
 
-    supports_native_structured_output = True
-
-    def __init__(
-        self,
-        api_key: str,
-        base_url: str,
-        model: str,
-        concurrency: int = 5,
-        max_retries: int = 3,
-        timeout: float = 120.0,
-        event_bus: EventBus | None = None,
-    ):
-        self.model = model
-        self.max_retries = max_retries
-        self._semaphore = asyncio.Semaphore(concurrency)
-        self._bus = event_bus
+    def __post_init__(self):
+        super().__post_init__()
+        self.supports_native_structured_output = True
         self._client = AsyncOpenAI(
-            api_key=api_key,
-            base_url=base_url,
-            timeout=timeout,
-            max_retries=2,
+            api_key=self.api_key,
+            base_url=self.base_url,
+            timeout=self.timeout,
+            max_retries=self.max_retries,
         )
 
     async def chat(
         self,
         messages: list[dict],
+        prompt: list[dict] | None = None,
         tools: list[ToolDict] | None = None,
         temperature: float = 1.0,
         tool_choice: str | dict | None = None,
@@ -55,7 +43,7 @@ class OpenAIProvider(LLMProvider):
                 try:
                     kwargs: dict = {
                         "model": self.model,
-                        "messages": messages,
+                        "messages": prompt + messages if prompt is not None else messages,
                         "tools": tools,
                         "stream": True,
                         "temperature": temperature,
@@ -99,22 +87,20 @@ class OpenAIProvider(LLMProvider):
             reasoning = getattr(delta, "reasoning_content", None)
             if reasoning:
                 reasoning_parts.append(reasoning)
-                if self._bus:
-                    await self._bus.emit(ThinkingDelta(
-                        timestamp=time.time(),
-                        source=self.model,
-                        content=reasoning,
-                    ))
+                await self.event_bus.emit(ThinkingDelta(
+                    timestamp=time.time(),
+                    source=self.model,
+                    content=reasoning,
+                ))
 
             if delta.content:
                 if not (delta.tool_calls and delta.content.isspace()):
                     content_parts.append(delta.content)
-                    if self._bus:
-                        await self._bus.emit(ResponseDelta(
-                            timestamp=time.time(),
-                            source=self.model,
-                            content=delta.content,
-                        ))
+                    await self.event_bus.emit(ResponseDelta(
+                        timestamp=time.time(),
+                        source=self.model,
+                        content=delta.content,
+                    ))
 
             if delta.tool_calls:
                 for tool_chunk in delta.tool_calls:
