@@ -194,12 +194,9 @@ class Agent:
                     "content": str(result_text),
                 })
 
-
-            if used_todo:
-                rounds_without_todo = rounds_without_todo + 1
-                if todo.has_open_items() and rounds_without_todo >= 3:
-                    rounds_without_todo = 0
-                    messages.append({"role": "user", "content": [{"type": "text", "text": "<reminder>Update your todos.</reminder>"}]})
+            rounds_without_todo = 0 if used_todo else rounds_without_todo + 1
+            if todo.has_open_items() and rounds_without_todo >= 3:
+                messages.append({"role": "user", "content": [{"type": "text", "text": "<reminder>Update your todos.</reminder>"}]})
         else:
             # 超过 max_tool_rounds
             response = await llm.chat(messages)
