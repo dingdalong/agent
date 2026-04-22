@@ -1,7 +1,7 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Any, Type
 from pydantic import BaseModel, ValidationError
-from src.singleton import ui, event_bus, llm
+from src.singleton import ui, event_bus, llm, todo
 from src.config import config
 from src.tools import tools_mgr as _global_tools_mgr, ToolDict
 from src.tools.tools_mgr import ToolsMgr
@@ -32,7 +32,7 @@ class Agent:
 
     name: str
     description: str
-    prompt: str | Callable[..., str]
+    prompt: str
     tools_mgr: ToolsMgr | None = field(default=None, repr=False)
     _tool_list: list[ToolDict] = field(default_factory=list, init=False, repr=False)
 
@@ -156,20 +156,14 @@ class Agent:
     async def run(
         self,
         input: str,
+        messages: list[dict],
         struct_output: StructOutputConfig | None = None,
     ) -> str | BaseModel:
-        if callable(self.prompt):
-            prompt = self.prompt(input)
-        else:
-            prompt = self.prompt
-
-        messages: list[dict[str, Any]] = [
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": input},
-        ]
-
+        messages.append({"role": "user", "content": input})
         schema_cls = struct_output.model_cls if struct_output else None
+
         final_text = ""
+        rounds_without_todo = 0
         for round_idx in range(max_tool_rounds):
             messages[:] = await self.normalize_messages(messages)
             response = await llm.chat(messages, self._tool_list, output_schema=schema_cls)
@@ -181,8 +175,12 @@ class Agent:
                 final_text = content
                 break
 
+            used_todo = False
             for tc in tool_calls.values():
                 tool_name = tc["name"]
+                if tool_name == "todo_write":
+                    used_todo = True
+
                 try:
                     args = json.loads(tc["arguments"])
                 except json.JSONDecodeError:
@@ -195,6 +193,13 @@ class Agent:
                     "tool_call_id": tc["id"],
                     "content": str(result_text),
                 })
+
+
+            if used_todo:
+                rounds_without_todo = rounds_without_todo + 1
+                if todo.has_open_items() and rounds_without_todo >= 3:
+                    rounds_without_todo = 0
+                    messages.append({"role": "user", "content": [{"type": "text", "text": "<reminder>Update your todos.</reminder>"}]})
         else:
             # 超过 max_tool_rounds
             response = await llm.chat(messages)

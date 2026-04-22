@@ -19,12 +19,26 @@ class AgentApp:
 
         await ui.output("Agent 已启动，输入 'exit' 退出。\n")
         try:
-            agent = Agent("总控", "入口", "你是一个有用的助手")
+            prompt = "你是一个有用的助手"
+            agent = Agent("总控", "入口", prompt)
+            history = []
+            history.append({"role": "system", "content": prompt})
             while True:
                 user_input = await ui.input("\n\n你: ")
                 if user_input.strip().lower() in ("exit", "quit"):
                     break
-                await agent.run(user_input)
+
+                await agent.run(user_input, history)
+                #final_text = extract_text(history[-1]["content"])
+                #if final_text:
+                #    print(final_text)
+                #print()
+                #from workflow.plan import build_graph, PlanExecuteState
+                #from src.graph import GraphEngine, RunContext
+                #plan_graph = await build_graph()
+                #state = PlanExecuteState(user_goal=user_input.strip())
+                #result = await GraphEngine().run(plan_graph, RunContext(input=user_input.strip(), state=state))
+                #await ui.output(result.output)
         finally:
             if event_bus:
                 event_bus.close()

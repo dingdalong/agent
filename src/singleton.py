@@ -6,6 +6,9 @@ ui = CLIInterface()
 from src.events import EventBus, EventLevel
 event_bus = EventBus(level=EventLevel.from_str(config["events"].get("level", "progress")))
 
+from src.todo import TodoManager
+todo = TodoManager()
+
 from src.llm.deepseek import DeepSeekProvider
 default_llm_cfg = config["llm"]["default"]
 
