@@ -1,35 +1,36 @@
 import asyncio, logging
-from src.singleton import ui, event_bus, llm
-from src.agent import Agent
-from src.compact import CompactState
+from dataclasses import dataclass, field
+from src.agent import Agent, AgentDeps
 
 logger = logging.getLogger(__name__)
 
+@dataclass
 class AgentApp:
-    def __init__(
-        self,
-    ):
-        pass
+    deps: AgentDeps = field(repr=False)
 
     async def run(self) -> None:
         consumer_task = None
         async def _consume():
-            async for event in event_bus.subscribe():
-                await ui.on_event(event)
+            async for event in self.deps.event_bus.subscribe():
+                await self.deps.ui.on_event(event)
         consumer_task = asyncio.create_task(_consume())
 
-        await ui.output("Agent 已启动，输入 'exit' 退出。\n")
+        await self.deps.ui.output("Agent 已启动，输入 'exit' 退出。\n")
         try:
             prompt = "你是一个有用的助手，你的名字叫小糖果"
-            agent = Agent("总控", "入口", prompt)
-            compact_state = CompactState()
+            agent = Agent(
+                name = "总控",
+                description = "入口",
+                prompt = prompt,
+                deps = self.deps,
+            )
             history = []
             while True:
-                user_input = await ui.input("\n\n你: ")
+                user_input = await self.deps.ui.input("\n\n你: ")
                 if user_input.strip().lower() in ("exit", "quit"):
                     break
 
-                await agent.run(user_input, history, compact_state)
+                await agent.run(user_input, history)
                 #final_text = extract_text(history[-1]["content"])
                 #if final_text:
                 #    print(final_text)
@@ -41,8 +42,8 @@ class AgentApp:
                 #result = await GraphEngine().run(plan_graph, RunContext(input=user_input.strip(), state=state))
                 #await ui.output(result.output)
         finally:
-            if event_bus:
-                event_bus.close()
+            if self.deps.event_bus:
+                self.deps.event_bus.close()
             if consumer_task:
                 await consumer_task
         pass

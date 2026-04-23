@@ -2,7 +2,9 @@
 
 from typing import Callable
 from pydantic import BaseModel
-from src.tools.tools_mgr import tools_mgr, ToolEntry
+from src.tools.tools_mgr import ToolEntry
+
+_registry: list[ToolEntry] = []
 
 def tool(
     model: type[BaseModel],
@@ -15,7 +17,6 @@ def tool(
     def decorator(func: Callable) -> Callable:
         tool_name = name or func.__name__
 
-        # 生成参数 schema
         model_schema = model.model_json_schema()
         if model_schema.get("type") == "object":
             parameters_schema = model_schema
@@ -36,7 +37,7 @@ def tool(
             sensitive=sensitive,
             confirm_template=confirm_template,
         )
-        tools_mgr.register(entry)
+        _registry.append(entry)
         return func
 
     return decorator

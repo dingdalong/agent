@@ -3,12 +3,6 @@ import os
 from dotenv import load_dotenv
 from pathlib import Path
 
-class AppConfig:
-    def __init__(
-        self,
-    ):
-        pass
-
 def override(config: dict, key: str, env_key: str):
     value = os.environ.get(env_key)
     if value is not None:

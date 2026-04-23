@@ -9,6 +9,7 @@ import logging
 import re
 import asyncio
 from src.events import EventBus
+from src.tools import ToolDict
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +23,7 @@ class LLMResponse:
 
 # ---- 结构化输出辅助函数 ----
 
-def _build_output_schema(name: str, description: str, model: Type[BaseModel]) -> dict:
+def _build_output_schema(name: str, description: str, model: Type[BaseModel]) -> ToolDict:
     """从 Pydantic 模型构建 function-calling 格式的 tool schema。"""
     schema = model.model_json_schema()
     schema.pop("title", None)
@@ -90,7 +91,7 @@ class LLMProvider(ABC):
         self,
         messages: list[dict],
         prompt: list[dict] | None = None,
-        tools: list[dict] | None = None,
+        tools: list[ToolDict] | None = None,
         temperature: float = 1.0,
         tool_choice: str | dict | None = None,
         output_schema: Type[BaseModel] | None = None,

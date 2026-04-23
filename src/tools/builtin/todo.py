@@ -1,7 +1,11 @@
+from __future__ import annotations
+from typing import TYPE_CHECKING, List, Literal, Optional
+
 from src.tools.decorator import tool
 from pydantic import BaseModel, Field
-from typing import List, Literal, Optional
-from src.singleton import todo
+
+if TYPE_CHECKING:
+    from src.agent import Agent
 
 class TodoItem(BaseModel):
     content: str = Field(..., description="这一步要做什么")
@@ -13,5 +17,5 @@ class TodoWrite(BaseModel):
     items: List[TodoItem] = Field(..., description="待办事项列表")
 
 @tool(model=TodoWrite, description="Update task tracking list.")
-async def todo_write(items: list) -> str:
-    return await todo.update(items)
+async def todo_write(items: list, agnet:Agent) -> str:
+    return await agnet._todo.update(items)

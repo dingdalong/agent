@@ -1,8 +1,12 @@
+from __future__ import annotations
+from typing import TYPE_CHECKING
 import json
 import time
 from pathlib import Path
 from dataclasses import dataclass, field
-from src.singleton import llm
+
+if TYPE_CHECKING:
+    from src.agent import AgentDeps
 
 WORKDIR = Path.cwd()
 CONTEXT_LIMIT = 50000
@@ -15,7 +19,10 @@ class CompactState:
     last_summary: str = ""
     recent_files: list[str] = field(default_factory=list)
 
+@dataclass
 class CompactMgr:
+    deps: AgentDeps = field(repr=False)
+
     def is_need_compact(self, messages: list) -> bool:
         if self.estimate_context_size(messages) > CONTEXT_LIMIT:
             return True
@@ -68,7 +75,7 @@ class CompactMgr:
             "Be compact but concrete.\n\n"
             f"{conversation}"
         )
-        response = await llm.chat(messages=[{"role": "user", "content": prompt}])
+        response = await self.deps.llm.chat(messages=[{"role": "user", "content": prompt}])
         return response.content
 
     async def compact_history(self, messages: list, state: CompactState, focus: str | None = None) -> list:

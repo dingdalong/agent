@@ -1,15 +1,14 @@
 from dataclasses import dataclass, field
-from typing import Callable, Any, Type
-from pydantic import BaseModel, ValidationError
-from src.singleton import ui, event_bus, llm, todo, compact
+from typing import Any, Type
+from pydantic import BaseModel, ConfigDict, ValidationError
 from src.config import config
-from src.tools import tools_mgr as _global_tools_mgr, ToolDict
-from src.tools.tools_mgr import ToolsMgr
+from src.tools import ToolDict
 from src.compact import CompactState
 from src.events.types import CompactDelta
-import json
-import logging
-import time
+from src.todo import TodoManager
+from src.compact import CompactMgr
+import json, logging, time, uuid
+from uuid import UUID
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +21,17 @@ class StructOutputConfig:
     schema_name: str = "structured_output"
     schema_desc: str = "结构化输出"
 
+class AgentDeps(BaseModel):
+    """外部依赖
+    所有字段声明为 Any 以避免循环导入
+    组装时通过 isinstance 断言保证。
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    llm: Any = None  # LLMProvider
+    ui: Any = None  # UserInterface
+    event_bus: Any = None  # EventBus
+    tools_mgr: Any = None  # ToolsMgr
 
 @dataclass
 class Agent:
@@ -33,18 +43,23 @@ class Agent:
         prompt: 系统提示
     """
 
+    uuid: UUID = field(init=False)
     name: str
     description: str
     prompt: str
-    _prompt: list[dict] = field(default_factory=list[dict], init=False, repr=False)
-    tools_mgr: ToolsMgr | None = field(default=None, repr=False)
-    _tool_list: list[ToolDict] = field(default_factory=list, init=False, repr=False)
+    deps: AgentDeps = field(repr=False)
+    tools: set[str] | None = field(default=None)
+    _prompt: list[dict]  = field(init=False, default_factory=list)
+    _tools_schemas: list[ToolDict] = field(init=False)
+    _todo: TodoManager = field(init=False, default_factory=TodoManager, repr=False)
+    _compact: CompactMgr = field(init=False, repr=False)
+    _compact_state: CompactState = field(init=False, repr=False)
 
     def __post_init__(self):
-        if self.tools_mgr is None : self.tools_mgr = _global_tools_mgr
-        self._tool_list = self.tools_mgr.get_schemas()
-        self._prompt = []
+        self.uuid = uuid.uuid4()
+        self._tools_schemas = self.deps.tools_mgr.get_schemas(self.tools)
         self._prompt.append({"role": "system", "content": self.prompt})
+        self._compact = CompactMgr(self.deps)
 
     async def normalize_messages(self, messages: list) -> list:
         """在发送至 OpenAI API 前清理消息列表。
@@ -148,6 +163,13 @@ class Agent:
             else:
                 merged.append(msg)
 
+        # ---------- 步骤 4：确保 assistant 消息合法 ----------
+        # API 要求 assistant 消息至少包含 content 或 tool_calls 之一
+        for msg in merged:
+            if msg.get("role") == "assistant" and not msg.get("tool_calls"):
+                if not msg.get("content"):
+                    msg["content"] = ""
+
         return merged
 
     async def clear_reasoning_content(self, messages):
@@ -163,7 +185,6 @@ class Agent:
         self,
         input: str,
         messages: list[dict],
-        state: CompactState,
         struct_output: StructOutputConfig | None = None,
     ) -> str | BaseModel:
         messages.append({"role": "user", "content": input})
@@ -174,27 +195,40 @@ class Agent:
         manual_compact = False
         compact_focus = None
         for round_idx in range(max_tool_rounds):
-            messages[:] = await compact.micro_compact(messages)
-            if compact.is_need_compact(messages):
-                await event_bus.emit(CompactDelta(
+            messages[:] = await self._compact.micro_compact(messages)
+            if self._compact.is_need_compact(messages):
+                await self.deps.event_bus.emit(CompactDelta(
                     timestamp=time.time(),
                     source=self.name,
                     content="auto manual",
                 ))
-                messages[:] = await compact.compact_history(messages, state)
+                messages[:] = await self._compact.compact_history(messages, self._compact_state)
             messages[:] = await self.normalize_messages(messages)
-            response = await llm.chat(prompt=self._prompt, messages=messages, tools=self._tool_list, output_schema=schema_cls)
+            response = await self.deps.llm.chat(prompt=self._prompt, messages=messages, tools=self._tools_schemas, output_schema=schema_cls)
             content, tool_calls = response.content, response.tool_calls
 
-            messages.append(response.assistant_message)
+            if content:
+                final_text = content
 
             if not tool_calls:
-                final_text = content
+                if content:
+                    messages.append(response.assistant_message)
                 break
+
+            messages.append(response.assistant_message)
 
             used_todo = False
             for tc in tool_calls.values():
                 tool_name = tc["name"]
+                if self.tools is not None:
+                    if tool_name not in self.tools:
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc["id"],
+                            "content": f"错误：未知工具 '{tool_name}'",
+                        })
+                        continue
+
                 if tool_name == "todo_write":
                     used_todo = True
                 try:
@@ -205,7 +239,7 @@ class Agent:
                 except json.JSONDecodeError:
                     args = {}
 
-                result_text = await self.tools_mgr.execute(tool_name, args)
+                result_text = await self.deps.tools_mgr.execute(tool_name, args, self.deps, self)
 
                 messages.append({
                     "role": "tool",
@@ -214,19 +248,19 @@ class Agent:
                 })
 
             rounds_without_todo = 0 if used_todo else rounds_without_todo + 1
-            if todo.has_open_items() and rounds_without_todo >= 3:
+            if self._todo.has_open_items() and rounds_without_todo >= 3:
                 messages.append({"role": "user", "content": [{"type": "text", "text": "<reminder>Update your todos.</reminder>"}]})
 
             if manual_compact:
-                await event_bus.emit(CompactDelta(
+                await self.deps.event_bus.emit(CompactDelta(
                     timestamp=time.time(),
                     source=self.name,
                     content="llm manual",
                 ))
-                messages[:] = await compact.compact_history(messages, state, focus=compact_focus)
+                messages[:] = await self._compact.compact_history(messages, self._compact_state, focus=compact_focus)
         else:
             # 超过 max_tool_rounds
-            response = await llm.chat(prompt=self._prompt, messages=messages)
+            response = await self.deps.llm.chat(prompt=self._prompt, messages=messages)
             final_text = response.content
 
         #移除思考内容
@@ -235,13 +269,13 @@ class Agent:
         # 结构化输出解析
         if struct_output is not None:
             # 原生 Provider：final_text 已是受约束的 JSON，直接解析
-            if llm.supports_native_structured_output and final_text:
+            if self.deps.llm.supports_native_structured_output and final_text:
                 try:
                     return struct_output.model_cls.model_validate_json(final_text)
                 except (ValidationError, Exception) as e:
                     logger.debug(f"原生结构化输出解析失败，回退到 structured_chat: {e}")
             # 非原生 或 解析失败：Two-Pass 兜底
-            result = await llm.structured_chat(
+            result = await self.deps.llm.structured_chat(
                 output_schema=struct_output.model_cls,
                 messages=messages,
                 prompt=self._prompt,
