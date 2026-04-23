@@ -17,5 +17,5 @@ class TodoWrite(BaseModel):
     items: List[TodoItem] = Field(..., description="待办事项列表")
 
 @tool(model=TodoWrite, description="Update task tracking list.")
-async def todo_write(items: list, agnet:Agent) -> str:
+async def todo_write(items: list, agnet: Agent) -> str:
     return await agnet._todo.update(items)

@@ -21,7 +21,7 @@ class ToolEntry:
     sensitive: bool = False
     confirm_template: str | None = None
 
-    async def __call__(self, *context: Any, **kwds: Any) -> Any:
+    async def __call__(self, context: Dict[str, Any], **kwds: Any) -> Any:
         if self.sensitive:
             """异步询问用户确认（控制台模式）"""
             print(f"\n⚠️  工具 '{self.name}' 需要执行敏感操作。")
@@ -43,19 +43,8 @@ class ToolEntry:
             return f"参数验证失败: {result}"
 
         try:
-            inject = {}
-            injectable = {type(obj): obj for obj in context}
-            globalns = getattr(inspect.getmodule(self.func), "__dict__", {})
-            localns = {cls.__name__: cls for cls in injectable}
-            try:
-                hints = get_type_hints(self.func, globalns=globalns, localns=localns)
-            except Exception:
-                hints = {}
-            for param_name, param_type in hints.items():
-                if param_name == "return":
-                    continue
-                if param_type in injectable:
-                    inject[param_name] = injectable[param_type]
+            sig = inspect.signature(self.func)
+            inject = {name: context[name] for name in sig.parameters if name in context}
 
             if inspect.iscoroutinefunction(self.func):
                 result = await self.func(**validated_args, **inject)
@@ -110,10 +99,10 @@ class ToolsMgr:
             for tool in tools
         ]
 
-    async def execute(self, tool_name: str, arguments: Dict[str, Any], *context: Any) -> str:
+    async def execute(self, tool_name: str, arguments: Dict[str, Any], context: Dict[str, Any] | None = None) -> str:
         """异步执行工具，返回结果字符串（错误信息也以字符串返回）"""
         if tool_name not in self._tools:
             return f"错误：未知工具 '{tool_name}'"
 
         tool = self._tools[tool_name]
-        return await tool(*context, **arguments)
+        return await tool(context or {}, **arguments)

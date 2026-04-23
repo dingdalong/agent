@@ -1,3 +1,3 @@
-from src.agent.agent import Agent
+from src.agent.agent import Agent, AgentDeps
 
-__all__ = ["Agent"]
+__all__ = ["Agent", "AgentDeps"]

@@ -17,11 +17,11 @@ TRANSCRIPT_DIR = WORKDIR / ".transcripts"
 class CompactState:
     has_compacted: bool = False
     last_summary: str = ""
-    recent_files: list[str] = field(default_factory=list)
 
 @dataclass
 class CompactMgr:
     deps: AgentDeps = field(repr=False)
+    recent_files: list[str] = field(init=False, default_factory=list)
 
     def is_need_compact(self, messages: list) -> bool:
         if self.estimate_context_size(messages) > CONTEXT_LIMIT:
@@ -31,6 +31,13 @@ class CompactMgr:
 
     def estimate_context_size(self, messages: list) -> int:
         return len(str(messages))
+
+    async def track_recent_file(self, path: str) -> None:
+        if path in self.recent_files:
+            self.recent_files.remove(path)
+        self.recent_files.append(path)
+        if len(self.recent_files) > 5:
+            self.recent_files[:] = self.recent_files[-5:]
 
     async def collect_tool_result_blocks(self, messages: list) -> list[tuple[int, int, dict]]:
         blocks = []
@@ -60,6 +67,7 @@ class CompactMgr:
         with path.open("w") as handle:
             for message in messages:
                 handle.write(json.dumps(message, default=str) + "\n")
+        await self.track_recent_file(path.as_posix())
         return path
 
     async def summarize_history(self, messages: list) -> str:
@@ -84,8 +92,8 @@ class CompactMgr:
         summary = await self.summarize_history(messages)
         if focus:
             summary += f"\n\nFocus to preserve next: {focus}"
-        if state.recent_files:
-            recent_lines = "\n".join(f"- {path}" for path in state.recent_files)
+        if self.recent_files:
+            recent_lines = "\n".join(f"- {path}" for path in self.recent_files)
             summary += f"\n\nRecent files to reopen if needed:\n{recent_lines}"
         state.has_compacted = True
         state.last_summary = summary
