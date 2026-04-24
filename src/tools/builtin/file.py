@@ -13,9 +13,9 @@ class ListDirectory(BaseModel):
     max_depth: int = Field(3, description="递归最大深度，仅在 recursive=True 时生效。")
 
 @tool(model=ListDirectory, description="列出目录内容，显示文件和子目录的树形结构。")
-async def list_directory(path: str, tool_use_id: str, agent: Agent,
+async def list_directory(path: str, agent: Agent,
                          recursive: bool = False, max_depth: int = 3) -> str:
-    return await agent._file.list_directory(path, tool_use_id, recursive, max_depth)
+    return await agent._file.list_directory(path, recursive, max_depth)
 
 class CreateDirectory(BaseModel):
     path: str = Field(..., description="要创建的目录的相对路径，支持多级目录。")
@@ -37,8 +37,8 @@ class FindFiles(BaseModel):
     path: str = Field(".", description="搜索起点的相对路径，默认为当前工作目录。")
 
 @tool(model=FindFiles, description="按glob模式搜索文件。")
-async def find_files(pattern: str, tool_use_id: str, agent: Agent, path: str = ".") -> str:
-    return await agent._file.find_files(pattern, tool_use_id, path)
+async def find_files(pattern: str, agent: Agent, path: str = ".") -> str:
+    return await agent._file.find_files(pattern, path)
 
 class GetFileInfo(BaseModel):
     path: str = Field(..., description="要查询的文件或目录的相对路径。")
@@ -49,13 +49,11 @@ async def get_file_info(path: str, agent: Agent) -> str:
 
 class ReadFile(BaseModel):
     path: str = Field(..., description="相对文件路径。")
-    offset: int = Field(1, description="起始行号（从1开始），用于分页读取。")
-    limit: Optional[int] = Field(None, description="读取行数限制。与 offset 配合实现分页。")
+    page: int = Field(1, description="页码，从 1 开始。")
 
-@tool(model=ReadFile, description="读取文件内容，支持按行分页读取。")
-async def read_file(path: str, tool_use_id: str, agent: Agent,
-                    offset: int = 1, limit: int | None = None) -> str:
-    return await agent._file.read_file(path, tool_use_id, offset, limit)
+@tool(model=ReadFile, description="读取文件内容，按页返回（每页约200行）。", raw_output=True)
+async def read_file(path: str, agent: Agent, page: int = 1) -> str:
+    return await agent._file.read_file(path, page)
 
 class WriteFile(BaseModel):
     path: str = Field(..., description="相对文件路径。")

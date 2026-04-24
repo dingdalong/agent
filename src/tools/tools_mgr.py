@@ -1,6 +1,6 @@
-import logging, asyncio, inspect
-from dataclasses import dataclass
-from typing import Any, Callable, Dict, TypedDict, get_type_hints
+import logging, asyncio, inspect, math
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, TypedDict
 from pydantic import BaseModel, ValidationError
 
 logger = logging.getLogger(__name__)
@@ -20,10 +20,10 @@ class ToolEntry:
     parameters_schema: dict[str, Any]
     sensitive: bool = False
     confirm_template: str | None = None
+    raw_output: bool = False
 
     async def __call__(self, context: Dict[str, Any], **kwds: Any) -> Any:
         if self.sensitive:
-            """异步询问用户确认（控制台模式）"""
             print(f"\n⚠️  工具 '{self.name}' 需要执行敏感操作。")
             answer = await asyncio.to_thread(input, "是否允许执行？(y/n): ")
             if not answer.strip().lower() == 'y':
@@ -33,7 +33,7 @@ class ToolEntry:
             validated_args = self.model(**kwds).model_dump()
         except ValidationError as e:
             messages = []
-            for err in e.errors()[:3]:  # 最多显示前3个错误
+            for err in e.errors()[:3]:
                 loc = ".".join(str(x) for x in err["loc"])
                 msg = err["msg"]
                 messages.append(f"{loc}: {msg}")
@@ -51,10 +51,7 @@ class ToolEntry:
             else:
                 result = await asyncio.to_thread(self.func, **validated_args, **inject)
 
-            result_str = str(result)
-            if len(result_str) > 500:
-                result_str = result_str[:500] + "...(结果已截断)"
-            return result_str
+            return str(result)
         except Exception as e:
             error_msg = f"{type(e).__name__}: {str(e)}"
             if len(error_msg) > 200:
@@ -62,8 +59,10 @@ class ToolEntry:
             return f"工具执行出错: {error_msg}"
 
 class ToolsMgr:
-    def __init__(self):
+    def __init__(self, page_size: int = 4000):
         self._tools: dict[str, ToolEntry] = {}
+        self._result_store: dict[str, str] = {}
+        self.page_size = page_size
         from src.tools.decorator import _registry
         for entry in _registry:
             self.register(entry)
@@ -99,10 +98,37 @@ class ToolsMgr:
             for tool in tools
         ]
 
+    def get_page(self, tool_use_id: str, page: int) -> tuple[str, int, int]:
+        """返回 (页面内容, 当前页码, 总页数)"""
+        full = self._result_store.get(tool_use_id)
+        if full is None:
+            raise KeyError(f"未找到 tool_use_id={tool_use_id} 的缓存结果")
+        total_pages = math.ceil(len(full) / self.page_size)
+        page = max(1, min(page, total_pages))
+        start = (page - 1) * self.page_size
+        end = start + self.page_size
+        return full[start:end], page, total_pages
+
+    def _truncate(self, result: str, tool_use_id: str) -> str:
+        if len(result) <= self.page_size:
+            return result
+        self._result_store[tool_use_id] = result
+        total_pages = math.ceil(len(result) / self.page_size)
+        preview = result[:self.page_size]
+        return (
+            f"{preview}\n\n"
+            f"...(结果已截断，共 {total_pages} 页。"
+            f"使用 read_tool_result 工具传入 tool_use_id=\"{tool_use_id}\" 和 page 页码获取其余内容)"
+        )
+
     async def execute(self, tool_name: str, arguments: Dict[str, Any], context: Dict[str, Any] | None = None) -> str:
         """异步执行工具，返回结果字符串（错误信息也以字符串返回）"""
         if tool_name not in self._tools:
             return f"错误：未知工具 '{tool_name}'"
 
         tool = self._tools[tool_name]
-        return await tool(context or {}, **arguments)
+        result = await tool(context or {}, **arguments)
+        if tool.raw_output:
+            return result
+        tool_use_id = (context or {}).get("tool_use_id", "")
+        return self._truncate(result, tool_use_id)

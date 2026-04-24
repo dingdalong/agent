@@ -12,6 +12,7 @@ def tool(
     name: str | None = None,
     sensitive: bool = False,
     confirm_template: str | None = None,
+    raw_output: bool = False,
 ) -> Callable:
     """工具注册装饰器"""
     def decorator(func: Callable) -> Callable:
@@ -36,6 +37,7 @@ def tool(
             parameters_schema=parameters_schema,
             sensitive=sensitive,
             confirm_template=confirm_template,
+            raw_output=raw_output,
         )
         _registry.append(entry)
         return func

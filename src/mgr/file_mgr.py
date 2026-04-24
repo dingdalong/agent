@@ -1,6 +1,7 @@
 from __future__ import annotations
 from typing import TYPE_CHECKING
 
+import math
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -11,13 +12,7 @@ if TYPE_CHECKING:
 @dataclass
 class FileMgr:
     workdir: Path
-    tool_results_dir: Path = field(init=False)
     deps: AgentDeps = field(repr=False)
-    preview_chars: int = 2000
-    persist_threshold: int = 30000
-
-    def __post_init__(self):
-        self.tool_results_dir = self.workdir / ".task_outputs" / "tool-results"
 
     def safe_path(self, path_str: str) -> Path:
         path = (self.workdir / path_str).resolve()
@@ -25,45 +20,28 @@ class FileMgr:
             raise ValueError(f"Path escapes workspace: {path_str}")
         return path
 
-    async def persist_large_output(self, tool_use_id: str, output: str) -> str:
-        if len(output) <= self.persist_threshold:
-            return output
-        self.tool_results_dir.mkdir(parents=True, exist_ok=True)
-        stored_path = self.tool_results_dir / f"{tool_use_id}.txt"
-        if not stored_path.exists():
-            stored_path.write_text(output)
-        preview = output[:self.preview_chars]
-        rel_path = stored_path.relative_to(self.workdir)
-        return (
-            "<persisted-output>\n"
-            f"Full output saved to: {rel_path}\n"
-            "Preview:\n"
-            f"{preview}\n"
-            "</persisted-output>"
-        )
+    lines_per_page: int = 200
 
-    async def read_file(self, path: str, tool_use_id: str,
-                        offset: int = 1, limit: int | None = None) -> str:
+    async def read_file(self, path: str, page: int = 1) -> str:
         try:
             all_lines = self.safe_path(path).read_text().splitlines()
             total = len(all_lines)
+            total_pages = max(1, math.ceil(total / self.lines_per_page))
+            page = max(1, min(page, total_pages))
 
-            start = max(0, offset - 1)
-            end = min(total, start + limit) if limit else total
+            start = (page - 1) * self.lines_per_page
+            end = min(total, start + self.lines_per_page)
             selected = all_lines[start:end]
 
-            header = f"文件: {path} | 总行数: {total} | 显示: 第{start + 1}-{end}行"
+            header = f"文件: {path} | 总行数: {total} | 第 {page}/{total_pages} 页 (第{start + 1}-{end}行)"
             numbered = [f"{start + 1 + i:>4} | {line}" for i, line in enumerate(selected)]
 
             parts = [header]
-            if start > 0:
-                parts.append(f"... 跳过前 {start} 行")
             parts.extend(numbered)
-            if end < total:
-                parts.append(f"... 剩余 {total - end} 行 (使用 offset={end + 1} 继续读取)")
+            if page < total_pages:
+                parts.append(f"\n(还有 {total_pages - page} 页，传入 page={page + 1} 继续读取)")
 
-            output = "\n".join(parts)
-            return await self.persist_large_output(tool_use_id, output)
+            return "\n".join(parts)
         except Exception as exc:
             return f"Error: {exc}"
 
@@ -249,7 +227,7 @@ class FileMgr:
 
         return lines, dir_count, file_count
 
-    async def list_directory(self, path: str, tool_use_id: str,
+    async def list_directory(self, path: str,
                              recursive: bool = False, max_depth: int = 3) -> str:
         try:
             dir_path = self.safe_path(path)
@@ -265,8 +243,7 @@ class FileMgr:
             lines.extend(tree_lines)
             lines.append(f"共 {dir_count} 个目录, {file_count} 个文件")
 
-            output = "\n".join(lines)
-            return await self.persist_large_output(tool_use_id, output)
+            return "\n".join(lines)
         except Exception as exc:
             return f"Error: {exc}"
 
@@ -296,7 +273,7 @@ class FileMgr:
         except Exception as exc:
             return f"Error: {exc}"
 
-    async def find_files(self, pattern: str, tool_use_id: str, path: str = ".") -> str:
+    async def find_files(self, pattern: str, path: str = ".") -> str:
         try:
             search_root = self.safe_path(path)
             if not search_root.exists():
@@ -321,7 +298,6 @@ class FileMgr:
                     size = self._format_size(m.stat().st_size)
                     lines.append(f"  [FILE] {rel} ({size})")
 
-            output = "\n".join(lines)
-            return await self.persist_large_output(tool_use_id, output)
+            return "\n".join(lines)
         except Exception as exc:
             return f"Error: {exc}"
