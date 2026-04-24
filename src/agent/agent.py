@@ -6,7 +6,6 @@ from typing import Any, Type
 from pydantic import BaseModel, ConfigDict, ValidationError
 from src.config import config
 from src.tools import ToolDict
-from src.compact import CompactState
 from src.events.types import CompactDelta
 from src.todo import TodoManager
 from src.compact import CompactMgr
@@ -56,7 +55,6 @@ class Agent:
     _tools_schemas: list[ToolDict] = field(init=False)
     _todo: TodoManager = field(init=False, default_factory=TodoManager, repr=False)
     _compact: CompactMgr = field(init=False, repr=False)
-    _compact_state: CompactState = field(init=False, repr=False)
     _file: FileMgr = field(init=False, repr=False)
 
     def __post_init__(self):
@@ -87,7 +85,7 @@ class Agent:
                     source=self.name,
                     content="auto manual",
                 ))
-                messages[:] = await self._compact.compact_history(messages, self._compact_state)
+                messages[:] = await self._compact.compact_history(messages)
             messages[:] = await normalize_messages(messages)
             response = await self.deps.llm.chat(prompt=self._prompt, messages=messages, tools=self._tools_schemas, output_schema=schema_cls)
             content, tool_calls = response.content, response.tool_calls
@@ -146,7 +144,7 @@ class Agent:
                     source=self.name,
                     content="llm manual",
                 ))
-                messages[:] = await self._compact.compact_history(messages, self._compact_state, focus=compact_focus)
+                messages[:] = await self._compact.compact_history(messages, focus=compact_focus)
         else:
             # 超过 max_tool_rounds
             response = await self.deps.llm.chat(prompt=self._prompt, messages=messages)

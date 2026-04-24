@@ -1,3 +1,3 @@
-from src.compact.compactmgr import CompactMgr, CompactState
+from src.compact.compactmgr import CompactMgr
 
-__all__ = ["CompactMgr", "CompactState"]
+__all__ = ["CompactMgr"]

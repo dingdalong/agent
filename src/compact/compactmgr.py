@@ -14,14 +14,11 @@ KEEP_RECENT_TOOL_RESULTS = 3
 TRANSCRIPT_DIR = WORKDIR / ".transcripts"
 
 @dataclass
-class CompactState:
-    has_compacted: bool = False
-    last_summary: str = ""
-
-@dataclass
 class CompactMgr:
     deps: AgentDeps = field(repr=False)
     recent_files: list[str] = field(init=False, default_factory=list)
+    has_compacted: bool = False
+    last_summary: str = ""
 
     def is_need_compact(self, messages: list) -> bool:
         if self.estimate_context_size(messages) > CONTEXT_LIMIT:
@@ -86,7 +83,7 @@ class CompactMgr:
         response = await self.deps.llm.chat(messages=[{"role": "user", "content": prompt}])
         return response.content
 
-    async def compact_history(self, messages: list, state: CompactState, focus: str | None = None) -> list:
+    async def compact_history(self, messages: list, focus: str | None = None) -> list:
         transcript_path = await self.write_transcript(messages)
         print(f"[transcript saved: {transcript_path}]")
         summary = await self.summarize_history(messages)
@@ -95,8 +92,8 @@ class CompactMgr:
         if self.recent_files:
             recent_lines = "\n".join(f"- {path}" for path in self.recent_files)
             summary += f"\n\nRecent files to reopen if needed:\n{recent_lines}"
-        state.has_compacted = True
-        state.last_summary = summary
+        self.has_compacted = True
+        self.last_summary = summary
         return [{
             "role": "user",
             "content": (
