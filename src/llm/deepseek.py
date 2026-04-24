@@ -39,7 +39,6 @@ def _normalize_content(content: object) -> str | list[dict]:
 
     return ""
 
-
 def _normalize_tool_calls(tool_calls: object, msg_index: int) -> list[dict] | None:
     """
     规范化 tool_calls 字段。
@@ -96,8 +95,6 @@ def _normalize_tool_calls(tool_calls: object, msg_index: int) -> list[dict] | No
 
     return None
 
-
-
 class DeepSeekProvider(LLMProvider):
     """基于 OpenAI SDK 的 LLM Provider。"""
 
@@ -111,11 +108,22 @@ class DeepSeekProvider(LLMProvider):
             max_retries=self.max_retries,
         )
 
-    def estimate_tokens(self, message: list[dict]) -> int:
+    def clear_reasoning_content(self, messages):
+        """清理思考内容"""
+        for message in messages:
+            # 处理对象（有 reasoning_content 属性）
+            if hasattr(message, 'reasoning_content'):
+                message.reasoning_content = None
+            # 处理字典（有 'reasoning_content' 键）
+            elif isinstance(message, dict) and 'reasoning_content' in message:
+                message['reasoning_content'] = None
+
+    def estimate_tokens(self, messages: list[dict]) -> int:
+        """计算token数量"""
         tokenizer = transformers.AutoTokenizer.from_pretrained(
             "src/tokenizer/deepseek", trust_remote_code=True
             )
-        return len(tokenizer.encode(str(message)))
+        return len(tokenizer.encode(str(messages)))
 
     def normalize_messages(
         self,

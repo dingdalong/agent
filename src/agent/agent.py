@@ -76,8 +76,10 @@ class Agent:
         rounds_without_todo = 0
         manual_compact = False
         compact_focus = None
+        round_start_idx = len(messages)
+        has_tool_calls = False
         for round_idx in range(max_tool_rounds):
-            #messages[:] = await self._compact.micro_compact(messages)
+            messages[:] = await self._compact.micro_compact(messages)
             if self._compact.is_need_compact(messages):
                 await self.deps.event_bus.emit(CompactDelta(
                     timestamp=time.time(),
@@ -96,6 +98,7 @@ class Agent:
             if not tool_calls:
                 break
 
+            has_tool_calls = True
             used_todo = False
             for tc in tool_calls.values():
                 tool_name = tc["name"]
@@ -145,6 +148,9 @@ class Agent:
             # 超过 max_tool_rounds
             response = await self.deps.llm.chat(prompt=self._prompt, messages=messages)
             final_text = response.content
+
+        if not has_tool_calls:
+            self.deps.llm.clear_reasoning_content(messages[round_start_idx:])
 
         # 结构化输出解析
         if struct_output is not None:
