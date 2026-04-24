@@ -2,6 +2,7 @@ import logging, asyncio, inspect, math
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, TypedDict
 from pydantic import BaseModel, ValidationError
+from src.config import config
 
 logger = logging.getLogger(__name__)
 
@@ -59,10 +60,10 @@ class ToolEntry:
             return f"工具执行出错: {error_msg}"
 
 class ToolsMgr:
-    def __init__(self, page_size: int = 4000):
+    def __init__(self):
         self._tools: dict[str, ToolEntry] = {}
         self._result_store: dict[str, str] = {}
-        self.page_size = page_size
+        self.page_size = config["tool"]["page_size"]
         from src.tools.decorator import _registry
         for entry in _registry:
             self.register(entry)

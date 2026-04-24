@@ -13,6 +13,13 @@ llm:
     concurrency: 5 # 最大并发数量
     max_retries: 3 # 重试次数
 
+tool:
+  page_size: 4000 # 工具调用结果每页字数
+
+compact:
+  context_limit: 200000 # 上下文限制
+  auto_compact_rate: 0.8 # 达到上下文多少时进行压缩
+  keep_recent_tool_results: 3 # 保留最近N条工具调用结果
 
 events:
     level: progress   # progress | detail | trace

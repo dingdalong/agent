@@ -4,13 +4,12 @@ import json
 import time
 from pathlib import Path
 from dataclasses import dataclass, field
+from src.config import config
 
 if TYPE_CHECKING:
     from src.agent import AgentDeps
 
 WORKDIR = Path.cwd()
-CONTEXT_LIMIT = 200*1024*0.8
-KEEP_RECENT_TOOL_RESULTS = 3
 TRANSCRIPT_DIR = WORKDIR / ".transcripts"
 
 @dataclass
@@ -20,8 +19,13 @@ class CompactMgr:
     has_compacted: bool = False
     last_summary: str = ""
 
+    def __post_init__(self):
+        compact_cfg = config["compact"]
+        self.auto_compact_size = compact_cfg["context_limit"] * compact_cfg["auto_compact_rate"]
+        self.keep_recent_tool_results = compact_cfg["keep_recent_tool_results"]
+
     def is_need_compact(self, messages: list) -> bool:
-        if self.deps.llm.estimate_tokens(messages) > CONTEXT_LIMIT:
+        if self.deps.llm.estimate_tokens(messages) > self.auto_compact_size:
             return True
         else:
             return False
@@ -46,9 +50,9 @@ class CompactMgr:
 
     async def micro_compact(self, messages: list) -> list:
         tool_results = await self.collect_tool_result_blocks(messages)
-        if len(tool_results) <= KEEP_RECENT_TOOL_RESULTS:
+        if len(tool_results) <= self.keep_recent_tool_results:
             return messages
-        for _, _, block in tool_results[:-KEEP_RECENT_TOOL_RESULTS]:
+        for _, _, block in tool_results[:-self.keep_recent_tool_results]:
             content = block.get("content", "")
             if not isinstance(content, str) or len(content) <= 120:
                 continue
