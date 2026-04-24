@@ -86,6 +86,8 @@ class LLMProvider(ABC):
     def __post_init__(self):
         self._semaphore = asyncio.Semaphore(self.concurrency)
 
+    def estimate_tokens(self, message: list[dict]) -> int: ...
+
     @abstractmethod
     async def chat(
         self,

@@ -7,9 +7,9 @@ from openai import AsyncOpenAI, APIConnectionError, RateLimitError, APIError
 from src.events.types import ResponseDelta, ThinkingDelta
 from src.llm.base import LLMProvider, LLMResponse
 from src.tools import ToolDict
+import transformers
 
 logger = logging.getLogger(__name__)
-
 
 class DeepSeekProvider(LLMProvider):
     """基于 OpenAI SDK 的 LLM Provider。"""
@@ -23,6 +23,12 @@ class DeepSeekProvider(LLMProvider):
             timeout=self.timeout,
             max_retries=self.max_retries,
         )
+
+    def estimate_tokens(self, message: list[dict]) -> int:
+        tokenizer = transformers.AutoTokenizer.from_pretrained(
+            "src/tokenizer/deepseek", trust_remote_code=True
+            )
+        return len(tokenizer.encode(str(message)))
 
     async def chat(
         self,

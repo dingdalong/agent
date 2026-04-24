@@ -9,7 +9,7 @@ if TYPE_CHECKING:
     from src.agent import AgentDeps
 
 WORKDIR = Path.cwd()
-CONTEXT_LIMIT = 50000
+CONTEXT_LIMIT = 200*1024*0.8
 KEEP_RECENT_TOOL_RESULTS = 3
 TRANSCRIPT_DIR = WORKDIR / ".transcripts"
 
@@ -21,13 +21,10 @@ class CompactMgr:
     last_summary: str = ""
 
     def is_need_compact(self, messages: list) -> bool:
-        if self.estimate_context_size(messages) > CONTEXT_LIMIT:
+        if self.deps.llm.estimate_tokens(messages) > CONTEXT_LIMIT:
             return True
         else:
             return False
-
-    def estimate_context_size(self, messages: list) -> int:
-        return len(str(messages))
 
     async def track_recent_file(self, path: str) -> None:
         if path in self.recent_files:
