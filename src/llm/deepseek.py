@@ -121,7 +121,7 @@ class DeepSeekProvider(LLMProvider):
     def estimate_tokens(self, messages: list[dict]) -> int:
         """计算token数量"""
         tokenizer = transformers.AutoTokenizer.from_pretrained(
-            "src/tokenizer/deepseek", trust_remote_code=True
+            "src/llm/tokenizer/deepseek", trust_remote_code=True
             )
         return len(tokenizer.encode(str(messages)))
 
