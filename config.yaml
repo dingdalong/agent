@@ -1,15 +1,15 @@
 llm_provider:
   deepseek:
     models: # 可用模型
-      - deepseek-reasoner
-      - deepseek-chat
+      - deepseek-v4-pro
+      - deepseek-v4-flash
     base_url: https://api.deepseek.com/v1
 
 llm:
   max_tool_rounds: 10
   default: # 默认模型
     provider: deepseek # 模型提供商
-    model: deepseek-reasoner # 模型名称
+    model: deepseek-v4-flash # 模型名称
     concurrency: 5 # 最大并发数量
     max_retries: 3 # 重试次数
 

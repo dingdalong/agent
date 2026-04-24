@@ -31,16 +31,6 @@ class AgentApp:
                     break
 
                 await agent.run(user_input, history)
-                #final_text = extract_text(history[-1]["content"])
-                #if final_text:
-                #    print(final_text)
-                #print()
-                #from workflow.plan import build_graph, PlanExecuteState
-                #from src.graph import GraphEngine, RunContext
-                #plan_graph = await build_graph()
-                #state = PlanExecuteState(user_goal=user_input.strip())
-                #result = await GraphEngine().run(plan_graph, RunContext(input=user_input.strip(), state=state))
-                #await ui.output(result.output)
         finally:
             if self.deps.event_bus:
                 self.deps.event_bus.close()

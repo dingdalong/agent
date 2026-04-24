@@ -9,7 +9,6 @@ from src.tools import ToolDict
 from src.events.types import CompactDelta
 from src.todo import TodoManager
 from src.compact import CompactMgr
-from src.agent.base import normalize_messages, clear_reasoning_content
 from src.mgr import FileMgr
 
 logger = logging.getLogger(__name__)
@@ -78,7 +77,7 @@ class Agent:
         manual_compact = False
         compact_focus = None
         for round_idx in range(max_tool_rounds):
-            messages[:] = await self._compact.micro_compact(messages)
+            #messages[:] = await self._compact.micro_compact(messages)
             if self._compact.is_need_compact(messages):
                 await self.deps.event_bus.emit(CompactDelta(
                     timestamp=time.time(),
@@ -86,19 +85,16 @@ class Agent:
                     content="auto manual",
                 ))
                 messages[:] = await self._compact.compact_history(messages)
-            messages[:] = await normalize_messages(messages)
+            messages[:] = self.deps.llm.normalize_messages(messages)
             response = await self.deps.llm.chat(prompt=self._prompt, messages=messages, tools=self._tools_schemas, output_schema=schema_cls)
             content, tool_calls = response.content, response.tool_calls
 
             if content:
                 final_text = content
 
-            if not tool_calls:
-                if content:
-                    messages.append(response.assistant_message)
-                break
-
             messages.append(response.assistant_message)
+            if not tool_calls:
+                break
 
             used_todo = False
             for tc in tool_calls.values():
@@ -149,9 +145,6 @@ class Agent:
             # 超过 max_tool_rounds
             response = await self.deps.llm.chat(prompt=self._prompt, messages=messages)
             final_text = response.content
-
-        #移除思考内容
-        await clear_reasoning_content(messages)
 
         # 结构化输出解析
         if struct_output is not None:
