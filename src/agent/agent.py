@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from src.config import config
 from src.tools import ToolDict
 from src.events.types import CompactDelta
-from src.mgr import FileMgr, TodoManager, CompactMgr
+from src.mgr import FileMgr, TodoManager, CompactMgr, PromptMgr
 
 logger = logging.getLogger(__name__)
 
@@ -45,22 +45,22 @@ class Agent:
     uuid: UUID = field(init=False)
     name: str
     description: str
-    prompt: str
     deps: AgentDeps = field(repr=False)
     tools: set[str] | None = field(default=None)
-    _prompt: list[dict]  = field(init=False, default_factory=list)
     _tools_schemas: list[ToolDict] = field(init=False)
     _todo_mgr: TodoManager = field(init=False, default_factory=TodoManager, repr=False)
     _compact_mgr: CompactMgr = field(init=False, repr=False)
     _file_mgr: FileMgr = field(init=False, repr=False)
+    _prompt_mgr: PromptMgr  = field(init=False, repr=False)
 
     def __post_init__(self):
         self.uuid = uuid.uuid4()
         self._tools_schemas = self.deps.tools_mgr.get_schemas(self.tools)
-        self._prompt.append({"role": "system", "content": self.prompt})
         self._compact_mgr = CompactMgr(self.deps)
         workspace = Path.cwd() / "workspace"
         self._file_mgr = FileMgr(workspace, self.deps)
+
+        self._prompt_mgr = PromptMgr(agent = self, model = self.deps.llm.model, workdir = workspace)
 
     async def run(
         self,
@@ -87,7 +87,7 @@ class Agent:
                 ))
                 messages[:] = await self._compact_mgr.compact_history(messages)
             messages[:] = self.deps.llm.normalize_messages(messages)
-            response = await self.deps.llm.chat(prompt=self._prompt, messages=messages, tools=self._tools_schemas, output_schema=schema_cls)
+            response = await self.deps.llm.chat(prompt=self._prompt_mgr.build(), messages=messages, tools=self._tools_schemas, output_schema=schema_cls)
             content, tool_calls = response.content, response.tool_calls
 
             if content:
@@ -145,7 +145,7 @@ class Agent:
                 messages[:] = await self._compact_mgr.compact_history(messages, focus=compact_focus)
         else:
             # 超过 max_tool_rounds
-            response = await self.deps.llm.chat(prompt=self._prompt, messages=messages)
+            response = await self.deps.llm.chat(prompt=self._prompt_mgr.build(), messages=messages)
             final_text = response.content
 
         if not has_tool_calls:
@@ -163,7 +163,7 @@ class Agent:
             result = await self.deps.llm.structured_chat(
                 output_schema=struct_output.model_cls,
                 messages=messages,
-                prompt=self._prompt,
+                prompt=self._prompt_mgr.build(),
                 schema_name=struct_output.schema_name,
                 schema_description=struct_output.schema_desc,
             )

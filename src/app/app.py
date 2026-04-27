@@ -17,11 +17,9 @@ class AgentApp:
 
         await self.deps.ui.output("Agent 已启动，输入 'exit' 退出。\n")
         try:
-            prompt = "你是一个有用的助手，你的名字叫小糖果"
             agent = Agent(
                 name = "总控",
                 description = "入口",
-                prompt = prompt,
                 deps = self.deps,
             )
             history = []
