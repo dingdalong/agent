@@ -147,7 +147,7 @@ class Agent:
 
             rounds_without_todo = 0 if used_todo else rounds_without_todo + 1
             if self._todo_mgr.has_open_items() and rounds_without_todo >= 3:
-                messages.append({"role": "user", "content": [{"type": "text", "text": "<reminder>Update your todos.</reminder>"}]})
+                messages.append({"role": "user", "content": [{"type": "text", "text": "<reminder>更新你的待办事项。</reminder>"}]})
 
             if manual_compact:
                 await self.deps.event_bus.emit(CompactDelta(

@@ -10,28 +10,28 @@ class TodoManager:
             af = str(item.get("active_form", "")).strip()
 
             if not content:
-                raise ValueError(f"Item {i}: content required")
+                raise ValueError(f"Item {i}: 缺失字段：content")
             if status not in ("pending", "in_progress", "completed"):
-                raise ValueError(f"Item {i}: invalid status '{status}'")
+                raise ValueError(f"Item {i}: 无效状态：'{status}'")
             if not af:
-                raise ValueError(f"Item {i}: active_form required")
+                raise ValueError(f"Item {i}: 缺失字段：active_form")
             if status == "in_progress":
                 ip += 1
 
             validated.append({"content": content, "status": status, "active_form": af})
 
         if len(validated) > 20:
-            raise ValueError("Max 20 todos")
+            raise ValueError("待办事项最多20条")
 
         if ip > 1:
-            raise ValueError("Only one in_progress allowed")
+            raise ValueError("只允许存在一个 in_progress 状态。")
 
         self.items = validated
         return self.render()
 
     def render(self) -> str:
         if not self.items:
-            return "No todos."
+            return "没有待办事项."
         lines = []
         for item in self.items:
             m = {

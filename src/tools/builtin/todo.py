@@ -13,9 +13,9 @@ class TodoItem(BaseModel):
     active_form: str = Field(..., description="当它正在进行中时，可以用更自然的进行时描述")
 
 class TodoWrite(BaseModel):
-    """Rewrite the current session plan for multi-step work."""
+    """为多步骤工作重写当前会话计划。"""
     items: List[TodoItem] = Field(..., description="待办事项列表")
 
-@tool(model=TodoWrite, description="Update task tracking list.")
+@tool(model=TodoWrite, description="更新待办事项。")
 async def todo_write(items: list, agent: Agent) -> str:
     return await agent._todo_mgr.update(items)
