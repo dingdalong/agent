@@ -11,8 +11,6 @@ from src.mgr import FileMgr, TodoManager, CompactMgr, PromptMgr
 
 logger = logging.getLogger(__name__)
 
-max_tool_rounds = config["llm"]["max_tool_rounds"]
-
 @dataclass
 class StructOutputConfig:
     """Agent.run 的结构化输出配置。"""
@@ -77,15 +75,30 @@ class Agent:
         compact_focus = None
         round_start_idx = len(messages)
         has_tool_calls = False
-        for round_idx in range(max_tool_rounds):
+        compact_streak = 0
+        max_compact_streak = 3
+        while True:
             messages[:] = await self._compact_mgr.micro_compact(messages)
             if self._compact_mgr.is_need_compact(messages):
+                compact_streak += 1
+                if compact_streak > max_compact_streak:
+                    logger.warning("连续 %d 次 compact 后仍需压缩，终止循环防止空转", compact_streak - 1)
+                    messages.append({"role": "user", "content": "由于对话上下文过长且多次压缩仍无法继续，请你基于当前已完成的工作做一个总结：1) 已经完成了什么；2) 还有什么未完成；3) 给出后续建议。"})
+                    messages[:] = self.deps.llm.normalize_messages(messages)
+                    response = await self.deps.llm.chat(prompt=self._prompt_mgr.build(), messages=messages, tools=[], output_schema=schema_cls)
+                    if response.content:
+                        final_text = response.content
+                    messages.append(response.assistant_message)
+                    break
                 await self.deps.event_bus.emit(CompactDelta(
                     timestamp=time.time(),
                     source=self.name,
                     content="auto manual",
                 ))
                 messages[:] = await self._compact_mgr.compact_history(messages)
+            else:
+                compact_streak = 0
+
             messages[:] = self.deps.llm.normalize_messages(messages)
             response = await self.deps.llm.chat(prompt=self._prompt_mgr.build(), messages=messages, tools=self._tools_schemas, output_schema=schema_cls)
             content, tool_calls = response.content, response.tool_calls
@@ -143,10 +156,6 @@ class Agent:
                     content="llm manual",
                 ))
                 messages[:] = await self._compact_mgr.compact_history(messages, focus=compact_focus)
-        else:
-            # 超过 max_tool_rounds
-            response = await self.deps.llm.chat(prompt=self._prompt_mgr.build(), messages=messages)
-            final_text = response.content
 
         if not has_tool_calls:
             self.deps.llm.clear_reasoning_content(messages[round_start_idx:])

@@ -6,7 +6,6 @@ llm_provider:
     base_url: https://api.deepseek.com/v1
 
 llm:
-  max_tool_rounds: 10
   default: # 默认模型
     provider: deepseek # 模型提供商
     model: deepseek-v4-flash # 模型名称
