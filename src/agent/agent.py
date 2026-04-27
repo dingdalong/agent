@@ -7,9 +7,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from src.config import config
 from src.tools import ToolDict
 from src.events.types import CompactDelta
-from src.todo import TodoManager
-from src.compact import CompactMgr
-from src.mgr import FileMgr
+from src.mgr import FileMgr, TodoManager, CompactMgr
 
 logger = logging.getLogger(__name__)
 
@@ -52,16 +50,17 @@ class Agent:
     tools: set[str] | None = field(default=None)
     _prompt: list[dict]  = field(init=False, default_factory=list)
     _tools_schemas: list[ToolDict] = field(init=False)
-    _todo: TodoManager = field(init=False, default_factory=TodoManager, repr=False)
-    _compact: CompactMgr = field(init=False, repr=False)
-    _file: FileMgr = field(init=False, repr=False)
+    _todo_mgr: TodoManager = field(init=False, default_factory=TodoManager, repr=False)
+    _compact_mgr: CompactMgr = field(init=False, repr=False)
+    _file_mgr: FileMgr = field(init=False, repr=False)
 
     def __post_init__(self):
         self.uuid = uuid.uuid4()
         self._tools_schemas = self.deps.tools_mgr.get_schemas(self.tools)
         self._prompt.append({"role": "system", "content": self.prompt})
-        self._compact = CompactMgr(self.deps)
-        self._file = FileMgr(Path.cwd() / "workspace", self.deps)
+        self._compact_mgr = CompactMgr(self.deps)
+        workspace = Path.cwd() / "workspace"
+        self._file_mgr = FileMgr(workspace, self.deps)
 
     async def run(
         self,
@@ -79,14 +78,14 @@ class Agent:
         round_start_idx = len(messages)
         has_tool_calls = False
         for round_idx in range(max_tool_rounds):
-            messages[:] = await self._compact.micro_compact(messages)
-            if self._compact.is_need_compact(messages):
+            messages[:] = await self._compact_mgr.micro_compact(messages)
+            if self._compact_mgr.is_need_compact(messages):
                 await self.deps.event_bus.emit(CompactDelta(
                     timestamp=time.time(),
                     source=self.name,
                     content="auto manual",
                 ))
-                messages[:] = await self._compact.compact_history(messages)
+                messages[:] = await self._compact_mgr.compact_history(messages)
             messages[:] = self.deps.llm.normalize_messages(messages)
             response = await self.deps.llm.chat(prompt=self._prompt, messages=messages, tools=self._tools_schemas, output_schema=schema_cls)
             content, tool_calls = response.content, response.tool_calls
@@ -134,7 +133,7 @@ class Agent:
                 })
 
             rounds_without_todo = 0 if used_todo else rounds_without_todo + 1
-            if self._todo.has_open_items() and rounds_without_todo >= 3:
+            if self._todo_mgr.has_open_items() and rounds_without_todo >= 3:
                 messages.append({"role": "user", "content": [{"type": "text", "text": "<reminder>Update your todos.</reminder>"}]})
 
             if manual_compact:
@@ -143,7 +142,7 @@ class Agent:
                     source=self.name,
                     content="llm manual",
                 ))
-                messages[:] = await self._compact.compact_history(messages, focus=compact_focus)
+                messages[:] = await self._compact_mgr.compact_history(messages, focus=compact_focus)
         else:
             # 超过 max_tool_rounds
             response = await self.deps.llm.chat(prompt=self._prompt, messages=messages)

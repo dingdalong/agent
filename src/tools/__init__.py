@@ -1,6 +1,6 @@
-from src.tools.tools_mgr import ToolsMgr, ToolDict
 import importlib
 from pathlib import Path
+from src.tools.decorator import ToolDict, ToolEntry
 
 package_dir = Path(__file__).parent
 package_dir = package_dir / "builtin"
@@ -10,4 +10,4 @@ for item in sorted(package_dir.glob("*.py")):
     module_name = item.stem
     module = importlib.import_module(f".{module_name}", package=f"{__package__}.builtin")
 
-__all__ = ["ToolsMgr", "ToolDict"]
+__all__ = ["ToolDict", "ToolEntry"]

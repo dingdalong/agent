@@ -18,4 +18,4 @@ class TodoWrite(BaseModel):
 
 @tool(model=TodoWrite, description="Update task tracking list.")
 async def todo_write(items: list, agent: Agent) -> str:
-    return await agent._todo.update(items)
+    return await agent._todo_mgr.update(items)

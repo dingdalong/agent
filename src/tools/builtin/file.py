@@ -15,14 +15,14 @@ class ListDirectory(BaseModel):
 @tool(model=ListDirectory, description="列出目录内容，显示文件和子目录的树形结构。")
 async def list_directory(path: str, agent: Agent,
                          recursive: bool = False, max_depth: int = 3) -> str:
-    return await agent._file.list_directory(path, recursive, max_depth)
+    return await agent._file_mgr.list_directory(path, recursive, max_depth)
 
 class CreateDirectory(BaseModel):
     path: str = Field(..., description="要创建的目录的相对路径，支持多级目录。")
 
 @tool(model=CreateDirectory, description="创建新目录。")
 async def create_directory(path: str, agent: Agent) -> str:
-    return await agent._file.create_directory(path)
+    return await agent._file_mgr.create_directory(path)
 
 class MoveFile(BaseModel):
     source: str = Field(..., description="源文件或目录的相对路径。")
@@ -30,7 +30,7 @@ class MoveFile(BaseModel):
 
 @tool(model=MoveFile, description="移动或重命名文件/目录。")
 async def move_file(source: str, destination: str, agent: Agent) -> str:
-    return await agent._file.move_file(source, destination)
+    return await agent._file_mgr.move_file(source, destination)
 
 class FindFiles(BaseModel):
     pattern: str = Field(..., description="glob匹配模式，如 '*.py'、'**/*.json'。")
@@ -38,14 +38,14 @@ class FindFiles(BaseModel):
 
 @tool(model=FindFiles, description="按glob模式搜索文件。")
 async def find_files(pattern: str, agent: Agent, path: str = ".") -> str:
-    return await agent._file.find_files(pattern, path)
+    return await agent._file_mgr.find_files(pattern, path)
 
 class GetFileInfo(BaseModel):
     path: str = Field(..., description="要查询的文件或目录的相对路径。")
 
 @tool(model=GetFileInfo, description="获取文件或目录的详细元数据，包括大小、行数、时间、权限等。")
 async def get_file_info(path: str, agent: Agent) -> str:
-    return await agent._file.get_file_info(path)
+    return await agent._file_mgr.get_file_info(path)
 
 class ReadFile(BaseModel):
     path: str = Field(..., description="相对文件路径。")
@@ -53,7 +53,7 @@ class ReadFile(BaseModel):
 
 @tool(model=ReadFile, description="读取文件内容，按页返回（每页约200行）。", raw_output=True)
 async def read_file(path: str, agent: Agent, page: int = 1) -> str:
-    return await agent._file.read_file(path, page)
+    return await agent._file_mgr.read_file(path, page)
 
 class WriteFile(BaseModel):
     path: str = Field(..., description="相对文件路径。")
@@ -67,7 +67,7 @@ async def write_file(path: str, content: str, agent: Agent,
                      append: bool = False,
                      chunk_index: int | None = None,
                      total_chunks: int | None = None) -> str:
-    return await agent._file.write_file(path, content, append, chunk_index, total_chunks)
+    return await agent._file_mgr.write_file(path, content, append, chunk_index, total_chunks)
 
 class EditFile(BaseModel):
     path: str = Field(..., description="相对文件路径。")
@@ -92,5 +92,5 @@ async def edit_file(path: str, agent: Agent,
                     start_line: int | None = None,
                     end_line: int | None = None,
                     count: int = 1) -> str:
-    return await agent._file.edit_file(path, mode, old_text, new_text, start_line, end_line, count)
+    return await agent._file_mgr.edit_file(path, mode, old_text, new_text, start_line, end_line, count)
 

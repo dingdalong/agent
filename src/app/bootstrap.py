@@ -8,7 +8,7 @@ from src.config import load_config
 from src.interfaces import CLIInterface
 from src.events import EventBus, EventLevel
 from src.llm import get_provider
-from src.tools import ToolsMgr
+from src.mgr import ToolsMgr
 from src.agent import AgentDeps
 from src.app.app import AgentApp
 

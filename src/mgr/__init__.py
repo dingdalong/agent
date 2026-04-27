@@ -1,3 +1,6 @@
 from src.mgr.file_mgr import FileMgr
+from src.mgr.compact_mgr import CompactMgr
+from src.mgr.todo_mgr import TodoManager
+from src.mgr.tools_mgr import ToolsMgr
 
-__all__ = ["FileMgr"]
+__all__ = ["FileMgr", "CompactMgr", "TodoManager", "ToolsMgr"]
