@@ -1,7 +1,9 @@
 """DeepSeek LLM Provider。"""
 
 import asyncio
+import json
 import logging
+import re
 import time
 from openai import AsyncOpenAI, APIConnectionError, RateLimitError, APIError
 from src.events.types import ResponseDelta, ThinkingDelta
@@ -124,6 +126,85 @@ class DeepSeekProvider(LLMProvider):
             "src/llm/tokenizer/deepseek", trust_remote_code=True
             )
         return len(tokenizer.encode(str(messages)))
+
+    # ---- 文本工具调用的正则 ----
+    _DSML_BLOCK_RE = re.compile(
+        r'<｜DSML｜tool_calls>(.*?)</｜DSML｜tool_calls>', re.DOTALL
+    )
+    _DSML_INVOKE_RE = re.compile(
+        r'<｜DSML｜invoke\s+name="([^"]+)">(.*?)</｜DSML｜invoke>', re.DOTALL
+    )
+    _DSML_PARAM_RE = re.compile(
+        r'<｜DSML｜parameter\s+name="([^"]+)"[^>]*>(.*?)</｜DSML｜parameter>',
+        re.DOTALL,
+    )
+    _V3_BLOCK_RE = re.compile(
+        r'<｜tool call begin｜>(.*?)<｜tool call end｜>', re.DOTALL
+    )
+
+    def _try_parse_text_tool_calls(
+        self, content: str
+    ) -> tuple[dict[int, dict[str, str]], str]:
+        # 格式 1: DSML 标签格式
+        tool_calls, cleaned = self._parse_dsml_tool_calls(content)
+        if tool_calls:
+            return tool_calls, cleaned
+
+        # 格式 2: V3 分隔符格式
+        tool_calls, cleaned = self._parse_v3_tool_calls(content)
+        if tool_calls:
+            return tool_calls, cleaned
+
+        return {}, content
+
+    def _parse_dsml_tool_calls(
+        self, content: str
+    ) -> tuple[dict[int, dict[str, str]], str]:
+        blocks = self._DSML_BLOCK_RE.findall(content)
+        if not blocks:
+            return {}, content
+
+        tool_calls: dict[int, dict[str, str]] = {}
+        idx = 0
+        for block in blocks:
+            for tool_name, invoke_body in self._DSML_INVOKE_RE.findall(block):
+                params = {}
+                for pname, pvalue in self._DSML_PARAM_RE.findall(invoke_body):
+                    params[pname] = pvalue
+                tool_calls[idx] = {
+                    "id": f"text_call_{idx}",
+                    "name": tool_name,
+                    "arguments": json.dumps(params, ensure_ascii=False),
+                }
+                idx += 1
+
+        cleaned = self._DSML_BLOCK_RE.sub("", content).strip()
+        return tool_calls, cleaned
+
+    def _parse_v3_tool_calls(
+        self, content: str
+    ) -> tuple[dict[int, dict[str, str]], str]:
+        matches = self._V3_BLOCK_RE.findall(content)
+        if not matches:
+            return {}, content
+
+        tool_calls: dict[int, dict[str, str]] = {}
+        for idx, match in enumerate(matches):
+            try:
+                parsed = json.loads(match.strip())
+                if isinstance(parsed, dict) and "name" in parsed:
+                    tool_calls[idx] = {
+                        "id": f"text_call_{idx}",
+                        "name": parsed["name"],
+                        "arguments": json.dumps(
+                            parsed.get("arguments", {}), ensure_ascii=False
+                        ),
+                    }
+            except json.JSONDecodeError:
+                continue
+
+        cleaned = self._V3_BLOCK_RE.sub("", content).strip()
+        return tool_calls, cleaned
 
     def normalize_messages(
         self,
@@ -304,6 +385,16 @@ class DeepSeekProvider(LLMProvider):
 
         content = "".join(content_parts) or ""
         reasoning_content = "".join(reasoning_parts) or ""
+
+        # 兜底：模型把 tool call 输出为文本而非结构化通道
+        if not tool_calls and content:
+            fallback_calls, content = self._try_parse_text_tool_calls(content)
+            if fallback_calls:
+                logger.info(
+                    "从文本中解析出 %d 个工具调用（模型未走结构化通道）",
+                    len(fallback_calls),
+                )
+                tool_calls = fallback_calls
 
         # 构造完整的 assistant 消息，包含 Provider 特有字段
         assistant_message: dict = {
