@@ -36,6 +36,9 @@ class CompactMgr:
         else:
             return False
 
+    async def micro_compact(self, messages: list) -> list:
+        return self.deps.llm.micro_compact(messages, self.keep_recent_tool_results)
+
     async def track_recent_file(self, path: str) -> None:
         if path in self.recent_files:
             self.recent_files.remove(path)
@@ -43,27 +46,6 @@ class CompactMgr:
         if len(self.recent_files) > 5:
             self.recent_files[:] = self.recent_files[-5:]
 
-    async def collect_tool_result_blocks(self, messages: list) -> list[tuple[int, int, dict]]:
-        blocks = []
-        for message_index, message in enumerate(messages):
-            content = message.get("content")
-            if message.get("role") != "user" or not isinstance(content, list):
-                continue
-            for block_index, block in enumerate(content):
-                if isinstance(block, dict) and block.get("type") == "tool_result":
-                    blocks.append((message_index, block_index, block))
-        return blocks
-
-    async def micro_compact(self, messages: list) -> list:
-        tool_results = await self.collect_tool_result_blocks(messages)
-        if len(tool_results) <= self.keep_recent_tool_results:
-            return messages
-        for _, _, block in tool_results[:-self.keep_recent_tool_results]:
-            content = block.get("content", "")
-            if not isinstance(content, str) or len(content) <= 120:
-                continue
-            block["content"] = "[Earlier tool result compacted. Re-run the tool if you need full detail.]"
-        return messages
 
     async def write_transcript(self, messages: list) -> Path:
         TRANSCRIPT_DIR.mkdir(parents=True, exist_ok=True)

@@ -19,7 +19,7 @@ tool:
 
 compact:
   auto_compact_rate: 0.8 # 达到上下文多少时进行压缩
-  keep_recent_tool_results: 3 # 保留最近N条工具调用结果
+  keep_recent_tool_results: 5 # 保留最近N条工具调用结果
 
 events:
     level: progress   # progress | detail | trace
