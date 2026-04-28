@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from src.config import config
 from src.tools import ToolDict
 from src.events.types import CompactDelta
-from src.mgr import FileMgr, TodoManager, CompactMgr, PromptMgr
+from src.mgr import FileMgr, TodoManager, CompactMgr, PromptMgr, SkillMgr
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +50,7 @@ class Agent:
     _compact_mgr: CompactMgr = field(init=False, repr=False)
     _file_mgr: FileMgr = field(init=False, repr=False)
     _prompt_mgr: PromptMgr  = field(init=False, repr=False)
+    _skill_mgr: SkillMgr = field(init=False, repr=False)
 
     def __post_init__(self):
         self.uuid = uuid.uuid4()
@@ -57,6 +58,7 @@ class Agent:
         self._compact_mgr = CompactMgr(self.deps)
         workspace = Path.cwd() / "workspace"
         self._file_mgr = FileMgr(workspace, self.deps)
+        self._skill_mgr = SkillMgr(workspace / ".skills")
 
         self._prompt_mgr = PromptMgr(agent = self, model = self.deps.llm.model, workdir = workspace)
 

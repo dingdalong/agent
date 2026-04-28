@@ -5,6 +5,7 @@ import datetime
 import os
 from pathlib import Path
 from dataclasses import dataclass, field
+from collections import deque
 
 if TYPE_CHECKING:
     from src.agent import Agent
@@ -14,6 +15,7 @@ class PromptMgr:
     agent: Agent
     model: str
     workdir: Path
+    skills: deque[str] = field(default_factory=lambda: deque(maxlen=2))
 
     """
     从独立的部分组装系统提示。
@@ -22,21 +24,43 @@ class PromptMgr:
     这使得提示更易于推理、更易于测试，也更易于随着智能体能力的增长而演进。
     """
 
+    def load_skill(self, name) -> str:
+        if not self.agent._skill_mgr.check_skill(name):
+            describe = self.agent._skill_mgr.describe() or "无"
+            return f"错误: 不存在的技能：'{name}'。可能技能列表：\n" + "\n".join(describe)
+        else:
+            self.skills.append(name)
+            return f"成功加载技能：'{name}'"
+
     def _build_core(self) -> str:
         return (
-            f"你是一个运行在 {self.workdir} 中的智能体。\n"
+            f"你是一个运行在`{self.workdir}`中的智能体。\n"
             "可以使用所提供的工具来完成用户的需求。\n"
-            "在做假设之前务必先验证。不要凭空猜测行事。\n"
+            "在做假设之前务必*先验证*。**不要凭空猜测行事**。\n"
         )
 
+    def _build_skill_listing(self) -> str:
+        describe = self.agent._skill_mgr.describe()
+        if not describe:
+            return ""
+        else:
+            return "# 可用技能列表：\n" + describe
+
     def _build_dynamic_context(self) -> str:
+        loaded_skills = "\n\n".join(
+            self.agent._skill_mgr.load_full_text(name)
+            for name in self.skills
+        )
         lines = [
-            f"当前时间：{datetime.date.today().isoformat()}",
-            f"工作目录：{self.workdir}",
-            f"llm模型：{self.model}",
-            f"运行平台：{os.uname().sysname}",
+            f"运行平台：`{os.uname().sysname}`",
+            f"llm模型：`{self.model}`",
+            f"工作目录：`{self.workdir}`",
         ]
-        return "# 动态上下文\n" + "\n".join(lines)
+        ctx = "# 动态上下文\n" + "\n".join(lines)
+        if loaded_skills:
+            ctx += "\n\n# 已加载技能\n" + loaded_skills
+        ctx += f"\n\n当前时间：`{datetime.date.today().isoformat()}`"
+        return ctx
 
     def build(self) -> list:
         """
@@ -48,6 +72,10 @@ class PromptMgr:
         core = self._build_core()
         if core:
             sections.append(core)
+
+        skills = self._build_skill_listing()
+        if skills:
+            sections.append(skills)
 
         sections.append("=== 动态边界标记 ===")
         dynamic = self._build_dynamic_context()
