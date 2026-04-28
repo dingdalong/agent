@@ -46,6 +46,36 @@ class PromptMgr:
         else:
             return "# 可用技能列表：\n" + describe
 
+    def _build_agent_md(self) -> str:
+        """
+        按优先级顺序加载 AGENT.md 文件（全部包含）：
+        ~/.Agent/AGENT.md（用户级全局指令）
+        <项目根目录>/AGENT.md（项目级指令）
+        <当前子目录>/AGENT.md（目录专属指令）
+        """
+        sources = []
+
+        user_agent = Path.home() / ".Agent" / "AGENT.md"
+        if user_agent.exists():
+            sources.append(("user global (~/.Agent/AGENT.md)", user_agent.read_text()))
+
+        project_agent = self.workdir / "AGENT.md"
+        if project_agent.exists():
+            sources.append(("project root (AGENT.md)", project_agent.read_text()))
+
+        cwd = Path.cwd()
+        if cwd != self.workdir:
+            subdir_agent = cwd / "AGENT.md"
+            if subdir_agent.exists():
+                sources.append((f"subdir ({cwd.name}/AGENT.md)", subdir_agent.read_text()))
+        if not sources:
+            return ""
+        parts = ["# AGENT.md instructions"]
+        for label, content in sources:
+            parts.append(f"## From {label}")
+            parts.append(content.strip())
+        return "\n\n".join(parts)
+
     def _build_dynamic_context(self) -> str:
         loaded_skills = "\n\n".join(
             self.agent._skill_mgr.load_full_text(name)
@@ -76,6 +106,10 @@ class PromptMgr:
         skills = self._build_skill_listing()
         if skills:
             sections.append(skills)
+
+        agent_md = self._build_agent_md()
+        if agent_md:
+            sections.append(agent_md)
 
         sections.append("=== 动态边界标记 ===")
         dynamic = self._build_dynamic_context()
