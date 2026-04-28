@@ -66,10 +66,8 @@ class Agent:
         self,
         input: str,
         messages: list[dict],
-        struct_output: StructOutputConfig | None = None,
     ) -> str | BaseModel:
         messages.append({"role": "user", "content": input})
-        schema_cls = struct_output.model_cls if struct_output else None
 
         final_text = ""
         rounds_without_todo = 0
@@ -88,7 +86,7 @@ class Agent:
                     logger.warning("连续 %d 次 compact 后仍需压缩，终止循环防止空转", compact_streak - 1)
                     messages.append({"role": "user", "content": "由于对话上下文过长且多次压缩仍无法继续，请你基于当前已完成的工作做一个总结：1) 已经完成了什么；2) 还有什么未完成；3) 给出后续建议。"})
                     messages[:] = self.deps.llm.normalize_messages(messages)
-                    response = await self.deps.llm.chat(prompt=prompt, messages=messages, tools=[], output_schema=schema_cls)
+                    response = await self.deps.llm.chat(prompt=prompt, messages=messages, tools=[])
                     if response.content:
                         final_text = response.content
                     messages.append(response.assistant_message)
@@ -103,7 +101,7 @@ class Agent:
                 compact_streak = 0
 
             messages[:] = self.deps.llm.normalize_messages(messages)
-            response = await self.deps.llm.chat(prompt=prompt, messages=messages, tools=self._tools_schemas, output_schema=schema_cls)
+            response = await self.deps.llm.chat(prompt=prompt, messages=messages, tools=self._tools_schemas)
             content, tool_calls = response.content, response.tool_calls
 
             if content:
@@ -162,24 +160,5 @@ class Agent:
 
         if not has_tool_calls:
             self.deps.llm.clear_reasoning_content(messages[round_start_idx:])
-
-        # 结构化输出解析
-        if struct_output is not None:
-            # 原生 Provider：final_text 已是受约束的 JSON，直接解析
-            if self.deps.llm.supports_native_structured_output and final_text:
-                try:
-                    return struct_output.model_cls.model_validate_json(final_text)
-                except (ValidationError, Exception) as e:
-                    logger.debug(f"原生结构化输出解析失败，回退到 structured_chat: {e}")
-            # 非原生 或 解析失败：Two-Pass 兜底
-            result = await self.deps.llm.structured_chat(
-                output_schema=struct_output.model_cls,
-                messages=messages,
-                prompt=self._prompt_mgr.build(),
-                schema_name=struct_output.schema_name,
-                schema_description=struct_output.schema_desc,
-            )
-            if result is not None:
-                return result
 
         return final_text

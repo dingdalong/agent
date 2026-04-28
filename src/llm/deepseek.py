@@ -310,7 +310,6 @@ class DeepSeekProvider(LLMProvider):
         tools: list[ToolDict] | None = None,
         temperature: float = 0,
         tool_choice: str | dict | None = None,
-        output_schema=None,
     ) -> LLMResponse:
         """流式调用 LLM，返回完整响应。"""
         async with self._semaphore:
