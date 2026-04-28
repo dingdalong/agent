@@ -12,10 +12,10 @@ def load_config(ptch: str = "config.yaml") -> dict:
             config = yaml.safe_load(f) or {}
 
     for key, provider in config.get("llm_provider", {}).items():
-        env_key = f"{key.upper()}_API_KEY"
-        value = os.environ.get(env_key)
-        if value is not None:
-            provider["api_key"] = value
+        for env_suffix, field in (("API_KEY", "api_key"), ("API_URL", "base_url")):
+            value = os.environ.get(f"{key.upper()}_{env_suffix}")
+            if value is not None:
+                provider[field] = value
 
     return config
 
