@@ -261,8 +261,8 @@ class DeepSeekProvider(LLMProvider):
 
             has_tool_calls = bool(msg.get("tool_calls"))
 
-            # 跳过空内容且无 tool_calls 的消息
-            if not content and not has_tool_calls:
+            # 跳过空内容且无 tool_calls 的消息（tool 角色必须保留，否则 tool_call_id 无应答）
+            if not content and not has_tool_calls and role != "tool":
                 continue
 
             # 2.4 构建基础消息体
