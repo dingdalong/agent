@@ -24,8 +24,10 @@ class CompactMgr:
         self.auto_compact_size = compact_cfg["context_limit"] * compact_cfg["auto_compact_rate"]
         self.keep_recent_tool_results = compact_cfg["keep_recent_tool_results"]
 
-    def is_need_compact(self, messages: list) -> bool:
-        if self.deps.llm.estimate_tokens(messages) > self.auto_compact_size:
+    def is_need_compact(self, messages: list, prompt: list) -> bool:
+        message_token = self.deps.llm.estimate_tokens(messages)
+        prompt_token = self.deps.llm.estimate_tokens(prompt)
+        if message_token + prompt_token > self.auto_compact_size:
             return True
         else:
             return False
