@@ -31,6 +31,7 @@ class LLMProvider(ABC):
     max_retries: int = 3
     timeout: float = 120.0
     supports_native_structured_output: bool = False
+    reasoning_effort: str = "max"
 
     def __post_init__(self):
         self._semaphore = asyncio.Semaphore(self.concurrency)

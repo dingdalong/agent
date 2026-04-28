@@ -322,7 +322,7 @@ class DeepSeekProvider(LLMProvider):
                         stream=True,
                         temperature=temperature,
                         tool_choice=tool_choice or ("auto" if tools else None),
-                        reasoning_effort="max",
+                        reasoning_effort=self.reasoning_effort,
                         extra_body={"thinking": {"type": "enabled"}}
                     )
                     return await self._parse_stream(response)

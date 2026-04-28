@@ -30,6 +30,7 @@ async def create_app() -> AgentApp:
         api_key = llm_provider_cfg["api_key"],
         base_url = llm_provider_cfg["base_url"],
         model = default_llm_cfg["model"],
+        reasoning_effort = default_llm_cfg["reasoning_effort"],
         concurrency = default_llm_cfg["concurrency"],
         max_retries = default_llm_cfg["max_retries"],
         event_bus = event_bus,
