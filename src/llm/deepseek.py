@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import time
+import httpx
 from openai import AsyncOpenAI, APIConnectionError, RateLimitError, APIError
 from src.events.types import ResponseDelta, ThinkingDelta
 from src.llm.base import LLMProvider, LLMResponse
@@ -327,7 +328,7 @@ class DeepSeekProvider(LLMProvider):
                     )
                     return await self._parse_stream(response)
 
-                except (APIConnectionError, RateLimitError, asyncio.TimeoutError) as e:
+                except (APIConnectionError, RateLimitError, asyncio.TimeoutError, httpx.ReadTimeout) as e:
                     if attempt == self.max_retries - 1:
                         raise
                     wait_time = 2 ** attempt
