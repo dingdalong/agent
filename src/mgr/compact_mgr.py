@@ -21,7 +21,11 @@ class CompactMgr:
 
     def __post_init__(self):
         compact_cfg = config["compact"]
-        self.auto_compact_size = compact_cfg["context_limit"] * compact_cfg["auto_compact_rate"]
+        default_llm_cfg = config["llm"]["default"]
+        llm_provider_name = default_llm_cfg["provider"]
+        llm_provider_cfg = config["llm_provider"][llm_provider_name]
+        context_limit = llm_provider_cfg["context_limit"]
+        self.auto_compact_size = context_limit * compact_cfg["auto_compact_rate"]
         self.keep_recent_tool_results = compact_cfg["keep_recent_tool_results"]
 
     def is_need_compact(self, messages: list, prompt: list) -> bool:
