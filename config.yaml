@@ -6,6 +6,12 @@ llm_provider:
     base_url: https://api.deepseek.com/v1
     reasoning_effort: max # 推理力度
     context_limit: 200000 # 上下文限制
+  openai:
+    models: # 可用模型
+      - gpt-5.5
+    base_url: http://172.20.103.154:23000
+    reasoning_effort: xhigh # 推理力度
+    context_limit: 200000 # 上下文限制
 
 llm:
   default: # 默认模型
@@ -19,7 +25,7 @@ tool:
 
 compact:
   auto_compact_rate: 0.8 # 达到上下文多少时进行压缩
-  keep_recent_tool_results: 5 # 保留最近N条工具调用结果
+  keep_recent_tool_results: 10 # 保留最近N条工具调用结果
 
 events:
     level: progress   # progress | detail | trace
