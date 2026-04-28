@@ -12,11 +12,17 @@ llm_provider:
     base_url: http://172.20.103.154:23000
     reasoning_effort: xhigh # 推理力度
     context_limit: 200000 # 上下文限制
+  anthropic:
+    models: # 可用模型
+      - claude-sonnet-4-6
+    base_url: https://api.anthropic.com
+    reasoning_effort: high # 推理力度
+    context_limit: 200000 # 上下文限制
 
 llm:
   default: # 默认模型
     provider: deepseek # 模型提供商
-    model: deepseek-v4-flash # 模型名称
+    model: deepseek-v4-pro # 模型名称
     concurrency: 5 # 最大并发数量
     max_retries: 3 # 重试次数
 
