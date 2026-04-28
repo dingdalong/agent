@@ -37,8 +37,14 @@ class LLMProvider(ABC):
         self._semaphore = asyncio.Semaphore(self.concurrency)
 
     def clear_reasoning_content(self, message): ...
+
+    @abstractmethod
     def estimate_tokens(self, message: list[dict]) -> int: ...
+
+    @abstractmethod
     def micro_compact(self, messages: list[dict], keep_recent: int) -> list[dict]: ...
+
+    @abstractmethod
     def normalize_messages(
         self,
         message: list[dict],
