@@ -13,7 +13,7 @@ class SubAgentManifest:
     name: str
     description: str
     path: Path
-    tools: set[str]
+    tools: set[str] | None = None
 
 @dataclass
 class SubAgentDocument:
@@ -42,7 +42,7 @@ class SubAgentMgr:
                 name = meta.get("name", path.stem)
                 description = meta.get("description", "没有说明内容")
                 raw_tools = meta.get("tools", "")
-                tools = {t.strip() for t in raw_tools.split(",") if t.strip()}
+                tools = {t.strip() for t in raw_tools.split(",") if t.strip()} or None
                 if tools:
                     tools.add("read_tool_result")
                 manifest = SubAgentManifest(
