@@ -44,8 +44,14 @@ class PromptMgr:
         describe = self.agent._skill_mgr.describe()
         if not describe:
             return ""
-        else:
-            return "# 可用技能列表：\n" + describe
+        return (
+            "# 可用技能列表：\n" + describe +
+            "\n\n## 技能使用流程\n"
+            "1. 使用 `load_skill` 加载技能，技能指令及附属文件会出现在系统提示中。\n"
+            "2. 若技能包含带 `{占位符}` 的模板附属文件（`<skill-file>`），"
+            "使用 `fill_skill_template` 填充变量后获得完整文本。\n"
+            "3. 若需委托子智能体执行，将填充后的文本作为 prompt 传给 `task_delegator`。"
+        )
 
     def _build_subagent_listing(self) -> str:
         describe = self.agent._subagent_mgr.describe()

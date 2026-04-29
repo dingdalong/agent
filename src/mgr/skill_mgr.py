@@ -51,6 +51,15 @@ class SkillMgr:
     def check_skill(self, name: str) -> bool:
         return name in self._documents
 
+    def get_companion(self, skill_name: str, file_name: str) -> str | None:
+        document = self._documents.get(skill_name)
+        if not document:
+            return None
+        path = document.manifest.path.parent / file_name
+        if not path.is_file() or path.name == "SKILL.md":
+            return None
+        return path.read_text()
+
     def load_full_text(self, name: str) -> str:
         document = self._documents.get(name)
         if not document:
