@@ -7,6 +7,7 @@ class SkillManifest:
     name: str
     description: str
     path: Path
+
 @dataclass
 class SkillDocument:
     manifest: SkillManifest
@@ -58,7 +59,7 @@ class SkillMgr:
         document = self._documents.get(name)
         if not document:
             known = ", ".join(sorted(self._documents)) or "(none)"
-            return f"错误: 不存在的技能：'{name}'。可能技能列表：{known}"
+            return f"错误: 不存在的技能：'{name}'。可用技能列表：{known}"
         return (
             f"<skill name=\"{document.manifest.name}\">\n"
             f"{document.body}\n"

@@ -27,7 +27,7 @@ class PromptMgr:
     def load_skill(self, name) -> str:
         if not self.agent._skill_mgr.check_skill(name):
             describe = self.agent._skill_mgr.describe() or "无"
-            return f"错误: 不存在的技能：'{name}'。可能技能列表：\n" + "\n".join(describe)
+            return f"错误: 不存在的技能：'{name}'。可用技能列表：\n" + "\n".join(describe)
         else:
             self.skills.append(name)
             return f"成功加载技能：'{name}'"
@@ -45,6 +45,13 @@ class PromptMgr:
             return ""
         else:
             return "# 可用技能列表：\n" + describe
+
+    def _build_subagent_listing(self) -> str:
+        describe = self.agent._subagent_mgr.describe()
+        if not describe:
+            return ""
+        else:
+            return "# 可用子智能体列表：\n" + describe + "\n **善用子智能体来协助完成任务**"
 
     def _build_agent_md(self) -> str:
         """
@@ -106,6 +113,11 @@ class PromptMgr:
         skills = self._build_skill_listing()
         if skills:
             sections.append(skills)
+
+        if not self.agent.is_subagent:
+            subagents = self._build_subagent_listing()
+            if subagents:
+                sections.append(subagents)
 
         agent_md = self._build_agent_md()
         if agent_md:
