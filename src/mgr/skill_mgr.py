@@ -56,8 +56,17 @@ class SkillMgr:
         if not document:
             known = ", ".join(sorted(self._documents)) or "(none)"
             return f"错误: 不存在的技能：'{name}'。可用技能列表：{known}"
-        return (
+        skill_dir = document.manifest.path.parent
+        companions = sorted(
+            p for p in skill_dir.iterdir()
+            if p.is_file() and p.name != "SKILL.md"
+        )
+        text = (
             f"<skill name=\"{document.manifest.name}\">\n"
             f"{document.body}\n"
             "</skill>"
         )
+        if companions:
+            listing = "\n".join(f"- {p}" for p in companions)
+            text += f"\n\n附属文件（可通过 read_file 读取）：\n{listing}"
+        return text
