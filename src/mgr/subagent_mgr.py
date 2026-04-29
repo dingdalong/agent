@@ -2,6 +2,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import re
+import yaml
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -57,11 +58,7 @@ class SubAgentMgr:
         match = re.match(r"^---\s*\n(.*?)\n---\s*\n(.*)", text, re.DOTALL)
         if not match:
             return {}, text
-        meta = {}
-        for line in match.group(1).splitlines():
-            if ":" in line:
-                k, _, v = line.partition(":")
-                meta[k.strip()] = v.strip()
+        meta = yaml.safe_load(match.group(1)) or {}
         return meta, match.group(2)
 
     def describe(self) -> str | None:

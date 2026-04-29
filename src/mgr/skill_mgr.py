@@ -1,4 +1,5 @@
 import re
+import yaml
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -32,15 +33,10 @@ class SkillMgr:
             self._documents[name] = SkillDocument(manifest=manifest, body=body.strip())
 
     def _parse_frontmatter(self, text: str) -> tuple[dict, str]:
-        match = re.match(r"^---\n(.*?)\n---\n(.*)", text, re.DOTALL)
+        match = re.match(r"^---\s*\n(.*?)\n---\s*\n(.*)", text, re.DOTALL)
         if not match:
             return {}, text
-        meta = {}
-        for line in match.group(1).strip().splitlines():
-            if ":" not in line:
-                continue
-            key, value = line.split(":", 1)
-            meta[key.strip()] = value.strip()
+        meta = yaml.safe_load(match.group(1)) or {}
         return meta, match.group(2)
 
     def describe(self) -> str | None:
