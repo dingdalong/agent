@@ -84,6 +84,7 @@ class SubAgentMgr:
         agent = Agent(
             name = name,
             description = document.manifest.description,
+            role_prompt = document.prompt or None,
             deps = self.deps,
             tools = document.manifest.tools,
             is_subagent = True,

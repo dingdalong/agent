@@ -15,6 +15,7 @@ class PromptMgr:
     agent: Agent
     model: str
     workdir: Path
+    role_prompt: str | None = None
     skills: deque[str] = field(default_factory=lambda: deque(maxlen=2))
 
     """
@@ -52,6 +53,11 @@ class PromptMgr:
             return ""
         else:
             return "# 可用子智能体列表：\n" + describe + "\n **善用子智能体来协助完成任务**"
+
+    def _build_role_prompt(self) -> str:
+        if not self.role_prompt:
+            return ""
+        return f"# 角色提示词：\n{self.role_prompt}"
 
     def _build_agent_md(self) -> str:
         """
@@ -109,6 +115,10 @@ class PromptMgr:
         core = self._build_core()
         if core:
             sections.append(core)
+
+        role_prompt = self._build_role_prompt()
+        if role_prompt:
+            sections.append(role_prompt)
 
         skills = self._build_skill_listing()
         if skills:

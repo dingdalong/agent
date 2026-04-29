@@ -44,6 +44,7 @@ class Agent:
     name: str
     description: str
     deps: AgentDeps = field(repr=False)
+    role_prompt: str | None = field(default=None)
     tools: set[str] | None = field(default=None)
     is_subagent: bool = field(default=False)
     _tools_schemas: list[ToolDict] = field(init=False)
@@ -64,7 +65,7 @@ class Agent:
         self._skill_mgr = SkillMgr(workspace / ".skills")
         self._subagent_mgr = SubAgentMgr(workspace, self.deps)
 
-        self._prompt_mgr = PromptMgr(agent = self, model = self.deps.llm.model, workdir = workspace)
+        self._prompt_mgr = PromptMgr(agent = self, model = self.deps.llm.model, workdir = workspace, role_prompt = self.role_prompt)
 
     async def run(
         self,
