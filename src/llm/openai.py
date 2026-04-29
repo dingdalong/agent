@@ -227,8 +227,8 @@ class OpenAIProvider(LLMProvider):
                 except (APIConnectionError, RateLimitError, asyncio.TimeoutError, httpx.ReadTimeout) as e:
                     if attempt == self.max_retries - 1:
                         raise
-                    wait_time = 2 ** attempt
-                    logger.warning(f"API错误 ({type(e).__name__})，{wait_time}秒后重试...")
+                    wait_time = min(2 ** attempt * 5, 60)
+                    logger.warning(f"API错误 ({type(e).__name__})，{wait_time}秒后重试 ({attempt+1}/{self.max_retries})...")
                     await asyncio.sleep(wait_time)
 
                 except APIError:

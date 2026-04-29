@@ -28,7 +28,7 @@ class LLMProvider(ABC):
     model: str
     event_bus: EventBus
     concurrency: int = 5
-    max_retries: int = 3
+    max_retries: int = 6
     timeout: float = 120.0
     supports_native_structured_output: bool = False
     reasoning_effort: str = "max"

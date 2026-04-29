@@ -71,7 +71,6 @@ class SubAgentMgr:
         return "\n".join(lines)
 
     async def task_delegator(self, name: str, prompt: str) -> str:
-
         document = self._documents.get(name)
         if not document:
             known = ", ".join(sorted(self._documents)) or "(none)"
