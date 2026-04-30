@@ -27,7 +27,7 @@ async def create_app() -> AgentApp:
     llm_provider_cfg = config["llm_provider"][llm_provider_name]
     LLMProvider = get_provider(llm_provider_name)
     llm = LLMProvider(
-        api_key = llm_provider_cfg["api_key"],
+        api_key = llm_provider_cfg.get("api_key", ""),
         base_url = llm_provider_cfg["base_url"],
         model = default_llm_cfg["model"],
         reasoning_effort = llm_provider_cfg["reasoning_effort"],

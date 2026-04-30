@@ -18,11 +18,17 @@ llm_provider:
     base_url: https://api.anthropic.com
     reasoning_effort: high # 推理力度
     context_limit: 200000 # 上下文限制
+  ollama:
+    models: # 可用模型
+      - qwen3.6:35b-a3b-coding-nvfp4
+    base_url: http://localhost:11434/v1
+    reasoning_effort: none # Ollama 模型通常不支持推理
+    context_limit: 200000 # 上下文限制
 
 llm:
   default: # 默认模型
-    provider: deepseek # 模型提供商
-    model: deepseek-v4-pro # 模型名称
+    provider: ollama # 模型提供商
+    model: qwen3.6:35b-a3b-coding-nvfp4 # 模型名称
     concurrency: 5 # 最大并发数量
     max_retries: 3 # 重试次数
 
