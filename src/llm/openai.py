@@ -1,11 +1,9 @@
 """OpenAI SDK 实现的 LLM Provider — Responses API。"""
 
-import asyncio
 import logging
 import time
-import httpx
 import tiktoken
-from openai import AsyncOpenAI, APIConnectionError, RateLimitError, APIError
+from openai import AsyncOpenAI, APIConnectionError, RateLimitError, InternalServerError
 from src.events.types import ResponseDelta, ThinkingDelta
 from src.llm.base import LLMProvider, LLMResponse
 from src.tools import ToolDict
@@ -15,6 +13,8 @@ logger = logging.getLogger(__name__)
 
 class OpenAIProvider(LLMProvider):
     """OpenAI Provider (Responses API)"""
+
+    _retryable_errors = (APIConnectionError, RateLimitError, InternalServerError)
 
     def __post_init__(self):
         super().__post_init__()
@@ -190,50 +190,35 @@ class OpenAIProvider(LLMProvider):
             for t in tools
         ]
 
-    async def chat(
+    async def _do_chat(
         self,
         messages: list[dict],
         prompt: list[dict] | None = None,
         tools: list[ToolDict] | None = None,
-        temperature: float = 1.0,
+        temperature: float = 0.6,
         tool_choice: str | dict | None = None,
     ) -> LLMResponse:
-        """流式调用 LLM (Responses API)，返回完整响应。"""
-        async with self._semaphore:
-            for attempt in range(self.max_retries):
-                try:
-                    instructions, input_items = self._convert_to_input(messages, prompt)
-                    converted_tools = self._convert_tools(tools)
+        instructions, input_items = self._convert_to_input(messages, prompt)
+        converted_tools = self._convert_tools(tools)
 
-                    kwargs: dict = {
-                        "model": self.model,
-                        "input": input_items,
-                        "stream": True,
-                        "temperature": temperature,
-                        "reasoning": {
-                            "effort": self.reasoning_effort,
-                            "summary": "auto",
-                        },
-                    }
-                    if instructions:
-                        kwargs["instructions"] = instructions
-                    if converted_tools:
-                        kwargs["tools"] = converted_tools
-                        kwargs["tool_choice"] = tool_choice or "auto"
+        kwargs: dict = {
+            "model": self.model,
+            "input": input_items,
+            "stream": True,
+            "temperature": temperature,
+            "reasoning": {
+                "effort": self.reasoning_effort,
+                "summary": "auto",
+            },
+        }
+        if instructions:
+            kwargs["instructions"] = instructions
+        if converted_tools:
+            kwargs["tools"] = converted_tools
+            kwargs["tool_choice"] = tool_choice or "auto"
 
-                    stream = await self._client.responses.create(**kwargs)
-                    return await self._parse_stream(stream)
-
-                except (APIConnectionError, RateLimitError, asyncio.TimeoutError, httpx.ReadTimeout) as e:
-                    if attempt == self.max_retries - 1:
-                        raise
-                    wait_time = min(2 ** attempt * 5, 60)
-                    logger.warning(f"API错误 ({type(e).__name__})，{wait_time}秒后重试 ({attempt+1}/{self.max_retries})...")
-                    await asyncio.sleep(wait_time)
-
-                except APIError:
-                    raise
-            raise RuntimeError("LLM chat: 所有重试均失败")
+        stream = await self._client.responses.create(**kwargs)
+        return await self._parse_stream(stream)
 
     async def _parse_stream(self, stream) -> LLMResponse:
         """解析 Responses API 流式事件。"""

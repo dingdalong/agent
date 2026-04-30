@@ -1,10 +1,8 @@
 """Ollama LLM Provider — OpenAI 兼容接口。"""
 
-import asyncio
 import logging
 import time
-import httpx
-from openai import AsyncOpenAI, APIConnectionError, RateLimitError, APIError
+from openai import AsyncOpenAI, APIConnectionError, RateLimitError, InternalServerError
 from src.events.types import ResponseDelta
 from src.llm.base import LLMProvider, LLMResponse
 from src.tools import ToolDict
@@ -14,6 +12,8 @@ logger = logging.getLogger(__name__)
 
 class OllamaProvider(LLMProvider):
     """Ollama Provider (OpenAI 兼容 Chat Completions API)"""
+
+    _retryable_errors = (APIConnectionError, RateLimitError, InternalServerError)
 
     def __post_init__(self):
         super().__post_init__()
@@ -125,41 +125,26 @@ class OllamaProvider(LLMProvider):
 
         return normalized
 
-    async def chat(
+    async def _do_chat(
         self,
         messages: list[dict],
         prompt: list[dict] | None = None,
         tools: list[ToolDict] | None = None,
-        temperature: float = 0.7,
+        temperature: float = 0.6,
         tool_choice: str | dict | None = None,
     ) -> LLMResponse:
-        """流式调用 Ollama，返回完整响应。"""
-        async with self._semaphore:
-            for attempt in range(self.max_retries):
-                try:
-                    kwargs: dict = {
-                        "model": self.model,
-                        "messages": prompt + messages if prompt else messages,
-                        "stream": True,
-                        "temperature": temperature,
-                    }
-                    if tools:
-                        kwargs["tools"] = tools
-                        kwargs["tool_choice"] = tool_choice or "auto"
+        kwargs: dict = {
+            "model": self.model,
+            "messages": prompt + messages if prompt else messages,
+            "stream": True,
+            "temperature": temperature,
+        }
+        if tools:
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = tool_choice or "auto"
 
-                    response = await self._client.chat.completions.create(**kwargs)
-                    return await self._parse_stream(response)
-
-                except (APIConnectionError, RateLimitError, asyncio.TimeoutError, httpx.ReadTimeout) as e:
-                    if attempt == self.max_retries - 1:
-                        raise
-                    wait_time = min(2 ** attempt * 5, 60)
-                    logger.warning(f"Ollama API错误 ({type(e).__name__})，{wait_time}秒后重试 ({attempt+1}/{self.max_retries})...")
-                    await asyncio.sleep(wait_time)
-
-                except APIError:
-                    raise
-            raise RuntimeError("Ollama chat: 所有重试均失败")
+        response = await self._client.chat.completions.create(**kwargs)
+        return await self._parse_stream(response)
 
     async def _parse_stream(self, stream) -> LLMResponse:
         """解析 Chat Completions 流式响应。"""

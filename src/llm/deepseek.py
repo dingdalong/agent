@@ -1,12 +1,10 @@
 """DeepSeek LLM Provider。"""
 
-import asyncio
 import json
 import logging
 import re
 import time
-import httpx
-from openai import AsyncOpenAI, APIConnectionError, RateLimitError, APIError
+from openai import AsyncOpenAI, APIConnectionError, RateLimitError, InternalServerError
 from src.events.types import ResponseDelta, ThinkingDelta
 from src.llm.base import LLMProvider, LLMResponse
 from src.tools import ToolDict
@@ -100,6 +98,8 @@ def _normalize_tool_calls(tool_calls: object, msg_index: int) -> list[dict] | No
 
 class DeepSeekProvider(LLMProvider):
     """基于 OpenAI SDK 的 LLM Provider。"""
+
+    _retryable_errors = (APIConnectionError, RateLimitError, InternalServerError)
 
     def __post_init__(self):
         super().__post_init__()
@@ -314,40 +314,25 @@ class DeepSeekProvider(LLMProvider):
 
         return normalized
 
-    async def chat(
+    async def _do_chat(
         self,
         messages: list[dict],
         prompt: list[dict] | None = None,
         tools: list[ToolDict] | None = None,
-        temperature: float = 0,
+        temperature: float = 0.6,
         tool_choice: str | dict | None = None,
     ) -> LLMResponse:
-        """流式调用 LLM，返回完整响应。"""
-        async with self._semaphore:
-            for attempt in range(self.max_retries):
-                try:
-                    response = await self._client.chat.completions.create(
-                        model=self.model,
-                        messages=prompt + messages if prompt is not None else messages,
-                        tools=tools,
-                        stream=True,
-                        temperature=temperature,
-                        tool_choice=tool_choice or ("auto" if tools else None),
-                        reasoning_effort=self.reasoning_effort,
-                        extra_body={"thinking": {"type": "enabled"}}
-                    )
-                    return await self._parse_stream(response)
-
-                except (APIConnectionError, RateLimitError, asyncio.TimeoutError, httpx.ReadTimeout) as e:
-                    if attempt == self.max_retries - 1:
-                        raise
-                    wait_time = min(2 ** attempt * 5, 60)
-                    logger.warning(f"API错误 ({type(e).__name__})，{wait_time}秒后重试 ({attempt+1}/{self.max_retries})...")
-                    await asyncio.sleep(wait_time)
-
-                except APIError:
-                    raise
-            raise RuntimeError("LLM chat: 所有重试均失败")
+        response = await self._client.chat.completions.create(
+            model=self.model,
+            messages=prompt + messages if prompt is not None else messages,
+            tools=tools,
+            stream=True,
+            temperature=temperature,
+            tool_choice=tool_choice or ("auto" if tools else None),
+            reasoning_effort=self.reasoning_effort,
+            extra_body={"thinking": {"type": "enabled"}}
+        )
+        return await self._parse_stream(response)
 
     async def _parse_stream(
         self, stream

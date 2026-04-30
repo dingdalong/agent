@@ -7,6 +7,7 @@ import json
 import logging
 import re
 import asyncio
+import httpx
 from src.events import EventBus
 from src.tools import ToolDict
 
@@ -33,6 +34,8 @@ class LLMProvider(ABC):
     supports_native_structured_output: bool = False
     reasoning_effort: str = "max"
 
+    _retryable_errors = ()
+
     def __post_init__(self):
         self._semaphore = asyncio.Semaphore(self.concurrency)
 
@@ -53,8 +56,29 @@ class LLMProvider(ABC):
         strict: bool = False
     ) -> int: ...
 
-    @abstractmethod
     async def chat(
+        self,
+        messages: list[dict],
+        prompt: list[dict] | None = None,
+        tools: list[ToolDict] | None = None,
+        temperature: float = 0.6,
+        tool_choice: str | dict | None = None,
+    ) -> LLMResponse:
+        retryable = self._retryable_errors + (asyncio.TimeoutError, httpx.ReadTimeout)
+        async with self._semaphore:
+            for attempt in range(self.max_retries):
+                try:
+                    return await self._do_chat(messages, prompt, tools, temperature, tool_choice)
+                except retryable as e:
+                    if attempt == self.max_retries - 1:
+                        raise
+                    wait_time = min(2 ** attempt * 5, 60)
+                    logger.warning(f"API错误 ({type(e).__name__})，{wait_time}秒后重试 ({attempt+1}/{self.max_retries})...")
+                    await asyncio.sleep(wait_time)
+            raise RuntimeError("LLM chat: 所有重试均失败")
+
+    @abstractmethod
+    async def _do_chat(
         self,
         messages: list[dict],
         prompt: list[dict] | None = None,

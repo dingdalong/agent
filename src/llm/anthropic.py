@@ -1,10 +1,8 @@
 """Anthropic LLM Provider。"""
 
-import asyncio
 import json
 import logging
 import time
-import httpx
 import tiktoken
 import anthropic
 from anthropic import AsyncAnthropic
@@ -17,6 +15,12 @@ logger = logging.getLogger(__name__)
 
 class AnthropicProvider(LLMProvider):
     """Anthropic Provider (Messages API)"""
+
+    _retryable_errors = (
+        anthropic.APIConnectionError,
+        anthropic.RateLimitError,
+        anthropic.InternalServerError,
+    )
 
     def __post_init__(self):
         super().__post_init__()
@@ -287,59 +291,36 @@ class AnthropicProvider(LLMProvider):
 
     # ---- API 调用 ----
 
-    async def chat(
+    async def _do_chat(
         self,
         messages: list[dict],
         prompt: list[dict] | None = None,
         tools: list[ToolDict] | None = None,
-        temperature: float = 1.0,
+        temperature: float = 0.6,
         tool_choice: str | dict | None = None,
     ) -> LLMResponse:
-        """流式调用 Claude Messages API，返回完整响应。"""
-        async with self._semaphore:
-            for attempt in range(self.max_retries):
-                try:
-                    system, claude_messages = self._convert_messages(messages, prompt)
-                    claude_tools = self._convert_tools(tools)
+        system, claude_messages = self._convert_messages(messages, prompt)
+        claude_tools = self._convert_tools(tools)
 
-                    kwargs: dict = {
-                        "model": self.model,
-                        "max_tokens": 16000,
-                        "messages": claude_messages,
-                        "thinking": {"type": "adaptive"},
-                    }
+        kwargs: dict = {
+            "model": self.model,
+            "max_tokens": 16000,
+            "messages": claude_messages,
+            "thinking": {"type": "adaptive"},
+        }
 
-                    effort = self._map_effort(self.reasoning_effort)
-                    kwargs["output_config"] = {"effort": effort}
+        effort = self._map_effort(self.reasoning_effort)
+        kwargs["output_config"] = {"effort": effort}
 
-                    if system:
-                        kwargs["system"] = system
-                    if claude_tools:
-                        kwargs["tools"] = claude_tools
-                        kwargs["tool_choice"] = self._convert_tool_choice(
-                            tool_choice or "auto"
-                        )
+        if system:
+            kwargs["system"] = system
+        if claude_tools:
+            kwargs["tools"] = claude_tools
+            kwargs["tool_choice"] = self._convert_tool_choice(
+                tool_choice or "auto"
+            )
 
-                    return await self._stream_chat(**kwargs)
-
-                except (
-                    anthropic.APIConnectionError,
-                    anthropic.RateLimitError,
-                    asyncio.TimeoutError,
-                    httpx.ReadTimeout,
-                ) as e:
-                    if attempt == self.max_retries - 1:
-                        raise
-                    wait_time = min(2 ** attempt * 5, 60)
-                    logger.warning(
-                        f"API错误 ({type(e).__name__})，{wait_time}秒后重试 ({attempt+1}/{self.max_retries})..."
-                    )
-                    await asyncio.sleep(wait_time)
-
-                except anthropic.APIStatusError:
-                    raise
-
-            raise RuntimeError("LLM chat: 所有重试均失败")
+        return await self._stream_chat(**kwargs)
 
     async def _stream_chat(self, **kwargs) -> LLMResponse:
         """执行流式调用并解析响应。"""
