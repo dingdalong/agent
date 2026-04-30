@@ -74,7 +74,7 @@ class CompactMgr:
 
     async def compact_history(self, messages: list, focus: str | None = None) -> list:
         transcript_path = await self.write_transcript(messages)
-        print(f"[transcript saved: {transcript_path}]")
+        await self.deps.ui.output(f"[transcript saved: {transcript_path}]\n")
         summary = await self.summarize_history(messages)
         if focus:
             summary += f"\n\nFocus to preserve next: {focus}"

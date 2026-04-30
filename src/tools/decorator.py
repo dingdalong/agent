@@ -25,8 +25,13 @@ class ToolEntry:
 
     async def __call__(self, context: Dict[str, Any], **kwds: Any) -> Any:
         if self.sensitive:
-            print(f"\n⚠️  工具 '{self.name}' 需要执行敏感操作。")
-            answer = await asyncio.to_thread(input, "是否允许执行？(y/n): ")
+            ui = context["deps"].ui
+            if self.confirm_template:
+                detail = self.confirm_template.format(**kwds)
+            else:
+                detail = ", ".join(f"{k}={v!r}" for k, v in kwds.items())
+            await ui.output(f"\n⚠️  工具 '{self.name}' 需要执行敏感操作：\n   {detail}\n")
+            answer = await ui.input("是否允许执行？(y/n): ")
             if not answer.strip().lower() == 'y':
                 return "用户取消了操作"
 
