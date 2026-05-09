@@ -45,27 +45,34 @@ class ToolsMgr:
             for tool in tools
         ]
 
-    def get_page(self, tool_use_id: str, page: int) -> tuple[str, int, int]:
+    def get_page(self, tool_call_id: str, page: int) -> tuple[str, int, int]:
         """返回 (页面内容, 当前页码, 总页数)"""
-        full = self._result_store.get(tool_use_id)
+        full = self._result_store.get(tool_call_id)
         if full is None:
-            raise KeyError(f"未找到 tool_use_id={tool_use_id} 的缓存结果")
+            raise KeyError(f"未找到 tool_call_id={tool_call_id} 的缓存结果")
         total_pages = math.ceil(len(full) / self.page_size)
-        page = max(1, min(page, total_pages))
+        if page < 1 or page > total_pages:
+            raise ValueError(f"页码超出范围：page={page}，总页数为 {total_pages}")
         start = (page - 1) * self.page_size
         end = start + self.page_size
         return full[start:end], page, total_pages
 
-    def _truncate(self, result: str, tool_use_id: str) -> str:
+    def _truncate(self, result: str, tool_call_id: str) -> str:
         if len(result) <= self.page_size:
             return result
-        self._result_store[tool_use_id] = result
+        self._result_store[tool_call_id] = result
         total_pages = math.ceil(len(result) / self.page_size)
         preview = result[:self.page_size]
         return (
             f"{preview}\n\n"
-            f"...(结果已截断，共 {total_pages} 页。"
-            f"使用 read_tool_result 工具传入 tool_use_id=\"{tool_use_id}\" 和 page 页码获取其余内容)"
+            f"[TOOL_RESULT_TRUNCATED]\n"
+            f"[tool_result 分页提示]\n"
+            f"工具调用 id: \"{tool_call_id}\"\n"
+            f"结果已截断为分页返回。\n"
+            f"这是该工具结果的第 1/{total_pages} 页，当前只读取了第 1 页。\n"
+            f"第 1 页已包含在本次返回中，继续读取时从 page=2 开始。\n"
+            f"理解和分析时应将各页视为同一个连续的工具结果，无需输出合并后的完整文本。\n"
+            f"继续调用 read_tool_result(tool_call_id=\"{tool_call_id}\", page=2) 读取下一页。"
         )
 
     async def execute(self, tool_name: str, arguments: Dict[str, Any], context: Dict[str, Any] | None = None) -> str:
@@ -77,5 +84,9 @@ class ToolsMgr:
         result = await tool(context or {}, **arguments)
         if tool.raw_output:
             return result
-        tool_use_id = (context or {}).get("tool_use_id", "")
-        return self._truncate(result, tool_use_id)
+
+        tool_call_id = (context or {}).get("current_tool_call_id")
+        if not tool_call_id:
+            return result
+
+        return self._truncate(result, tool_call_id)

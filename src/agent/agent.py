@@ -142,7 +142,7 @@ class Agent:
 
                 result_text = await self.deps.tools_mgr.execute(
                         tool_name, args,
-                        {"tool_use_id": tool_call_id, "deps": self.deps, "agent": self},
+                        {"current_tool_call_id": tool_call_id, "deps": self.deps, "agent": self},
                     )
 
                 messages.append({
