@@ -38,6 +38,8 @@ tool:
 compact:
   auto_compact_rate: 0.8 # 达到上下文多少时进行压缩
   keep_recent_tool_results: 10 # 保留最近N条工具调用结果
+  keep_recent_user_turns: 3 # 压缩时保留最近N次用户输入及其后的完整原始对话
+  keep_recent_messages_token_rate: 0.25 # 最近原始对话最多保留上下文窗口的比例，低于最小轮次时仍保留最小轮次
 
 events:
     level: progress   # progress | detail | trace
