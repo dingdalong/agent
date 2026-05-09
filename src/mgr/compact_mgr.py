@@ -98,7 +98,7 @@ class CompactMgr:
         early_conversation = json.dumps(early_messages, default=str)[:80000]
         recent_conversation = json.dumps(recent_messages, default=str)[:40000]
         prompt = (
-            "请总结这段 coding-agent 对话中的早期部分，以便后续工作可以继续。\n"
+            "请总结这段对话中的早期部分，以便后续工作可以继续。\n"
             "不要把它描述成完整对话：未压缩的近期原文会保留在这条摘要后面。\n"
             "近期原文只作为参照，用来判断早期信息中哪些仍然需要保留。\n"
             "不要总结、复述或改写近期原文。\n\n"
