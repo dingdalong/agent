@@ -33,6 +33,7 @@ class LLMProvider(ABC):
     timeout: float = 120.0
     supports_native_structured_output: bool = False
     reasoning_effort: str = "max"
+    preserve_thinking: bool = False
 
     _retryable_errors = ()
 
