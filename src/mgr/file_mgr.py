@@ -23,26 +23,15 @@ class FileMgr:
             raise ValueError(f"Path escapes workspace: {path_str}")
         return path
 
-    async def read_file(self, path: str, page: int = 1) -> str:
+    async def read_file(self, path: str) -> str:
         try:
             all_lines = self.safe_path(path).read_text().splitlines()
             total = len(all_lines)
             rendered = self._render_numbered_lines(all_lines)
-            pages = self.deps.llm.split_page(rendered)
-            total_pages = len(pages)
-            if page < 1 or page > total_pages:
-                raise ValueError(f"页码超出范围：page={page}，总页数为 {total_pages}")
-
-            selected = pages[page - 1]
-
-            header = f"文件: {path} | 总行数: {total} | 总页数: {total_pages} | 当前第 {page}页"
-
+            header = f"文件: {path} | 总行数: {total} | 内容格式: 行号 | 内容"
             parts = [header]
-            if selected:
-                parts.append(selected)
-            #if page < total_pages:
-            #    parts.append(f"\n(还有 {total_pages - page} 页，传入 page={page + 1} 继续读取)")
-
+            if rendered:
+                parts.append(rendered)
             return "\n".join(parts)
         except Exception as exc:
             return f"Error: {exc}"
