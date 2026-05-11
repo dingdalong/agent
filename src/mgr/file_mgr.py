@@ -23,12 +23,27 @@ class FileMgr:
             raise ValueError(f"Path escapes workspace: {path_str}")
         return path
 
-    async def read_file(self, path: str) -> str:
+    async def read_file(self, path: str,
+                        start_line: int | None = None,
+                        end_line: int | None = None) -> str:
         try:
             all_lines = self.safe_path(path).read_text().splitlines()
             total = len(all_lines)
-            rendered = self._render_numbered_lines(all_lines)
-            header = f"文件: {path} | 总行数: {total} | 内容格式: 行号 | 内容"
+            if start_line is None and end_line is None:
+                selected_lines = all_lines
+                first_line_no = 1
+                range_info = ""
+            else:
+                start = start_line if start_line is not None else 1
+                end = end_line if end_line is not None else total
+                if start < 1 or end < 1 or start > end or end > total:
+                    return f"Error: 行号范围无效 (文件共 {total} 行)"
+                selected_lines = all_lines[start - 1:end]
+                first_line_no = start
+                range_info = f" | 行范围: {start}-{end}"
+
+            rendered = self._render_numbered_lines(selected_lines, first_line_no)
+            header = f"文件: {path} | 总行数: {total}{range_info} | 内容格式: 行号 | 内容"
             parts = [header]
             if rendered:
                 parts.append(rendered)
@@ -36,10 +51,10 @@ class FileMgr:
         except Exception as exc:
             return f"Error: {exc}"
 
-    def _render_numbered_lines(self, all_lines: list[str]) -> str:
+    def _render_numbered_lines(self, all_lines: list[str], first_line_no: int = 1) -> str:
         return "\n".join(
             f"{line_no:>4} | {line}"
-            for line_no, line in enumerate(all_lines, 1)
+            for line_no, line in enumerate(all_lines, first_line_no)
         )
 
     async def write_file(self, path: str, content: str,

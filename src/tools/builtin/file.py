@@ -80,10 +80,14 @@ async def get_file_info(path: str, agent: Agent) -> str:
 
 class ReadFile(BaseModel):
     path: str = Field(..., description="相对文件路径。")
+    start_line: Optional[int] = Field(None, description="起始行号，从1开始；未提供时从文件开头读取。")
+    end_line: Optional[int] = Field(None, description="结束行号，包含该行；未提供时读取到文件末尾。")
 
-@tool(model=ReadFile, description="读取文件内容并附带行号，便于后续精确编辑。")
-async def read_file(path: str, agent: Agent) -> str:
-    return await agent._file_mgr.read_file(path)
+@tool(model=ReadFile, description="读取文件内容并附带行号，可指定行数范围，便于后续精确编辑。")
+async def read_file(path: str, agent: Agent,
+                    start_line: int | None = None,
+                    end_line: int | None = None) -> str:
+    return await agent._file_mgr.read_file(path, start_line=start_line, end_line=end_line)
 
 class WriteFile(BaseModel):
     path: str = Field(..., description="相对文件路径。")
