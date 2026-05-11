@@ -9,7 +9,7 @@ llm_provider:
   openai:
     models: # 可用模型
       - gpt-5.5
-    base_url: http://172.20.103.154:23000
+    base_url: https://api.openai.com/v1
     reasoning_effort: xhigh # 推理力度
     context_limit: 200000 # 上下文限制
   anthropic:
@@ -20,15 +20,20 @@ llm_provider:
     context_limit: 200000 # 上下文限制
   ollama:
     models: # 可用模型
-      - qwen3.6:35b-a3b-coding-nvfp4
-    base_url: http://localhost:11434/v1
-    reasoning_effort: none # Ollama 模型通常不支持推理
-    context_limit: 200000 # 上下文限制
+      - Qwen3.6-27B-Claude-Opus-Reasoning-Distill-v2-abliterated-OptiQ-4bit-mlx
+      - Qwen3.6-35B-A3B-Claude-4.7-Opus-Reasoning-Distilled-oQ6e
+      - Qwen3.6-35B-A3B-6bit
+      - Qwen3.6-35B-A3B-4bit
+      - Qwen3.6-27B-4bit
+    base_url: http://127.0.0.1:8000/v1
+    reasoning_effort: high
+    preserve_thinking: true # Qwen3.6 agent 场景保留历史 reasoning
+    context_limit: 70000 # 上下文限制
 
 llm:
   default: # 默认模型
     provider: ollama # 模型提供商
-    model: qwen3.6:35b-a3b-coding-nvfp4 # 模型名称
+    model: Qwen3.6-35B-A3B-Claude-4.7-Opus-Reasoning-Distilled-oQ6e
     concurrency: 5 # 最大并发数量
     max_retries: 3 # 重试次数
 
