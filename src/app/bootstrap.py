@@ -34,6 +34,8 @@ async def create_app() -> AgentApp:
         preserve_thinking = llm_provider_cfg.get("preserve_thinking", False),
         concurrency = default_llm_cfg["concurrency"],
         max_retries = default_llm_cfg["max_retries"],
+        context_limit = llm_provider_cfg["context_limit"],
+        page_token_rate = config["tool"]["page_token_rate"],
         event_bus = event_bus,
     )
     deps = AgentDeps(

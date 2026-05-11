@@ -15,7 +15,11 @@ class ListDirectory(BaseModel):
 @tool(model=ListDirectory, description="列出目录内容，显示文件和子目录的树形结构。")
 async def list_directory(path: str, agent: Agent,
                          recursive: bool = False, max_depth: int = 3) -> str:
-    return await agent._file_mgr.list_directory(path, recursive, max_depth)
+    return await agent._file_mgr.list_directory(
+        path,
+        recursive=recursive,
+        max_depth=max_depth,
+    )
 
 class CreateDirectory(BaseModel):
     path: str = Field(..., description="要创建的目录的相对路径，支持多级目录。")
@@ -38,7 +42,7 @@ class FindFiles(BaseModel):
 
 @tool(model=FindFiles, description="按glob模式搜索文件。")
 async def find_files(pattern: str, agent: Agent, path: str = ".") -> str:
-    return await agent._file_mgr.find_files(pattern, path)
+    return await agent._file_mgr.find_files(pattern, path=path)
 
 class GetFileInfo(BaseModel):
     path: str = Field(..., description="要查询的文件或目录的相对路径。")
@@ -53,7 +57,7 @@ class ReadFile(BaseModel):
 
 @tool(model=ReadFile, description="读取文件内容，按页返回（每页约200行）。", raw_output=True)
 async def read_file(path: str, agent: Agent, page: int = 1) -> str:
-    return await agent._file_mgr.read_file(path, page)
+    return await agent._file_mgr.read_file(path, page=page)
 
 class WriteFile(BaseModel):
     path: str = Field(..., description="相对文件路径。")
@@ -93,4 +97,3 @@ async def edit_file(path: str, agent: Agent,
                     end_line: int | None = None,
                     count: int = 1) -> str:
     return await agent._file_mgr.edit_file(path, mode, old_text, new_text, start_line, end_line, count)
-

@@ -1,7 +1,6 @@
 from __future__ import annotations
 from typing import TYPE_CHECKING
 
-import math
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -20,30 +19,34 @@ class FileMgr:
             raise ValueError(f"Path escapes workspace: {path_str}")
         return path
 
-    lines_per_page: int = 200
-
     async def read_file(self, path: str, page: int = 1) -> str:
         try:
             all_lines = self.safe_path(path).read_text().splitlines()
             total = len(all_lines)
-            total_pages = max(1, math.ceil(total / self.lines_per_page))
+            rendered = self._render_numbered_lines(all_lines)
+            pages = self.deps.llm.split_page(rendered)
+            total_pages = len(pages)
             page = max(1, min(page, total_pages))
 
-            start = (page - 1) * self.lines_per_page
-            end = min(total, start + self.lines_per_page)
-            selected = all_lines[start:end]
+            selected = pages[page - 1]
 
-            header = f"文件: {path} | 总行数: {total} | 第 {page}/{total_pages} 页 (第{start + 1}-{end}行)"
-            numbered = [f"{start + 1 + i:>4} | {line}" for i, line in enumerate(selected)]
+            header = f"文件: {path} | 总行数: {total} | 第 {page}/{total_pages} 页"
 
             parts = [header]
-            parts.extend(numbered)
+            if selected:
+                parts.append(selected)
             if page < total_pages:
                 parts.append(f"\n(还有 {total_pages - page} 页，传入 page={page + 1} 继续读取)")
 
             return "\n".join(parts)
         except Exception as exc:
             return f"Error: {exc}"
+
+    def _render_numbered_lines(self, all_lines: list[str]) -> str:
+        return "\n".join(
+            f"{line_no:>4} | {line}"
+            for line_no, line in enumerate(all_lines, 1)
+        )
 
     async def write_file(self, path: str, content: str,
                          append: bool = False,

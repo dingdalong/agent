@@ -1,6 +1,5 @@
-import logging, math
+import logging
 from typing import Any, Dict
-from src.config import config
 from src.tools import ToolDict, ToolEntry
 
 logger = logging.getLogger(__name__)
@@ -8,8 +7,7 @@ logger = logging.getLogger(__name__)
 class ToolsMgr:
     def __init__(self):
         self._tools: dict[str, ToolEntry] = {}
-        self._result_store: dict[str, str] = {}
-        self.page_size = config["tool"]["page_size"]
+        self._result_store: dict[str, list[str]] = {}
         from src.tools.decorator import _registry
         for entry in _registry:
             self.register(entry)
@@ -47,22 +45,21 @@ class ToolsMgr:
 
     def get_page(self, tool_call_id: str, page: int) -> tuple[str, int, int]:
         """返回 (页面内容, 当前页码, 总页数)"""
-        full = self._result_store.get(tool_call_id)
-        if full is None:
+        pages = self._result_store.get(tool_call_id)
+        if pages is None:
             raise KeyError(f"未找到 tool_call_id={tool_call_id} 的缓存结果")
-        total_pages = math.ceil(len(full) / self.page_size)
+        total_pages = len(pages)
         if page < 1 or page > total_pages:
             raise ValueError(f"页码超出范围：page={page}，总页数为 {total_pages}")
-        start = (page - 1) * self.page_size
-        end = start + self.page_size
-        return full[start:end], page, total_pages
+        return pages[page - 1], page, total_pages
 
-    def _truncate(self, result: str, tool_call_id: str) -> str:
-        if len(result) <= self.page_size:
+    def _truncate(self, result: str, tool_call_id: str, deps) -> str:
+        if deps.llm.estimate_tokens([{"role": "tool", "content": result}]) <= deps.llm.page_token_budget:
             return result
-        self._result_store[tool_call_id] = result
-        total_pages = math.ceil(len(result) / self.page_size)
-        preview = result[:self.page_size]
+        pages = deps.llm.split_page(result)
+        self._result_store[tool_call_id] = pages
+        total_pages = len(pages)
+        preview = pages[0]
         return (
             f"{preview}\n\n"
             f"[TOOL_RESULT_TRUNCATED]\n"
@@ -88,5 +85,8 @@ class ToolsMgr:
         tool_call_id = (context or {}).get("current_tool_call_id")
         if not tool_call_id:
             return result
+        deps = (context or {}).get("deps")
+        if deps is None:
+            return result
 
-        return self._truncate(result, tool_call_id)
+        return self._truncate(result, tool_call_id, deps)

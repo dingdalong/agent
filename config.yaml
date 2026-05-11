@@ -38,7 +38,7 @@ llm:
     max_retries: 3 # 重试次数
 
 tool:
-  page_size: 4000 # 工具调用结果每页字数
+  page_token_rate: 0.03 # 工具调用结果每页最多占上下文比例
 
 compact:
   auto_compact_rate: 0.8 # 达到上下文多少时进行压缩

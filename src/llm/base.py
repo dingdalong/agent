@@ -7,6 +7,7 @@ import json
 import logging
 import re
 import asyncio
+import math
 import httpx
 from src.events import EventBus
 from src.tools import ToolDict
@@ -31,6 +32,9 @@ class LLMProvider(ABC):
     concurrency: int = 5
     max_retries: int = 6
     timeout: float = 120.0
+    context_limit: int = 0
+    page_token_rate: float = 0.03
+    page_token_budget: int = field(init=False)
     supports_native_structured_output: bool = False
     reasoning_effort: str = "max"
     preserve_thinking: bool = False
@@ -39,11 +43,39 @@ class LLMProvider(ABC):
 
     def __post_init__(self):
         self._semaphore = asyncio.Semaphore(self.concurrency)
+        self.page_token_budget = max(1, math.floor(self.context_limit * self.page_token_rate))
 
     def clear_reasoning_content(self, message): ...
 
     @abstractmethod
     def estimate_tokens(self, message: list[dict]) -> int: ...
+
+    def _split_page_once(self, text: str) -> tuple[str, str]:
+        if self.estimate_tokens([{"role": "tool", "content": text}]) <= self.page_token_budget:
+            return text, ""
+
+        lo = 0
+        hi = len(text)
+        best = 0
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            if self.estimate_tokens([{"role": "tool", "content": text[:mid]}]) <= self.page_token_budget:
+                best = mid
+                lo = mid + 1
+            else:
+                hi = mid - 1
+
+        if best <= 0:
+            best = 1
+        return text[:best], text[best:]
+
+    def split_page(self, text: str) -> list[str]:
+        pages: list[str] = []
+        remaining = text
+        while remaining:
+            page, remaining = self._split_page_once(remaining)
+            pages.append(page)
+        return pages or [""]
 
     def micro_compact(self, messages: list[dict], keep_recent: int) -> list[dict]:
         tool_msgs = [
