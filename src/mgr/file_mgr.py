@@ -3,7 +3,11 @@ from typing import TYPE_CHECKING
 
 from dataclasses import dataclass, field
 from datetime import datetime
+import fnmatch
 from pathlib import Path
+import re
+
+import pathspec
 
 if TYPE_CHECKING:
     from src.agent import AgentDeps
@@ -305,3 +309,123 @@ class FileMgr:
             return "\n".join(lines)
         except Exception as exc:
             return f"Error: {exc}"
+
+    async def search_files(self, query: str,
+                           include: str | None = None,
+                           exclude: str | None = None,
+                           use_regex: bool = False,
+                           match_case: bool = False,
+                           match_whole_word: bool = False,
+                           include_ignored: bool = False) -> str:
+        try:
+            if not query:
+                return "Error: query 不能为空"
+
+            pattern = query if use_regex else re.escape(query)
+            if match_whole_word:
+                pattern = rf"\b(?:{pattern})\b"
+            flags = 0 if match_case else re.IGNORECASE
+            try:
+                matcher = re.compile(pattern, flags)
+            except re.error as exc:
+                return f"Error: 正则表达式无效: {exc}"
+
+            include_patterns = self._parse_glob_list(include)
+            exclude_patterns = self._parse_glob_list(exclude)
+            ignore_spec = None if include_ignored else self._load_gitignore_spec()
+            grouped: dict[str, list[tuple[int, str]]] = {}
+            file_count = 0
+            match_count = 0
+
+            for file_path in self._iter_search_files(
+                include_patterns,
+                exclude_patterns,
+                ignore_spec,
+            ):
+                try:
+                    text = file_path.read_text()
+                except (UnicodeDecodeError, OSError):
+                    continue
+
+                lines = text.splitlines()
+                rendered: dict[int, str] = {}
+                file_matches = 0
+                for index, line in enumerate(lines, 1):
+                    matches = list(matcher.finditer(line))
+                    if not matches:
+                        continue
+                    match_count += len(matches)
+                    file_matches += len(matches)
+
+                    rendered[index] = line
+
+                if file_matches:
+                    rel = file_path.relative_to(self.workdir).as_posix()
+                    grouped[rel] = [
+                        (line_no, line)
+                        for line_no, line in sorted(rendered.items())
+                    ]
+                    file_count += 1
+
+            lines = [
+                f'搜索: "{query}" | 正则: {str(use_regex).lower()}',
+                f"找到 {file_count} 个文件, {match_count} 处匹配",
+            ]
+            if include:
+                lines.append(f"包含: {include}")
+            if exclude:
+                lines.append(f"排除: {exclude}")
+            if include_ignored:
+                lines.append("包含 .gitignore 忽略内容: true")
+            lines.append("")
+
+            for rel, hits in grouped.items():
+                lines.append(rel)
+                for line_no, line in hits:
+                    lines.append(f"> {line_no:>4} | {line}")
+                lines.append("")
+
+            return "\n".join(lines).rstrip()
+        except Exception as exc:
+            return f"Error: {exc}"
+
+    def _parse_glob_list(self, patterns: str | None) -> list[str]:
+        if not patterns:
+            return []
+        return [p.strip() for p in patterns.split(",") if p.strip()]
+
+    def _iter_search_files(self,
+                           include_patterns: list[str],
+                           exclude_patterns: list[str],
+                           ignore_spec: pathspec.PathSpec | None):
+        for file_path in sorted(self.workdir.rglob("*")):
+            if not file_path.is_file():
+                continue
+            rel = file_path.relative_to(self.workdir)
+            rel_posix = rel.as_posix()
+            if ignore_spec is not None and ignore_spec.match_file(rel_posix):
+                continue
+            if include_patterns and not any(self._glob_matches(rel_posix, pattern) for pattern in include_patterns):
+                continue
+            if any(self._glob_matches(rel_posix, pattern) for pattern in exclude_patterns):
+                continue
+            yield file_path
+
+    def _load_gitignore_spec(self) -> pathspec.PathSpec | None:
+        gitignore = self.workdir / ".gitignore"
+        if not gitignore.is_file():
+            return None
+
+        try:
+            lines = gitignore.read_text().splitlines()
+        except OSError:
+            return None
+        return pathspec.PathSpec.from_lines("gitignore", lines)
+
+    def _glob_matches(self, rel_path: str, pattern: str) -> bool:
+        normalized = pattern.replace("\\", "/")
+        if fnmatch.fnmatch(rel_path, normalized):
+            return True
+        if normalized.startswith("**/") and fnmatch.fnmatch(rel_path, normalized[3:]):
+            return True
+        return False

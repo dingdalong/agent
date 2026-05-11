@@ -44,6 +44,33 @@ class FindFiles(BaseModel):
 async def find_files(pattern: str, agent: Agent, path: str = ".") -> str:
     return await agent._file_mgr.find_files(pattern, path=path)
 
+class SearchFiles(BaseModel):
+    query: str = Field(..., description="要搜索的文本或正则表达式。")
+    include: Optional[str] = Field(None, description="包含的glob模式，多个用英文逗号分隔；可用于限定目录，如 'src/**,**/*.md'。")
+    exclude: Optional[str] = Field(None, description="额外排除的glob模式，多个用英文逗号分隔，如 '.git/**,node_modules/**,*.lock'。")
+    use_regex: Optional[bool] = Field(False, description="是否将 query 作为正则表达式；默认 False 表示普通文本搜索。")
+    match_case: Optional[bool] = Field(False, description="是否区分大小写。")
+    match_whole_word: Optional[bool] = Field(False, description="是否全词匹配。")
+    include_ignored: Optional[bool] = Field(False, description="是否搜索被 .gitignore 忽略的文件；默认 False，主动查询忽略内容时设为 True。")
+
+@tool(model=SearchFiles, description="全局搜索文件内容，类似 VS Code Search，支持文本/正则、大小写、全词、包含/排除glob。")
+async def search_files(query: str, agent: Agent,
+                       include: str | None = None,
+                       exclude: str | None = None,
+                       use_regex: bool | None = False,
+                       match_case: bool | None = False,
+                       match_whole_word: bool | None = False,
+                       include_ignored: bool | None = False) -> str:
+    return await agent._file_mgr.search_files(
+        query,
+        include=include,
+        exclude=exclude,
+        use_regex=bool(use_regex),
+        match_case=bool(match_case),
+        match_whole_word=bool(match_whole_word),
+        include_ignored=bool(include_ignored),
+    )
+
 class GetFileInfo(BaseModel):
     path: str = Field(..., description="要查询的文件或目录的相对路径。")
 
