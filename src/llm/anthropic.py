@@ -49,17 +49,6 @@ class AnthropicProvider(LLMProvider):
                         if b.get("type") != "thinking"
                     ]
 
-    def micro_compact(self, messages: list[dict], keep_recent: int) -> list[dict]:
-        tool_msgs = [(i, msg) for i, msg in enumerate(messages)
-                     if msg.get("role") == "tool"]
-        if len(tool_msgs) <= keep_recent:
-            return messages
-        for _, msg in tool_msgs[:-keep_recent]:
-            content = msg.get("content", "")
-            if isinstance(content, str) and len(content) > 120:
-                msg["content"] = "[Earlier tool result compacted. Re-run the tool if you need full detail.]"
-        return messages
-
     def normalize_messages(
         self,
         messages: list[dict],
