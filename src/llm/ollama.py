@@ -123,6 +123,8 @@ class OllamaProvider(LLMProvider):
 
             if role == "assistant" and msg.get("reasoning"):
                 norm_msg["reasoning"] = msg["reasoning"]
+            if role == "assistant" and msg.get("reasoning_content"):
+                norm_msg["reasoning_content"] = msg["reasoning_content"]
 
             normalized.append(norm_msg)
 
@@ -165,6 +167,7 @@ class OllamaProvider(LLMProvider):
         tool_calls: dict[int, dict[str, str]] = {}
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
+        reasoning_content_parts: list[str] = []
         finish_reason = None
 
         async for chunk in stream:
@@ -178,14 +181,17 @@ class OllamaProvider(LLMProvider):
                     source=self.model,
                     content=reasoning,
                 ))
+            reasoning_content = getattr(delta, "reasoning_content", None)
+            if reasoning_content:
+                reasoning_content_parts.append(reasoning_content)
+                await self.event_bus.emit(ThinkingDelta(
+                    timestamp=time.time(),
+                    source=self.model,
+                    content=reasoning_content,
+                ))
 
             if delta.content:
                 content_parts.append(delta.content)
-                await self.event_bus.emit(ResponseDelta(
-                    timestamp=time.time(),
-                    source=self.model,
-                    content=delta.content,
-                ))
 
             if delta.tool_calls:
                 for tool_chunk in delta.tool_calls:
@@ -202,8 +208,17 @@ class OllamaProvider(LLMProvider):
             if chunk.choices[0].finish_reason:
                 finish_reason = chunk.choices[0].finish_reason
 
-        content = "".join(content_parts)
+        raw_content = "".join(content_parts)
+        content = raw_content.strip() if tool_calls else raw_content
         reasoning = "".join(reasoning_parts)
+        reasoning_content = "".join(reasoning_content_parts)
+
+        if content:
+            await self.event_bus.emit(ResponseDelta(
+                timestamp=time.time(),
+                source=self.model,
+                content=content,
+            ))
 
         assistant_message: dict = {
             "role": "assistant",
@@ -211,6 +226,8 @@ class OllamaProvider(LLMProvider):
         }
         if reasoning:
             assistant_message["reasoning"] = reasoning
+        if reasoning_content:
+            assistant_message["reasoning_content"] = reasoning_content
         if tool_calls:
             assistant_message["tool_calls"] = [
                 {
