@@ -43,34 +43,27 @@ class ToolsMgr:
             for tool in tools
         ]
 
-    def get_page(self, tool_call_id: str, page: int) -> tuple[str, int, int]:
-        """返回 (页面内容, 当前页码, 总页数)"""
+    def get_page(self, tool_call_id: str, page: int) -> str:
+        """返回格式化后的分页工具结果。"""
         pages = self._result_store.get(tool_call_id)
         if pages is None:
             raise KeyError(f"未找到 tool_call_id={tool_call_id} 的缓存结果")
         total_pages = len(pages)
         if page < 1 or page > total_pages:
             raise ValueError(f"页码超出范围：page={page}，总页数为 {total_pages}")
-        return pages[page - 1], page, total_pages
+        content = pages[page - 1]
+        parts = [
+            f"tool_call_id: {tool_call_id} | 总页数: {total_pages} | 当前第 {page} 页：",
+            content,
+        ]
+        return "\n".join(parts)
 
     def _truncate(self, result: str, tool_call_id: str, deps) -> str:
         if deps.llm.estimate_tokens([{"role": "tool", "content": result}]) <= deps.llm.page_token_budget:
             return result
         pages = deps.llm.split_page(result)
         self._result_store[tool_call_id] = pages
-        total_pages = len(pages)
-        preview = pages[0]
-        return (
-            f"{preview}\n\n"
-            f"[TOOL_RESULT_TRUNCATED]\n"
-            f"[tool_result 分页提示]\n"
-            f"工具调用 id: \"{tool_call_id}\"\n"
-            f"结果已截断为分页返回。\n"
-            f"这是该工具结果的第 1/{total_pages} 页，当前只读取了第 1 页。\n"
-            f"第 1 页已包含在本次返回中，继续读取时从 page=2 开始。\n"
-            f"理解和分析时应将各页视为同一个连续的工具结果，无需输出合并后的完整文本。\n"
-            f"继续调用 read_tool_result(tool_call_id=\"{tool_call_id}\", page=2) 读取下一页。"
-        )
+        return "工具调用结果过长，已被自动分页。可调用read_tool_result读取后续内容。\n" + self.get_page(tool_call_id, 1)
 
     async def execute(self, tool_name: str, arguments: Dict[str, Any], context: Dict[str, Any] | None = None) -> str:
         """异步执行工具，返回结果字符串（错误信息也以字符串返回）"""
