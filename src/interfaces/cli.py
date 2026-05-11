@@ -5,6 +5,8 @@ import asyncio
 from src.events.types import (
     Event,
     ErrorOccurred,
+    InputRequested,
+    OutputRequested,
     ResponseDelta,
     ThinkingDelta,
 )
@@ -47,6 +49,17 @@ class CLIInterface:
         match event:
             case ErrorOccurred(source=name, error=err):
                 print(f"  ✗ {name} 错误: {err}", flush=True)
+            case OutputRequested(content=c):
+                await self.output(c)
+            case InputRequested(prompt=prompt, future=future):
+                try:
+                    answer = await self.input(prompt)
+                except Exception as exc:
+                    if future is not None and not future.done():
+                        future.set_exception(exc)
+                else:
+                    if future is not None and not future.done():
+                        future.set_result(answer)
             case ResponseDelta(content=c):
                 if not self._in_response:
                     # 回应块开头：打印前缀
@@ -59,8 +72,3 @@ class CLIInterface:
                     print("\n💭 ", end="", flush=True)
                     self._in_thinking = True
                 print(c, end="", flush=True)
-
-    async def ask(self, question: str) -> str:
-        async with self._ask_lock:
-            await self.output(f"\n🤖提问: {question}")
-            return await self.input("\n你的回答: ")

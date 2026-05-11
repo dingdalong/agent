@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass, field
 from typing import AsyncIterator
 
 from src.events.levels import EventLevel
-from src.events.types import Event
+from src.events.types import Event, InputRequested, OutputRequested
 
 _SENTINEL = object()
 
@@ -44,6 +45,28 @@ class EventBus:
             if sub.accepts(event):
                 sub.queue.put_nowait(event)
 
+    async def request_output(self, content: str, source: str = "ui") -> None:
+        """通过事件队列请求 UI 串行输出。"""
+        await self.emit(OutputRequested(
+            timestamp=time.time(),
+            source=source,
+            content=content,
+        ))
+
+    async def request_input(self, prompt: str, source: str = "ui") -> str:
+        """通过事件队列请求 UI 串行输入。"""
+        if not self._subscribers:
+            raise RuntimeError("cannot request input: no subscribers")
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[str] = loop.create_future()
+        await self.emit(InputRequested(
+            timestamp=time.time(),
+            source=source,
+            prompt=prompt,
+            future=future,
+        ))
+        return await future
+
     async def subscribe(
         self,
         event_types: set[type[Event]] | None = None,
@@ -54,11 +77,21 @@ class EventBus:
         try:
             while True:
                 item = await sub.queue.get()
-                if item is _SENTINEL:
-                    break
-                yield item
+                try:
+                    if item is _SENTINEL:
+                        break
+                    yield item
+                finally:
+                    sub.queue.task_done()
         finally:
             self._subscribers.remove(sub)
+
+    async def join(self) -> None:
+        """等待当前已投递给订阅者的事件全部处理完成。"""
+        subscribers = list(self._subscribers)
+        if not subscribers:
+            return
+        await asyncio.gather(*(sub.queue.join() for sub in subscribers))
 
     def set_level(self, level: EventLevel) -> None:
         """运行时动态调整级别。"""

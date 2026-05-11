@@ -14,4 +14,4 @@ class AskUser(BaseModel):
 
 @tool(model=AskUser, description="当你需要用户提供额外信息、做出选择或确认时调用此工具。")
 async def ask_user(question: str, deps: AgentDeps) -> str:
-    return await deps.ui.ask(question)
+    return await deps.event_bus.request_input(f"\n🤖提问: {question}\n你的回答: ")

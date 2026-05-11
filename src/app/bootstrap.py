@@ -18,8 +18,8 @@ async def create_app() -> AgentApp:
     """应用组装入口 — 整个框架唯一的具体实现实例化点。
     """
     config = load_config()
-    ui = CLIInterface()
     event_bus = EventBus(level=EventLevel.from_str(config["events"].get("level", "progress")))
+    ui = CLIInterface()
     tools_mgr = ToolsMgr()
 
     default_llm_cfg = config["llm"]["default"]

@@ -126,7 +126,7 @@ class CompactMgr:
 
     async def compact_history(self, messages: list, focus: str | None = None) -> list:
         transcript_path = await self.write_transcript(messages)
-        await self.deps.ui.output(f"[transcript saved: {transcript_path}]\n")
+        await self.deps.event_bus.request_output(f"[transcript saved: {transcript_path}]\n")
         early_messages, recent_messages = self.split_history_for_compaction(messages)
         summary = await self.summarize_history(early_messages, recent_messages)
         if focus:

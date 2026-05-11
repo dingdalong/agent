@@ -11,18 +11,6 @@ if TYPE_CHECKING:
 class UserInterface(Protocol):
     """I/O 抽象协议，CLI 和 Web 各自实现。"""
 
-    async def input(self, message: str) -> str:
-        """获取用户输入，message 作为输入前缀。"""
-        ...
-
-    async def output(self, message: str) -> None:
-        """输出信息给用户。"""
-        ...
-
     async def on_event(self, event: Event) -> None:
         """处理 EventBus 事件，各终端实现自己的展示逻辑。"""
-        ...
-
-    async def ask(self, message: str) -> str:
-        """询问用户并返回回答"""
         ...

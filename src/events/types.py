@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import Literal, Union
 
@@ -47,8 +48,26 @@ class CompactDelta(Event):
     level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
     type: Literal["compact_delta"] = field(default="compact_delta", init=False)
 
+
+@dataclass
+class OutputRequested(Event):
+    """请求 UI 串行输出文本。"""
+    content: str = ""
+    level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
+    type: Literal["output_requested"] = field(default="output_requested", init=False)
+
+
+@dataclass
+class InputRequested(Event):
+    """请求 UI 串行读取用户输入，并通过 future 返回结果。"""
+    prompt: str = ""
+    future: asyncio.Future[str] | None = None
+    level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
+    type: Literal["input_requested"] = field(default="input_requested", init=False)
+
+
 # 联合类型
 AgentEvent = Union[
-    ErrorOccurred,
+    ErrorOccurred, InputRequested, OutputRequested,
     ResponseDelta, ThinkingDelta,
 ]
