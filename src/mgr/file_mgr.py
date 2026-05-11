@@ -26,17 +26,18 @@ class FileMgr:
             rendered = self._render_numbered_lines(all_lines)
             pages = self.deps.llm.split_page(rendered)
             total_pages = len(pages)
-            page = max(1, min(page, total_pages))
+            if page < 1 or page > total_pages:
+                raise ValueError(f"页码超出范围：page={page}，总页数为 {total_pages}")
 
             selected = pages[page - 1]
 
-            header = f"文件: {path} | 总行数: {total} | 第 {page}/{total_pages} 页"
+            header = f"文件: {path} | 总行数: {total} | 总页数: {total_pages} | 当前第 {page}页"
 
             parts = [header]
             if selected:
                 parts.append(selected)
-            if page < total_pages:
-                parts.append(f"\n(还有 {total_pages - page} 页，传入 page={page + 1} 继续读取)")
+            #if page < total_pages:
+            #    parts.append(f"\n(还有 {total_pages - page} 页，传入 page={page + 1} 继续读取)")
 
             return "\n".join(parts)
         except Exception as exc:

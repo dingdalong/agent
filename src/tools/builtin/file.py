@@ -53,9 +53,9 @@ async def get_file_info(path: str, agent: Agent) -> str:
 
 class ReadFile(BaseModel):
     path: str = Field(..., description="相对文件路径。")
-    page: int = Field(1, description="页码，从 1 开始。")
+    page: int = Field(1, description="页码，默认从 1 开始。")
 
-@tool(model=ReadFile, description="读取文件内容，按页返回（每页约200行）。", raw_output=True)
+@tool(model=ReadFile, description="读取文件内容，按页返回。", raw_output=True)
 async def read_file(path: str, agent: Agent, page: int = 1) -> str:
     return await agent._file_mgr.read_file(path, page=page)
 
