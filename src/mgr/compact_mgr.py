@@ -34,10 +34,9 @@ class CompactMgr:
             context_limit * compact_cfg.get("keep_recent_messages_token_rate", 0.25)
         )
 
-    def is_need_compact(self, messages: list, prompt: list) -> bool:
-        message_token = self.deps.llm.estimate_tokens(messages)
-        prompt_token = self.deps.llm.estimate_tokens(prompt)
-        if message_token + prompt_token > self.auto_compact_size:
+    def is_need_compact(self, messages: list, prompt: list, tools: list | None = None) -> bool:
+        input_tokens = self.deps.llm.estimate_tokens(messages, prompt, tools)
+        if input_tokens > self.auto_compact_size:
             return True
         else:
             return False

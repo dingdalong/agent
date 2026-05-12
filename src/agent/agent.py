@@ -85,7 +85,7 @@ class Agent:
         while True:
             prompt = self._prompt_mgr.build()
             messages[:] = await self._compact_mgr.micro_compact(messages)
-            if self._compact_mgr.is_need_compact(messages, prompt):
+            if self._compact_mgr.is_need_compact(messages, prompt, self._tools_schemas):
                 compact_streak += 1
                 if compact_streak > max_compact_streak:
                     logger.warning("连续 %d 次 compact 后仍需压缩，终止循环防止空转", compact_streak - 1)

@@ -6,6 +6,8 @@ from src.events.types import (
     Event,
     ErrorOccurred,
     InputRequested,
+    LLMCallCompleted,
+    LLMCallStarted,
     OutputRequested,
     ResponseDelta,
     ThinkingDelta,
@@ -60,6 +62,44 @@ class CLIInterface:
                 else:
                     if future is not None and not future.done():
                         future.set_result(answer)
+            case LLMCallStarted(
+                model=model,
+                estimated_input_tokens=estimated_input_tokens,
+                message_count=message_count,
+                tool_count=tool_count,
+            ):
+                print(
+                    "LLM call start: "
+                    f"model={model} "
+                    f"estimated_input_tokens={estimated_input_tokens} "
+                    f"messages={message_count} "
+                    f"tools={tool_count}",
+                    flush=True,
+                )
+            case LLMCallCompleted(
+                model=model,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                total_tokens=total_tokens,
+                cache_read_input_tokens=cache_read_input_tokens,
+                cache_creation_input_tokens=cache_creation_input_tokens,
+                duration_seconds=duration_seconds,
+                output_tokens_per_second=output_tokens_per_second,
+                total_tokens_per_second=total_tokens_per_second,
+            ):
+                print(
+                    "LLM usage: "
+                    f"model={model} "
+                    f"input={self._format_optional_int(input_tokens)} "
+                    f"output={self._format_optional_int(output_tokens)} "
+                    f"total={self._format_optional_int(total_tokens)} "
+                    f"cache_read={self._format_optional_int(cache_read_input_tokens)} "
+                    f"cache_created={self._format_optional_int(cache_creation_input_tokens)} "
+                    f"duration={self._format_optional_float(duration_seconds)}s "
+                    f"output_tps={self._format_optional_float(output_tokens_per_second)} "
+                    f"total_tps={self._format_optional_float(total_tokens_per_second)}",
+                    flush=True,
+                )
             case ResponseDelta(content=c):
                 if not self._in_response:
                     # 回应块开头：打印前缀
@@ -72,3 +112,13 @@ class CLIInterface:
                     print("\n💭 ", end="", flush=True)
                     self._in_thinking = True
                 print(c, end="", flush=True)
+
+    def _format_optional_int(self, value: int | None) -> str:
+        if value is None:
+            return "n/a"
+        return str(value)
+
+    def _format_optional_float(self, value: float | None) -> str:
+        if value is None:
+            return "n/a"
+        return f"{value:.2f}"

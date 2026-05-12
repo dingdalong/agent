@@ -8,8 +8,10 @@ import logging
 import re
 import asyncio
 import math
+import time
 import httpx
 from src.events import EventBus
+from src.events.types import LLMCallCompleted, LLMCallStarted
 from src.tools import ToolDict
 
 logger = logging.getLogger(__name__)
@@ -21,6 +23,7 @@ class LLMResponse:
     tool_calls: dict[int, dict[str, str]] = field(default_factory=dict)
     finish_reason: Optional[str] = None
     assistant_message: Optional[dict] = None
+    token_usage: dict[str, int | None] | None = None
 
 @dataclass
 class LLMProvider(ABC):
@@ -48,7 +51,12 @@ class LLMProvider(ABC):
     def clear_reasoning_content(self, message): ...
 
     @abstractmethod
-    def estimate_tokens(self, message: list[dict]) -> int: ...
+    def estimate_tokens(
+        self,
+        messages: list[dict],
+        prompt: list[dict] | None = None,
+        tools: list[ToolDict] | None = None,
+    ) -> int: ...
 
     def _split_page_once(self, text: str) -> tuple[str, str]:
         if self.estimate_tokens([{"role": "tool", "content": text}]) <= self.page_token_budget:
@@ -141,14 +149,70 @@ class LLMProvider(ABC):
         async with self._semaphore:
             for attempt in range(self.max_retries):
                 try:
-                    return await self._do_chat(messages, prompt, tools, temperature, tool_choice)
+                    started_at = await self._emit_llm_call_started(messages, prompt, tools)
+                    response = await self._do_chat(messages, prompt, tools, temperature, tool_choice)
+                    await self._emit_llm_call_completed(
+                        started_at=started_at,
+                        usage=response.token_usage,
+                    )
+                    return response
                 except retryable as e:
-                    if attempt >= self.max_retries:
+                    if attempt >= self.max_retries - 1:
                         raise
                     wait_time = min(2 ** attempt * 5, 60)
                     logger.warning(f"API错误 ({type(e).__name__})，{wait_time}秒后重试 ({attempt+1}/{self.max_retries})...")
                     await asyncio.sleep(wait_time)
             raise RuntimeError("LLM chat: 所有重试均失败")
+
+    async def _emit_llm_call_started(
+        self,
+        messages: list[dict],
+        prompt: list[dict] | None,
+        tools: list[ToolDict] | None,
+    ) -> float:
+        started_at = time.time()
+        if self.event_bus is None:
+            return started_at
+
+        all_messages = (prompt or []) + messages
+        await self.event_bus.emit(LLMCallStarted(
+            timestamp=started_at,
+            source=self.model,
+            model=self.model,
+            estimated_input_tokens=self.estimate_tokens(messages, prompt, tools),
+            message_count=len(all_messages),
+            tool_count=len(tools or []),
+        ))
+        return started_at
+
+    async def _emit_llm_call_completed(
+        self,
+        started_at: float | None,
+        ended_at: float | None = None,
+        usage: dict[str, int | None] | None = None,
+    ) -> None:
+        if self.event_bus is None or started_at is None:
+            return
+
+        completed_at = ended_at if ended_at is not None else time.time()
+        duration = max(completed_at - started_at, 0.0)
+        usage = usage or {}
+        output_tokens = usage.get("output_tokens")
+        total_tokens = usage.get("total_tokens")
+
+        await self.event_bus.emit(LLMCallCompleted(
+            timestamp=completed_at,
+            source=self.model,
+            model=self.model,
+            input_tokens=usage.get("input_tokens"),
+            output_tokens=output_tokens,
+            total_tokens=total_tokens,
+            cache_read_input_tokens=usage.get("cache_read_input_tokens"),
+            cache_creation_input_tokens=usage.get("cache_creation_input_tokens"),
+            duration_seconds=duration,
+            output_tokens_per_second=output_tokens / duration if output_tokens is not None and duration > 0 else None,
+            total_tokens_per_second=total_tokens / duration if total_tokens is not None and duration > 0 else None,
+        ))
 
     @abstractmethod
     async def _do_chat(

@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import time
+from functools import cached_property
 from openai import AsyncOpenAI, APIConnectionError, RateLimitError, InternalServerError
 from src.events.types import ResponseDelta, ThinkingDelta
 from src.llm.base import LLMProvider, LLMResponse
@@ -121,12 +122,38 @@ class DeepSeekProvider(LLMProvider):
             elif isinstance(message, dict) and 'reasoning_content' in message:
                 message['reasoning_content'] = None
 
-    def estimate_tokens(self, messages: list[dict]) -> int:
-        """计算token数量"""
-        tokenizer = transformers.AutoTokenizer.from_pretrained(
+    def estimate_tokens(
+        self,
+        messages: list[dict],
+        prompt: list[dict] | None = None,
+        tools: list[ToolDict] | None = None,
+    ) -> int:
+        all_messages = (prompt or []) + messages
+        messages_for_estimate = [{
+            "messages": all_messages,
+            "tools": tools,
+        }] if tools else all_messages
+        return len(self._tokenizer.encode(messages_for_estimate))
+
+    @cached_property
+    def _tokenizer(self):
+        return transformers.AutoTokenizer.from_pretrained(
             "src/llm/tokenizer/deepseek", trust_remote_code=True
-            )
-        return len(tokenizer.encode(str(messages)))
+        )
+
+    def _extract_token_usage(
+        self,
+        usage: object | None,
+    ) -> dict[str, int | None] | None:
+        if usage is None:
+            return None
+        return {
+            "input_tokens": getattr(usage, "prompt_tokens", None),
+            "output_tokens": getattr(usage, "completion_tokens", None),
+            "total_tokens": getattr(usage, "total_tokens", None),
+            "cache_read_input_tokens": getattr(usage, "prompt_cache_hit_tokens", None),
+            "cache_creation_input_tokens": getattr(usage, "prompt_cache_miss_tokens", None),
+        }
 
     # ---- 文本工具调用的正则 ----
     _DSML_BLOCK_RE = re.compile(
@@ -316,23 +343,35 @@ class DeepSeekProvider(LLMProvider):
             messages=prompt + messages if prompt is not None else messages,
             tools=tools,
             stream=True,
+            stream_options={"include_usage": True},
             temperature=temperature,
             tool_choice=tool_choice or ("auto" if tools else None),
             reasoning_effort=self.reasoning_effort,
             extra_body={"thinking": {"type": "enabled"}}
         )
-        return await self._parse_stream(response)
+        return await self._parse_stream(
+            response
+        )
 
     async def _parse_stream(
-        self, stream
+        self,
+        stream,
     ) -> LLMResponse:
         """解析流式响应。"""
         tool_calls: dict[int, dict[str, str]] = {}
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
         finish_reason = None
+        usage = None
 
         async for chunk in stream:
+            chunk_usage = getattr(chunk, "usage", None)
+            if chunk_usage is not None:
+                usage = chunk_usage
+
+            if not getattr(chunk, "choices", None):
+                continue
+
             delta = chunk.choices[0].delta
 
             reasoning = getattr(delta, "reasoning_content", None)
@@ -403,4 +442,5 @@ class DeepSeekProvider(LLMProvider):
             tool_calls=tool_calls,
             finish_reason=finish_reason,
             assistant_message=assistant_message,
+            token_usage=self._extract_token_usage(usage),
         )

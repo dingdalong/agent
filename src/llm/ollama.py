@@ -27,8 +27,44 @@ class OllamaProvider(LLMProvider):
             max_retries=self.max_retries,
         )
 
-    def estimate_tokens(self, messages: list[dict]) -> int:
-        return len(str(messages)) // 4
+    def estimate_tokens(
+        self,
+        messages: list[dict],
+        prompt: list[dict] | None = None,
+        tools: list[ToolDict] | None = None,
+    ) -> int:
+        all_messages = (prompt or []) + messages
+        messages_for_estimate = [{
+            "messages": all_messages,
+            "tools": tools,
+        }] if tools else all_messages
+        return len(str(messages_for_estimate)) // 4
+
+    def _extract_token_usage(
+        self,
+        usage: object | None,
+    ) -> dict[str, int | None] | None:
+        if usage is None:
+            return None
+        prompt_tokens_details = getattr(usage, "prompt_tokens_details", None)
+        cache_creation_input_tokens = getattr(
+            prompt_tokens_details,
+            "cache_creation_tokens",
+            None,
+        )
+        if cache_creation_input_tokens is None:
+            cache_creation_input_tokens = getattr(
+                prompt_tokens_details,
+                "cache_creation_input_tokens",
+                None,
+            )
+        return {
+            "input_tokens": getattr(usage, "prompt_tokens", None),
+            "output_tokens": getattr(usage, "completion_tokens", None),
+            "total_tokens": getattr(usage, "total_tokens", None),
+            "cache_read_input_tokens": getattr(prompt_tokens_details, "cached_tokens", None),
+            "cache_creation_input_tokens": cache_creation_input_tokens,
+        }
 
     def normalize_messages(
         self,
@@ -131,6 +167,7 @@ class OllamaProvider(LLMProvider):
             "model": self.model,
             "messages": prompt + messages if prompt else messages,
             "stream": True,
+            "stream_options": {"include_usage": True},
             "temperature": temperature,
         }
         if tools:
@@ -151,15 +188,26 @@ class OllamaProvider(LLMProvider):
         response = await self._client.chat.completions.create(**kwargs)
         return await self._parse_stream(response)
 
-    async def _parse_stream(self, stream) -> LLMResponse:
+    async def _parse_stream(
+        self,
+        stream,
+    ) -> LLMResponse:
         """解析 Chat Completions 流式响应。"""
         tool_calls: dict[int, dict[str, str]] = {}
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
         reasoning_content_parts: list[str] = []
         finish_reason = None
+        usage = None
 
         async for chunk in stream:
+            chunk_usage = getattr(chunk, "usage", None)
+            if chunk_usage is not None:
+                usage = chunk_usage
+
+            if not getattr(chunk, "choices", None):
+                continue
+
             delta = chunk.choices[0].delta
 
             reasoning = getattr(delta, "reasoning", None)
@@ -234,4 +282,5 @@ class OllamaProvider(LLMProvider):
             tool_calls=tool_calls,
             finish_reason=finish_reason,
             assistant_message=assistant_message,
+            token_usage=self._extract_token_usage(usage),
         )

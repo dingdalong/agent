@@ -32,12 +32,36 @@ class AnthropicProvider(LLMProvider):
             max_retries=0,
         )
 
-    def estimate_tokens(self, messages: list[dict]) -> int:
+    def estimate_tokens(
+        self,
+        messages: list[dict],
+        prompt: list[dict] | None = None,
+        tools: list[ToolDict] | None = None,
+    ) -> int:
+        all_messages = (prompt or []) + messages
+        messages_for_estimate = [{
+            "messages": all_messages,
+            "tools": tools,
+        }] if tools else all_messages
         try:
             encoding = tiktoken.get_encoding("cl100k_base")
         except Exception:
-            return len(str(messages)) // 4
-        return len(encoding.encode(str(messages)))
+            return len(str(messages_for_estimate)) // 4
+        return len(encoding.encode(str(messages_for_estimate)))
+
+    def _extract_token_usage(
+        self,
+        usage: object | None,
+    ) -> dict[str, int | None] | None:
+        if usage is None:
+            return None
+        return {
+            "input_tokens": getattr(usage, "input_tokens", None),
+            "output_tokens": getattr(usage, "output_tokens", None),
+            "total_tokens": getattr(usage, "total_tokens", None),
+            "cache_read_input_tokens": getattr(usage, "cache_read_input_tokens", None),
+            "cache_creation_input_tokens": getattr(usage, "cache_creation_input_tokens", None),
+        }
 
     def clear_reasoning_content(self, messages):
         for msg in messages:
@@ -311,7 +335,10 @@ class AnthropicProvider(LLMProvider):
 
         return await self._stream_chat(**kwargs)
 
-    async def _stream_chat(self, **kwargs) -> LLMResponse:
+    async def _stream_chat(
+        self,
+        **kwargs,
+    ) -> LLMResponse:
         """执行流式调用并解析响应。"""
         content_parts: list[str] = []
         thinking_parts: list[str] = []
@@ -408,4 +435,5 @@ class AnthropicProvider(LLMProvider):
             tool_calls=tool_calls,
             finish_reason=finish_reason,
             assistant_message=assistant_message,
+            token_usage=self._extract_token_usage(getattr(message, "usage", None)),
         )

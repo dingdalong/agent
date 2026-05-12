@@ -26,12 +26,37 @@ class OpenAIProvider(LLMProvider):
             max_retries=self.max_retries,
         )
 
-    def estimate_tokens(self, messages: list[dict]) -> int:
+    def estimate_tokens(
+        self,
+        messages: list[dict],
+        prompt: list[dict] | None = None,
+        tools: list[ToolDict] | None = None,
+    ) -> int:
         try:
             encoding = tiktoken.encoding_for_model(self.model)
         except KeyError:
             encoding = tiktoken.get_encoding("o200k_base")
-        return len(encoding.encode(str(messages)))
+        all_messages = (prompt or []) + messages
+        messages_for_estimate = [{
+            "messages": all_messages,
+            "tools": tools,
+        }] if tools else all_messages
+        return len(encoding.encode(str(messages_for_estimate)))
+
+    def _extract_token_usage(
+        self,
+        usage: object | None,
+    ) -> dict[str, int | None] | None:
+        if usage is None:
+            return None
+        input_token_details = getattr(usage, "input_token_details", None)
+        return {
+            "input_tokens": getattr(usage, "input_tokens", None),
+            "output_tokens": getattr(usage, "output_tokens", None),
+            "total_tokens": getattr(usage, "total_tokens", None),
+            "cache_read_input_tokens": getattr(input_token_details, "cached_tokens", None),
+            "cache_creation_input_tokens": getattr(input_token_details, "cache_creation_tokens", None),
+        }
 
     def normalize_messages(
         self,
@@ -209,12 +234,16 @@ class OpenAIProvider(LLMProvider):
         stream = await self._client.responses.create(**kwargs)
         return await self._parse_stream(stream)
 
-    async def _parse_stream(self, stream) -> LLMResponse:
+    async def _parse_stream(
+        self,
+        stream,
+    ) -> LLMResponse:
         """解析 Responses API 流式事件。"""
         tool_calls: dict[int, dict[str, str]] = {}
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
         finish_reason = None
+        usage = None
 
         func_call_map: dict[str, int] = {}
         next_idx = 0
@@ -257,6 +286,7 @@ class OpenAIProvider(LLMProvider):
 
             elif et == "response.completed":
                 resp = event.response
+                usage = getattr(resp, "usage", None)
                 if resp.status == "completed":
                     finish_reason = "stop"
                 elif resp.status == "incomplete":
@@ -287,4 +317,5 @@ class OpenAIProvider(LLMProvider):
             tool_calls=tool_calls,
             finish_reason=finish_reason,
             assistant_message=assistant_message,
+            token_usage=self._extract_token_usage(usage),
         )

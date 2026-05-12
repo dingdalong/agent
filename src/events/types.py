@@ -50,6 +50,33 @@ class CompactDelta(Event):
 
 
 @dataclass
+class LLMCallStarted(Event):
+    """LLM 调用开始时的 token 估算信息。"""
+    model: str = ""
+    estimated_input_tokens: int = 0
+    message_count: int = 0
+    tool_count: int = 0
+    level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
+    type: Literal["llm_call_started"] = field(default="llm_call_started", init=False)
+
+
+@dataclass
+class LLMCallCompleted(Event):
+    """LLM 调用完成后的 token usage 与速度信息。"""
+    model: str = ""
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+    cache_read_input_tokens: int | None = None
+    cache_creation_input_tokens: int | None = None
+    duration_seconds: float | None = None
+    output_tokens_per_second: float | None = None
+    total_tokens_per_second: float | None = None
+    level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
+    type: Literal["llm_call_completed"] = field(default="llm_call_completed", init=False)
+
+
+@dataclass
 class OutputRequested(Event):
     """请求 UI 串行输出文本。"""
     content: str = ""
@@ -69,5 +96,6 @@ class InputRequested(Event):
 # 联合类型
 AgentEvent = Union[
     ErrorOccurred, InputRequested, OutputRequested,
+    LLMCallCompleted, LLMCallStarted,
     ResponseDelta, ThinkingDelta,
 ]
