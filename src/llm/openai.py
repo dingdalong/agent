@@ -4,7 +4,6 @@ import logging
 import time
 import tiktoken
 from openai import AsyncOpenAI, APIConnectionError, RateLimitError, InternalServerError
-from src.events.types import ResponseDelta, ThinkingDelta
 from src.llm.base import LLMProvider, LLMResponse
 from src.tools import ToolDict
 
@@ -211,6 +210,8 @@ class OpenAIProvider(LLMProvider):
         tools: list[ToolDict] | None = None,
         temperature: float = 0.6,
         tool_choice: str | dict | None = None,
+        caller_name: str | None = None,
+        caller_uuid: str | None = None,
     ) -> LLMResponse:
         instructions, input_items = self._convert_to_input(messages, prompt)
         converted_tools = self._convert_tools(tools)
@@ -232,11 +233,13 @@ class OpenAIProvider(LLMProvider):
             kwargs["tool_choice"] = tool_choice or "auto"
 
         stream = await self._client.responses.create(**kwargs)
-        return await self._parse_stream(stream)
+        return await self._parse_stream(stream, caller_name, caller_uuid)
 
     async def _parse_stream(
         self,
         stream,
+        caller_name: str | None = None,
+        caller_uuid: str | None = None,
     ) -> LLMResponse:
         """解析 Responses API 流式事件。"""
         tool_calls: dict[int, dict[str, str]] = {}
@@ -253,19 +256,11 @@ class OpenAIProvider(LLMProvider):
 
             if et == "response.output_text.delta":
                 content_parts.append(event.delta)
-                await self.event_bus.emit(ResponseDelta(
-                    timestamp=time.time(),
-                    source=self.model,
-                    content=event.delta,
-                ))
+                await self.emit_response_delta(event.delta, caller_name, caller_uuid)
 
             elif et == "response.reasoning_summary_text.delta":
                 reasoning_parts.append(event.delta)
-                await self.event_bus.emit(ThinkingDelta(
-                    timestamp=time.time(),
-                    source=self.model,
-                    content=event.delta,
-                ))
+                await self.emit_thinking_delta(event.delta, caller_name, caller_uuid)
 
             elif et == "response.output_item.added":
                 item = event.item

@@ -6,7 +6,6 @@ import time
 import tiktoken
 import anthropic
 from anthropic import AsyncAnthropic
-from src.events.types import ResponseDelta, ThinkingDelta
 from src.llm.base import LLMProvider, LLMResponse
 from src.tools import ToolDict
 
@@ -311,6 +310,8 @@ class AnthropicProvider(LLMProvider):
         tools: list[ToolDict] | None = None,
         temperature: float = 0.6,
         tool_choice: str | dict | None = None,
+        caller_name: str | None = None,
+        caller_uuid: str | None = None,
     ) -> LLMResponse:
         system, claude_messages = self._convert_messages(messages, prompt)
         claude_tools = self._convert_tools(tools)
@@ -333,10 +334,16 @@ class AnthropicProvider(LLMProvider):
                 tool_choice or "auto"
             )
 
-        return await self._stream_chat(**kwargs)
+        return await self._stream_chat(
+            caller_name=caller_name,
+            caller_uuid=caller_uuid,
+            **kwargs,
+        )
 
     async def _stream_chat(
         self,
+        caller_name: str | None = None,
+        caller_uuid: str | None = None,
         **kwargs,
     ) -> LLMResponse:
         """执行流式调用并解析响应。"""
@@ -348,18 +355,10 @@ class AnthropicProvider(LLMProvider):
                 if event.type == "content_block_delta":
                     if event.delta.type == "thinking_delta":
                         thinking_parts.append(event.delta.thinking)
-                        await self.event_bus.emit(ThinkingDelta(
-                            timestamp=time.time(),
-                            source=self.model,
-                            content=event.delta.thinking,
-                        ))
+                        await self.emit_thinking_delta(event.delta.thinking, caller_name, caller_uuid)
                     elif event.delta.type == "text_delta":
                         content_parts.append(event.delta.text)
-                        await self.event_bus.emit(ResponseDelta(
-                            timestamp=time.time(),
-                            source=self.model,
-                            content=event.delta.text,
-                        ))
+                        await self.emit_response_delta(event.delta.text, caller_name, caller_uuid)
 
             final = await stream.get_final_message()
 

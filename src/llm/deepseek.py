@@ -6,7 +6,6 @@ import re
 import time
 from functools import cached_property
 from openai import AsyncOpenAI, APIConnectionError, RateLimitError, InternalServerError
-from src.events.types import ResponseDelta, ThinkingDelta
 from src.llm.base import LLMProvider, LLMResponse
 from src.tools import ToolDict
 import transformers
@@ -337,6 +336,8 @@ class DeepSeekProvider(LLMProvider):
         tools: list[ToolDict] | None = None,
         temperature: float = 0.6,
         tool_choice: str | dict | None = None,
+        caller_name: str | None = None,
+        caller_uuid: str | None = None,
     ) -> LLMResponse:
         response = await self._client.chat.completions.create(
             model=self.model,
@@ -350,12 +351,16 @@ class DeepSeekProvider(LLMProvider):
             extra_body={"thinking": {"type": "enabled"}}
         )
         return await self._parse_stream(
-            response
+            response,
+            caller_name,
+            caller_uuid,
         )
 
     async def _parse_stream(
         self,
         stream,
+        caller_name: str | None = None,
+        caller_uuid: str | None = None,
     ) -> LLMResponse:
         """解析流式响应。"""
         tool_calls: dict[int, dict[str, str]] = {}
@@ -377,20 +382,12 @@ class DeepSeekProvider(LLMProvider):
             reasoning = getattr(delta, "reasoning_content", None)
             if reasoning is not None:
                 reasoning_parts.append(reasoning)
-                await self.event_bus.emit(ThinkingDelta(
-                    timestamp=time.time(),
-                    source=self.model,
-                    content=reasoning,
-                ))
+                await self.emit_thinking_delta(reasoning, caller_name, caller_uuid)
 
             if delta.content:
                 if not (delta.tool_calls and delta.content.isspace()):
                     content_parts.append(delta.content)
-                    await self.event_bus.emit(ResponseDelta(
-                        timestamp=time.time(),
-                        source=self.model,
-                        content=delta.content,
-                    ))
+                    await self.emit_response_delta(delta.content, caller_name, caller_uuid)
 
             if delta.tool_calls:
                 for tool_chunk in delta.tool_calls:

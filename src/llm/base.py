@@ -11,7 +11,7 @@ import math
 import time
 import httpx
 from src.events import EventBus
-from src.events.types import LLMCallCompleted, LLMCallStarted
+from src.events.types import LLMCallCompleted, LLMCallStarted, ResponseDelta, ThinkingDelta
 from src.tools import ToolDict
 
 logger = logging.getLogger(__name__)
@@ -144,13 +144,23 @@ class LLMProvider(ABC):
         tools: list[ToolDict] | None = None,
         temperature: float = 0.6,
         tool_choice: str | dict | None = None,
+        caller_name: str | None = None,
+        caller_uuid: str | None = None,
     ) -> LLMResponse:
         retryable = self._retryable_errors + (asyncio.TimeoutError, httpx.ReadTimeout)
         async with self._semaphore:
             for attempt in range(self.max_retries):
                 try:
                     started_at = await self._emit_llm_call_started(messages, prompt, tools)
-                    response = await self._do_chat(messages, prompt, tools, temperature, tool_choice)
+                    response = await self._do_chat(
+                        messages,
+                        prompt,
+                        tools,
+                        temperature,
+                        tool_choice,
+                        caller_name,
+                        caller_uuid,
+                    )
                     await self._emit_llm_call_completed(
                         started_at=started_at,
                         usage=response.token_usage,
@@ -163,6 +173,38 @@ class LLMProvider(ABC):
                     logger.warning(f"API错误 ({type(e).__name__})，{wait_time}秒后重试 ({attempt+1}/{self.max_retries})...")
                     await asyncio.sleep(wait_time)
             raise RuntimeError("LLM chat: 所有重试均失败")
+
+    async def emit_response_delta(
+        self,
+        content: str,
+        caller_name: str | None = None,
+        caller_uuid: str | None = None,
+    ) -> None:
+        if self.event_bus is None:
+            return
+        await self.event_bus.emit(ResponseDelta(
+            timestamp=time.time(),
+            source=self.model,
+            content=content,
+            caller_name=caller_name,
+            caller_uuid=caller_uuid,
+        ))
+
+    async def emit_thinking_delta(
+        self,
+        content: str,
+        caller_name: str | None = None,
+        caller_uuid: str | None = None,
+    ) -> None:
+        if self.event_bus is None:
+            return
+        await self.event_bus.emit(ThinkingDelta(
+            timestamp=time.time(),
+            source=self.model,
+            content=content,
+            caller_name=caller_name,
+            caller_uuid=caller_uuid,
+        ))
 
     async def _emit_llm_call_started(
         self,
@@ -222,4 +264,6 @@ class LLMProvider(ABC):
         tools: list[ToolDict] | None = None,
         temperature: float = 1.0,
         tool_choice: str | dict | None = None,
+        caller_name: str | None = None,
+        caller_uuid: str | None = None,
     ) -> LLMResponse: ...

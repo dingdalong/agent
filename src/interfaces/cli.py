@@ -103,15 +103,25 @@ class CLIInterface:
             case ResponseDelta(content=c):
                 if not self._in_response:
                     # 回应块开头：打印前缀
-                    print("\n助手：", end="", flush=True)
+                    print(f"\n{self._response_prefix(event)}", end="", flush=True)
                     self._in_response = True
                 print(c, end="", flush=True)
             case ThinkingDelta(content=c):
                 if not self._in_thinking:
                     # 思考块开头：打印前缀
-                    print("\n💭 ", end="", flush=True)
+                    print(f"\n{self._thinking_prefix(event)}", end="", flush=True)
                     self._in_thinking = True
                 print(c, end="", flush=True)
+
+    def _response_prefix(self, event: ResponseDelta) -> str:
+        if event.caller_name and event.caller_uuid:
+            return f"助手(name={event.caller_name}, uuid={event.caller_uuid})："
+        return "助手："
+
+    def _thinking_prefix(self, event: ThinkingDelta) -> str:
+        if event.caller_name and event.caller_uuid:
+            return f"💭 (name={event.caller_name}, uuid={event.caller_uuid}) "
+        return "💭 "
 
     def _format_optional_int(self, value: int | None) -> str:
         if value is None:

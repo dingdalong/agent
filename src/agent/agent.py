@@ -91,7 +91,13 @@ class Agent:
                     logger.warning("连续 %d 次 compact 后仍需压缩，终止循环防止空转", compact_streak - 1)
                     messages.append({"role": "user", "content": "由于对话上下文过长且多次压缩仍无法继续，请你基于当前已完成的工作做一个总结：1) 已经完成了什么；2) 还有什么未完成；3) 给出后续建议。"})
                     messages[:] = self.deps.llm.normalize_messages(messages)
-                    response = await self.deps.llm.chat(prompt=prompt, messages=messages, tools=[])
+                    response = await self.deps.llm.chat(
+                        prompt=prompt,
+                        messages=messages,
+                        tools=[],
+                        caller_name=self.name,
+                        caller_uuid=str(self.uuid),
+                    )
                     if response.content:
                         final_text = response.content
                     messages.append(response.assistant_message)
@@ -106,7 +112,13 @@ class Agent:
                 compact_streak = 0
 
             messages[:] = self.deps.llm.normalize_messages(messages)
-            response = await self.deps.llm.chat(prompt=prompt, messages=messages, tools=self._tools_schemas)
+            response = await self.deps.llm.chat(
+                prompt=prompt,
+                messages=messages,
+                tools=self._tools_schemas,
+                caller_name=self.name,
+                caller_uuid=str(self.uuid),
+            )
             content, tool_calls = response.content, response.tool_calls
 
             if content:
