@@ -58,14 +58,20 @@ class EventBus:
         if not self._subscribers:
             raise RuntimeError("cannot request input: no subscribers")
         loop = asyncio.get_running_loop()
-        future: asyncio.Future[str] = loop.create_future()
-        await self.emit(InputRequested(
-            timestamp=time.time(),
-            source=source,
-            prompt=prompt,
-            future=future,
-        ))
-        return await future
+        next_prompt = prompt
+        while True:
+            future: asyncio.Future[str] = loop.create_future()
+            await self.emit(InputRequested(
+                timestamp=time.time(),
+                source=source,
+                prompt=next_prompt,
+                future=future,
+            ))
+            answer = await future
+            answer = answer.strip()
+            if answer:
+                return answer
+            next_prompt = ""
 
     async def subscribe(
         self,
