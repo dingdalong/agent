@@ -1,7 +1,7 @@
 from __future__ import annotations
 from typing import TYPE_CHECKING, Optional
 
-from src.tools.decorator import ToolPermission, tool
+from src.tools.decorator import PermissionRule, ToolPermission, tool
 from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
@@ -13,7 +13,7 @@ class ListDirectory(BaseModel):
     max_depth: int = Field(3, description="递归最大深度，仅在 recursive=True 时生效。")
 
 @tool(model=ListDirectory, description="列出目录内容，显示文件和子目录的树形结构。",
-      permission=ToolPermission(tips="列出目录：{path}", args=["path"]))
+      permission=ToolPermission(tips="列出目录：{path}", rules=[PermissionRule(permission="allow")]))
 async def list_directory(path: str, agent: Agent,
                          recursive: bool = False, max_depth: int = 3) -> str:
     return await agent._file_mgr.list_directory(
@@ -22,32 +22,12 @@ async def list_directory(path: str, agent: Agent,
         max_depth=max_depth,
     )
 
-class CreateDirectory(BaseModel):
-    path: str = Field(..., description="要创建的目录的相对路径，支持多级目录。")
-
-@tool(model=CreateDirectory, description="创建新目录。",
-      permission=ToolPermission(tips="创建目录：{path}", args=["path"]))
-async def create_directory(path: str, agent: Agent) -> str:
-    return await agent._file_mgr.create_directory(path)
-
-class MoveFile(BaseModel):
-    source: str = Field(..., description="源文件或目录的相对路径。")
-    destination: str = Field(..., description="目标相对路径。若目标是已有目录，则移入该目录内。")
-
-@tool(model=MoveFile, description="移动或重命名文件/目录。",
-      permission=ToolPermission(
-          tips="移动或重命名：{source} -> {destination}",
-          args=["source", "destination"],
-      ))
-async def move_file(source: str, destination: str, agent: Agent) -> str:
-    return await agent._file_mgr.move_file(source, destination)
-
 class FindFiles(BaseModel):
     pattern: str = Field(..., description="glob匹配模式，如 '*.py'、'**/*.json'。")
     path: str = Field(".", description="搜索起点的相对路径，默认为当前工作目录。")
 
 @tool(model=FindFiles, description="按glob模式搜索文件。",
-      permission=ToolPermission(tips="在 {path} 中查找：{pattern}", args=["path"]))
+      permission=ToolPermission(tips="在 {path} 中查找：{pattern}", rules=[PermissionRule(permission="allow")]))
 async def find_files(pattern: str, agent: Agent, path: str = ".") -> str:
     return await agent._file_mgr.find_files(pattern, path=path)
 
@@ -61,7 +41,7 @@ class SearchFiles(BaseModel):
     include_ignored: Optional[bool] = Field(False, description="是否搜索被 .gitignore 忽略的文件；默认 False，主动查询忽略内容时设为 True。")
 
 @tool(model=SearchFiles, description="全局搜索文件内容，类似 VS Code Search，支持文本/正则、大小写、全词、包含/排除glob。",
-      permission=ToolPermission(tips="搜索文本：{query}"))
+      permission=ToolPermission(tips="搜索文本：{query}", rules=[PermissionRule(permission="allow")]))
 async def search_files(query: str, agent: Agent,
                        include: str | None = None,
                        exclude: str | None = None,
@@ -83,7 +63,7 @@ class GetFileInfo(BaseModel):
     path: str = Field(..., description="要查询的文件或目录的相对路径。")
 
 @tool(model=GetFileInfo, description="获取文件或目录的详细元数据，包括大小、行数、时间、权限等。",
-      permission=ToolPermission(tips="查看文件信息：{path}", args=["path"]))
+      permission=ToolPermission(tips="查看文件信息：{path}", rules=[PermissionRule(permission="allow")]))
 async def get_file_info(path: str, agent: Agent) -> str:
     return await agent._file_mgr.get_file_info(path)
 
@@ -93,11 +73,31 @@ class ReadFile(BaseModel):
     end_line: Optional[int] = Field(None, description="结束行号，包含该行；未提供时读取到文件末尾。")
 
 @tool(model=ReadFile, description="读取文件内容并附带行号，可指定行数范围，便于后续精确编辑。",
-      permission=ToolPermission(tips="读取文件：{path}", args=["path"]))
+      permission=ToolPermission(tips="读取文件：{path}", rules=[PermissionRule(permission="allow")]))
 async def read_file(path: str, agent: Agent,
                     start_line: int | None = None,
                     end_line: int | None = None) -> str:
     return await agent._file_mgr.read_file(path, start_line=start_line, end_line=end_line)
+
+class CreateDirectory(BaseModel):
+    path: str = Field(..., description="要创建的目录的相对路径，支持多级目录。")
+
+@tool(model=CreateDirectory, description="创建新目录。",
+      permission=ToolPermission(tips="创建目录：{path}", args=["path"]))
+async def create_directory(path: str, agent: Agent) -> str:
+    return await agent._file_mgr.create_directory(path)
+
+class MoveFile(BaseModel):
+    source: str = Field(..., description="源文件或目录的相对路径。")
+    destination: str = Field(..., description="目标相对路径。若目标是已有目录，则移入该目录内。")
+
+@tool(model=MoveFile, description="移动或重命名文件/目录。",
+      permission=ToolPermission(
+          tips="移动或重命名：{source} -> {destination}",
+          args=["source", "destination"],
+      ))
+async def move_file(source: str, destination: str, agent: Agent) -> str:
+    return await agent._file_mgr.move_file(source, destination)
 
 class WriteFile(BaseModel):
     path: str = Field(..., description="相对文件路径。")
