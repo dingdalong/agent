@@ -4,7 +4,6 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any, Type
 from pydantic import BaseModel, ConfigDict
-from src.config import config
 from src.tools import ToolDict
 from src.events.types import CompactDelta
 from src.mgr import FileMgr, TodoManager, CompactMgr, PromptMgr, SkillMgr, SubAgentMgr
@@ -30,6 +29,7 @@ class AgentDeps(BaseModel):
     event_bus: Any = None  # EventBus
     tools_mgr: Any = None  # ToolsMgr
     permission_mgr: Any = None  # PermissionManager
+    config_mgr: Any = None  # ConfigManager
 
 @dataclass
 class Agent:

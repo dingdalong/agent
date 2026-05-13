@@ -27,16 +27,18 @@ class PermissionManager:
 
     def __init__(
         self,
-        config: dict[str, Any] | None = None,
         rules: list[dict[str, Any]] | None = None,
         tools: Iterable[ToolEntry] | None = None,
+        config_mgr: Any = None,
     ):
         self.session_allow: list[PermissionEntry] = []
         self.deny_rules: list[PermissionEntry] = []
         self.allow_rules: list[PermissionEntry] = []
+        self.config_mgr = config_mgr
 
         self._load_tool_rules(tools or [])
-        self._load_config_rules(config or {}, rules=rules)
+        permission_config = config_mgr.get_user_setting("permission") if config_mgr is not None else {}
+        self._load_config_rules(permission_config, rules=rules)
 
     def _validate_permission(self, permission: Any, field_name: str) -> None:
         if permission not in RULE_PERMISSIONS:
@@ -168,6 +170,24 @@ class PermissionManager:
         except ValidationError:
             return tool_input
 
+    def _serialize_rule(self, rule: PermissionEntry) -> dict[str, Any]:
+        serialized: dict[str, Any] = {
+            "tool": rule.tool_name,
+            "permission": rule.permission,
+        }
+        if rule.args:
+            serialized["args"] = rule.args
+        return serialized
+
+    def _persist_allow_rule(self, rule: PermissionEntry) -> None:
+        if self.config_mgr is None:
+            return
+
+        try:
+            self.config_mgr.append_permission_rule(self._serialize_rule(rule))
+        except OSError as exc:
+            logger.warning("跳过权限持久化：%s", exc)
+
     def _build_detail(self, tool: ToolEntry, tool_input: dict[str, Any]) -> str:
         tips = tool.permission.tips if tool.permission else None
         if tips:
@@ -230,7 +250,7 @@ class PermissionManager:
                 if normalized == "always":
                     permission_args = tool.permission.args if tool.permission and tool.permission.args else []
                     if not permission_args:
-                        self.session_allow.append(PermissionEntry(tool.name, "allow", {}))
+                        entry = PermissionEntry(tool.name, "allow", {})
                     else:
                         values = self._format_args(tool, tool_input)
                         args: dict[str, str] = {}
@@ -238,8 +258,10 @@ class PermissionManager:
                             value = values.get(arg_name)
                             if isinstance(value, str):
                                 args[arg_name] = value
-                        if set(args) == set(permission_args):
-                            self.session_allow.append(PermissionEntry(tool.name, "allow", args))
+                        entry = PermissionEntry(tool.name, "allow", args) if set(args) == set(permission_args) else None
+                    if entry is not None:
+                        self.session_allow.append(entry)
+                        self._persist_allow_rule(entry)
                     permission = "allow"
                     reason = "用户在当前会话中始终允许"
                 elif normalized in {"y", "yes"}:
@@ -261,4 +283,3 @@ class PermissionManager:
                 detail=detail,
             )
         return permission, reason
-

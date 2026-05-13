@@ -40,12 +40,6 @@ llm:
 tool:
   page_token_rate: 0.03 # 工具调用结果每页最多占上下文比例
 
-permission:
-  rules: [] # 按工具调用参数匹配，字段：tool/args/permission；permission 支持 allow | deny；未匹配时询问
-  # rules 示例：
-  #   - { tool: shell, args: { command: ["uv run:*", "pytest *"] }, permission: allow }
-  #   - { tool: shell, args: { command: "sudo *" }, permission: deny }
-
 compact:
   auto_compact_rate: 0.8 # 达到上下文多少时进行压缩
   keep_recent_tool_results: 3 # 保留最近N组工具调用结果

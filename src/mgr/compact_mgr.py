@@ -4,7 +4,6 @@ import json
 import time
 from pathlib import Path
 from dataclasses import dataclass, field
-from src.config import config
 
 if TYPE_CHECKING:
     from src.agent import AgentDeps
@@ -22,10 +21,10 @@ class CompactMgr:
     recent_messages_token_limit: int = field(init=False)
 
     def __post_init__(self):
-        compact_cfg = config["compact"]
-        default_llm_cfg = config["llm"]["default"]
+        compact_cfg = self.deps.config_mgr.get_config("compact")
+        default_llm_cfg = self.deps.config_mgr.get_config("llm.default")
         llm_provider_name = default_llm_cfg["provider"]
-        llm_provider_cfg = config["llm_provider"][llm_provider_name]
+        llm_provider_cfg = self.deps.config_mgr.get_config(f"llm_provider.{llm_provider_name}")
         context_limit = llm_provider_cfg["context_limit"]
         self.auto_compact_size = context_limit * compact_cfg["auto_compact_rate"]
         self.keep_recent_tool_results = compact_cfg["keep_recent_tool_results"]

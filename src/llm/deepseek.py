@@ -132,7 +132,7 @@ class DeepSeekProvider(LLMProvider):
             "messages": all_messages,
             "tools": tools,
         }] if tools else all_messages
-        return len(self._tokenizer.encode(messages_for_estimate))
+        return len(self._tokenizer.encode(str(messages_for_estimate)))
 
     @cached_property
     def _tokenizer(self):
