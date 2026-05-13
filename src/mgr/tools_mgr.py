@@ -5,9 +5,11 @@ from src.tools import ToolDict, ToolEntry
 logger = logging.getLogger(__name__)
 
 class ToolsMgr:
-    def __init__(self):
+    def __init__(self, load_registered: bool = True):
         self._tools: dict[str, ToolEntry] = {}
         self._result_store: dict[str, list[str]] = {}
+        if not load_registered:
+            return
         from src.tools.decorator import _registry
         for entry in _registry:
             self.register(entry)
@@ -56,6 +58,8 @@ class ToolsMgr:
             f"tool_call_id: {tool_call_id} | 总页数: {total_pages} | 当前第 {page} 页：",
             content,
         ]
+        if page < total_pages:
+            parts.append(f"传入 tool_call_id={tool_call_id}, page={page + 1} 继续读取")
         return "\n".join(parts)
 
     def _truncate(self, result: str, tool_call_id: str, deps) -> str:
@@ -71,6 +75,13 @@ class ToolsMgr:
             return f"错误：未知工具 '{tool_name}'"
 
         tool = self._tools[tool_name]
+        deps = (context or {}).get("deps")
+        permission_mgr = getattr(deps, "permission_mgr", None) if deps is not None else None
+        if permission_mgr is not None:
+            permission, reason = await permission_mgr.authorize(tool, arguments, deps)
+            if permission == "deny":
+                return f"权限拒绝：{reason}"
+
         result = await tool(context or {}, **arguments)
         if tool.raw_output:
             return result
@@ -78,7 +89,6 @@ class ToolsMgr:
         tool_call_id = (context or {}).get("current_tool_call_id")
         if not tool_call_id:
             return result
-        deps = (context or {}).get("deps")
         if deps is None:
             return result
 

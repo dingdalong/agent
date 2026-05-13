@@ -1,4 +1,4 @@
-from src.tools.decorator import tool
+from src.tools.decorator import PermissionRule, ToolPermission, tool
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict
 from ddgs import DDGS
@@ -24,7 +24,11 @@ class WebSearch(BaseModel):
     query: str = Field(..., description="要锁搜的内容")
     max_results: Optional[int] = Field(None, description="搜索结果条数")
 
-@tool(model=WebSearch, description="当需要实时信息、最新新闻或未知事实时，使用此工具进行联网搜索。")
+@tool(model=WebSearch, description="当需要实时信息、最新新闻或未知事实时，使用此工具进行联网搜索。",
+      permission=ToolPermission(
+          tips="搜索：{query}",
+          rules=[PermissionRule(permission="allow")],
+      ))
 async def web_search(query: str, max_results: int = 5) -> str:
     try:
         ddgs = DDGS()

@@ -5,10 +5,10 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass, field
-from typing import AsyncIterator
+from typing import AsyncIterator, Literal
 
 from src.events.levels import EventLevel
-from src.events.types import Event, InputRequested, OutputRequested
+from src.events.types import Event, InputRequested, OutputRequested, PermissionNotice, PermissionRequested
 
 _SENTINEL = object()
 
@@ -72,6 +72,42 @@ class EventBus:
             if answer:
                 return answer
             next_prompt = ""
+
+    async def notify_permission(
+        self,
+        status: Literal["allow", "deny"],
+        tool_name: str,
+        detail: str = "",
+        source: str = "permission",
+    ) -> None:
+        """通过事件队列发布工具权限状态通知。"""
+        await self.emit(PermissionNotice(
+            timestamp=time.time(),
+            source=source,
+            status=status,
+            tool_name=tool_name,
+            detail=detail,
+        ))
+
+    async def request_permission(
+        self,
+        tool_name: str,
+        detail: str,
+        source: str = "permission",
+    ) -> str:
+        """通过事件队列请求 UI 读取工具权限确认。"""
+        if not self._subscribers:
+            raise RuntimeError("cannot request permission: no subscribers")
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[str] = loop.create_future()
+        await self.emit(PermissionRequested(
+            timestamp=time.time(),
+            source=source,
+            tool_name=tool_name,
+            detail=detail,
+            future=future,
+        ))
+        return await future
 
     async def subscribe(
         self,

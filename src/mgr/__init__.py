@@ -5,5 +5,6 @@ from src.mgr.tools_mgr import ToolsMgr
 from src.mgr.prompt_mgr import PromptMgr
 from src.mgr.skill_mgr import SkillMgr
 from src.mgr.subagent_mgr import SubAgentMgr
+from src.mgr.permission_mgr import PermissionManager
 
-__all__ = ["FileMgr", "CompactMgr", "TodoManager", "ToolsMgr", "PromptMgr", "SkillMgr", "SubAgentMgr"]
+__all__ = ["FileMgr", "CompactMgr", "TodoManager", "ToolsMgr", "PromptMgr", "SkillMgr", "SubAgentMgr", "PermissionManager"]

@@ -1,7 +1,7 @@
 from __future__ import annotations
 from typing import TYPE_CHECKING
 
-from src.tools.decorator import tool
+from src.tools.decorator import PermissionRule, ToolPermission, tool
 from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
@@ -14,7 +14,8 @@ class FillSkillTemplate(BaseModel):
     variables: dict[str, str] = Field(..., description="模板变量，key 为占位符名，value 为替换值")
 
 
-@tool(model=FillSkillTemplate, description="填充技能附属文件中的模板变量，返回替换后的文本")
+@tool(model=FillSkillTemplate, description="填充技能附属文件中的模板变量，返回替换后的文本",
+      permission=ToolPermission(rules=[PermissionRule(permission="allow")]))
 async def fill_skill_template(skill_name: str, file_name: str, variables: dict[str, str], agent: Agent) -> str:
     text = agent._skill_mgr.get_companion(skill_name, file_name)
     if text is None:

@@ -8,7 +8,7 @@ from src.config import load_config
 from src.interfaces import CLIInterface
 from src.events import EventBus, EventLevel
 from src.llm import get_provider
-from src.mgr import ToolsMgr
+from src.mgr import PermissionManager, ToolsMgr
 from src.agent import AgentDeps
 from src.app.app import AgentApp
 
@@ -21,6 +21,7 @@ async def create_app() -> AgentApp:
     event_bus = EventBus(level=EventLevel.from_str(config["events"].get("level", "progress")))
     ui = CLIInterface()
     tools_mgr = ToolsMgr()
+    permission_mgr = PermissionManager(config.get("permission", {}), tools=tools_mgr.list_entries())
 
     default_llm_cfg = config["llm"]["default"]
     llm_provider_name = default_llm_cfg["provider"]
@@ -43,6 +44,7 @@ async def create_app() -> AgentApp:
         ui = ui,
         event_bus = event_bus,
         tools_mgr = tools_mgr,
+        permission_mgr = permission_mgr,
     )
     return AgentApp(
         deps = deps,

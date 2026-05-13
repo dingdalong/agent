@@ -9,6 +9,8 @@ from src.events.types import (
     LLMCallCompleted,
     LLMCallStarted,
     OutputRequested,
+    PermissionNotice,
+    PermissionRequested,
     ResponseDelta,
     ThinkingDelta,
 )
@@ -53,6 +55,31 @@ class CLIInterface:
                 print(f"  ✗ {name} 错误: {err}", flush=True)
             case OutputRequested(content=c):
                 await self.output(c)
+            case PermissionRequested(
+                tool_name=tool_name,
+                detail=detail,
+                future=future,
+            ):
+                message = (
+                    f"\n⚠️  工具 '{tool_name}' 请求执行：\n"
+                    f"   {detail}\n"
+                    "是否允许执行？(y/n/always): "
+                )
+                try:
+                    answer = await self.input(message)
+                except Exception as exc:
+                    if future is not None and not future.done():
+                        future.set_exception(exc)
+                else:
+                    if future is not None and not future.done():
+                        future.set_result(answer)
+            case PermissionNotice(status=status, tool_name=tool_name, detail=detail):
+                if status == "allow":
+                    await self.output(f"[执行工具]{detail}\n")
+                elif detail:
+                    await self.output(f"[拒绝执行]{detail}\n")
+                else:
+                    await self.output(f"[拒绝执行工具]{tool_name}\n")
             case InputRequested(prompt=prompt, future=future):
                 try:
                     answer = await self.input(prompt)

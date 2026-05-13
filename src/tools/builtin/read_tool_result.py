@@ -1,7 +1,7 @@
 from __future__ import annotations
 from typing import TYPE_CHECKING
 
-from src.tools.decorator import tool
+from src.tools.decorator import PermissionRule, ToolPermission, tool
 from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
@@ -9,11 +9,12 @@ if TYPE_CHECKING:
 
 class ReadToolResult(BaseModel):
     tool_call_id: str = Field(..., description="被截断工具结果对应的原始 tool_call_id。")
-    page: int = Field(2, description="页码，一般从2开始。")
+    page: int = Field(2, description="页码，从第 2 页继续读取。")
 
 @tool(
     model=ReadToolResult,
-    description="读取工具调用结果的后续内容。",
+    description="读取分页工具结果的后续页。",
+    permission=ToolPermission(rules=[PermissionRule(permission="allow")]),
     raw_output=True,
 )
 async def read_tool_result(

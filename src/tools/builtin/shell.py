@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from src.tools.decorator import tool
+from src.tools.decorator import PermissionRule, ToolPermission, tool
 from pydantic import BaseModel, Field
 
 
@@ -10,7 +10,17 @@ class Shell(BaseModel):
     timeout: int = Field(default=300, description="超时时间（秒）")
 
 
-@tool(model=Shell, description="执行 shell 命令并返回输出", sensitive=True)
+@tool(model=Shell, description="执行 shell 命令并返回输出",
+      permission=ToolPermission(
+          tips="{command}",
+          args=["command"],
+          rules=[
+              PermissionRule(
+                  permission="deny",
+                  args={"command": ["sudo *", "rm -r *", "rm -R *", "rm --recursive *"]},
+              ),
+          ],
+      ))
 async def shell(command: str, timeout: int) -> str:
     try:
         proc = await asyncio.create_subprocess_shell(

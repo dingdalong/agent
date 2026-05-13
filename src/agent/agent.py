@@ -29,6 +29,7 @@ class AgentDeps(BaseModel):
     ui: Any = None  # UserInterface
     event_bus: Any = None  # EventBus
     tools_mgr: Any = None  # ToolsMgr
+    permission_mgr: Any = None  # PermissionManager
 
 @dataclass
 class Agent:

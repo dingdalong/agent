@@ -89,6 +89,26 @@ class OutputRequested(Event):
 
 
 @dataclass
+class PermissionNotice(Event):
+    """工具权限状态通知，供 UI 自行组织展示。"""
+    status: Literal["allow", "deny"] = "allow"
+    tool_name: str = ""
+    detail: str = ""
+    level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
+    type: Literal["permission_notice"] = field(default="permission_notice", init=False)
+
+
+@dataclass
+class PermissionRequested(Event):
+    """请求 UI 读取工具权限确认，并通过 future 返回结果。"""
+    tool_name: str = ""
+    detail: str = ""
+    future: asyncio.Future[str] | None = None
+    level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
+    type: Literal["permission_requested"] = field(default="permission_requested", init=False)
+
+
+@dataclass
 class InputRequested(Event):
     """请求 UI 串行读取用户输入，并通过 future 返回结果。"""
     prompt: str = ""
@@ -100,6 +120,7 @@ class InputRequested(Event):
 # 联合类型
 AgentEvent = Union[
     ErrorOccurred, InputRequested, OutputRequested,
+    PermissionNotice, PermissionRequested,
     LLMCallCompleted, LLMCallStarted,
     ResponseDelta, ThinkingDelta,
 ]

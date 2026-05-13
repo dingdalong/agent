@@ -1,6 +1,5 @@
 """@tool 装饰器 — 将函数注册为工具。"""
 
-from typing import Callable
 import asyncio, inspect
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, TypedDict
@@ -12,6 +11,21 @@ class ToolDict(TypedDict):
     function: Dict[str, Any]
 
 @dataclass
+class PermissionRule:
+    """单条工具权限规则。"""
+    permission: str
+    args: dict[str, str | list[str]] | None = None
+
+
+@dataclass
+class ToolPermission:
+    """工具权限元数据。"""
+    tips: str | None = None
+    args: list[str] | None = None
+    rules: list[PermissionRule] | None = None
+
+
+@dataclass
 class ToolEntry:
     """工具的完整元数据"""
     name: str
@@ -19,25 +33,11 @@ class ToolEntry:
     model: type[BaseModel]
     description: str
     parameters_schema: dict[str, Any]
-    sensitive: bool = False
-    confirm_template: str | None = None
+    # 工具权限元数据。None 表示无内置权限规则，未匹配时询问。
+    permission: ToolPermission | None = None
     raw_output: bool = False
 
     async def __call__(self, context: Dict[str, Any], **kwds: Any) -> Any:
-        if self.sensitive:
-            deps = context["deps"]
-            if self.confirm_template:
-                detail = self.confirm_template.format(**kwds)
-            else:
-                detail = ", ".join(f"{k}={v!r}" for k, v in kwds.items())
-            answer = await deps.event_bus.request_input(
-                f"\n⚠️  工具 '{self.name}' 需要执行敏感操作：\n"
-                f"   {detail}\n"
-                "是否允许执行？(y/n): "
-            )
-            if not answer.strip().lower() == 'y':
-                return "用户取消了操作"
-
         try:
             validated_args = self.model(**kwds).model_dump()
         except ValidationError as e:
@@ -73,8 +73,7 @@ def tool(
     model: type[BaseModel],
     description: str,
     name: str | None = None,
-    sensitive: bool = False,
-    confirm_template: str | None = None,
+    permission: ToolPermission | None = None,
     raw_output: bool = False,
 ) -> Callable:
     """工具注册装饰器"""
@@ -98,8 +97,7 @@ def tool(
             model=model,
             description=description,
             parameters_schema=parameters_schema,
-            sensitive=sensitive,
-            confirm_template=confirm_template,
+            permission=permission,
             raw_output=raw_output,
         )
         _registry.append(entry)
