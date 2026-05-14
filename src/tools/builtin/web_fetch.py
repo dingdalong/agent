@@ -243,7 +243,7 @@ def _decode_body(data: bytes, content_type: str) -> str:
         return data.decode("utf-8", errors="replace")
 
 
-@tool(model=WebFetchInput, description="访问指定URL并提取LLM友好的网页正文内容。",
+@tool(model=WebFetchInput, description="访问指定URL，返回网页正文内容。",
       permission=ToolPermission(
           tips="访问网页：{url}",
           rules=[PermissionRule(permission="allow")],

@@ -1,7 +1,7 @@
 ---
 name: explore
 description: 专用于只读探索项目结构、架构、目录关系、查找相关文件、读取源码/文档/配置、访问URL并总结证据的子任务 agent。
-tools: list_directory, find_files, get_file_info, read_file, web_fetch
+tools: list_directory, find_files, search_files, get_file_info, read_file, web_search, web_fetch
 model: sonnet
 permissionMode: default
 memory: project
