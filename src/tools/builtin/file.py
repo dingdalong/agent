@@ -8,17 +8,14 @@ if TYPE_CHECKING:
     from src.agent import Agent
 
 class ListDirectory(BaseModel):
-    path: str = Field(".", description="相对目录路径，默认为当前工作目录。")
-    recursive: bool = Field(False, description="是否递归列出子目录内容。")
-    max_depth: int = Field(3, description="递归最大深度，仅在 recursive=True 时生效。")
+    path: Optional[str] = Field(".", description="相对目录路径，默认为当前工作目录。")
+    max_depth: Optional[int] = Field(3, description="递归列出子目录的最大深度，默认为3。")
 
-@tool(model=ListDirectory, description="列出目录内容，显示文件和子目录的树形结构。",
+@tool(model=ListDirectory, description="列出目录结构，显示文件和子目录的树形结构。",
       permission=ToolPermission(tips="列出目录：{path}", rules=[PermissionRule(permission="allow")]))
-async def list_directory(path: str, agent: Agent,
-                         recursive: bool = False, max_depth: int = 3) -> str:
+async def list_directory(path: str, agent: Agent, max_depth: int = 3) -> str:
     return await agent._file_mgr.list_directory(
         path,
-        recursive=recursive,
         max_depth=max_depth,
     )
 

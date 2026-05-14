@@ -210,7 +210,7 @@ class FileMgr:
         else:
             return f"{size / (1024 * 1024):.1f}MB"
 
-    def _build_tree(self, dir_path: Path, prefix: str, recursive: bool,
+    def _build_tree(self, dir_path: Path, prefix: str,
                     current_depth: int, max_depth: int) -> tuple[list[str], int, int]:
         lines: list[str] = []
         dir_count = 0
@@ -227,17 +227,16 @@ class FileMgr:
 
             if entry.is_dir():
                 dir_count += 1
-                if recursive and current_depth < max_depth:
+                if current_depth < max_depth:
                     lines.append(f"{prefix}{connector}[DIR]  {entry.name}/")
                     child_prefix = prefix + ("    " if is_last else "│   ")
                     child_lines, cd, cf = self._build_tree(
-                        entry, child_prefix, True, current_depth + 1, max_depth)
+                        entry, child_prefix, current_depth + 1, max_depth)
                     lines.extend(child_lines)
                     dir_count += cd
                     file_count += cf
                 else:
-                    suffix = " (未展开)" if recursive else ""
-                    lines.append(f"{prefix}{connector}[DIR]  {entry.name}/{suffix}")
+                    lines.append(f"{prefix}{connector}[DIR]  {entry.name}/ (未展开)")
             else:
                 file_count += 1
                 size = self._format_size(entry.stat().st_size)
@@ -245,8 +244,7 @@ class FileMgr:
 
         return lines, dir_count, file_count
 
-    async def list_directory(self, path: str,
-                             recursive: bool = False, max_depth: int = 3) -> str:
+    async def list_directory(self, path: str, max_depth: int = 3) -> str:
         try:
             dir_path = self.safe_path(path)
             if not dir_path.exists():
@@ -257,7 +255,7 @@ class FileMgr:
             rel = dir_path.relative_to(self.workdir)
             lines = [f"目录: {rel}/"]
             tree_lines, dir_count, file_count = self._build_tree(
-                dir_path, "", recursive, 1, max_depth)
+                dir_path, "", 1, max_depth)
             lines.extend(tree_lines)
             lines.append(f"共 {dir_count} 个目录, {file_count} 个文件")
 
