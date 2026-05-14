@@ -327,8 +327,6 @@ class FileMgr:
             search_root = self.safe_path(path)
             if not search_root.exists():
                 return f"Error: 路径不存在: {path}"
-            if not search_root.is_dir():
-                return f"Error: 不是目录: {path}"
 
             matcher = re.compile(re.escape(query), re.IGNORECASE)
             ignore_spec = self._load_gitignore_spec()
@@ -376,7 +374,12 @@ class FileMgr:
                     break
 
             rel_root = search_root.relative_to(self.workdir).as_posix()
-            display_root = "." if rel_root == "." else f"{rel_root}/"
+            if rel_root == ".":
+                display_root = "."
+            elif search_root.is_dir():
+                display_root = f"{rel_root}/"
+            else:
+                display_root = rel_root
 
             lines = [
                 f'搜索: "{query}"',
@@ -401,7 +404,8 @@ class FileMgr:
     def _iter_search_files(self,
                            search_root: Path,
                            ignore_spec: pathspec.PathSpec | None):
-        for file_path in sorted(search_root.rglob("*")):
+        candidates = [search_root] if search_root.is_file() else sorted(search_root.rglob("*"))
+        for file_path in candidates:
             if not file_path.is_file():
                 continue
             rel = file_path.relative_to(self.workdir)
