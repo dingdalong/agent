@@ -13,7 +13,7 @@ class ListDirectory(BaseModel):
     max_depth: int = Field(3, description="递归最大深度，仅在 recursive=True 时生效。")
 
 @tool(model=ListDirectory, description="列出目录内容，显示文件和子目录的树形结构。",
-      permission=ToolPermission(tips="列出目录：{path}", rules=[PermissionRule(permission="allow")]))
+      permission=ToolPermission(tips="列出目录：{path}", args=["path"], rules=[PermissionRule(permission="allow")]))
 async def list_directory(path: str, agent: Agent,
                          recursive: bool = False, max_depth: int = 3) -> str:
     return await agent._file_mgr.list_directory(
@@ -27,7 +27,7 @@ class FindFiles(BaseModel):
     path: str = Field(".", description="搜索起点的相对路径，默认为当前工作目录。")
 
 @tool(model=FindFiles, description="按glob模式搜索文件。",
-      permission=ToolPermission(tips="在 {path} 中查找：{pattern}", rules=[PermissionRule(permission="allow")]))
+      permission=ToolPermission(tips="在 {path} 中查找：{pattern}", args=["path"], rules=[PermissionRule(permission="allow")]))
 async def find_files(pattern: str, agent: Agent, path: str = ".") -> str:
     return await agent._file_mgr.find_files(pattern, path=path)
 
@@ -63,7 +63,7 @@ class GetFileInfo(BaseModel):
     path: str = Field(..., description="要查询的文件或目录的相对路径。")
 
 @tool(model=GetFileInfo, description="获取文件或目录的详细元数据，包括大小、行数、时间、权限等。",
-      permission=ToolPermission(tips="查看文件信息：{path}", rules=[PermissionRule(permission="allow")]))
+      permission=ToolPermission(tips="查看文件信息：{path}", args=["path"], rules=[PermissionRule(permission="allow")]))
 async def get_file_info(path: str, agent: Agent) -> str:
     return await agent._file_mgr.get_file_info(path)
 
@@ -73,7 +73,7 @@ class ReadFile(BaseModel):
     end_line: Optional[int] = Field(None, description="结束行号，包含该行；未提供时读取到文件末尾。")
 
 @tool(model=ReadFile, description="读取文件内容并附带行号，可指定行数范围，便于后续精确编辑。",
-      permission=ToolPermission(tips="读取文件：{path}", rules=[PermissionRule(permission="allow")]))
+      permission=ToolPermission(tips="读取文件：{path}", args=["path"], rules=[PermissionRule(permission="allow")]))
 async def read_file(path: str, agent: Agent,
                     start_line: int | None = None,
                     end_line: int | None = None) -> str:
@@ -106,7 +106,7 @@ class WriteFile(BaseModel):
     chunk_index: Optional[int] = Field(None, description="当前分块序号（从1开始），用于分块写入大文件。")
     total_chunks: Optional[int] = Field(None, description="总分块数，与 chunk_index 配合使用。")
 
-@tool(model=WriteFile, description="写入或追加文件内容，支持分块写入大文件。",
+@tool(model=WriteFile, description="新建、覆盖写入或追加完整文件内容，支持分块写入大文件；局部精确编辑请使用文件编辑工具。",
       permission=ToolPermission(tips="写入文件：{path}", args=["path"]))
 async def write_file(path: str, content: str, agent: Agent,
                      append: bool = False,
@@ -114,28 +114,48 @@ async def write_file(path: str, content: str, agent: Agent,
                      total_chunks: int | None = None) -> str:
     return await agent._file_mgr.write_file(path, content, append, chunk_index, total_chunks)
 
-class EditFile(BaseModel):
+class ReplaceInFile(BaseModel):
     file_path: str = Field(..., description="要编辑的相对文件路径。")
-    mode: str = Field("replace", description=(
-        "编辑模式: "
-        "replace=查找替换old_text为new_text; "
-        "range_replace=将start_line到end_line的内容替换为new_text; "
-        "insert=在start_line行前插入new_text; "
-        "delete=删除start_line到end_line的行。"
-    ))
-    old_text: Optional[str] = Field(None, description="要查找的文本 (replace 模式必填)。")
-    new_text: Optional[str] = Field(None, description="替换/插入的新内容。")
-    start_line: Optional[int] = Field(None, description="起始行号，从1开始 (range_replace/insert/delete 模式使用)。")
-    end_line: Optional[int] = Field(None, description="结束行号，包含该行 (range_replace/delete 模式使用)。")
-    count: int = Field(1, description="replace 模式下的替换次数，0=全部替换。")
+    old_text: str = Field(..., description="要精确查找的原文本，必须与文件内容完全一致。")
+    new_text: str = Field(..., description="替换后的新文本；传空字符串表示删除匹配文本。")
+    count: int = Field(1, description="替换次数，0=全部替换。")
 
-@tool(model=EditFile, description="精确编辑文件：支持查找替换、按行范围替换、插入、删除四种模式。",
-      permission=ToolPermission(tips="编辑文件：{file_path}，模式：{mode}", args=["file_path"]))
-async def edit_file(file_path: str, agent: Agent,
-                    mode: str = "replace",
-                    old_text: str | None = None,
-                    new_text: str | None = None,
-                    start_line: int | None = None,
-                    end_line: int | None = None,
-                    count: int = 1) -> str:
-    return await agent._file_mgr.edit_file(file_path, mode, old_text, new_text, start_line, end_line, count)
+@tool(model=ReplaceInFile, description="精确替换文件中的文本。用于已知 old_text 完整内容时的局部编辑；count=0 表示全部替换。",
+      permission=ToolPermission(tips="替换文件文本：{file_path}", args=["file_path"]))
+async def replace_in_file(file_path: str, old_text: str, new_text: str,
+                          agent: Agent, count: int = 1) -> str:
+    return await agent._file_mgr.replace_in_file(file_path, old_text, new_text, count)
+
+class ReplaceFileLines(BaseModel):
+    file_path: str = Field(..., description="要编辑的相对文件路径。")
+    start_line: int = Field(..., description="要替换的起始行号，从1开始。")
+    end_line: int = Field(..., description="要替换的结束行号，包含该行。")
+    new_text: str = Field(..., description="用于替换该行范围的新内容。")
+
+@tool(model=ReplaceFileLines, description="按行号范围替换文件内容。适合 read_file 返回行号后进行精确行级编辑。",
+      permission=ToolPermission(tips="替换文件行：{file_path}，行范围：{start_line}-{end_line}", args=["file_path"]))
+async def replace_file_lines(file_path: str, start_line: int, end_line: int,
+                             new_text: str, agent: Agent) -> str:
+    return await agent._file_mgr.replace_file_lines(file_path, start_line, end_line, new_text)
+
+class InsertFileLines(BaseModel):
+    file_path: str = Field(..., description="要编辑的相对文件路径。")
+    start_line: int = Field(..., description="插入位置，从1开始；内容会插入到该行之前。传总行数+1表示追加到末尾。")
+    new_text: str = Field(..., description="要插入的新内容。")
+
+@tool(model=InsertFileLines, description="在指定行之前插入文件内容。传 start_line=总行数+1 可追加到文件末尾。",
+      permission=ToolPermission(tips="插入文件行：{file_path}，位置：{start_line}", args=["file_path"]))
+async def insert_file_lines(file_path: str, start_line: int,
+                            new_text: str, agent: Agent) -> str:
+    return await agent._file_mgr.insert_file_lines(file_path, start_line, new_text)
+
+class DeleteFileLines(BaseModel):
+    file_path: str = Field(..., description="要编辑的相对文件路径。")
+    start_line: int = Field(..., description="要删除的起始行号，从1开始。")
+    end_line: int = Field(..., description="要删除的结束行号，包含该行。")
+
+@tool(model=DeleteFileLines, description="按行号范围删除文件内容。适合 read_file 返回行号后进行精确删除。",
+      permission=ToolPermission(tips="删除文件行：{file_path}，行范围：{start_line}-{end_line}", args=["file_path"]))
+async def delete_file_lines(file_path: str, start_line: int,
+                            end_line: int, agent: Agent) -> str:
+    return await agent._file_mgr.delete_file_lines(file_path, start_line, end_line)

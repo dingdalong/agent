@@ -91,77 +91,84 @@ class FileMgr:
         except Exception as exc:
             return f"Error: {exc}"
 
-    async def edit_file(self, path: str,
-                        mode: str = "replace",
-                        old_text: str | None = None,
-                        new_text: str | None = None,
-                        start_line: int | None = None,
-                        end_line: int | None = None,
-                        count: int = 1) -> str:
+    async def replace_in_file(self, path: str, old_text: str,
+                              new_text: str, count: int = 1) -> str:
         try:
             file_path = self.safe_path(path)
             content = file_path.read_text()
-            lines = content.splitlines(keepends=True)
-            total = len(lines)
-
-            if mode == "replace":
-                if not old_text:
-                    return "Error: replace 模式需要 old_text"
-                found = content.count(old_text)
-                if found == 0:
-                    return f"Error: 未找到匹配文本 (文件共 {total} 行)"
-                replaced = count if count > 0 else found
-                result = content.replace(old_text, new_text or "", replaced)
-                file_path.write_text(result)
-                actual = min(replaced, found)
-                return f"已替换 {actual} 处匹配 | 文件: {path} | 总行数: {len(result.splitlines())}"
-
-            elif mode == "range_replace":
-                if start_line is None or end_line is None:
-                    return "Error: range_replace 模式需要 start_line 和 end_line"
-                if start_line < 1 or end_line > total or start_line > end_line:
-                    return f"Error: 行号范围无效 (文件共 {total} 行)"
-                before = lines[:start_line - 1]
-                after = lines[end_line:]
-                insert = (new_text or "").splitlines(keepends=True)
-                if insert and not insert[-1].endswith("\n"):
-                    insert[-1] += "\n"
-                result_lines = before + insert + after
-                file_path.write_text("".join(result_lines))
-                removed = end_line - start_line + 1
-                added = len(insert)
-                return (f"已替换第 {start_line}-{end_line} 行 ({removed} 行 -> {added} 行) "
-                        f"| 文件: {path} | 总行数: {len(result_lines)}")
-
-            elif mode == "insert":
-                if start_line is None:
-                    return "Error: insert 模式需要 start_line"
-                if start_line < 1 or start_line > total + 1:
-                    return f"Error: 行号无效 (文件共 {total} 行, 可插入范围 1-{total + 1})"
-                insert = (new_text or "").splitlines(keepends=True)
-                if insert and not insert[-1].endswith("\n"):
-                    insert[-1] += "\n"
-                result_lines = lines[:start_line - 1] + insert + lines[start_line - 1:]
-                file_path.write_text("".join(result_lines))
-                return (f"已在第 {start_line} 行前插入 {len(insert)} 行 "
-                        f"| 文件: {path} | 总行数: {len(result_lines)}")
-
-            elif mode == "delete":
-                if start_line is None or end_line is None:
-                    return "Error: delete 模式需要 start_line 和 end_line"
-                if start_line < 1 or end_line > total or start_line > end_line:
-                    return f"Error: 行号范围无效 (文件共 {total} 行)"
-                result_lines = lines[:start_line - 1] + lines[end_line:]
-                file_path.write_text("".join(result_lines))
-                removed = end_line - start_line + 1
-                return (f"已删除第 {start_line}-{end_line} 行 ({removed} 行) "
-                        f"| 文件: {path} | 总行数: {len(result_lines)}")
-
-            else:
-                return f"Error: 未知模式 '{mode}', 支持: replace, range_replace, insert, delete"
+            total = len(content.splitlines())
+            if not old_text:
+                return "Error: replace_in_file 需要 old_text"
+            found = content.count(old_text)
+            if found == 0:
+                return f"Error: 未找到匹配文本 (文件共 {total} 行)"
+            replaced = count if count > 0 else found
+            result = content.replace(old_text, new_text, replaced)
+            file_path.write_text(result)
+            actual = min(replaced, found)
+            return f"已替换 {actual} 处匹配 | 文件: {path} | 总行数: {len(result.splitlines())}"
 
         except Exception as exc:
             return f"Error: {exc}"
+
+    async def replace_file_lines(self, path: str, start_line: int,
+                                 end_line: int, new_text: str) -> str:
+        try:
+            file_path = self.safe_path(path)
+            lines = file_path.read_text().splitlines(keepends=True)
+            total = len(lines)
+            if start_line < 1 or end_line > total or start_line > end_line:
+                return f"Error: 行号范围无效 (文件共 {total} 行)"
+            before = lines[:start_line - 1]
+            after = lines[end_line:]
+            insert = self._split_edit_lines(new_text)
+            result_lines = before + insert + after
+            file_path.write_text("".join(result_lines))
+            removed = end_line - start_line + 1
+            added = len(insert)
+            return (f"已替换第 {start_line}-{end_line} 行 ({removed} 行 -> {added} 行) "
+                    f"| 文件: {path} | 总行数: {len(result_lines)}")
+
+        except Exception as exc:
+            return f"Error: {exc}"
+
+    async def insert_file_lines(self, path: str, start_line: int, new_text: str) -> str:
+        try:
+            file_path = self.safe_path(path)
+            lines = file_path.read_text().splitlines(keepends=True)
+            total = len(lines)
+            if start_line < 1 or start_line > total + 1:
+                return f"Error: 行号无效 (文件共 {total} 行, 可插入范围 1-{total + 1})"
+            insert = self._split_edit_lines(new_text)
+            result_lines = lines[:start_line - 1] + insert + lines[start_line - 1:]
+            file_path.write_text("".join(result_lines))
+            return (f"已在第 {start_line} 行前插入 {len(insert)} 行 "
+                    f"| 文件: {path} | 总行数: {len(result_lines)}")
+
+        except Exception as exc:
+            return f"Error: {exc}"
+
+    async def delete_file_lines(self, path: str, start_line: int, end_line: int) -> str:
+        try:
+            file_path = self.safe_path(path)
+            lines = file_path.read_text().splitlines(keepends=True)
+            total = len(lines)
+            if start_line < 1 or end_line > total or start_line > end_line:
+                return f"Error: 行号范围无效 (文件共 {total} 行)"
+            result_lines = lines[:start_line - 1] + lines[end_line:]
+            file_path.write_text("".join(result_lines))
+            removed = end_line - start_line + 1
+            return (f"已删除第 {start_line}-{end_line} 行 ({removed} 行) "
+                    f"| 文件: {path} | 总行数: {len(result_lines)}")
+
+        except Exception as exc:
+            return f"Error: {exc}"
+
+    def _split_edit_lines(self, text: str) -> list[str]:
+        lines = text.splitlines(keepends=True)
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += "\n"
+        return lines
 
     async def get_file_info(self, path: str) -> str:
         try:
