@@ -2,6 +2,7 @@ import re
 import yaml
 from dataclasses import dataclass, field
 from pathlib import Path
+from itertools import chain
 
 @dataclass
 class SkillManifest:
@@ -23,9 +24,18 @@ class SkillMgr:
         self._load_all()
 
     def _load_all(self) -> None:
+        builtin_dir = Path(__file__).resolve().parent.parent / "skills"
+        plugins_dir = self.workdir / ".agent" / "plugins"
+        workspace_dir = self.workdir / ".agent" / "skills"
+
         if not self.workdir.exists():
             return
-        for path in sorted(self.workdir.rglob("SKILL.md")):
+
+        for path in chain(
+            sorted(builtin_dir.rglob("SKILL.md")),
+            sorted(plugins_dir.rglob("SKILL.md")),
+            sorted(workspace_dir.rglob("SKILL.md"))
+        ):
             meta, body = self._parse_frontmatter(path.read_text())
             name = meta.get("name", path.parent.name)
             description = meta.get("description", "没有说明内容")

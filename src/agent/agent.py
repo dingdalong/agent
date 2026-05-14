@@ -63,7 +63,7 @@ class Agent:
         self._compact_mgr = CompactMgr(self.deps)
         workspace = Path.cwd() / "workspace"
         self._file_mgr = FileMgr(workspace, self.deps)
-        self._skill_mgr = SkillMgr(workspace / ".skills")
+        self._skill_mgr = SkillMgr(workspace)
         self._subagent_mgr = SubAgentMgr(workspace, self.deps)
 
         self._prompt_mgr = PromptMgr(agent = self, model = self.deps.llm.model, workdir = workspace, role_prompt = self.role_prompt)
