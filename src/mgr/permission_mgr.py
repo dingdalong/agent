@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from fnmatch import fnmatch
 import logging
 from typing import Any, Iterable, Literal
 from pydantic import ValidationError
-from src.tools.decorator import ToolEntry
+from src.tools.decorator import ArgPattern, PermissionChecker, ToolEntry, args_match
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +17,17 @@ RULE_PERMISSIONS = {"allow", "deny"}
 class PermissionEntry:
     tool_name: str
     permission: RulePermission
-    args: dict[str, ArgPattern]
+    args: dict[str, ArgPattern] | None
+    checker: PermissionChecker | None = None
+
+    def check(self, values: dict[str, Any]) -> bool:
+        if self.checker is None and self.args is None:
+            return True
+        if self.checker is not None and self.checker(values):
+            return True
+        if self.args is None:
+            return False
+        return args_match(self.args, values)
 
 PermissionDecision = tuple[str, str]
 
@@ -77,7 +86,12 @@ class PermissionManager:
                 entry = PermissionEntry(
                     tool_name=tool.name,
                     permission=rule.permission,
-                    args=self._normalize_args(rule.args or {}, f"{tool.name}.permission.rules[{index}].args"),
+                    args=(
+                        self._normalize_args(rule.args, f"{tool.name}.permission.rules[{index}].args")
+                        if rule.args is not None
+                        else None
+                    ),
+                    checker=rule.checker,
                 )
                 if entry.permission == "deny":
                     self.deny_rules.append(entry)
@@ -121,7 +135,11 @@ class PermissionManager:
                 entry = PermissionEntry(
                     tool_name=tool_name,
                     permission=permission,
-                    args=self._normalize_args(rule.get("args", {}), f"permission.rules[{index}].args"),
+                    args=(
+                        self._normalize_args(rule.get("args"), f"permission.rules[{index}].args")
+                        if "args" in rule
+                        else None
+                    ),
                 )
             except ValueError as exc:
                 logger.warning("丢弃权限配置规则 permission.rules[%s]：%s", index, exc)
@@ -130,30 +148,6 @@ class PermissionManager:
                 self.deny_rules.append(entry)
             else:
                 self.allow_rules.append(entry)
-
-    def _args_match(self, patterns: dict[str, ArgPattern], values: dict[str, Any]) -> bool:
-        for arg_name, pattern in patterns.items():
-            if isinstance(pattern, str) and pattern == "*":
-                if arg_name not in values:
-                    return False
-                continue
-            value = values.get(arg_name)
-            if not isinstance(value, str):
-                return False
-            pattern_list = pattern if isinstance(pattern, list) else [pattern]
-            matched = False
-            for item in pattern_list:
-                if fnmatch(value, item):
-                    matched = True
-                    break
-                if item.endswith(":*"):
-                    prefix = item[:-2]
-                    if value == prefix or value.startswith(f"{prefix} "):
-                        matched = True
-                        break
-            if not matched:
-                return False
-        return True
 
     def _format_rule(self, rule: PermissionEntry) -> str:
         if not rule.args:
@@ -207,7 +201,7 @@ class PermissionManager:
             if rule.tool_name not in {"*", tool_name}:
                 continue
             values = self._format_args(tool, tool_input) if isinstance(tool, ToolEntry) else tool_input
-            if self._args_match(rule.args, values):
+            if rule.check(values):
                 return "deny", f"被拒绝规则阻止：{self._format_rule(rule)}"
 
         for rule in [*self.allow_rules, *self.session_allow]:
@@ -216,7 +210,7 @@ class PermissionManager:
 
             if isinstance(tool, ToolEntry):
                 required_args = set(tool.permission.args or []) if tool.permission else set()
-                rule_args = set(rule.args)
+                rule_args = set(rule.args or {})
                 if not required_args and rule_args:
                     continue
                 if required_args and rule_args != required_args:
@@ -227,7 +221,7 @@ class PermissionManager:
             else:
                 values = tool_input
 
-            if self._args_match(rule.args, values):
+            if rule.check(values):
                 return "allow", f"匹配权限规则：{self._format_rule(rule)}"
 
         return "ask", f"{tool_name} 未匹配权限规则，默认询问"

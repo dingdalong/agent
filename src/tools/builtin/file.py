@@ -13,7 +13,7 @@ class ListDirectory(BaseModel):
     max_depth: int = Field(3, description="递归最大深度，仅在 recursive=True 时生效。")
 
 @tool(model=ListDirectory, description="列出目录内容，显示文件和子目录的树形结构。",
-      permission=ToolPermission(tips="列出目录：{path}", args=["path"], rules=[PermissionRule(permission="allow")]))
+      permission=ToolPermission(tips="列出目录：{path}", rules=[PermissionRule(permission="allow")]))
 async def list_directory(path: str, agent: Agent,
                          recursive: bool = False, max_depth: int = 3) -> str:
     return await agent._file_mgr.list_directory(
@@ -27,7 +27,7 @@ class FindFiles(BaseModel):
     path: str = Field(".", description="查找起点目录，默认为当前工作目录。")
 
 @tool(model=FindFiles, description="按文件名/路径 glob 查找文件；不搜索文件内容。如果要搜索文件内容，请使用 search_files。",
-      permission=ToolPermission(tips="在 {path} 中查找：{pattern}", args=["path"], rules=[PermissionRule(permission="allow")]))
+      permission=ToolPermission(tips="在 {path} 中查找：{pattern}", rules=[PermissionRule(permission="allow")]))
 async def find_files(pattern: str, agent: Agent, path: str = ".") -> str:
     return await agent._file_mgr.find_files(pattern, path=path)
 
@@ -44,7 +44,7 @@ class GetFileInfo(BaseModel):
     path: str = Field(..., description="要查询的文件或目录的相对路径。")
 
 @tool(model=GetFileInfo, description="获取文件或目录的详细元数据，包括大小、行数、时间、权限等。",
-      permission=ToolPermission(tips="查看文件信息：{path}", args=["path"], rules=[PermissionRule(permission="allow")]))
+      permission=ToolPermission(tips="查看文件信息：{path}", rules=[PermissionRule(permission="allow")]))
 async def get_file_info(path: str, agent: Agent) -> str:
     return await agent._file_mgr.get_file_info(path)
 
@@ -54,7 +54,7 @@ class ReadFile(BaseModel):
     end_line: Optional[int] = Field(None, description="结束行号，包含该行；未提供时读取到文件末尾。")
 
 @tool(model=ReadFile, description="读取文件内容并附带行号，可指定行数范围，便于后续精确编辑。",
-      permission=ToolPermission(tips="读取文件：{path}", args=["path"], rules=[PermissionRule(permission="allow")]))
+      permission=ToolPermission(tips="读取文件：{path}", rules=[PermissionRule(permission="allow")]))
 async def read_file(path: str, agent: Agent,
                     start_line: int | None = None,
                     end_line: int | None = None) -> str:

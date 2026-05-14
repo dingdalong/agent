@@ -2,6 +2,7 @@
 
 import asyncio, inspect
 from dataclasses import dataclass
+from fnmatch import fnmatch
 from typing import Any, Callable, Dict, TypedDict
 from pydantic import BaseModel, ValidationError
 
@@ -10,11 +11,51 @@ class ToolDict(TypedDict):
     type: str
     function: Dict[str, Any]
 
+
+ArgPattern = str | list[str]
+PermissionChecker = Callable[[dict[str, Any]], bool]
+
+
+def args_match(patterns: dict[str, ArgPattern], values: dict[str, Any]) -> bool:
+    for arg_name, pattern in patterns.items():
+        if isinstance(pattern, str) and pattern == "*":
+            if arg_name not in values:
+                return False
+            continue
+        value = values.get(arg_name)
+        if not isinstance(value, str):
+            return False
+        pattern_list = pattern if isinstance(pattern, list) else [pattern]
+        matched = False
+        for item in pattern_list:
+            if fnmatch(value, item):
+                matched = True
+                break
+            if item.endswith(":*"):
+                prefix = item[:-2]
+                if value == prefix or value.startswith(f"{prefix} "):
+                    matched = True
+                    break
+        if not matched:
+            return False
+    return True
+
+
 @dataclass
 class PermissionRule:
     """单条工具权限规则。"""
     permission: str
-    args: dict[str, str | list[str]] | None = None
+    args: dict[str, ArgPattern] | None = None
+    checker: PermissionChecker | None = None
+
+    def check(self, values: dict[str, Any]) -> bool:
+        if self.checker is None and self.args is None:
+            return True
+        if self.checker is not None and self.checker(values):
+            return True
+        if self.args is None:
+            return False
+        return args_match(self.args, values)
 
 
 @dataclass
