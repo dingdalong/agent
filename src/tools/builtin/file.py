@@ -20,19 +20,19 @@ async def list_directory(path: str, agent: Agent, max_depth: int = 3) -> str:
     )
 
 class FindFiles(BaseModel):
-    pattern: str = Field(..., description="文件名或路径 glob，如 '*.py'、'**/config*.yaml'；只匹配路径，不搜索文件内容。")
-    path: str = Field(".", description="查找起点目录，默认为当前工作目录。")
+    pattern: str = Field(..., description="文件名或目录 glob，如 '*.py'、'**/config*.yaml'")
+    path: Optional[str] = Field(".", description="查找起点目录相对路径，默认为当前工作目录。")
 
-@tool(model=FindFiles, description="按文件名/路径 glob 查找文件；不搜索文件内容。如果要搜索文件内容，请使用 search_files。",
+@tool(model=FindFiles, description="查找文件或目录，支持glob。",
       permission=ToolPermission(tips="在 {path} 中查找：{pattern}", rules=[PermissionRule(permission="allow")]))
 async def find_files(pattern: str, agent: Agent, path: str = ".") -> str:
     return await agent._file_mgr.find_files(pattern, path=path)
 
 class SearchFiles(BaseModel):
-    query: str = Field(..., description="要在文件内容中查找的普通文本；不是 glob，不是正则。")
-    path: str = Field(".", description="搜索起点目录，默认当前工作目录；用于限定范围，如 'src'、'tests'。")
+    query: str = Field(..., description="要查找的普通文本，不区分大小写。")
+    path: Optional[str] = Field(".", description="可以是目录或者具体文件，相对路径。当为目录时，搜索目录中所有文件内容，包括子目录中的文件。默认为当前工作目录。不支持glob")
 
-@tool(model=SearchFiles, description="搜索文件内容，返回匹配文件、行号和匹配行；如果要按文件名查找，请使用 find_files。",
+@tool(model=SearchFiles, description="搜索文本内容，返回匹配文件、行号和匹配行。",
       permission=ToolPermission(tips="搜索文本：{query}", rules=[PermissionRule(permission="allow")]))
 async def search_files(query: str, agent: Agent, path: str = ".") -> str:
     return await agent._file_mgr.search_files(query, path=path)
@@ -50,7 +50,7 @@ class ReadFile(BaseModel):
     start_line: Optional[int] = Field(None, description="起始行号，从1开始；未提供时从文件开头读取。")
     end_line: Optional[int] = Field(None, description="结束行号，包含该行；未提供时读取到文件末尾。")
 
-@tool(model=ReadFile, description="读取文件内容并附带行号，可指定行数范围，便于后续精确编辑。",
+@tool(model=ReadFile, description="读取文件内容并附带行号，可指定行数范围。",
       permission=ToolPermission(tips="读取文件：{path}", rules=[PermissionRule(permission="allow")]))
 async def read_file(path: str, agent: Agent,
                     start_line: int | None = None,
@@ -84,7 +84,7 @@ class WriteFile(BaseModel):
     chunk_index: Optional[int] = Field(None, description="当前分块序号（从1开始），用于分块写入大文件。")
     total_chunks: Optional[int] = Field(None, description="总分块数，与 chunk_index 配合使用。")
 
-@tool(model=WriteFile, description="新建、覆盖写入或追加完整文件内容，支持分块写入大文件；局部精确编辑请使用文件编辑工具。",
+@tool(model=WriteFile, description="新建、覆盖写入或追加完整文件内容，支持分块写入大文件。不用精确编辑文件内容",
       permission=ToolPermission(tips="写入文件：{path}", args=["path"]))
 async def write_file(path: str, content: str, agent: Agent,
                      append: bool = False,
@@ -121,7 +121,7 @@ class InsertFileLines(BaseModel):
     start_line: int = Field(..., description="插入位置，从1开始；内容会插入到该行之前。传总行数+1表示追加到末尾。")
     new_text: str = Field(..., description="要插入的新内容。")
 
-@tool(model=InsertFileLines, description="在指定行之前插入文件内容。传 start_line=总行数+1 可追加到文件末尾。",
+@tool(model=InsertFileLines, description="在指定行之前插入文件内容。传 start_line=总行数+1时 可追加到文件末尾。",
       permission=ToolPermission(tips="插入文件行：{file_path}，位置：{start_line}", args=["file_path"]))
 async def insert_file_lines(file_path: str, start_line: int,
                             new_text: str, agent: Agent) -> str:
