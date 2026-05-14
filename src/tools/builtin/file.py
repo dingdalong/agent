@@ -20,7 +20,7 @@ async def list_directory(path: str, agent: Agent, max_depth: int = 3) -> str:
     )
 
 class FindFiles(BaseModel):
-    pattern: str = Field(..., description="文件名或目录 glob，如 '*.py'、'**/config*.yaml'")
+    pattern: str = Field(..., description="文件名或目录 glob，只匹配路径，如 '*.py'、'**/config*.yaml'")
     path: Optional[str] = Field(".", description="查找起点目录相对路径，默认为当前工作目录。")
 
 @tool(model=FindFiles, description="查找文件或目录，支持glob。",
@@ -29,8 +29,8 @@ async def find_files(pattern: str, agent: Agent, path: str = ".") -> str:
     return await agent._file_mgr.find_files(pattern, path=path)
 
 class SearchFiles(BaseModel):
-    query: str = Field(..., description="要查找的普通文本，不区分大小写。")
-    path: Optional[str] = Field(".", description="可以是目录或者具体文件，相对路径。当为目录时，搜索目录中所有文件内容，包括子目录中的文件。默认为当前工作目录。不支持glob")
+    query: str = Field(..., description="要查找的普通文本，不区分大小写；不是 glob，也不是正则。")
+    path: Optional[str] = Field(".", description="目录或文件的相对路径。当为目录时，搜索目录中所有文件内容，包括子目录中的文件。默认为当前工作目录。不支持 glob。")
 
 @tool(model=SearchFiles, description="搜索文本内容，返回匹配文件、行号和匹配行。",
       permission=ToolPermission(tips="搜索文本：{query}", rules=[PermissionRule(permission="allow")]))
