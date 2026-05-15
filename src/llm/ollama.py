@@ -161,7 +161,7 @@ class OllamaProvider(LLMProvider):
         tools: list[ToolDict] | None = None,
         temperature: float = 0.6,
         tool_choice: str | dict | None = None,
-        caller_name: str | None = None,
+        caller_agent_type: str | None = None,
         caller_uuid: str | None = None,
     ) -> LLMResponse:
         kwargs: dict = {
@@ -187,12 +187,12 @@ class OllamaProvider(LLMProvider):
             }
 
         response = await self._client.chat.completions.create(**kwargs)
-        return await self._parse_stream(response, caller_name, caller_uuid)
+        return await self._parse_stream(response, caller_agent_type, caller_uuid)
 
     async def _parse_stream(
         self,
         stream,
-        caller_name: str | None = None,
+        caller_agent_type: str | None = None,
         caller_uuid: str | None = None,
     ) -> LLMResponse:
         """解析 Chat Completions 流式响应。"""
@@ -216,11 +216,11 @@ class OllamaProvider(LLMProvider):
             reasoning = getattr(delta, "reasoning", None)
             if reasoning:
                 reasoning_parts.append(reasoning)
-                await self.emit_thinking_delta(reasoning, caller_name, caller_uuid)
+                await self.emit_thinking_delta(reasoning, caller_agent_type, caller_uuid)
             reasoning_content = getattr(delta, "reasoning_content", None)
             if reasoning_content:
                 reasoning_content_parts.append(reasoning_content)
-                await self.emit_thinking_delta(reasoning_content, caller_name, caller_uuid)
+                await self.emit_thinking_delta(reasoning_content, caller_agent_type, caller_uuid)
 
             if delta.content:
                 content_parts.append(delta.content)
@@ -246,7 +246,7 @@ class OllamaProvider(LLMProvider):
         reasoning_content = "".join(reasoning_content_parts)
 
         if content:
-            await self.emit_response_delta(content, caller_name, caller_uuid)
+            await self.emit_response_delta(content, caller_agent_type, caller_uuid)
 
         assistant_message: dict = {
             "role": "assistant",

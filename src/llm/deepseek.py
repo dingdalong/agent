@@ -336,7 +336,7 @@ class DeepSeekProvider(LLMProvider):
         tools: list[ToolDict] | None = None,
         temperature: float = 0.6,
         tool_choice: str | dict | None = None,
-        caller_name: str | None = None,
+        caller_agent_type: str | None = None,
         caller_uuid: str | None = None,
     ) -> LLMResponse:
         response = await self._client.chat.completions.create(
@@ -352,14 +352,14 @@ class DeepSeekProvider(LLMProvider):
         )
         return await self._parse_stream(
             response,
-            caller_name,
+            caller_agent_type,
             caller_uuid,
         )
 
     async def _parse_stream(
         self,
         stream,
-        caller_name: str | None = None,
+        caller_agent_type: str | None = None,
         caller_uuid: str | None = None,
     ) -> LLMResponse:
         """解析流式响应。"""
@@ -382,12 +382,12 @@ class DeepSeekProvider(LLMProvider):
             reasoning = getattr(delta, "reasoning_content", None)
             if reasoning is not None:
                 reasoning_parts.append(reasoning)
-                await self.emit_thinking_delta(reasoning, caller_name, caller_uuid)
+                await self.emit_thinking_delta(reasoning, caller_agent_type, caller_uuid)
 
             if delta.content:
                 if not (delta.tool_calls and delta.content.isspace()):
                     content_parts.append(delta.content)
-                    await self.emit_response_delta(delta.content, caller_name, caller_uuid)
+                    await self.emit_response_delta(delta.content, caller_agent_type, caller_uuid)
 
             if delta.tool_calls:
                 for tool_chunk in delta.tool_calls:

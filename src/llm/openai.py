@@ -210,7 +210,7 @@ class OpenAIProvider(LLMProvider):
         tools: list[ToolDict] | None = None,
         temperature: float = 0.6,
         tool_choice: str | dict | None = None,
-        caller_name: str | None = None,
+        caller_agent_type: str | None = None,
         caller_uuid: str | None = None,
     ) -> LLMResponse:
         instructions, input_items = self._convert_to_input(messages, prompt)
@@ -233,12 +233,12 @@ class OpenAIProvider(LLMProvider):
             kwargs["tool_choice"] = tool_choice or "auto"
 
         stream = await self._client.responses.create(**kwargs)
-        return await self._parse_stream(stream, caller_name, caller_uuid)
+        return await self._parse_stream(stream, caller_agent_type, caller_uuid)
 
     async def _parse_stream(
         self,
         stream,
-        caller_name: str | None = None,
+        caller_agent_type: str | None = None,
         caller_uuid: str | None = None,
     ) -> LLMResponse:
         """解析 Responses API 流式事件。"""
@@ -256,11 +256,11 @@ class OpenAIProvider(LLMProvider):
 
             if et == "response.output_text.delta":
                 content_parts.append(event.delta)
-                await self.emit_response_delta(event.delta, caller_name, caller_uuid)
+                await self.emit_response_delta(event.delta, caller_agent_type, caller_uuid)
 
             elif et == "response.reasoning_summary_text.delta":
                 reasoning_parts.append(event.delta)
-                await self.emit_thinking_delta(event.delta, caller_name, caller_uuid)
+                await self.emit_thinking_delta(event.delta, caller_agent_type, caller_uuid)
 
             elif et == "response.output_item.added":
                 item = event.item

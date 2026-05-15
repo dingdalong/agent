@@ -145,13 +145,13 @@ class CLIInterface:
                 print(c, end="", flush=True)
 
     def _response_prefix(self, event: ResponseDelta) -> str:
-        if event.caller_name and event.caller_uuid:
-            return f"助手(name={event.caller_name}, uuid={event.caller_uuid})："
+        if event.caller_agent_type and event.caller_uuid:
+            return f"助手(agent_type={event.caller_agent_type}, uuid={event.caller_uuid})："
         return "助手："
 
     def _thinking_prefix(self, event: ThinkingDelta) -> str:
-        if event.caller_name and event.caller_uuid:
-            return f"💭 (name={event.caller_name}, uuid={event.caller_uuid}) "
+        if event.caller_agent_type and event.caller_uuid:
+            return f"💭 (agent_type={event.caller_agent_type}, uuid={event.caller_uuid}) "
         return "💭 "
 
     def _format_optional_int(self, value: int | None) -> str:

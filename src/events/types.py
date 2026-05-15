@@ -25,7 +25,7 @@ class Event:
 class ResponseDelta(Event):
     """流式回应 — 默认可见。"""
     content: str = ""
-    caller_name: str | None = None
+    caller_agent_type: str | None = None
     caller_uuid: str | None = None
     level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
     type: Literal["token_delta"] = field(default="token_delta", init=False)
@@ -35,7 +35,7 @@ class ResponseDelta(Event):
 class ThinkingDelta(Event):
     """思考过程 — 默认可见。"""
     content: str = ""
-    caller_name: str | None = None
+    caller_agent_type: str | None = None
     caller_uuid: str | None = None
     level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
     type: Literal["thinking_delta"] = field(default="thinking_delta", init=False)

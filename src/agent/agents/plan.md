@@ -1,5 +1,5 @@
 ---
-name: plan
+agent_type: plan
 description: |
   专用于阅读上下文、拆解需求、制定实施计划和验证策略的只读子任务 agent。当任务需求比较大，需要拆成阶段、文件范围和验证步骤，修改涉及多个模块、跨层调用或不明确的架构边界，需要先判断实现路径、风险点和测试策略，或主 agent 需要一个可执行 checklist 来指导后续工作时，总控 agent 应该优先委派给它。
 tools: list_directory, find_files, search_files, get_file_info, read_file

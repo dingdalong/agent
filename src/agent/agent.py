@@ -36,13 +36,13 @@ class Agent:
     """Agent 定义。
 
     Attributes:
-        name: 唯一标识。
+        uuid: 唯一类型标识。
+        agent_type: agent类型
         description: 一句话描述
-        prompt: 系统提示
     """
 
     uuid: UUID = field(init=False)
-    name: str
+    agent_type: str
     description: str
     deps: AgentDeps = field(repr=False)
     role_prompt: str | None = field(default=None)
@@ -96,7 +96,7 @@ class Agent:
                         prompt=prompt,
                         messages=messages,
                         tools=[],
-                        caller_name=self.name,
+                        caller_agent_type=self.agent_type,
                         caller_uuid=str(self.uuid),
                     )
                     if response.content:
@@ -105,7 +105,7 @@ class Agent:
                     break
                 await self.deps.event_bus.emit(CompactDelta(
                     timestamp=time.time(),
-                    source=self.name,
+                    source=self.agent_type,
                     content="auto manual",
                 ))
                 messages[:] = await self._compact_mgr.compact_history(messages)
@@ -117,7 +117,7 @@ class Agent:
                 prompt=prompt,
                 messages=messages,
                 tools=self._tools_schemas,
-                caller_name=self.name,
+                caller_agent_type=self.agent_type,
                 caller_uuid=str(self.uuid),
             )
             content, tool_calls = response.content, response.tool_calls
@@ -171,7 +171,7 @@ class Agent:
             if manual_compact:
                 await self.deps.event_bus.emit(CompactDelta(
                     timestamp=time.time(),
-                    source=self.name,
+                    source=self.agent_type,
                     content="llm manual",
                 ))
                 messages[:] = await self._compact_mgr.compact_history(messages, focus=compact_focus)

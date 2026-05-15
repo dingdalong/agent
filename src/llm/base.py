@@ -144,7 +144,7 @@ class LLMProvider(ABC):
         tools: list[ToolDict] | None = None,
         temperature: float = 0.6,
         tool_choice: str | dict | None = None,
-        caller_name: str | None = None,
+        caller_agent_type: str | None = None,
         caller_uuid: str | None = None,
     ) -> LLMResponse:
         retryable = self._retryable_errors + (asyncio.TimeoutError, httpx.ReadTimeout)
@@ -158,7 +158,7 @@ class LLMProvider(ABC):
                         tools,
                         temperature,
                         tool_choice,
-                        caller_name,
+                        caller_agent_type,
                         caller_uuid,
                     )
                     await self._emit_llm_call_completed(
@@ -177,7 +177,7 @@ class LLMProvider(ABC):
     async def emit_response_delta(
         self,
         content: str,
-        caller_name: str | None = None,
+        caller_agent_type: str | None = None,
         caller_uuid: str | None = None,
     ) -> None:
         if self.event_bus is None:
@@ -186,14 +186,14 @@ class LLMProvider(ABC):
             timestamp=time.time(),
             source=self.model,
             content=content,
-            caller_name=caller_name,
+            caller_agent_type=caller_agent_type,
             caller_uuid=caller_uuid,
         ))
 
     async def emit_thinking_delta(
         self,
         content: str,
-        caller_name: str | None = None,
+        caller_agent_type: str | None = None,
         caller_uuid: str | None = None,
     ) -> None:
         if self.event_bus is None:
@@ -202,7 +202,7 @@ class LLMProvider(ABC):
             timestamp=time.time(),
             source=self.model,
             content=content,
-            caller_name=caller_name,
+            caller_agent_type=caller_agent_type,
             caller_uuid=caller_uuid,
         ))
 
@@ -264,6 +264,6 @@ class LLMProvider(ABC):
         tools: list[ToolDict] | None = None,
         temperature: float = 1.0,
         tool_choice: str | dict | None = None,
-        caller_name: str | None = None,
+        caller_agent_type: str | None = None,
         caller_uuid: str | None = None,
     ) -> LLMResponse: ...

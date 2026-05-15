@@ -19,7 +19,7 @@ class AgentApp:
         await self.deps.event_bus.request_output("Agent 已启动，输入 'exit' 退出。\n")
         try:
             agent = Agent(
-                name = "总控",
+                agent_type = "总控",
                 description = "入口",
                 deps = self.deps,
             )

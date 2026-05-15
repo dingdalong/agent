@@ -310,7 +310,7 @@ class AnthropicProvider(LLMProvider):
         tools: list[ToolDict] | None = None,
         temperature: float = 0.6,
         tool_choice: str | dict | None = None,
-        caller_name: str | None = None,
+        caller_agent_type: str | None = None,
         caller_uuid: str | None = None,
     ) -> LLMResponse:
         system, claude_messages = self._convert_messages(messages, prompt)
@@ -335,14 +335,14 @@ class AnthropicProvider(LLMProvider):
             )
 
         return await self._stream_chat(
-            caller_name=caller_name,
+            caller_agent_type=caller_agent_type,
             caller_uuid=caller_uuid,
             **kwargs,
         )
 
     async def _stream_chat(
         self,
-        caller_name: str | None = None,
+        caller_agent_type: str | None = None,
         caller_uuid: str | None = None,
         **kwargs,
     ) -> LLMResponse:
@@ -355,10 +355,10 @@ class AnthropicProvider(LLMProvider):
                 if event.type == "content_block_delta":
                     if event.delta.type == "thinking_delta":
                         thinking_parts.append(event.delta.thinking)
-                        await self.emit_thinking_delta(event.delta.thinking, caller_name, caller_uuid)
+                        await self.emit_thinking_delta(event.delta.thinking, caller_agent_type, caller_uuid)
                     elif event.delta.type == "text_delta":
                         content_parts.append(event.delta.text)
-                        await self.emit_response_delta(event.delta.text, caller_name, caller_uuid)
+                        await self.emit_response_delta(event.delta.text, caller_agent_type, caller_uuid)
 
             final = await stream.get_final_message()
 
