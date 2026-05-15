@@ -29,6 +29,24 @@ class CLIInterface:
     async def output(self, message: str) -> None:
         print(message, end="", flush=True)
 
+    async def _read_non_empty_input(
+        self,
+        prompt: str,
+        future: asyncio.Future[str] | None,
+    ) -> None:
+        try:
+            next_prompt = prompt
+            while True:
+                answer = (await self.input(next_prompt)).strip()
+                if answer:
+                    if future is not None and not future.done():
+                        future.set_result(answer)
+                    return
+                next_prompt = ""
+        except Exception as exc:
+            if future is not None and not future.done():
+                future.set_exception(exc)
+
     def _end_thinking_if_needed(self) -> None:
         """如果正在输出思考流，先换行结束。"""
         if self._in_thinking:
@@ -65,14 +83,7 @@ class CLIInterface:
                     f"   {detail}\n"
                     "是否允许执行？(y/n/always): "
                 )
-                try:
-                    answer = await self.input(message)
-                except Exception as exc:
-                    if future is not None and not future.done():
-                        future.set_exception(exc)
-                else:
-                    if future is not None and not future.done():
-                        future.set_result(answer)
+                await self._read_non_empty_input(message, future)
             case PermissionNotice(status=status, tool_name=tool_name, detail=detail):
                 if status == "allow":
                     await self.output(f"[执行工具]{detail}\n")
@@ -81,14 +92,7 @@ class CLIInterface:
                 else:
                     await self.output(f"[拒绝执行工具]{tool_name}\n")
             case InputRequested(prompt=prompt, future=future):
-                try:
-                    answer = await self.input(prompt)
-                except Exception as exc:
-                    if future is not None and not future.done():
-                        future.set_exception(exc)
-                else:
-                    if future is not None and not future.done():
-                        future.set_result(answer)
+                await self._read_non_empty_input(prompt, future)
             case LLMCallStarted(
                 model=model,
                 estimated_input_tokens=estimated_input_tokens,
