@@ -51,6 +51,17 @@ class PromptMgr:
             "不影响执行时，将缺失信息作为限制或不确定点明确传递。"
         )
 
+    def _build_context_and_tool_constraints(self) -> str:
+        return (
+            "# 上下文和工具调用约束\n"
+            "1. 已读取的文件、计划、模板和工具结果，在当前上下文仍可见且未被修改时必须复用；"
+            "不要为确认、重新理解或满足流程措辞重复读取。\n"
+            "2. 每次工具调用必须服务当前下一步；不要为“准备后续使用”“顺便看看”或未来阶段预取信息。\n"
+            "3. 多阶段流程只获取当前阶段立即需要的信息；后续阶段的信息等进入该阶段后再获取。\n"
+            "4. 只有工具返回内容被截断、需要未读取范围、文件可能已修改，或当前上下文缺少完成下一步所需的具体内容时，"
+            "才允许重新读取；重读前先说明缺失信息或原因。"
+        )
+
     def _build_skill_listing(self) -> str:
         describe = self.agent._skill_mgr.describe()
         if not describe:
@@ -61,8 +72,9 @@ class PromptMgr:
             "技能用于加载专门流程或知识。\n"
             "1. 当任务明显匹配某个技能时，使用 `load_skill` 加载它。\n"
             "2. 如果已加载技能要求委派，委派 prompt 必须同时满足该技能指令和本文的运行决策顺序。"
-            "如果技能明确指定子 agent 名称，必须把该名称原样传递。"
-            "一般委派使用task_delegator，如果涉及模版委派，则使用task_delegator_template。"
+            "3. 如果技能明确指定子 agent 名称，必须把该名称原样传递。"
+            "4. 如果技能要求使用 prompt 模板委派子智能体，按“上下文和工具调用约束”读取当前阶段所需模板，"
+            "组装完整 prompt 后使用 `task_delegator` 委派。"
         )
 
     def _build_subagent_listing(self) -> str:
@@ -164,6 +176,10 @@ class PromptMgr:
         truthfulness_constraints = self._build_truthfulness_constraints()
         if truthfulness_constraints:
             sections.append(truthfulness_constraints)
+
+        context_and_tool_constraints = self._build_context_and_tool_constraints()
+        if context_and_tool_constraints:
+            sections.append(context_and_tool_constraints)
 
         if not self.agent.is_subagent:
             decision_order = self._build_controller_decision_order()
