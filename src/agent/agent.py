@@ -77,8 +77,6 @@ class Agent:
 
         final_text = ""
         rounds_without_todo = 0
-        manual_compact = False
-        compact_focus = None
         round_start_idx = len(messages)
         has_tool_calls = False
         compact_streak = 0
@@ -131,6 +129,8 @@ class Agent:
 
             has_tool_calls = True
             used_todo = False
+            manual_compact = False
+            compact_focus = None
             for tc in tool_calls.values():
                 tool_name = tc["name"]
                 tool_call_id = tc["id"]
