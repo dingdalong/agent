@@ -60,14 +60,14 @@ class CompactMgr:
         await self.track_recent_file(path.as_posix())
         return path
 
-    def split_history_for_compaction(self, messages: list) -> tuple[list, list]:
+    def split_history_for_compaction(self, messages: list) -> tuple[list, list, list]:
         user_indices = [
             idx for idx, message in enumerate(messages)
             if message.get("role") == "user"
         ]
         if len(user_indices) <= self.keep_recent_user_turns:
             split_idx = 0
-            return messages[:split_idx], messages[split_idx:]
+            return [], messages[:split_idx], messages[split_idx:]
 
         spans: list[tuple[int, int]] = []
         for pos, start in enumerate(user_indices):
@@ -88,19 +88,49 @@ class CompactMgr:
             kept_tokens += span_tokens
 
         split_idx = min(start for start, _ in kept_spans) if kept_spans else len(messages)
-        return messages[:split_idx], messages[split_idx:]
+        messages_to_summarize = messages[:split_idx]
+        recent_messages = messages[split_idx:]
 
-    async def summarize_history(self, early_messages: list, recent_messages: list) -> str:
-        if not early_messages:
+        preserved_messages = []
+        first_user_idx = user_indices[0] if user_indices else None
+        if first_user_idx is not None and first_user_idx < split_idx:
+            first_user = messages[first_user_idx]
+            preserved_messages.append(first_user)
+            messages_to_summarize = [
+                message
+                for index, message in enumerate(messages_to_summarize)
+                if index != first_user_idx
+            ]
+        return preserved_messages, messages_to_summarize, recent_messages
+
+    async def summarize_history(
+        self,
+        preserved_messages: list | None = None,
+        messages_to_summarize: list | None = None,
+        recent_messages: list | None = None,
+    ) -> str:
+        preserved_messages = preserved_messages or []
+        messages_to_summarize = messages_to_summarize or []
+        recent_messages = recent_messages or []
+
+        if not messages_to_summarize:
             return "没有早期对话需要压缩。"
-        early_conversation = json.dumps(early_messages, default=str)[:80000]
+        conversation_to_summarize = json.dumps(messages_to_summarize, default=str)[:80000]
         recent_conversation = json.dumps(recent_messages, default=str)[:40000]
+        preserved_conversation = json.dumps(preserved_messages, default=str)[:40000]
+        preserved_reference = ""
+        if preserved_messages:
+            preserved_reference = (
+                "下面是已经保留为原文的首条 user 消息，仅用于理解早期历史：\n"
+                f"<preserved_messages_reference>\n{preserved_conversation}\n</preserved_messages_reference>\n\n"
+            )
         prompt = (
-            "请总结这段对话中的早期部分，以便后续工作可以继续。\n"
-            "不要把它描述成完整对话：未压缩的近期原文会保留在这条摘要后面。\n"
-            "近期原文只作为参照，用来判断早期信息中哪些仍然需要保留。\n"
-            "不要总结、复述或改写近期原文。\n\n"
-            "如果早期历史与近期原文冲突，以近期原文为准。\n"
+            "请总结这段对话中需要压缩为摘要的历史，以便后续工作可以继续。\n"
+            "不要把它描述成完整对话：已经保留为原文的内容会出现在这条摘要前后。\n"
+            "已保留原文只作为参照，用来判断待压缩历史中哪些信息仍然需要保留。\n"
+            "不要总结、复述或改写已经保留为原文的内容。\n"
+            "如果早期历史与已保留原文冲突，以已保留原文为准。\n"
+            "如果待压缩历史依赖已保留原文，只总结待压缩历史中的后续变化、结论、状态和仍需保留的信息。\n"
             "直接输出摘要正文，不要输出 XML 标签、JSON 原文或解释说明。\n\n"
             "请保留：\n"
             "1. 用户明确提出过且后续仍应遵守的需求、约束、偏好\n"
@@ -114,8 +144,9 @@ class CompactMgr:
             "2. 无结论的寒暄、重复确认和低价值中间推理\n"
             "3. 近期原文中会完整保留的内容\n\n"
             "摘要要简洁、具体、可执行，并适合作为近期原文之前的上下文前缀。\n\n"
-            "下面是需要压缩的早期历史：\n"
-            f"<early_history_to_summarize>\n{early_conversation}\n</early_history_to_summarize>\n\n"
+            f"{preserved_reference}"
+            "下面是需要压缩为摘要的历史：\n"
+            f"<history_to_summarize>\n{conversation_to_summarize}\n</history_to_summarize>\n\n"
             "下面是已经保留为原文的近期对话，仅用于判断哪些早期信息仍需保留：\n"
             f"<recent_raw_messages_reference>\n{recent_conversation}\n</recent_raw_messages_reference>"
         )
@@ -125,8 +156,12 @@ class CompactMgr:
     async def compact_history(self, messages: list, focus: str | None = None) -> list:
         transcript_path = await self.write_transcript(messages)
         await self.deps.event_bus.request_output(f"[transcript saved: {transcript_path}]\n")
-        early_messages, recent_messages = self.split_history_for_compaction(messages)
-        summary = await self.summarize_history(early_messages, recent_messages)
+        preserved_messages, messages_to_summarize, recent_messages = self.split_history_for_compaction(messages)
+        summary = await self.summarize_history(
+            preserved_messages=preserved_messages,
+            messages_to_summarize=messages_to_summarize,
+            recent_messages=recent_messages,
+        )
         if focus:
             summary += f"\n\n接下来需要重点保留：{focus}"
         if self.recent_files:
@@ -134,7 +169,10 @@ class CompactMgr:
             summary += f"\n\n如有需要，可重新打开这些近期文件：\n{recent_lines}"
         self.has_compacted = True
         self.last_summary = summary
-        return [{
+        if not messages_to_summarize:
+            return preserved_messages + recent_messages
+
+        return preserved_messages + [{
             "role": "user",
             "content": (
                 "以下是早期对话的压缩摘要，用于衔接后续未压缩的近期原文。\n"
