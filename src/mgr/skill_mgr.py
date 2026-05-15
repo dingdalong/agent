@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from itertools import chain
 
+BUILTIN_SKILL_DIR = Path(__file__).resolve().parent.parent / "skills"
+
 @dataclass
 class SkillManifest:
     name: str
@@ -14,6 +16,7 @@ class SkillManifest:
 class SkillDocument:
     manifest: SkillManifest
     body: str
+    full_text: str
 
 @dataclass
 class SkillMgr:
@@ -24,23 +27,45 @@ class SkillMgr:
         self._load_all()
 
     def _load_all(self) -> None:
-        builtin_dir = Path(__file__).resolve().parent.parent / "skills"
+        builtin_dir = BUILTIN_SKILL_DIR
         plugins_dir = self.workdir / ".agent" / "plugins"
         workspace_dir = self.workdir / ".agent" / "skills"
 
         if not self.workdir.exists():
             return
 
-        for path in chain(
-            sorted(builtin_dir.rglob("SKILL.md")),
-            sorted(plugins_dir.rglob("SKILL.md")),
-            sorted(workspace_dir.rglob("SKILL.md"))
-        ):
+        paths = chain(
+            ((path, "buildin") for path in sorted(builtin_dir.rglob("SKILL.md"))),
+            (
+                (path, path.relative_to(plugins_dir).parts[0])
+                for path in sorted(plugins_dir.rglob("SKILL.md"))
+            ),
+            ((path, "user") for path in sorted(workspace_dir.rglob("SKILL.md"))),
+        )
+
+        for path, namespace in paths:
             meta, body = self._parse_frontmatter(path.read_text())
-            name = meta.get("name", path.parent.name)
+            skill_name = meta.get("name", path.parent.name)
+            name = f"{namespace}:{skill_name}"
             description = meta.get("description", "没有说明内容")
             manifest = SkillManifest(name=name, description=description, path=path)
-            self._documents[name] = SkillDocument(manifest=manifest, body=body.strip())
+            skill_dir = manifest.path.parent.resolve()
+            parts = [
+                f"<skill name=\"{manifest.name}\" skill_dir=\"{skill_dir}\">",
+                body.strip(),
+            ]
+            for skill_file in sorted(
+                p for p in skill_dir.iterdir()
+                if p.is_file() and p.name != "SKILL.md"
+            ):
+                rel_path = skill_file.relative_to(skill_dir).as_posix()
+                parts.append(f"<skill-file path=\"{rel_path}\" ref=\"{skill_dir}/{rel_path}\" />")
+            parts.append("</skill>")
+            self._documents[name] = SkillDocument(
+                manifest=manifest,
+                body=body.strip(),
+                full_text="\n".join(parts),
+            )
 
     def _parse_frontmatter(self, text: str) -> tuple[dict, str]:
         match = re.match(r"^---\s*\n(.*?)\n---\s*\n(.*)", text, re.DOTALL)
@@ -61,31 +86,9 @@ class SkillMgr:
     def check_skill(self, name: str) -> bool:
         return name in self._documents
 
-    def get_companion(self, skill_name: str, file_name: str) -> str | None:
-        document = self._documents.get(skill_name)
-        if not document:
-            return None
-        path = document.manifest.path.parent / file_name
-        if not path.is_file() or path.name == "SKILL.md":
-            return None
-        return path.read_text()
-
     def load_full_text(self, name: str) -> str:
         document = self._documents.get(name)
         if not document:
             known = ", ".join(sorted(self._documents)) or "(none)"
             return f"错误: 不存在的技能：'{name}'。可用技能列表：{known}"
-        parts = [
-            f"<skill name=\"{document.manifest.name}\">",
-            document.body,
-        ]
-        skill_dir = document.manifest.path.parent
-        for path in sorted(
-            p for p in skill_dir.iterdir()
-            if p.is_file() and p.name != "SKILL.md"
-        ):
-            parts.append(f"\n<skill-file name=\"{path.name}\">")
-            parts.append(path.read_text().strip())
-            parts.append("</skill-file>")
-        parts.append("</skill>")
-        return "\n".join(parts)
+        return document.full_text
