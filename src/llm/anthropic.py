@@ -15,12 +15,6 @@ logger = logging.getLogger(__name__)
 class AnthropicProvider(LLMProvider):
     """Anthropic Provider (Messages API)"""
 
-    _retryable_errors = (
-        anthropic.APIConnectionError,
-        anthropic.RateLimitError,
-        anthropic.InternalServerError,
-    )
-
     def __post_init__(self):
         super().__post_init__()
         self.supports_native_structured_output = True

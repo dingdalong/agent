@@ -5,7 +5,7 @@ import logging
 import re
 import time
 from functools import cached_property
-from openai import AsyncOpenAI, APIConnectionError, RateLimitError, InternalServerError
+from openai import AsyncOpenAI
 from src.llm.base import LLMProvider, LLMResponse
 from src.tools import ToolDict
 import transformers
@@ -99,8 +99,6 @@ def _normalize_tool_calls(tool_calls: object, msg_index: int) -> list[dict] | No
 class DeepSeekProvider(LLMProvider):
     """基于 OpenAI SDK 的 LLM Provider。"""
 
-    _retryable_errors = (APIConnectionError, RateLimitError, InternalServerError)
-
     def __post_init__(self):
         super().__post_init__()
         self.supports_native_structured_output = False
@@ -108,7 +106,7 @@ class DeepSeekProvider(LLMProvider):
             api_key=self.api_key,
             base_url=self.base_url,
             timeout=self.timeout,
-            max_retries=self.max_retries,
+            max_retries=0,
         )
 
     def clear_reasoning_content(self, messages):

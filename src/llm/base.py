@@ -9,7 +9,10 @@ import re
 import asyncio
 import math
 import time
+import random
 import httpx
+import openai
+import anthropic
 from src.events import EventBus
 from src.events.types import LLMCallCompleted, LLMCallStarted, ResponseDelta, ThinkingDelta
 from src.tools import ToolDict
@@ -41,8 +44,6 @@ class LLMProvider(ABC):
     supports_native_structured_output: bool = False
     reasoning_effort: str = "max"
     preserve_thinking: bool = False
-
-    _retryable_errors = ()
 
     def __post_init__(self):
         self._semaphore = asyncio.Semaphore(self.concurrency)
@@ -128,6 +129,107 @@ class LLMProvider(ABC):
                     msg["content"] = "[Earlier tool result compacted. Re-run the tool if you need full detail.]"
         return messages
 
+    def _exception_status_code(self, exc: BaseException) -> int | None:
+        status_code = getattr(exc, "status_code", None)
+        if isinstance(status_code, int):
+            return status_code
+        response = getattr(exc, "response", None)
+        response_status = getattr(response, "status_code", None)
+        return response_status if isinstance(response_status, int) else None
+
+    def _exception_text(self, exc: BaseException) -> str:
+        parts = [str(exc)]
+        body = getattr(exc, "body", None)
+        if body is not None:
+            try:
+                parts.append(json.dumps(body, ensure_ascii=False, default=str))
+            except TypeError:
+                parts.append(str(body))
+        response = getattr(exc, "response", None)
+        response_text = getattr(response, "text", None)
+        if response_text:
+            parts.append(str(response_text))
+        return "\n".join(part for part in parts if part).lower()
+
+    def is_context_too_long_error(self, exc: BaseException) -> bool:
+        text = self._exception_text(exc)
+        patterns = (
+            "context length",
+            "maximum context",
+            "prompt too long",
+            "overlong_prompt",
+            "input is too long",
+            "tokens exceed",
+            "too many tokens",
+        )
+        return any(pattern in text for pattern in patterns)
+
+    def is_retryable_error(self, exc: BaseException) -> bool:
+        if self.is_context_too_long_error(exc):
+            return False
+
+        non_retryable_types = (
+            openai.AuthenticationError,
+            openai.PermissionDeniedError,
+            openai.NotFoundError,
+            openai.BadRequestError,
+            openai.UnprocessableEntityError,
+            openai.APIResponseValidationError,
+            openai.ContentFilterFinishReasonError,
+            openai.LengthFinishReasonError,
+            anthropic.AuthenticationError,
+            anthropic.PermissionDeniedError,
+            anthropic.NotFoundError,
+            anthropic.BadRequestError,
+            anthropic.UnprocessableEntityError,
+            anthropic.APIResponseValidationError,
+        )
+        if isinstance(exc, non_retryable_types):
+            return False
+
+        retryable_types = (
+            openai.APIConnectionError,
+            openai.APITimeoutError,
+            openai.RateLimitError,
+            openai.InternalServerError,
+            openai.ConflictError,
+            anthropic.APIConnectionError,
+            anthropic.APITimeoutError,
+            anthropic.RateLimitError,
+            anthropic.InternalServerError,
+            anthropic.ConflictError,
+            httpx.TimeoutException,
+            httpx.TransportError,
+            asyncio.TimeoutError,
+            TimeoutError,
+            ConnectionError,
+        )
+        if isinstance(exc, retryable_types):
+            return True
+
+        status_code = self._exception_status_code(exc)
+        if status_code in {408, 409, 429}:
+            return True
+        if status_code is not None and status_code >= 500:
+            return True
+
+        if isinstance(exc, OSError) and not isinstance(
+            exc,
+            (FileNotFoundError, PermissionError, IsADirectoryError, NotADirectoryError),
+        ):
+            return True
+
+        return False
+
+    async def _sleep(self, delay: float) -> None:
+        await asyncio.sleep(delay)
+
+    def _retry_jitter(self) -> float:
+        return random.uniform(0, 1)
+
+    def _retry_delay(self, attempt: int) -> float:
+        return min(2 ** attempt * 5, 60) + self._retry_jitter()
+
     @abstractmethod
     def normalize_messages(
         self,
@@ -147,9 +249,9 @@ class LLMProvider(ABC):
         caller_agent_type: str | None = None,
         caller_uuid: str | None = None,
     ) -> LLMResponse:
-        retryable = self._retryable_errors + (asyncio.TimeoutError, httpx.ReadTimeout)
         async with self._semaphore:
-            for attempt in range(self.max_retries):
+            max_attempts = max(1, self.max_retries)
+            for attempt in range(max_attempts):
                 try:
                     started_at = await self._emit_llm_call_started(messages, prompt, tools)
                     response = await self._do_chat(
@@ -166,12 +268,18 @@ class LLMProvider(ABC):
                         usage=response.token_usage,
                     )
                     return response
-                except retryable as e:
-                    if attempt >= self.max_retries - 1:
+                except Exception as e:
+                    if not self.is_retryable_error(e) or attempt >= max_attempts - 1:
                         raise
-                    wait_time = min(2 ** attempt * 5, 60)
-                    logger.warning(f"API错误 ({type(e).__name__})，{wait_time}秒后重试 ({attempt+1}/{self.max_retries})...")
-                    await asyncio.sleep(wait_time)
+                    wait_time = self._retry_delay(attempt)
+                    logger.warning(
+                        "API错误 (%s)，%.1f秒后重试 (%d/%d)...",
+                        type(e).__name__,
+                        wait_time,
+                        attempt + 1,
+                        max_attempts,
+                    )
+                    await self._sleep(wait_time)
             raise RuntimeError("LLM chat: 所有重试均失败")
 
     async def emit_response_delta(

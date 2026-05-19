@@ -2,7 +2,7 @@
 
 import logging
 import time
-from openai import AsyncOpenAI, APIConnectionError, RateLimitError, InternalServerError
+from openai import AsyncOpenAI
 from src.llm.base import LLMProvider, LLMResponse
 from src.tools import ToolDict
 
@@ -11,8 +11,6 @@ logger = logging.getLogger(__name__)
 
 class OllamaProvider(LLMProvider):
     """Ollama Provider (OpenAI 兼容 Chat Completions API)"""
-
-    _retryable_errors = (APIConnectionError, RateLimitError, InternalServerError)
 
     def __post_init__(self):
         super().__post_init__()
@@ -23,7 +21,7 @@ class OllamaProvider(LLMProvider):
             api_key=self.api_key or "ollama",
             base_url=self.base_url,
             timeout=self.timeout,
-            max_retries=self.max_retries,
+            max_retries=0,
         )
 
     def estimate_tokens(

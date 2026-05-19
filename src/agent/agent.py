@@ -6,7 +6,7 @@ from typing import Any, Type
 from pydantic import BaseModel, ConfigDict
 from src.tools import ToolDict
 from src.events.types import CompactDelta
-from src.mgr import FileMgr, TodoManager, CompactMgr, PromptMgr, SkillMgr, SubAgentMgr
+from src.mgr import FileMgr, TodoManager, CompactMgr, RecoveryMgr, PromptMgr, SkillMgr, SubAgentMgr
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +51,7 @@ class Agent:
     _tools_schemas: list[ToolDict] = field(init=False)
     _todo_mgr: TodoManager = field(init=False, default_factory=TodoManager, repr=False)
     _compact_mgr: CompactMgr = field(init=False, repr=False)
+    _recovery_mgr: RecoveryMgr = field(init=False, repr=False)
     _file_mgr: FileMgr = field(init=False, repr=False)
     _skill_mgr: SkillMgr = field(init=False, repr=False)
     _subagent_mgr: SubAgentMgr = field(init=False, repr=False)
@@ -61,6 +62,7 @@ class Agent:
         self.uuid = uuid.uuid4()
         self._tools_schemas = self.deps.tools_mgr.get_schemas(self.tools)
         self._compact_mgr = CompactMgr(self.deps)
+        self._recovery_mgr = RecoveryMgr(self.deps)
         workspace = Path.cwd() / "workspace"
         self._file_mgr = FileMgr(workspace, self.deps)
         self._skill_mgr = SkillMgr(workspace)
@@ -87,13 +89,10 @@ class Agent:
             if self._compact_mgr.is_need_compact(messages, prompt, self._tools_schemas):
                 compact_streak += 1
                 if compact_streak > max_compact_streak:
-                    logger.warning("连续 %d 次 compact 后仍需压缩，终止循环防止空转", compact_streak - 1)
-                    messages.append({"role": "user", "content": "由于对话上下文过长且多次压缩仍无法继续，请你基于当前已完成的工作做一个总结：1) 已经完成了什么；2) 还有什么未完成；3) 给出后续建议。"})
-                    messages[:] = self.deps.llm.normalize_messages(messages)
-                    response = await self.deps.llm.chat(
+                    logger.warning("连续 %d 次 compact 后仍需压缩，请求模型总结当前进展", compact_streak - 1)
+                    response = await self._recovery_mgr.summarize_context_limit_exhaustion(
                         prompt=prompt,
                         messages=messages,
-                        tools=[],
                         caller_agent_type=self.agent_type,
                         caller_uuid=str(self.uuid),
                     )
@@ -111,7 +110,7 @@ class Agent:
                 compact_streak = 0
 
             messages[:] = self.deps.llm.normalize_messages(messages)
-            response = await self.deps.llm.chat(
+            response = await self._recovery_mgr.chat_with_recovery(
                 prompt=prompt,
                 messages=messages,
                 tools=self._tools_schemas,
@@ -153,10 +152,11 @@ class Agent:
                 except json.JSONDecodeError:
                     args = {}
 
-                result_text = await self.deps.tools_mgr.execute(
-                        tool_name, args,
-                        {"current_tool_call_id": tool_call_id, "deps": self.deps, "agent": self},
-                    )
+                result_text = await self._recovery_mgr.execute_tool_with_recovery(
+                    tool_name,
+                    args,
+                    {"current_tool_call_id": tool_call_id, "deps": self.deps, "agent": self},
+                )
 
                 messages.append({
                     "role": "tool",
