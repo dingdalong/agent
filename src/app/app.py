@@ -33,6 +33,7 @@ class AgentApp:
                 if user_input.strip().lower() in ("exit", "quit"):
                     break
 
+                history_len = len(history)
                 work_task = asyncio.create_task(agent.run(user_input, history))
                 try:
                     await work_task
@@ -40,6 +41,7 @@ class AgentApp:
                     if not work_task.done():
                         work_task.cancel()
                     await asyncio.gather(work_task, return_exceptions=True)
+                    del history[history_len:]
                     await self.deps.event_bus.request_output("\n已中断当前任务。\n")
                     continue
         finally:
