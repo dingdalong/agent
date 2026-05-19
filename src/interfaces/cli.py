@@ -1,11 +1,13 @@
 """CLIInterface — 命令行交互实现。"""
 
 import asyncio
+import sys
 
 from src.events.types import (
     Event,
     ErrorOccurred,
     InputRequested,
+    InputInterrupted,
     LLMCallCompleted,
     LLMCallStarted,
     OutputRequested,
@@ -13,6 +15,7 @@ from src.events.types import (
     PermissionRequested,
     ResponseDelta,
     ThinkingDelta,
+    UserInputRequest,
 )
 
 class CLIInterface:
@@ -23,8 +26,33 @@ class CLIInterface:
         self._in_response = False  # 是否正在输出回应流
         self._ask_lock = asyncio.Lock()
 
-    async def input(self, message: str) -> str:
-        return await asyncio.to_thread(input, message)
+    async def _read_line(self, message: str) -> str:
+        print(message, end="", flush=True)
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[str] = loop.create_future()
+
+        def on_stdin_ready() -> None:
+            try:
+                line = sys.stdin.readline()
+            except BaseException as exc:
+                if not future.done():
+                    future.set_exception(exc)
+                return
+            if not future.done():
+                future.set_result(line)
+
+        try:
+            loop.add_reader(sys.stdin.fileno(), on_stdin_ready)
+        except (AttributeError, NotImplementedError, OSError):
+            line = await loop.run_in_executor(None, sys.stdin.readline)
+        else:
+            try:
+                line = await future
+            finally:
+                loop.remove_reader(sys.stdin.fileno())
+        if line == "":
+            raise EOFError
+        return line.rstrip("\n")
 
     async def output(self, message: str) -> None:
         print(message, end="", flush=True)
@@ -32,20 +60,29 @@ class CLIInterface:
     async def _read_non_empty_input(
         self,
         prompt: str,
-        future: asyncio.Future[str] | None,
+        request: UserInputRequest | None,
     ) -> None:
         try:
             next_prompt = prompt
             while True:
-                answer = (await self.input(next_prompt)).strip()
+                answer = (await self._read_line(next_prompt)).strip()
                 if answer:
-                    if future is not None and not future.done():
-                        future.set_result(answer)
+                    if request is not None:
+                        request.complete(answer)
                     return
                 next_prompt = ""
+        except EOFError:
+            if request is not None:
+                request.interrupt()
         except Exception as exc:
-            if future is not None and not future.done():
-                future.set_exception(exc)
+            if request is not None:
+                request.fail(exc)
+        except BaseException as exc:
+            if request is not None:
+                if isinstance(exc, KeyboardInterrupt):
+                    request.interrupt()
+                else:
+                    request.fail(exc)
 
     def _end_thinking_if_needed(self) -> None:
         """如果正在输出思考流，先换行结束。"""
@@ -73,17 +110,13 @@ class CLIInterface:
                 print(f"  ✗ {name} 错误: {err}", flush=True)
             case OutputRequested(content=c):
                 await self.output(c)
-            case PermissionRequested(
-                tool_name=tool_name,
-                detail=detail,
-                future=future,
-            ):
+            case PermissionRequested(tool_name=tool_name, detail=detail):
                 message = (
                     f"\n⚠️  工具 '{tool_name}' 请求执行：\n"
                     f"   {detail}\n"
                     "是否允许执行？(y/n/always): "
                 )
-                await self._read_non_empty_input(message, future)
+                await self._read_non_empty_input(message, event)
             case PermissionNotice(status=status, tool_name=tool_name, detail=detail):
                 if status == "allow":
                     await self.output(f"[执行工具]{detail}\n")
@@ -91,8 +124,8 @@ class CLIInterface:
                     await self.output(f"[拒绝执行]{detail}\n")
                 else:
                     await self.output(f"[拒绝执行工具]{tool_name}\n")
-            case InputRequested(prompt=prompt, future=future):
-                await self._read_non_empty_input(prompt, future)
+            case InputRequested(prompt=prompt):
+                await self._read_non_empty_input(prompt, event)
             case LLMCallStarted(
                 model=model,
                 estimated_input_tokens=estimated_input_tokens,

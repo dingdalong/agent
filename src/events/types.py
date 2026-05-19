@@ -19,6 +19,29 @@ class Event:
     type: str = ""
 
 
+class InputInterrupted(Exception):
+    """用户取消了一个输入请求。"""
+
+
+@dataclass
+class UserInputRequest(Event):
+    """需要 UI 通过 future 返回用户输入的事件基类。"""
+
+    future: asyncio.Future[str] | None = None
+
+    def complete(self, value: str) -> None:
+        if self.future is not None and not self.future.done():
+            self.future.set_result(value)
+
+    def interrupt(self) -> None:
+        if self.future is not None and not self.future.done():
+            self.future.set_exception(InputInterrupted())
+
+    def fail(self, exc: BaseException) -> None:
+        if self.future is not None and not self.future.done():
+            self.future.set_exception(exc)
+
+
 # --- PROGRESS 级别 ---
 
 @dataclass
@@ -99,20 +122,18 @@ class PermissionNotice(Event):
 
 
 @dataclass
-class PermissionRequested(Event):
+class PermissionRequested(UserInputRequest):
     """请求 UI 读取工具权限确认，并通过 future 返回结果。"""
     tool_name: str = ""
     detail: str = ""
-    future: asyncio.Future[str] | None = None
     level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
     type: Literal["permission_requested"] = field(default="permission_requested", init=False)
 
 
 @dataclass
-class InputRequested(Event):
+class InputRequested(UserInputRequest):
     """请求 UI 串行读取用户输入，并通过 future 返回结果。"""
     prompt: str = ""
-    future: asyncio.Future[str] | None = None
     level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
     type: Literal["input_requested"] = field(default="input_requested", init=False)
 

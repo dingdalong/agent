@@ -23,4 +23,4 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project.scripts]
-agent = "main:main"
+agent = "main:cli"

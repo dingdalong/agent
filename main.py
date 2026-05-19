@@ -11,5 +11,11 @@ async def main():
     finally:
         await app.shutdown()
 
+def cli() -> None:
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    cli()

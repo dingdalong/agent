@@ -1,6 +1,7 @@
 import asyncio, logging
 from dataclasses import dataclass, field
 from src.agent import Agent, AgentDeps
+from src.interfaces import InputInterrupted
 
 logger = logging.getLogger(__name__)
 
@@ -25,17 +26,28 @@ class AgentApp:
             )
             history = []
             while True:
-                user_input = await self.deps.event_bus.request_input("\n\n你: ")
+                try:
+                    user_input = await self.deps.event_bus.request_input("\n\n你: ")
+                except (InputInterrupted, asyncio.CancelledError, KeyboardInterrupt):
+                    break
                 if user_input.strip().lower() in ("exit", "quit"):
                     break
 
-                await agent.run(user_input, history)
+                work_task = asyncio.create_task(agent.run(user_input, history))
+                try:
+                    await work_task
+                except (InputInterrupted, asyncio.CancelledError, KeyboardInterrupt):
+                    if not work_task.done():
+                        work_task.cancel()
+                    await asyncio.gather(work_task, return_exceptions=True)
+                    await self.deps.event_bus.request_output("\n已中断当前任务。\n")
+                    continue
         finally:
             if self.deps.event_bus:
-                await self.deps.event_bus.join()
                 self.deps.event_bus.close()
             if consumer_task:
-                await consumer_task
+                consumer_task.cancel()
+                await asyncio.gather(consumer_task, return_exceptions=True)
         pass
 
     async def shutdown(self):

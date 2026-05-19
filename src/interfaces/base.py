@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
+from src.events.types import InputInterrupted
+
 if TYPE_CHECKING:
     from src.events import Event
+
 
 @runtime_checkable
 class UserInterface(Protocol):
