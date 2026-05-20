@@ -80,7 +80,7 @@ class SkillMgr:
         lines = []
         for name in sorted(self._documents):
             manifest = self._documents[name].manifest
-            lines.append(f"- {manifest.name}: {manifest.description}")
+            lines.append(f"- [{manifest.name}]: {manifest.description}")
         return "\n".join(lines)
 
     def check_skill(self, name: str) -> bool:
