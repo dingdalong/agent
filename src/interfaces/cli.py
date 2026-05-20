@@ -1,7 +1,20 @@
-"""CLIInterface — 命令行交互实现。"""
+"""CLIInterface — prompt_toolkit based command line interface."""
+
+from __future__ import annotations
 
 import asyncio
+import os
+import signal
 import sys
+import termios
+from collections.abc import Callable
+from contextlib import contextmanager
+
+from prompt_toolkit import PromptSession, print_formatted_text
+from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.patch_stdout import patch_stdout
+from prompt_toolkit.styles import Style
 
 from src.events.types import (
     ErrorOccurred,
@@ -13,50 +26,128 @@ from src.events.types import (
 )
 from src.interfaces.base import UserInterface
 
+
 class CLIInterface(UserInterface):
-    """基于标准输入/输出的 CLI 交互实现。"""
+    """基于 prompt_toolkit 的 CLI 交互实现。"""
 
     def __init__(self) -> None:
         super().__init__()
-        self._ask_lock = asyncio.Lock()
+        self._resume_interrupt_reader: Callable[[], None] | None = None
+        self._interrupt_watch_depth = 0
+        self._style = Style.from_dict({
+            "agent.response": "ansicyan",
+            "agent.thinking": "ansimagenta",
+            "agent.error": "ansired",
+            "agent.muted": "ansibrightblack",
+            "agent.permission": "ansiyellow",
+            "agent.success": "ansigreen",
+        })
+        self._session: PromptSession[str] = PromptSession(
+            key_bindings=self._build_input_key_bindings(),
+            style=self._style,
+        )
 
-    async def _read_line(self, message: str) -> str:
-        print(message, end="", flush=True)
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[str] = loop.create_future()
-
-        def on_stdin_ready() -> None:
-            try:
-                line = sys.stdin.readline()
-            except BaseException as exc:
-                if not future.done():
-                    future.set_exception(exc)
+    @contextmanager
+    def watch_interrupt(self, request_interrupt: Callable[[], None]):
+        with super().watch_interrupt(request_interrupt):
+            if self._interrupt_watch_depth > 0:
+                self._interrupt_watch_depth += 1
+                try:
+                    yield
+                finally:
+                    self._interrupt_watch_depth -= 1
                 return
-            if not future.done():
-                future.set_result(line)
 
-        try:
-            loop.add_reader(sys.stdin.fileno(), on_stdin_ready)
-        except (AttributeError, NotImplementedError, OSError):
-            line = await loop.run_in_executor(None, sys.stdin.readline)
-        else:
+            self._interrupt_watch_depth = 1
+            loop = asyncio.get_running_loop()
+            fd = None
+            old_terminal_attrs = None
+            reader_installed = False
+
+            def schedule_interrupt() -> None:
+                loop.call_soon_threadsafe(request_interrupt)
+
+            def on_sigint(signum, frame) -> None:
+                schedule_interrupt()
+
+            def on_stdin_ready() -> None:
+                if fd is None:
+                    return
+                try:
+                    if b"\x03" in os.read(fd, 1024):
+                        schedule_interrupt()
+                except OSError:
+                    pass
+
+            def resume_interrupt_reader() -> None:
+                nonlocal reader_installed
+                if fd is None:
+                    return
+                if reader_installed:
+                    try:
+                        loop.remove_reader(fd)
+                    except (AttributeError, NotImplementedError, OSError):
+                        pass
+                    reader_installed = False
+                try:
+                    loop.add_reader(fd, on_stdin_ready)
+                except (AttributeError, NotImplementedError, OSError):
+                    return
+                reader_installed = True
+
+            old_handler = signal.signal(signal.SIGINT, on_sigint)
             try:
-                line = await future
+                fd = sys.stdin.fileno()
+                old_terminal_attrs = termios.tcgetattr(fd)
+                new_terminal_attrs = list(old_terminal_attrs)
+                new_terminal_attrs[3] &= ~(termios.ICANON | termios.ISIG | termios.ECHO)
+                new_terminal_attrs[6] = list(new_terminal_attrs[6])
+                new_terminal_attrs[6][termios.VMIN] = 1
+                new_terminal_attrs[6][termios.VTIME] = 0
+                termios.tcsetattr(fd, termios.TCSANOW, new_terminal_attrs)
+            except (AttributeError, OSError, termios.error):
+                fd = None
+                old_terminal_attrs = None
+            resume_interrupt_reader()
+            self._resume_interrupt_reader = resume_interrupt_reader if fd is not None else None
+            try:
+                yield
             finally:
-                loop.remove_reader(sys.stdin.fileno())
-        if line == "":
-            raise EOFError
-        return line.rstrip("\n")
+                self._interrupt_watch_depth = 0
+                self._resume_interrupt_reader = None
+                if fd is not None and reader_installed:
+                    try:
+                        loop.remove_reader(fd)
+                    except (AttributeError, NotImplementedError, OSError):
+                        pass
+                if fd is not None and old_terminal_attrs is not None:
+                    try:
+                        termios.tcflush(fd, termios.TCIFLUSH)
+                        termios.tcsetattr(fd, termios.TCSADRAIN, old_terminal_attrs)
+                    except (OSError, termios.error):
+                        pass
+                signal.signal(signal.SIGINT, old_handler)
+
+    async def _read_input(self, prompt: str, default: str = "") -> str:
+        try:
+            with patch_stdout():
+                return await self._session.prompt_async(
+                    prompt,
+                    default=default,
+                    multiline=True,
+                    prompt_continuation="... ",
+                    bottom_toolbar="Enter 提交 · Shift+Enter/Ctrl+J 换行 · Ctrl+C 清空/退出",
+                    handle_sigint=True,
+                )
+        finally:
+            if self._resume_interrupt_reader is not None:
+                self._resume_interrupt_reader()
+
+    async def _read_permission(self, tool_name: str, detail: str) -> str:
+        return await self._prompt_permission(tool_name, detail)
 
     async def _write(self, message: str) -> None:
-        print(message, end="", flush=True)
-
-    def _permission_prompt(self, tool_name: str, detail: str) -> str:
-        return (
-            f"\n⚠️  工具 '{tool_name}' 请求执行：\n"
-            f"   {detail}\n"
-            "是否允许执行？(y/n/always): "
-        )
+        self._print(message, end="")
 
     async def _write_response_prefix(self, event: ResponseDelta) -> None:
         await self._write(f"\n{self._response_prefix(event)}")
@@ -64,8 +155,37 @@ class CLIInterface(UserInterface):
     async def _write_thinking_prefix(self, event: ThinkingDelta) -> None:
         await self._write(f"\n{self._thinking_prefix(event)}")
 
+    async def _prompt_permission(self, tool_name: str, detail: str) -> str:
+        self._print(HTML(
+            "\n<agent.permission>工具请求权限</agent.permission>\n"
+            f"  工具: {self._escape_html(tool_name)}\n"
+            f"  内容: {self._escape_html(detail)}\n"
+            "  [y] 允许一次   [n] 拒绝   [a] 始终允许\n"
+        ))
+        session: PromptSession[str] = PromptSession(
+            key_bindings=self._build_permission_key_bindings(),
+            style=self._style,
+        )
+        with patch_stdout():
+            while True:
+                try:
+                    answer = (await session.prompt_async("选择: ", handle_sigint=True)).strip().lower()
+                finally:
+                    if self._resume_interrupt_reader is not None:
+                        self._resume_interrupt_reader()
+                if answer in {"y", "yes"}:
+                    return "yes"
+                if answer in {"n", "no", "deny"}:
+                    return "deny"
+                if answer in {"a", "always"}:
+                    return "always"
+                self._print(HTML("<agent.error>请输入 y、n 或 a。</agent.error>"))
+
     async def on_error(self, event: ErrorOccurred) -> None:
-        print(f"  ✗ {event.source} 错误: {event.error}", flush=True)
+        self._print(HTML(
+            f"<agent.error>  x {self._escape_html(event.source)} 错误: "
+            f"{self._escape_html(event.error)}</agent.error>"
+        ))
 
     async def on_permission_notice(self, event: PermissionNotice) -> None:
         if event.status == "allow":
@@ -76,17 +196,16 @@ class CLIInterface(UserInterface):
             await self._write(f"[拒绝执行工具]{event.tool_name}\n")
 
     async def on_llm_call_started(self, event: LLMCallStarted) -> None:
-        print(
+        self._print(
             "LLM call start: "
             f"model={event.model} "
             f"estimated_input_tokens={event.estimated_input_tokens} "
             f"messages={event.message_count} "
             f"tools={event.tool_count}",
-            flush=True,
         )
 
     async def on_llm_call_completed(self, event: LLMCallCompleted) -> None:
-        print(
+        self._print(
             "LLM usage: "
             f"model={event.model} "
             f"input={self._format_optional_int(event.input_tokens)} "
@@ -97,7 +216,6 @@ class CLIInterface(UserInterface):
             f"duration={self._format_optional_float(event.duration_seconds)}s "
             f"output_tps={self._format_optional_float(event.output_tokens_per_second)} "
             f"total_tps={self._format_optional_float(event.total_tokens_per_second)}",
-            flush=True,
         )
 
     def _response_prefix(self, event: ResponseDelta) -> str:
@@ -107,8 +225,60 @@ class CLIInterface(UserInterface):
 
     def _thinking_prefix(self, event: ThinkingDelta) -> str:
         if event.caller_agent_type and event.caller_uuid:
-            return f"💭 (agent_type={event.caller_agent_type}, uuid={event.caller_uuid}) "
-        return "💭 "
+            return f"思考(agent_type={event.caller_agent_type}, uuid={event.caller_uuid}) "
+        return "思考 "
+
+    def _print(self, *values, **kwargs) -> None:
+        print_formatted_text(*values, style=self._style, **kwargs)
+
+    def _build_input_key_bindings(self) -> KeyBindings:
+        bindings = KeyBindings()
+
+        @bindings.add("enter")
+        def _(event) -> None:
+            event.app.exit(result=event.current_buffer.text)
+
+        @bindings.add("c-j")
+        def _(event) -> None:
+            event.current_buffer.insert_text("\n")
+
+        self._try_add_binding(bindings, "s-enter", lambda event: event.current_buffer.insert_text("\n"))
+
+        @bindings.add("c-c")
+        def _(event) -> None:
+            if event.current_buffer.text:
+                event.current_buffer.reset()
+                return
+            event.app.exit(exception=KeyboardInterrupt)
+
+        return bindings
+
+    def _build_permission_key_bindings(self) -> KeyBindings:
+        bindings = KeyBindings()
+
+        def choose(value: str) -> Callable:
+            def handler(event) -> None:
+                event.app.exit(result=value)
+            return handler
+
+        bindings.add("y")(choose("yes"))
+        bindings.add("n")(choose("deny"))
+        bindings.add("a")(choose("always"))
+        bindings.add("c-c")(lambda event: event.app.exit(exception=KeyboardInterrupt))
+        return bindings
+
+    def _try_add_binding(self, bindings: KeyBindings, key: str, handler: Callable) -> None:
+        try:
+            bindings.add(key)(handler)
+        except ValueError:
+            pass
+
+    def _escape_html(self, value: str) -> str:
+        return (
+            value.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+        )
 
     def _format_optional_int(self, value: int | None) -> str:
         if value is None:

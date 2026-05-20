@@ -8,9 +8,24 @@ from dataclasses import dataclass, field
 from typing import AsyncIterator, Literal
 
 from src.events.levels import EventLevel
-from src.events.types import Event, InputRequested, OutputRequested, PermissionNotice, PermissionRequested
+from src.events.types import (
+    Event,
+    InputRequested,
+    InterruptRequested,
+    OutputRequested,
+    PermissionNotice,
+    PermissionRequested,
+)
 
 _SENTINEL = object()
+
+class NoEventSubscribers(RuntimeError):
+    """需要 UI 响应的事件没有任何订阅者。"""
+
+    def __init__(self, kind: str):
+        self.kind = kind
+        super().__init__(f"cannot request {kind}: no subscribers")
+
 
 @dataclass
 class _Subscription:
@@ -53,16 +68,24 @@ class EventBus:
             content=content,
         ))
 
-    async def request_input(self, prompt: str, source: str = "ui") -> str:
+    async def request_interrupt(self, source: str = "ui") -> None:
+        """通过事件队列请求中断当前用户交互或 agent 工作。"""
+        await self.emit(InterruptRequested(
+            timestamp=time.time(),
+            source=source,
+        ))
+
+    async def request_input(self, prompt: str, source: str = "ui", default: str = "") -> str:
         """通过事件队列请求 UI 串行输入。"""
         if not self._subscribers:
-            raise RuntimeError("cannot request input: no subscribers")
+            raise NoEventSubscribers("input")
         loop = asyncio.get_running_loop()
         future: asyncio.Future[str] = loop.create_future()
         await self.emit(InputRequested(
             timestamp=time.time(),
             source=source,
             prompt=prompt,
+            default=default,
             future=future,
         ))
         return await future
@@ -91,7 +114,7 @@ class EventBus:
     ) -> str:
         """通过事件队列请求 UI 读取工具权限确认。"""
         if not self._subscribers:
-            raise RuntimeError("cannot request permission: no subscribers")
+            raise NoEventSubscribers("permission")
         loop = asyncio.get_running_loop()
         future: asyncio.Future[str] = loop.create_future()
         await self.emit(PermissionRequested(

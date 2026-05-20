@@ -19,10 +19,6 @@ class Event:
     type: str = ""
 
 
-class InputInterrupted(Exception):
-    """用户取消了一个输入请求。"""
-
-
 @dataclass
 class UserInputRequest(Event):
     """需要 UI 通过 future 返回用户输入的事件基类。"""
@@ -33,9 +29,9 @@ class UserInputRequest(Event):
         if self.future is not None and not self.future.done():
             self.future.set_result(value)
 
-    def interrupt(self) -> None:
+    def cancel(self) -> None:
         if self.future is not None and not self.future.done():
-            self.future.set_exception(InputInterrupted())
+            self.future.cancel()
 
     def fail(self, exc: BaseException) -> None:
         if self.future is not None and not self.future.done():
@@ -112,6 +108,13 @@ class OutputRequested(Event):
 
 
 @dataclass
+class InterruptRequested(Event):
+    """请求中断当前用户交互或 agent 工作。"""
+    level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
+    type: Literal["interrupt_requested"] = field(default="interrupt_requested", init=False)
+
+
+@dataclass
 class PermissionNotice(Event):
     """工具权限状态通知，供 UI 自行组织展示。"""
     status: Literal["allow", "deny"] = "allow"
@@ -134,13 +137,14 @@ class PermissionRequested(UserInputRequest):
 class InputRequested(UserInputRequest):
     """请求 UI 串行读取用户输入，并通过 future 返回结果。"""
     prompt: str = ""
+    default: str = ""
     level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
     type: Literal["input_requested"] = field(default="input_requested", init=False)
 
 
 # 联合类型
 AgentEvent = Union[
-    ErrorOccurred, InputRequested, OutputRequested,
+    ErrorOccurred, InputRequested, OutputRequested, InterruptRequested,
     PermissionNotice, PermissionRequested,
     LLMCallCompleted, LLMCallStarted,
     ResponseDelta, ThinkingDelta,

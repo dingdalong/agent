@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 from abc import ABC, abstractmethod
+from collections.abc import Callable
+from contextlib import contextmanager
 
 from src.events.types import (
     Event,
     ErrorOccurred,
-    InputInterrupted,
     InputRequested,
     LLMCallCompleted,
     LLMCallStarted,
@@ -26,11 +28,21 @@ class UserInterface(ABC):
     def __init__(self) -> None:
         self._in_thinking = False
         self._in_response = False
+        self._request_interrupt: Callable[[], None] | None = None
 
-    @abstractmethod
-    async def _read_line(self, prompt: str) -> str:
-        """读取一行用户输入。"""
-        ...
+    @contextmanager
+    def watch_interrupt(self, request_interrupt: Callable[[], None]):
+        """监听用户取消信号。检测到取消时调用 request_interrupt。"""
+        previous = self._request_interrupt
+        self._request_interrupt = request_interrupt
+        try:
+            yield
+        finally:
+            self._request_interrupt = previous
+
+    def _request_user_interrupt(self) -> None:
+        if self._request_interrupt is not None:
+            self._request_interrupt()
 
     @abstractmethod
     async def _write(self, message: str) -> None:
@@ -38,8 +50,13 @@ class UserInterface(ABC):
         ...
 
     @abstractmethod
-    def _permission_prompt(self, tool_name: str, detail: str) -> str:
-        """格式化权限请求提示。"""
+    async def _read_input(self, prompt: str, default: str = "") -> str:
+        """读取用户输入。"""
+        ...
+
+    @abstractmethod
+    async def _read_permission(self, tool_name: str, detail: str) -> str:
+        """读取权限确认结果。"""
         ...
 
     @abstractmethod
@@ -52,32 +69,24 @@ class UserInterface(ABC):
         """输出思考流前缀。"""
         ...
 
-    async def _read_non_empty_input(
+    async def _complete_user_request(
         self,
-        prompt: str,
         request: UserInputRequest | None,
+        reader,
     ) -> None:
         try:
-            next_prompt = prompt
             while True:
-                answer = (await self._read_line(next_prompt)).strip()
-                if answer:
+                answer = await reader()
+                normalized = answer.strip()
+                if normalized:
                     if request is not None:
-                        request.complete(answer)
+                        request.complete(normalized)
                     return
-                next_prompt = ""
-        except EOFError:
-            if request is not None:
-                request.interrupt()
-        except Exception as exc:
-            if request is not None:
-                request.fail(exc)
+        except (EOFError, KeyboardInterrupt):
+            self._request_user_interrupt()
         except BaseException as exc:
             if request is not None:
-                if isinstance(exc, KeyboardInterrupt):
-                    request.interrupt()
-                else:
-                    request.fail(exc)
+                request.fail(exc)
 
     async def _end_thinking_if_needed(self) -> None:
         if self._in_thinking:
@@ -103,14 +112,24 @@ class UserInterface(ABC):
                 await self._write(content)
             case ErrorOccurred():
                 await self.on_error(event)
-            case InputRequested(prompt=prompt):
-                await self._read_non_empty_input(prompt, event)
+            case InputRequested(prompt=prompt, default=default):
+                next_prompt = prompt
+                next_default = default
+
+                async def read_input() -> str:
+                    nonlocal next_prompt, next_default
+                    answer = await self._read_input(next_prompt, next_default)
+                    next_prompt = ""
+                    next_default = ""
+                    return answer if answer.strip() else ""
+
+                await self._complete_user_request(event, read_input)
             case PermissionNotice():
                 await self.on_permission_notice(event)
             case PermissionRequested(tool_name=tool_name, detail=detail):
-                await self._read_non_empty_input(
-                    self._permission_prompt(tool_name, detail),
+                await self._complete_user_request(
                     event,
+                    lambda: self._read_permission(tool_name, detail),
                 )
             case LLMCallStarted():
                 await self.on_llm_call_started(event)
