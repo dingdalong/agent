@@ -11,7 +11,7 @@ from collections.abc import Callable
 from contextlib import contextmanager
 
 from prompt_toolkit import PromptSession, print_formatted_text
-from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.formatted_text import ANSI, HTML
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.styles import Style
@@ -25,6 +25,7 @@ from src.events.types import (
     ThinkingDelta,
 )
 from src.interfaces.base import UserInterface
+from src.interfaces.markdown_renderer import MarkdownStreamRenderer
 
 
 class CLIInterface(UserInterface):
@@ -46,6 +47,10 @@ class CLIInterface(UserInterface):
             key_bindings=self._build_input_key_bindings(),
             style=self._style,
         )
+        self._markdown_renderers = {
+            "response": MarkdownStreamRenderer(),
+            "thinking": MarkdownStreamRenderer(),
+        }
 
     @contextmanager
     def watch_interrupt(self, request_interrupt: Callable[[], None]):
@@ -187,6 +192,65 @@ class CLIInterface(UserInterface):
             f"{self._escape_html(event.error)}</agent.error>"
         ))
 
+    async def on_response_delta(self, event: ResponseDelta, content: str) -> None:
+        await self._write_markdown_delta(
+            "response",
+            self._write_response_prefix,
+            event,
+            content,
+        )
+
+    async def _end_response_if_needed(self) -> None:
+        await self._end_markdown_stream_if_needed("response")
+
+    async def on_thinking_delta(self, event: ThinkingDelta, content: str) -> None:
+        await self._write_markdown_delta(
+            "thinking",
+            self._write_thinking_prefix,
+            event,
+            content,
+        )
+
+    async def _end_thinking_if_needed(self) -> None:
+        await self._end_markdown_stream_if_needed("thinking")
+
+    async def _write_markdown_delta(
+        self,
+        stream_name: str,
+        prefix_writer: Callable,
+        event,
+        content: str,
+    ) -> None:
+        if not self._is_markdown_stream_active(stream_name):
+            self._markdown_renderers[stream_name].reset()
+            await prefix_writer(event)
+            self._set_markdown_stream_active(stream_name, True)
+        for chunk in self._markdown_renderers[stream_name].append(content):
+            self._print_ansi(chunk)
+
+    async def _end_markdown_stream_if_needed(self, stream_name: str) -> None:
+        if self._is_markdown_stream_active(stream_name):
+            for chunk in self._markdown_renderers[stream_name].flush():
+                self._print_ansi(chunk)
+            await self._write("\n")
+            self._set_markdown_stream_active(stream_name, False)
+
+    def _is_markdown_stream_active(self, stream_name: str) -> bool:
+        if stream_name == "response":
+            return self._in_response
+        if stream_name == "thinking":
+            return self._in_thinking
+        raise ValueError(f"unknown markdown stream: {stream_name}")
+
+    def _set_markdown_stream_active(self, stream_name: str, active: bool) -> None:
+        if stream_name == "response":
+            self._in_response = active
+            return
+        if stream_name == "thinking":
+            self._in_thinking = active
+            return
+        raise ValueError(f"unknown markdown stream: {stream_name}")
+
     async def on_permission_notice(self, event: PermissionNotice) -> None:
         if event.status == "allow":
             await self._write(f"[执行工具]{event.detail}\n")
@@ -230,6 +294,9 @@ class CLIInterface(UserInterface):
 
     def _print(self, *values, **kwargs) -> None:
         print_formatted_text(*values, style=self._style, **kwargs)
+
+    def _print_ansi(self, value: str) -> None:
+        print_formatted_text(ANSI(value), end="")
 
     def _build_input_key_bindings(self) -> KeyBindings:
         bindings = KeyBindings()

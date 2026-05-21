@@ -15,11 +15,13 @@ class AgentApp:
     _active_user_request: UserInputRequest | None = field(default=None, init=False, repr=False)
 
     async def run(self) -> None:
-        consumer_task = asyncio.create_task(self._consume_events())
-        await asyncio.sleep(0)
-
-        await self.deps.event_bus.request_output("Agent 已启动，输入 'exit' 退出。\n")
+        consumer_task = None
         try:
+            await self.deps.ui.start()
+            consumer_task = asyncio.create_task(self._consume_events())
+            await asyncio.sleep(0)
+
+            await self.deps.event_bus.request_output("Agent 已启动，输入 'exit' 退出。\n")
             agent = Agent(
                 agent_type = "总控",
                 description = "入口",
@@ -49,6 +51,7 @@ class AgentApp:
             if consumer_task:
                 consumer_task.cancel()
                 await asyncio.gather(consumer_task, return_exceptions=True)
+            await self.deps.ui.stop()
 
     async def _consume_events(self) -> None:
         async for event in self.deps.event_bus.subscribe():

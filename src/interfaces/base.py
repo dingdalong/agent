@@ -44,6 +44,14 @@ class UserInterface(ABC):
         if self._request_interrupt is not None:
             self._request_interrupt()
 
+    async def start(self) -> None:
+        """启动 UI 生命周期钩子。默认实现供同步 UI 使用。"""
+        pass
+
+    async def stop(self) -> None:
+        """停止 UI 生命周期钩子。默认实现供同步 UI 使用。"""
+        pass
+
     @abstractmethod
     async def _write(self, message: str) -> None:
         """输出文本。"""
