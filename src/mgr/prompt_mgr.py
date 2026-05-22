@@ -157,8 +157,19 @@ class PromptMgr:
         ctx = "# 动态上下文\n" + "\n".join(lines)
         if loaded_skills:
             ctx += "\n\n# 已加载技能\n" + loaded_skills
+        memory_context = self._build_memory_context()
+        if memory_context:
+            ctx += "\n\n" + memory_context
         ctx += f"\n\n当前时间：`{datetime.date.today().isoformat()}`"
         return ctx
+
+    def _build_memory_context(self) -> str:
+        if getattr(self.agent, "memory", "project") != "project":
+            return ""
+        memory_mgr = getattr(getattr(self.agent, "deps", None), "memory_mgr", None)
+        if memory_mgr is None:
+            return ""
+        return memory_mgr.build_prompt()
 
     def build(self) -> list:
         """

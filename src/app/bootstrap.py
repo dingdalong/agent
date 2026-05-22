@@ -7,7 +7,9 @@ import logging
 from src.interfaces import CLIInterface
 from src.events import EventBus, EventLevel
 from src.llm import get_provider
-from src.mgr import ConfigManager, PermissionManager, ToolsMgr
+from pathlib import Path
+
+from src.mgr import ConfigManager, MemoryMgr, PermissionManager, ToolsMgr
 from src.agent import AgentDeps
 from src.app.app import AgentApp
 
@@ -20,6 +22,8 @@ async def create_app() -> AgentApp:
     event_bus = EventBus(level=EventLevel.from_str(config_mgr.get_config("events").get("level", "progress")))
     ui = CLIInterface()
     tools_mgr = ToolsMgr()
+    workspace = Path.cwd() / "workspace"
+    memory_mgr = MemoryMgr(workspace)
     permission_mgr = PermissionManager(
         tools=tools_mgr.list_entries(),
         config_mgr=config_mgr,
@@ -48,6 +52,7 @@ async def create_app() -> AgentApp:
         tools_mgr = tools_mgr,
         permission_mgr = permission_mgr,
         config_mgr = config_mgr,
+        memory_mgr = memory_mgr,
     )
     return AgentApp(
         deps = deps,

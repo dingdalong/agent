@@ -15,6 +15,7 @@ class SubAgentManifest:
     description: str
     path: Path
     tools: set[str] | None = None
+    memory: str | None = None
 
 @dataclass
 class SubAgentDocument:
@@ -46,11 +47,13 @@ class SubAgentMgr:
                 tools = {t.strip() for t in raw_tools.split(",") if t.strip()} or None
                 if tools:
                     tools.add("read_tool_result")
+                memory = meta.get("memory")
                 manifest = SubAgentManifest(
                     agent_type=agent_type,
                     description=description,
                     path=path,
                     tools=tools,
+                    memory=memory,
                 )
                 self._documents[agent_type] = SubAgentDocument(manifest=manifest, prompt=prompt.strip())
 
@@ -84,6 +87,7 @@ class SubAgentMgr:
             deps = self.deps,
             tools = document.manifest.tools,
             is_subagent = True,
+            memory = document.manifest.memory,
         )
         history = []
         return await agent.run(prompt, history)

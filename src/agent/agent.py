@@ -30,6 +30,7 @@ class AgentDeps(BaseModel):
     tools_mgr: Any = None  # ToolsMgr
     permission_mgr: Any = None  # PermissionManager
     config_mgr: Any = None  # ConfigManager
+    memory_mgr: Any = None  # MemoryMgr
 
 @dataclass
 class Agent:
@@ -48,6 +49,7 @@ class Agent:
     role_prompt: str | None = field(default=None)
     tools: set[str] | None = field(default=None)
     is_subagent: bool = field(default=False)
+    memory: str | None = field(default="project")
     _tools_schemas: list[ToolDict] = field(init=False)
     _todo_mgr: TodoManager = field(init=False, default_factory=TodoManager, repr=False)
     _compact_mgr: CompactMgr = field(init=False, repr=False)
