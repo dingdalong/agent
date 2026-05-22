@@ -73,13 +73,39 @@ class CompactDelta(Event):
 
 
 @dataclass
+class ToolCallStarted(Event):
+    """工具调用开始 — 默认可见。"""
+    tool_name: str = ""
+    tool_call_id: str = ""
+    detail: str = ""
+    caller_agent_type: str | None = None
+    caller_uuid: str | None = None
+    level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
+    type: Literal["tool_call_started"] = field(default="tool_call_started", init=False)
+
+
+@dataclass
+class ToolCallCompleted(Event):
+    """工具调用完成 — 默认可见。"""
+    tool_name: str = ""
+    tool_call_id: str = ""
+    status: Literal["success", "error"] = "success"
+    duration_seconds: float = 0.0
+    result_preview: str = ""
+    caller_agent_type: str | None = None
+    caller_uuid: str | None = None
+    level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
+    type: Literal["tool_call_completed"] = field(default="tool_call_completed", init=False)
+
+
+@dataclass
 class LLMCallStarted(Event):
     """LLM 调用开始时的 token 估算信息。"""
     model: str = ""
     estimated_input_tokens: int = 0
     message_count: int = 0
     tool_count: int = 0
-    level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
+    level: EventLevel = field(default=EventLevel.DETAIL, init=False)
     type: Literal["llm_call_started"] = field(default="llm_call_started", init=False)
 
 
@@ -95,7 +121,7 @@ class LLMCallCompleted(Event):
     duration_seconds: float | None = None
     output_tokens_per_second: float | None = None
     total_tokens_per_second: float | None = None
-    level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
+    level: EventLevel = field(default=EventLevel.DETAIL, init=False)
     type: Literal["llm_call_completed"] = field(default="llm_call_completed", init=False)
 
 
@@ -146,6 +172,7 @@ class InputRequested(UserInputRequest):
 AgentEvent = Union[
     ErrorOccurred, InputRequested, OutputRequested, InterruptRequested,
     PermissionNotice, PermissionRequested,
+    CompactDelta, ToolCallCompleted, ToolCallStarted,
     LLMCallCompleted, LLMCallStarted,
     ResponseDelta, ThinkingDelta,
 ]

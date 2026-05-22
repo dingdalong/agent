@@ -1,5 +1,11 @@
 import logging
+import time
 from typing import Any, Dict
+from uuid import UUID
+
+from pydantic import ValidationError
+
+from src.events.types import ToolCallCompleted, ToolCallStarted
 from src.tools import ToolDict, ToolEntry
 
 logger = logging.getLogger(__name__)
@@ -69,24 +75,120 @@ class ToolsMgr:
         self._result_store[tool_call_id] = pages
         return "工具调用结果过长，已被自动分页。可调用read_tool_result读取后续内容。\n" + self.get_page(tool_call_id, 1)
 
+    def _tool_detail(self, tool: ToolEntry, arguments: dict[str, Any]) -> str:
+        tips = tool.permission.tips if tool.permission else None
+        if not tips:
+            return tool.description
+        try:
+            values = {**arguments, **tool.model(**arguments).model_dump()}
+        except ValidationError:
+            values = arguments
+        try:
+            return tips.format(**values)
+        except (AttributeError, IndexError, KeyError, ValueError):
+            return tips
+
+    def _result_status(self, result: str) -> str:
+        error_prefixes = (
+            "错误：",
+            "参数验证失败:",
+            "工具执行出错:",
+            "权限拒绝：",
+        )
+        return "error" if result.startswith(error_prefixes) else "success"
+
+    def _result_preview(self, result: str, limit: int = 160) -> str:
+        preview = " ".join(result.split())
+        if len(preview) <= limit:
+            return preview
+        return preview[: limit - 3] + "..."
+
+    async def _emit_tool_started(
+        self,
+        deps: Any,
+        context: dict[str, Any],
+        tool: ToolEntry,
+        arguments: dict[str, Any],
+        tool_call_id: str,
+    ) -> None:
+        event_bus = getattr(deps, "event_bus", None) if deps is not None else None
+        if event_bus is None:
+            return
+        agent = context.get("agent")
+        await event_bus.emit(ToolCallStarted(
+            timestamp=time.time(),
+            source="tools",
+            tool_name=tool.name,
+            tool_call_id=tool_call_id,
+            detail=self._tool_detail(tool, arguments),
+            caller_agent_type=getattr(agent, "agent_type", None),
+            caller_uuid=self._format_uuid(getattr(agent, "uuid", None)),
+        ))
+
+    async def _emit_tool_completed(
+        self,
+        deps: Any,
+        context: dict[str, Any],
+        tool: ToolEntry,
+        tool_call_id: str,
+        status: str,
+        duration_seconds: float,
+        result: str,
+    ) -> None:
+        event_bus = getattr(deps, "event_bus", None) if deps is not None else None
+        if event_bus is None:
+            return
+        agent = context.get("agent")
+        await event_bus.emit(ToolCallCompleted(
+            timestamp=time.time(),
+            source="tools",
+            tool_name=tool.name,
+            tool_call_id=tool_call_id,
+            status=status,
+            duration_seconds=duration_seconds,
+            result_preview=self._result_preview(result),
+            caller_agent_type=getattr(agent, "agent_type", None),
+            caller_uuid=self._format_uuid(getattr(agent, "uuid", None)),
+        ))
+
+    def _format_uuid(self, value: Any) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, UUID):
+            return str(value)
+        return str(value)
+
     async def execute(self, tool_name: str, arguments: Dict[str, Any], context: Dict[str, Any] | None = None) -> str:
         """异步执行工具，返回结果字符串（错误信息也以字符串返回）"""
         if tool_name not in self._tools:
             return f"错误：未知工具 '{tool_name}'"
 
         tool = self._tools[tool_name]
-        deps = (context or {}).get("deps")
+        context = context or {}
+        deps = context.get("deps")
         permission_mgr = getattr(deps, "permission_mgr", None) if deps is not None else None
         if permission_mgr is not None:
             permission, reason = await permission_mgr.authorize(tool, arguments, deps)
             if permission == "deny":
                 return f"权限拒绝：{reason}"
 
-        result = await tool(context or {}, **arguments)
+        tool_call_id = context.get("current_tool_call_id") or ""
+        await self._emit_tool_started(deps, context, tool, arguments, tool_call_id)
+        started_at = time.time()
+        result = await tool(context, **arguments)
+        status = self._result_status(result)
+        await self._emit_tool_completed(
+            deps,
+            context,
+            tool,
+            tool_call_id,
+            status,
+            time.time() - started_at,
+            result,
+        )
         if tool.raw_output:
             return result
 
-        tool_call_id = (context or {}).get("current_tool_call_id")
         if not tool_call_id:
             return result
         if deps is None:

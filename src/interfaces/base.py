@@ -8,6 +8,7 @@ from collections.abc import Callable
 from contextlib import contextmanager
 
 from src.events.types import (
+    CompactDelta,
     Event,
     ErrorOccurred,
     InputRequested,
@@ -18,6 +19,8 @@ from src.events.types import (
     PermissionRequested,
     ResponseDelta,
     ThinkingDelta,
+    ToolCallCompleted,
+    ToolCallStarted,
     UserInputRequest,
 )
 
@@ -139,6 +142,12 @@ class UserInterface(ABC):
                     event,
                     lambda: self._read_permission(tool_name, detail),
                 )
+            case CompactDelta():
+                await self.on_compact_delta(event)
+            case ToolCallStarted():
+                await self.on_tool_call_started(event)
+            case ToolCallCompleted():
+                await self.on_tool_call_completed(event)
             case LLMCallStarted():
                 await self.on_llm_call_started(event)
             case LLMCallCompleted():
@@ -169,6 +178,15 @@ class UserInterface(ABC):
         pass
 
     async def on_permission_notice(self, event: PermissionNotice) -> None:
+        pass
+
+    async def on_compact_delta(self, event: CompactDelta) -> None:
+        pass
+
+    async def on_tool_call_started(self, event: ToolCallStarted) -> None:
+        pass
+
+    async def on_tool_call_completed(self, event: ToolCallCompleted) -> None:
         pass
 
     async def on_llm_call_started(self, event: LLMCallStarted) -> None:

@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from src.agent import Agent, AgentDeps
 from src.events import NoEventSubscribers
@@ -21,7 +22,7 @@ class AgentApp:
             consumer_task = asyncio.create_task(self._consume_events())
             await asyncio.sleep(0)
 
-            await self.deps.event_bus.request_output("Agent 已启动，输入 'exit' 退出。\n")
+            await self.deps.event_bus.request_output(self._startup_banner())
             agent = Agent(
                 agent_type = "总控",
                 description = "入口",
@@ -134,3 +135,12 @@ class AgentApp:
 
     async def shutdown(self):
         pass
+
+    def _startup_banner(self) -> str:
+        model = getattr(getattr(self.deps, "llm", None), "model", "unknown")
+        return (
+            "Agent workbench ready\n"
+            f"model: {model}\n"
+            f"workdir: {Path.cwd()}\n"
+            "Enter submits · Ctrl+J newline · Ctrl+C interrupts · exit/quit to leave\n"
+        )

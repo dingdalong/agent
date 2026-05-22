@@ -17,12 +17,15 @@ from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.styles import Style
 
 from src.events.types import (
+    CompactDelta,
     ErrorOccurred,
     LLMCallCompleted,
     LLMCallStarted,
     PermissionNotice,
     ResponseDelta,
     ThinkingDelta,
+    ToolCallCompleted,
+    ToolCallStarted,
 )
 from src.interfaces.base import UserInterface
 from src.interfaces.markdown_renderer import MarkdownStreamRenderer
@@ -36,12 +39,13 @@ class CLIInterface(UserInterface):
         self._resume_interrupt_reader: Callable[[], None] | None = None
         self._interrupt_watch_depth = 0
         self._style = Style.from_dict({
-            "agent.response": "ansicyan",
-            "agent.thinking": "ansimagenta",
+            "agent.response": "",
+            "agent.thinking": "ansibrightblack",
             "agent.error": "ansired",
             "agent.muted": "ansibrightblack",
             "agent.permission": "ansiyellow",
             "agent.success": "ansigreen",
+            "agent.tool": "ansibrightblack",
         })
         self._session: PromptSession[str] = PromptSession(
             key_bindings=self._build_input_key_bindings(),
@@ -165,7 +169,8 @@ class CLIInterface(UserInterface):
             "\n<agent.permission>工具请求权限</agent.permission>\n"
             f"  工具: {self._escape_html(tool_name)}\n"
             f"  内容: {self._escape_html(detail)}\n"
-            "  [y] 允许一次   [n] 拒绝   [a] 始终允许\n"
+            "  输入 y/n/a 后按 Enter 确认\n"
+            "  [y] 允许一次   [n] 拒绝   [a] 始终允许并保存\n"
         ))
         session: PromptSession[str] = PromptSession(
             key_bindings=self._build_permission_key_bindings(),
@@ -253,11 +258,40 @@ class CLIInterface(UserInterface):
 
     async def on_permission_notice(self, event: PermissionNotice) -> None:
         if event.status == "allow":
-            await self._write(f"[执行工具]{event.detail}\n")
+            return
         elif event.detail:
-            await self._write(f"[拒绝执行]{event.detail}\n")
+            await self._write(f"[deny] {event.detail}\n")
         else:
-            await self._write(f"[拒绝执行工具]{event.tool_name}\n")
+            await self._write(f"[deny] {event.tool_name}\n")
+
+    async def on_compact_delta(self, event: CompactDelta) -> None:
+        detail = event.content.strip() or "context"
+        self._print(HTML(
+            f"<agent.muted>[compact] {self._escape_html(detail)}</agent.muted>"
+        ))
+
+    async def on_tool_call_started(self, event: ToolCallStarted) -> None:
+        agent = self._agent_label(event.caller_agent_type, event.caller_uuid)
+        detail = event.detail.strip()
+        pieces = ["[tool]"]
+        if agent:
+            pieces.append(agent)
+        pieces.append(event.tool_name)
+        if detail:
+            pieces.append(detail)
+        self._print(HTML(
+            f"<agent.tool>{self._escape_html(' '.join(pieces))}</agent.tool>"
+        ))
+
+    async def on_tool_call_completed(self, event: ToolCallCompleted) -> None:
+        label = "done" if event.status == "success" else "error"
+        style = "agent.success" if event.status == "success" else "agent.error"
+        line = f"[{label}] {event.tool_name} {event.duration_seconds:.2f}s"
+        if event.status != "success" and event.result_preview:
+            line += f" {event.result_preview}"
+        self._print(HTML(
+            f"<{style}>{self._escape_html(line)}</{style}>"
+        ))
 
     async def on_llm_call_started(self, event: LLMCallStarted) -> None:
         self._print(
@@ -283,14 +317,21 @@ class CLIInterface(UserInterface):
         )
 
     def _response_prefix(self, event: ResponseDelta) -> str:
-        if event.caller_agent_type and event.caller_uuid:
-            return f"助手(agent_type={event.caller_agent_type}, uuid={event.caller_uuid})："
+        agent = self._agent_label(event.caller_agent_type, event.caller_uuid)
+        if agent:
+            return f"{agent}："
         return "助手："
 
     def _thinking_prefix(self, event: ThinkingDelta) -> str:
-        if event.caller_agent_type and event.caller_uuid:
-            return f"思考(agent_type={event.caller_agent_type}, uuid={event.caller_uuid}) "
+        agent = self._agent_label(event.caller_agent_type, event.caller_uuid)
+        if agent:
+            return f"思考 {agent} "
         return "思考 "
+
+    def _agent_label(self, agent_type: str | None, agent_uuid: str | None) -> str:
+        if not agent_type:
+            return ""
+        return agent_type
 
     def _print(self, *values, **kwargs) -> None:
         print_formatted_text(*values, style=self._style, **kwargs)
@@ -322,15 +363,6 @@ class CLIInterface(UserInterface):
 
     def _build_permission_key_bindings(self) -> KeyBindings:
         bindings = KeyBindings()
-
-        def choose(value: str) -> Callable:
-            def handler(event) -> None:
-                event.app.exit(result=value)
-            return handler
-
-        bindings.add("y")(choose("yes"))
-        bindings.add("n")(choose("deny"))
-        bindings.add("a")(choose("always"))
         bindings.add("c-c")(lambda event: event.app.exit(exception=KeyboardInterrupt))
         return bindings
 
