@@ -120,8 +120,6 @@ class MemoryMgr:
             path=path,
         )
         self._write_entry(entry)
-        self.entries[entry.title] = entry
-        self.entries = self._sort_entries(self.entries)
         return title
 
     def read(self, title: str) -> str:
