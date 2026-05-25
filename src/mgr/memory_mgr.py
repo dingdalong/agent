@@ -34,14 +34,14 @@ class MemoryMgr:
         self.workdir = Path(self.workdir)
         self.memory_dir = self.workdir / ".agent" / "memory"
         self.entries: dict[str, MemoryEntry] = {}
-        self.load_all()
+        self._load_all()
 
-    def load_all(self) -> dict[str, MemoryEntry]:
-        entries: dict[str, MemoryEntry] = {}
+    def _load_all(self) -> None:
         if not self.memory_dir.exists():
             self.entries = {}
-            return self.entries
+            return
 
+        entries: dict[str, MemoryEntry] = {}
         for path in sorted(self.memory_dir.glob("*.md")):
             entry = self._load_entry(path)
             if entry is None:
@@ -49,7 +49,9 @@ class MemoryMgr:
             entries[entry.title] = entry
 
         self.entries = self._sort_entries(entries)
-        return self.entries
+
+    def reload(self) -> None:
+        self._load_all()
 
     def build_prompt(self) -> str:
         entries = list(self.entries.values())

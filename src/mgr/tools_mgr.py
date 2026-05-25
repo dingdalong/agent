@@ -35,10 +35,11 @@ class ToolsMgr:
     def list_entries(self) -> list[ToolEntry]:
         return list(self._tools.values())
 
-    def get_schemas(self, tool_names: list[str] | None = None) -> list[ToolDict]:
-        tools = self._tools.values() if tool_names is None else [
-            self._tools[name] for name in tool_names if name in self._tools
-        ]
+    def get_schemas(self, tool_names: set[str] | list[str] | None = None) -> list[ToolDict]:
+        if tool_names is None:
+            tools = list(self._tools.values())
+        else:
+            tools = [self._tools[name] for name in sorted(tool_names) if name in self._tools]
         return [
             {
                 "type": "function",

@@ -49,6 +49,9 @@ class PermissionManager:
         permission_config = config_mgr.get_user_setting("permission") if config_mgr is not None else {}
         self._load_config_rules(permission_config, rules=rules)
 
+    def reload(self) -> None:
+        self.session_allow.clear()
+
     def _validate_permission(self, permission: Any, field_name: str) -> None:
         if permission not in RULE_PERMISSIONS:
             raise ValueError(

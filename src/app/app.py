@@ -42,6 +42,22 @@ class AgentApp:
                 if user_input.strip().lower() in ("exit", "quit"):
                     break
 
+                if user_input.strip().lower() == "/clear":
+                    history.clear()
+                    for attr in ("memory_mgr", "tools_mgr", "permission_mgr",
+                                 "config_mgr", "hooks_mgr"):
+                        mgr = getattr(self.deps, attr, None)
+                        if mgr is not None and hasattr(mgr, "reload"):
+                            mgr.reload()
+                    self.deps.session_context.clear()
+                    agent = Agent(
+                        agent_type="总控",
+                        description="入口",
+                        deps=self.deps,
+                    )
+                    await self.deps.event_bus.request_output("上下文已清理，所有组件已重载。\n")
+                    continue
+
                 interrupted = await self._run_agent_turn(agent, user_input, history)
                 if interrupted:
                     pending_input = user_input

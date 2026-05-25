@@ -18,9 +18,11 @@ class StructOutputConfig:
     schema_desc: str = "结构化输出"
 
 class AgentDeps(BaseModel):
-    """外部依赖
-    所有字段声明为 Any 以避免循环导入
-    组装时通过 isinstance 断言保证。
+    """外部依赖（进程级全局对象）。
+
+    所有字段声明为 Any 以避免循环导入，组装时通过 isinstance 断言保证。
+    /clear 时通过 hasattr(mgr, "reload") 判断并调用，
+    仅在管理器有运行时可变状态需要重置时才实现 reload() 方法。
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)

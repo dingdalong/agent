@@ -5,7 +5,6 @@ import datetime
 import os
 from pathlib import Path
 from dataclasses import dataclass, field
-from collections import deque
 
 if TYPE_CHECKING:
     from src.agent import Agent
@@ -16,13 +15,7 @@ class PromptMgr:
     model: str
     workdir: Path
     role_prompt: str | None = None
-
-    """
-    从独立的部分组装系统提示。
-    这里的设计原则是清晰性：
-    每个部分有单一来源、单一职责。
-    这使得提示更易于推理、更易于测试，也更易于随着智能体能力的增长而演进。
-    """
+    _static_prefix: str | None = field(init=False, default=None)
 
     def _build_core(self) -> str:
         return (
@@ -61,7 +54,7 @@ class PromptMgr:
             "# 可用技能\n" + describe +
             "\n\n## 技能使用流程\n"
             "技能用于加载专门流程或知识。\n"
-            "1. 当任务明显匹配某个技能时，使用 `load_skill` 加载它。\n"
+            "1. 任何任务（哪怕只有 1% 可能性匹配某个技能）都必须先调用load_skill加载对应技能，再执行其他操作。\n"
             "2. 如果已加载技能要求委派，委派 prompt 必须同时满足该技能指令和本文的运行决策顺序。"
             "4. 如果技能要求使用 prompt 模板委派子智能体，按“上下文和工具调用约束”读取当前阶段所需模板，"
             "组装完整 prompt 后使用 `task_delegator` 委派。"
@@ -103,12 +96,6 @@ class PromptMgr:
         return f"# 角色提示词：\n{self.role_prompt}"
 
     def _build_agent_md(self) -> str:
-        """
-        按优先级顺序加载 AGENT.md 文件（全部包含）：
-        ~/.Agent/AGENT.md（用户级全局指令）
-        <项目根目录>/AGENT.md（项目级指令）
-        <当前子目录>/AGENT.md（目录专属指令）
-        """
         sources = []
 
         user_agent = Path.home() / ".Agent" / "AGENT.md"
@@ -135,18 +122,13 @@ class PromptMgr:
             parts.append(content.strip())
         return "\n\n".join(parts)
 
-    def _build_dynamic_context(self) -> str:
+    def _build_environment(self) -> str:
         lines = [
             f"运行平台：`{os.uname().sysname}`",
             f"llm模型：`{self.model}`",
             f"工作目录：`{self.workdir}`",
         ]
-        ctx = "# 动态上下文\n" + "\n".join(lines)
-        memory_context = self._build_memory_context()
-        if memory_context:
-            ctx += "\n\n" + memory_context
-        ctx += f"\n\n当前时间：`{datetime.date.today().isoformat()}`"
-        return ctx
+        return "# 运行环境\n" + "\n".join(lines)
 
     def _build_memory_context(self) -> str:
         if getattr(self.agent, "memory", "project") != "project":
@@ -156,24 +138,13 @@ class PromptMgr:
             return ""
         return memory_mgr.build_prompt()
 
-    def build(self) -> list:
-        """
-        将所有部分组装成完整的系统提示。
-        静态部分（1-5）与动态部分（6）通过 === 动态边界标记 === 标记分隔。
-        在实际的缓存补全（CC）中，静态前缀会在多轮对话中被缓存，以节省提示词令牌。
-        """
+
+    def _build_static_prefix(self) -> str:
         sections = []
-        core = self._build_core()
-        if core:
-            sections.append(core)
 
-        truthfulness_constraints = self._build_truthfulness_constraints()
-        if truthfulness_constraints:
-            sections.append(truthfulness_constraints)
-
-        context_and_tool_constraints = self._build_context_and_tool_constraints()
-        if context_and_tool_constraints:
-            sections.append(context_and_tool_constraints)
+        sections.append(self._build_core())
+        sections.append(self._build_truthfulness_constraints())
+        sections.append(self._build_context_and_tool_constraints())
 
         if not self.agent.is_subagent:
             decision_order = self._build_controller_decision_order()
@@ -195,9 +166,22 @@ class PromptMgr:
         if agent_md:
             sections.append(agent_md)
 
-        sections.append("=== 动态边界标记 ===")
+        sections.append(self._build_environment())
+
+        memory_context = self._build_memory_context()
+        if memory_context:
+            sections.append(memory_context)
+
+        return "\n\n".join(s for s in sections if s)
+
+    def _build_dynamic_context(self) -> str:
+        return f"当前时间：`{datetime.date.today().isoformat()}`"
+
+    def build(self) -> list:
+        if self._static_prefix is None:
+            self._static_prefix = self._build_static_prefix()
+        parts = [self._static_prefix, "=== 动态边界标记 ==="]
         dynamic = self._build_dynamic_context()
         if dynamic:
-            sections.append(dynamic)
-
-        return [{"role": "system", "content": "\n\n".join(sections)}]
+            parts.append(dynamic)
+        return [{"role": "system", "content": "\n\n".join(parts)}]
