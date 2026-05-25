@@ -16,7 +16,6 @@ class PromptMgr:
     model: str
     workdir: Path
     role_prompt: str | None = None
-    skills: deque[str] = field(default_factory=lambda: deque(maxlen=2))
 
     """
     从独立的部分组装系统提示。
@@ -24,14 +23,6 @@ class PromptMgr:
     每个部分有单一来源、单一职责。
     这使得提示更易于推理、更易于测试，也更易于随着智能体能力的增长而演进。
     """
-
-    def load_skill(self, name) -> str:
-        if not self.agent._skill_mgr.check_skill(name):
-            describe = self.agent._skill_mgr.describe() or "无"
-            return f"错误: 不存在的技能：'{name}'。可用技能列表：\n" + "\n".join(describe)
-        else:
-            self.skills.append(name)
-            return f"成功加载技能：'{name}'"
 
     def _build_core(self) -> str:
         return (
@@ -145,18 +136,12 @@ class PromptMgr:
         return "\n\n".join(parts)
 
     def _build_dynamic_context(self) -> str:
-        loaded_skills = "\n\n".join(
-            self.agent._skill_mgr.load_full_text(name)
-            for name in self.skills
-        )
         lines = [
             f"运行平台：`{os.uname().sysname}`",
             f"llm模型：`{self.model}`",
             f"工作目录：`{self.workdir}`",
         ]
         ctx = "# 动态上下文\n" + "\n".join(lines)
-        if loaded_skills:
-            ctx += "\n\n# 已加载技能\n" + loaded_skills
         memory_context = self._build_memory_context()
         if memory_context:
             ctx += "\n\n" + memory_context

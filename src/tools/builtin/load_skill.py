@@ -13,4 +13,4 @@ class LoadSkill(BaseModel):
 @tool(model=LoadSkill, description="将指定技能的完整内容加载到当前上下文中。",
       permission=ToolPermission(rules=[PermissionRule(permission="allow")]))
 async def load_skill(name: str, agent: Agent) -> str:
-    return agent._prompt_mgr.load_skill(name)
+    return agent._skill_mgr.load_full_text(name)
