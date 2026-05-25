@@ -87,7 +87,6 @@ class Agent:
         max_compact_streak = 3
         while True:
             prompt = self._prompt_mgr.build()
-            messages[:] = await self._compact_mgr.micro_compact(messages)
             if self._compact_mgr.is_need_compact(messages, prompt, self._tools_schemas):
                 compact_streak += 1
                 if compact_streak > max_compact_streak:

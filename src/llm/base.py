@@ -86,49 +86,6 @@ class LLMProvider(ABC):
             pages.append(page)
         return pages or [""]
 
-    def micro_compact(self, messages: list[dict], keep_recent: int) -> list[dict]:
-        tool_groups: list[tuple[int, list[dict]]] = []
-        grouped_tool_indices: set[int] = set()
-
-        for i, msg in enumerate(messages):
-            if msg.get("role") != "assistant" or not msg.get("tool_calls"):
-                continue
-
-            call_ids = {
-                call.get("id")
-                for call in msg.get("tool_calls", [])
-                if isinstance(call, dict) and call.get("id")
-            }
-            if not call_ids:
-                continue
-
-            group: list[dict] = []
-            for j in range(i + 1, len(messages)):
-                tool_msg = messages[j]
-                if tool_msg.get("role") != "tool":
-                    break
-                if tool_msg.get("tool_call_id") not in call_ids:
-                    break
-                group.append(tool_msg)
-                grouped_tool_indices.add(j)
-
-            if group:
-                tool_groups.append((i, group))
-
-        for i, msg in enumerate(messages):
-            if msg.get("role") == "tool" and i not in grouped_tool_indices:
-                tool_groups.append((i, [msg]))
-
-        if len(tool_groups) <= keep_recent:
-            return messages
-        tool_groups.sort(key=lambda group: group[0])
-        for _, group in tool_groups[:-keep_recent]:
-            for msg in group:
-                content = msg.get("content", "")
-                if isinstance(content, str) and len(content) > 120:
-                    msg["content"] = "[Earlier tool result compacted. Re-run the tool if you need full detail.]"
-        return messages
-
     def _exception_status_code(self, exc: BaseException) -> int | None:
         status_code = getattr(exc, "status_code", None)
         if isinstance(status_code, int):

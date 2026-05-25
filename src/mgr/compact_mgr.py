@@ -26,7 +26,6 @@ class CompactMgr:
         llm_provider_cfg = self.deps.config_mgr.get_config(f"llm_provider.{llm_provider_name}")
         context_limit = llm_provider_cfg["context_limit"]
         self.auto_compact_size = context_limit * compact_cfg["auto_compact_rate"]
-        self.keep_recent_tool_results = compact_cfg["keep_recent_tool_results"]
         self.keep_recent_user_turns = compact_cfg.get("keep_recent_user_turns", 3)
         self.recent_messages_token_limit = int(
             context_limit * compact_cfg.get("keep_recent_messages_token_rate", 0.25)
@@ -38,9 +37,6 @@ class CompactMgr:
             return True
         else:
             return False
-
-    async def micro_compact(self, messages: list) -> list:
-        return self.deps.llm.micro_compact(messages, self.keep_recent_tool_results)
 
     async def track_recent_file(self, path: str) -> None:
         if path in self.recent_files:
