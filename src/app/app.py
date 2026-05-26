@@ -192,7 +192,7 @@ class AgentApp:
         self.deps.session_context.extend(result.additional_context)
 
     def _startup_banner(self) -> str:
-        model = getattr(getattr(self.deps, "llm", None), "model", "unknown")
+        model = getattr(self.deps.llm_mgr.get(), "model", "unknown") if self.deps.llm_mgr else "unknown"
         return (
             "Agent workbench ready\n"
             f"model: {model}\n"

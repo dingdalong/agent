@@ -16,6 +16,7 @@ class SubAgentManifest:
     path: Path
     tools: set[str] | None = None
     memory: str | None = None
+    model: str | None = None
 
 @dataclass
 class SubAgentDocument:
@@ -48,12 +49,14 @@ class SubAgentMgr:
                 if tools:
                     tools.add("read_tool_result")
                 memory = meta.get("memory")
+                model = meta.get("model")
                 manifest = SubAgentManifest(
                     agent_type=agent_type,
                     description=description,
                     path=path,
                     tools=tools,
                     memory=memory,
+                    model=model,
                 )
                 self._documents[agent_type] = SubAgentDocument(manifest=manifest, prompt=prompt.strip())
 
@@ -88,6 +91,7 @@ class SubAgentMgr:
             tools = document.manifest.tools,
             is_subagent = True,
             memory = document.manifest.memory,
+            model = document.manifest.model,
         )
 
         hooks_mgr = self.deps.hooks_mgr

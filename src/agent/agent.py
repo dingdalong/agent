@@ -26,7 +26,6 @@ class AgentDeps(BaseModel):
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
-    llm: Any = None  # LLMProvider
     llm_mgr: Any = None  # LLMMgr
     ui: Any = None  # UserInterface
     event_bus: Any = None  # EventBus
@@ -56,6 +55,7 @@ class Agent:
     tools: set[str] | None = field(default=None)
     is_subagent: bool = field(default=False)
     memory: str | None = field(default="project")
+    model: str | None = field(default=None)
     _tools_schemas: list[ToolDict] = field(init=False)
     _todo_mgr: TodoManager = field(init=False, default_factory=TodoManager, repr=False)
     _compact_mgr: CompactMgr = field(init=False, repr=False)
@@ -68,15 +68,16 @@ class Agent:
 
     def __post_init__(self):
         self.uuid = uuid.uuid4()
+        self.llm = self.deps.llm_mgr.get(self.model)
         self._tools_schemas = self.deps.tools_mgr.get_schemas(self.tools)
-        self._compact_mgr = CompactMgr(self.deps)
-        self._recovery_mgr = RecoveryMgr(self.deps)
+        self._compact_mgr = CompactMgr(self.deps, llm=self.llm)
+        self._recovery_mgr = RecoveryMgr(self.deps, llm=self.llm)
         workspace = Path.cwd() / "workspace"
         self._file_mgr = FileMgr(workspace, self.deps)
         self._skill_mgr = SkillMgr(workspace)
         self._subagent_mgr = SubAgentMgr(workspace, self.deps)
 
-        self._prompt_mgr = PromptMgr(agent = self, model = self.deps.llm.model, workdir = workspace, role_prompt = self.role_prompt)
+        self._prompt_mgr = PromptMgr(agent = self, model = self.llm.model, workdir = workspace, role_prompt = self.role_prompt)
 
 
     async def run(
@@ -118,7 +119,7 @@ class Agent:
             else:
                 compact_streak = 0
 
-            messages[:] = self.deps.llm.normalize_messages(messages)
+            messages[:] = self.llm.normalize_messages(messages)
             response = await self._recovery_mgr.chat_with_recovery(
                 prompt=prompt,
                 messages=messages,
@@ -203,6 +204,6 @@ class Agent:
                 messages[:] = await self._compact_mgr.compact_history(messages, focus=compact_focus)
 
         if not has_tool_calls:
-            self.deps.llm.clear_reasoning_content(messages[round_start_idx:])
+            self.llm.clear_reasoning_content(messages[round_start_idx:])
 
         return final_text

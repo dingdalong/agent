@@ -31,9 +31,7 @@ async def create_app() -> AgentApp:
 
     llm_mgr = LLMMgr(config_mgr=config_mgr, event_bus=event_bus)
     await llm_mgr.load_models()
-    llm = llm_mgr.get()
     deps = AgentDeps(
-        llm = llm,
         llm_mgr = llm_mgr,
         ui = ui,
         event_bus = event_bus,

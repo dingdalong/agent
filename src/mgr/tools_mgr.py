@@ -1,12 +1,15 @@
 import logging
 import time
-from typing import Any, Dict
+from typing import Any, Dict, TYPE_CHECKING
 from uuid import UUID
 
 from pydantic import ValidationError
 
 from src.events.types import ToolCallCompleted, ToolCallStarted
 from src.tools import ToolDict, ToolEntry
+
+if TYPE_CHECKING:
+    from src.llm.base import LLMProvider
 
 logger = logging.getLogger(__name__)
 
@@ -69,10 +72,10 @@ class ToolsMgr:
             parts.append(f"传入 tool_call_id={tool_call_id}, page={page + 1} 继续读取")
         return "\n".join(parts)
 
-    def _truncate(self, result: str, tool_call_id: str, deps) -> str:
-        if deps.llm.estimate_tokens([{"role": "tool", "content": result}]) <= deps.llm.page_token_budget:
+    def _truncate(self, result: str, tool_call_id: str, llm: LLMProvider) -> str:
+        if llm.estimate_tokens([{"role": "tool", "content": result}]) <= llm.page_token_budget:
             return result
-        pages = deps.llm.split_page(result)
+        pages = llm.split_page(result)
         self._result_store[tool_call_id] = pages
         return "工具调用结果过长，已被自动分页。可调用read_tool_result读取后续内容。\n" + self.get_page(tool_call_id, 1)
 
@@ -166,6 +169,7 @@ class ToolsMgr:
         tool = self._tools[tool_name]
         context = context or {}
         deps = context.get("deps")
+        agent = context.get("agent")
         tool_call_id = context.get("current_tool_call_id") or ""
         hooks_mgr = getattr(deps, "hooks_mgr", None) if deps is not None else None
         agent = context.get("agent")
@@ -248,7 +252,8 @@ class ToolsMgr:
 
         if not tool_call_id:
             return result
-        if deps is None:
+        llm = getattr(agent, "llm", None) if agent is not None else None
+        if llm is None:
             return result
 
-        return self._truncate(result, tool_call_id, deps)
+        return self._truncate(result, tool_call_id, llm)

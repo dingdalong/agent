@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from src.llm.base import LLMResponse
+from src.llm.base import LLMProvider, LLMResponse
 
 if TYPE_CHECKING:
     from src.agent import AgentDeps
@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 @dataclass
 class RecoveryMgr:
     deps: AgentDeps
+    llm: LLMProvider = None
     max_length_recovery_attempts: int = 3
     continuation_message: str = (
         "Output limit hit. Continue directly from where you stopped -- "
@@ -42,9 +43,9 @@ class RecoveryMgr:
         caller_uuid: str | None = None,
     ) -> LLMResponse:
         messages.append({"role": "user", "content": self.context_limit_summary_message})
-        messages[:] = self.deps.llm.normalize_messages(messages)
+        messages[:] = self.llm.normalize_messages(messages)
         try:
-            return await self.deps.llm.chat(
+            return await self.llm.chat(
                 prompt=prompt,
                 messages=messages,
                 tools=[],
@@ -52,7 +53,7 @@ class RecoveryMgr:
                 caller_uuid=caller_uuid,
             )
         except Exception as exc:
-            if self.deps.llm.is_context_too_long_error(exc):
+            if self.llm.is_context_too_long_error(exc):
                 return self.context_limit_exhausted_response()
             raise
 
@@ -69,7 +70,7 @@ class RecoveryMgr:
 
         while True:
             try:
-                response = await self.deps.llm.chat(
+                response = await self.llm.chat(
                     prompt=prompt,
                     messages=messages,
                     tools=tools,
@@ -77,7 +78,7 @@ class RecoveryMgr:
                     caller_uuid=caller_uuid,
                 )
             except Exception as exc:
-                if self.deps.llm.is_context_too_long_error(exc):
+                if self.llm.is_context_too_long_error(exc):
                     return self.context_limit_exhausted_response()
                 raise
 
@@ -96,7 +97,7 @@ class RecoveryMgr:
 
             length_recoveries += 1
             messages.append({"role": "user", "content": self.continuation_message})
-            messages[:] = self.deps.llm.normalize_messages(messages)
+            messages[:] = self.llm.normalize_messages(messages)
 
     async def execute_tool_with_recovery(
         self,

@@ -5,6 +5,8 @@ import time
 from pathlib import Path
 from dataclasses import dataclass, field
 
+from src.llm.base import LLMProvider
+
 if TYPE_CHECKING:
     from src.agent import AgentDeps
 
@@ -14,6 +16,7 @@ TRANSCRIPT_DIR = WORKDIR / ".transcripts"
 @dataclass
 class CompactMgr:
     deps: AgentDeps = field(repr=False)
+    llm: LLMProvider = field(default=None, repr=False)
     recent_files: list[str] = field(init=False, default_factory=list)
     has_compacted: bool = False
     keep_recent_user_turns: int = field(init=False)
@@ -21,10 +24,7 @@ class CompactMgr:
 
     def __post_init__(self):
         compact_cfg = self.deps.config_mgr.get_config("compact")
-        default_llm_cfg = self.deps.config_mgr.get_config("llm.default")
-        llm_provider_name = default_llm_cfg["provider"]
-        llm_provider_cfg = self.deps.config_mgr.get_config(f"llm_provider.{llm_provider_name}")
-        context_limit = llm_provider_cfg["context_limit"]
+        context_limit = self.llm.context_limit
         self.auto_compact_size = context_limit * compact_cfg["auto_compact_rate"]
         self.keep_recent_user_turns = compact_cfg.get("keep_recent_user_turns", 3)
         self.recent_messages_token_limit = int(
@@ -32,7 +32,7 @@ class CompactMgr:
         )
 
     def is_need_compact(self, messages: list, prompt: list, tools: list | None = None) -> bool:
-        input_tokens = self.deps.llm.estimate_tokens(messages, prompt, tools)
+        input_tokens = self.llm.estimate_tokens(messages, prompt, tools)
         if input_tokens > self.auto_compact_size:
             return True
         else:
@@ -73,7 +73,7 @@ class CompactMgr:
         kept_tokens = 0
         for span in reversed(spans):
             start, end = span
-            span_tokens = self.deps.llm.estimate_tokens(messages[start:end])
+            span_tokens = self.llm.estimate_tokens(messages[start:end])
             if (
                 len(kept_spans) >= self.keep_recent_user_turns
                 and kept_tokens + span_tokens > self.recent_messages_token_limit
@@ -153,7 +153,7 @@ class CompactMgr:
             "下面是未压缩近期原文，仅用于判断哪些待压缩历史信息仍需保留：\n"
             f"<recent_raw_messages_reference>\n{recent_conversation}\n</recent_raw_messages_reference>"
         )
-        response = await self.deps.llm.chat(messages=[{"role": "user", "content": prompt}])
+        response = await self.llm.chat(messages=[{"role": "user", "content": prompt}])
         return response.content
 
     def build_compacted_context_prefix(

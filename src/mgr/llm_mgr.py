@@ -52,21 +52,33 @@ class LLMMgr:
             if models:
                 logger.info("从 %s 获取到 %d 个可用模型", provider_name, len(models))
 
-    def get(self, model: str | None = None) -> LLMProvider:
-        if model is None or model not in self._model_to_provider:
-            model = self.config_mgr.get_config("llm.default")["model"]
+    def resolve_model(self, model: str | None = None) -> str:
+        if model is None:
+            return self.config_mgr.get_config("llm.default")["model"]
+        if model in self._model_to_provider:
+            return model
+        candidates = [m for m in self._model_to_provider if model in m]
+        if len(candidates) == 1:
+            return candidates[0]
+        if len(candidates) > 1:
+            return min(candidates, key=len)
+        logger.warning("未找到匹配模型 %r，使用默认模型", model)
+        return self.config_mgr.get_config("llm.default")["model"]
 
-        cached = self._cache.get(model)
+    def get(self, model: str | None = None) -> LLMProvider:
+        resolved = self.resolve_model(model)
+
+        cached = self._cache.get(resolved)
         if cached is not None:
             return cached
 
-        provider_name = self._model_to_provider.get(model)
+        provider_name = self._model_to_provider.get(resolved)
         if provider_name is None:
             available = ", ".join(sorted(self._model_to_provider)) or "(none)"
-            raise ValueError(f"未知的模型: {model!r}，可用模型: {available}")
+            raise ValueError(f"未知的模型: {model!r} (resolved: {resolved!r})，可用模型: {available}")
 
-        instance = self._create_provider(provider_name, model)
-        self._cache[model] = instance
+        instance = self._create_provider(provider_name, resolved)
+        self._cache[resolved] = instance
         return instance
 
     def _create_provider(self, provider_name: str, model: str) -> LLMProvider:
