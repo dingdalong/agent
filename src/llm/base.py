@@ -5,7 +5,6 @@ from dataclasses import dataclass, field
 from typing import Optional
 import json
 import logging
-import re
 import asyncio
 import math
 import time
@@ -249,7 +248,7 @@ class LLMProvider(ABC):
             norm_msg: dict = {"role": role, "content": content}
 
             if role == "assistant" and has_tool_calls and allow_tool_calls:
-                tool_calls = self._normalize_tool_calls(msg.get("tool_calls"), idx)
+                tool_calls = self._normalize_tool_calls(msg.get("tool_calls"))
                 if tool_calls:
                     norm_msg["tool_calls"] = tool_calls
 
@@ -281,7 +280,7 @@ class LLMProvider(ABC):
             return str(content)
         return content
 
-    def _normalize_tool_calls(self, tool_calls, msg_index: int) -> list[dict] | None:
+    def _normalize_tool_calls(self, tool_calls) -> list[dict] | None:
         if not tool_calls or not isinstance(tool_calls, list):
             return None
         valid_calls = []

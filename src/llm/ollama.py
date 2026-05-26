@@ -1,7 +1,6 @@
 """Ollama LLM Provider — OpenAI 兼容接口。"""
 
 import logging
-import time
 from openai import AsyncOpenAI
 from src.llm.base import LLMProvider, LLMResponse
 from src.tools import ToolDict
