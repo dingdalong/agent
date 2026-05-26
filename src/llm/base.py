@@ -52,10 +52,10 @@ class LLMProvider(ABC):
     def clear_reasoning_content(self, message): ...
 
     @classmethod
-    async def list_models(cls, api_key: str, base_url: str) -> list[str]:
-        client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=10.0, max_retries=0)
+    async def list_models(cls, api_key: str, base_url: str, timeout: float = 3.0) -> list[str]:
+        client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=3.0, max_retries=0)
         try:
-            response = await client.models.list()
+            response = await asyncio.wait_for(client.models.list(), timeout=timeout)
             return [m.id for m in response.data]
         finally:
             await client.close()

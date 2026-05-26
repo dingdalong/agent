@@ -1,5 +1,6 @@
 """Anthropic LLM Provider。"""
 
+import asyncio
 import json
 import logging
 import time
@@ -16,16 +17,18 @@ class AnthropicProvider(LLMProvider):
     """Anthropic Provider (Messages API)"""
 
     @classmethod
-    async def list_models(cls, api_key: str, base_url: str) -> list[str]:
-        client = AsyncAnthropic(api_key=api_key, base_url=base_url, timeout=10.0, max_retries=0)
+    async def list_models(cls, api_key: str, base_url: str, timeout: float = 3.0) -> list[str]:
+        client = AsyncAnthropic(api_key=api_key, base_url=base_url, timeout=3.0, max_retries=0)
         try:
-            models = []
-            page = await client.models.list(limit=100)
-            models.extend(m.id for m in page.data)
-            while page.has_more:
-                page = await page.get_next_page()
+            async def _fetch() -> list[str]:
+                models = []
+                page = await client.models.list(limit=100)
                 models.extend(m.id for m in page.data)
-            return models
+                while page.has_more:
+                    page = await page.get_next_page()
+                    models.extend(m.id for m in page.data)
+                return models
+            return await asyncio.wait_for(_fetch(), timeout=timeout)
         finally:
             await client.close()
 

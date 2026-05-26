@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -34,7 +35,8 @@ class LLMMgr:
 
     async def load_models(self) -> None:
         providers_cfg: dict = self.config_mgr.get_config("llm_provider")
-        for provider_name, provider_cfg in providers_cfg.items():
+
+        async def _fetch_provider(provider_name: str, provider_cfg: dict) -> tuple[str, list[str]]:
             try:
                 ProviderClass = get_provider(provider_name)
                 models = await ProviderClass.list_models(
@@ -47,6 +49,13 @@ class LLMMgr:
                     logger.info("从 %s API 获取模型列表失败，使用配置中的模型列表", provider_name)
                 else:
                     logger.warning("获取 %s 模型列表失败: %s", provider_name, e)
+            return provider_name, models
+
+        results = await asyncio.gather(
+            *(_fetch_provider(name, cfg) for name, cfg in providers_cfg.items())
+        )
+
+        for provider_name, models in results:
             for model in models:
                 self._model_to_provider[model] = provider_name
             if models:
