@@ -10,7 +10,6 @@ from contextlib import contextmanager
 from src.events.types import (
     CompactDelta,
     Event,
-    ErrorOccurred,
     InputRequested,
     LLMCallCompleted,
     LLMCallStarted,
@@ -121,8 +120,6 @@ class UserInterface(ABC):
         match event:
             case OutputRequested(content=content):
                 await self._write(content)
-            case ErrorOccurred():
-                await self.on_error(event)
             case InputRequested(prompt=prompt, default=default):
                 next_prompt = prompt
                 next_default = default
@@ -172,9 +169,6 @@ class UserInterface(ABC):
         await self._write(content)
 
     async def on_unhandled_event(self, event: Event) -> None:
-        pass
-
-    async def on_error(self, event: ErrorOccurred) -> None:
         pass
 
     async def on_permission_notice(self, event: PermissionNotice) -> None:

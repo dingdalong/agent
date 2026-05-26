@@ -1,20 +1,21 @@
-import json, logging, time, uuid
+from __future__ import annotations
+
+import asyncio, json, logging, time, uuid
 from uuid import UUID
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any, Callable, TYPE_CHECKING
 from pydantic import BaseModel, ConfigDict
 from src.tools import ToolDict
 from src.events.types import AgentStateChanged, CompactDelta
 from src.agent.states import AgentState, RunContext
-from src.mgr import FileMgr, TodoManager, CompactMgr, PromptMgr, SkillMgr, SubAgentMgr
+from src.mgr import FileMgr, TodoManager, CompactMgr, CompactResult, PromptMgr, SkillMgr, SubAgentMgr
 
 logger = logging.getLogger(__name__)
 
 class AgentDeps(BaseModel):
     """外部依赖（进程级全局对象）。
 
-    所有字段声明为 Any 以避免循环导入，组装时通过 isinstance 断言保证。
     /clear 时通过 hasattr(mgr, "reload") 判断并调用，
     仅在管理器有运行时可变状态需要重置时才实现 reload() 方法。
     """
@@ -50,6 +51,7 @@ class Agent:
     is_subagent: bool = field(default=False)
     memory: str | None = field(default="project")
     model: str | None = field(default=None)
+    history: list[dict] = field(init=False, default_factory=list)
     _tools_schemas: list[ToolDict] = field(init=False)
     _todo_mgr: TodoManager = field(init=False, default_factory=TodoManager, repr=False)
     _compact_mgr: CompactMgr = field(init=False, repr=False)
@@ -63,7 +65,14 @@ class Agent:
         self.uuid = uuid.uuid4()
         self.llm = self.deps.llm_mgr.get(self.model)
         self._tools_schemas = self.deps.tools_mgr.get_schemas(self.tools)
-        self._compact_mgr = CompactMgr(self.deps, llm=self.llm)
+        compact_cfg = self.deps.config_mgr.get_config("compact")
+        context_limit = self.llm.context_limit
+        self._compact_mgr = CompactMgr(
+            llm=self.llm,
+            auto_compact_size=int(context_limit * compact_cfg["auto_compact_rate"]),
+            keep_recent_user_turns=compact_cfg.get("keep_recent_user_turns", 3),
+            recent_messages_token_limit=int(context_limit * compact_cfg.get("keep_recent_messages_token_rate", 0.25)),
+        )
         workspace = Path.cwd() / "workspace"
         self._file_mgr = FileMgr(workspace, self.deps)
         self._skill_mgr = SkillMgr(workspace)
@@ -82,21 +91,25 @@ class Agent:
             AgentState.CONTEXT_OVERFLOW: self._on_context_overflow,
         }
 
-    async def run(self, input: str, messages: list[dict]) -> str:
-        messages.append({"role": "user", "content": input})
+    async def run(self, input: str) -> str:
+        self.history.append({"role": "user", "content": input})
         ctx = RunContext(
-            messages=messages,
-            round_start_idx=len(messages),
+            messages=self.history,
+            round_start_idx=len(self.history),
         )
-        state = AgentState.CHECK_COMPACT
-        while state != AgentState.DONE:
-            prev = state
-            state = await self._handlers[state](ctx)
-            await self._emit_state_changed(prev, state)
+        try:
+            state = AgentState.CHECK_COMPACT
+            while state != AgentState.DONE:
+                prev = state
+                state = await self._handlers[state](ctx)
+                await self._emit_state_changed(prev, state)
 
-        if not ctx.has_tool_calls:
-            self.llm.clear_reasoning_content(messages[ctx.round_start_idx:])
-        return ctx.final_text
+            if not ctx.has_tool_calls:
+                self.llm.clear_reasoning_content(self.history[ctx.round_start_idx:])
+            return ctx.final_text
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            del self.history[ctx.round_start_idx:]
+            raise
 
     # ---- state handlers ----
 
@@ -117,7 +130,10 @@ class Agent:
             source=self.agent_type,
             content="auto compact",
         ))
-        ctx.messages[:] = await self._compact_mgr.compact_history(ctx.messages)
+        result = await self._compact_mgr.compact_history(ctx.messages)
+        ctx.messages[:] = result.messages
+        if result.transcript_path:
+            await self.deps.event_bus.request_output(f"[transcript saved: {result.transcript_path}]\n")
         return AgentState.LLM_CALL
 
     async def _on_llm_call(self, ctx: RunContext) -> AgentState:
@@ -197,7 +213,7 @@ class Agent:
             try:
                 result_text = str(await self.deps.tools_mgr.execute(
                     tool_name, args,
-                    {"current_tool_call_id": tool_call_id, "deps": self.deps, "agent": self},
+                    current_tool_call_id=tool_call_id, deps=self.deps, agent=self,
                 ))
             except Exception as exc:
                 result_text = f"错误：工具 '{tool_name}' 执行失败: {type(exc).__name__}: {exc}"
@@ -244,9 +260,12 @@ class Agent:
                 source=self.agent_type,
                 content="llm manual",
             ))
-            ctx.messages[:] = await self._compact_mgr.compact_history(
+            result = await self._compact_mgr.compact_history(
                 ctx.messages, focus=ctx.compact_focus,
             )
+            ctx.messages[:] = result.messages
+            if result.transcript_path:
+                await self.deps.event_bus.request_output(f"[transcript saved: {result.transcript_path}]\n")
 
         return AgentState.CHECK_COMPACT
 

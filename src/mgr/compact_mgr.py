@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import TYPE_CHECKING
+
 import json
 import time
 from pathlib import Path
@@ -7,29 +7,24 @@ from dataclasses import dataclass, field
 
 from src.llm.base import LLMProvider
 
-if TYPE_CHECKING:
-    from src.agent import AgentDeps
-
 WORKDIR = Path.cwd()
 TRANSCRIPT_DIR = WORKDIR / ".transcripts"
 
+
+@dataclass
+class CompactResult:
+    messages: list[dict]
+    transcript_path: Path | None = None
+
+
 @dataclass
 class CompactMgr:
-    deps: AgentDeps = field(repr=False)
-    llm: LLMProvider = field(default=None, repr=False)
+    llm: LLMProvider = field(repr=False)
+    auto_compact_size: int = 0.8
+    keep_recent_user_turns: int = 3
+    recent_messages_token_limit: int = 0.25
     recent_files: list[str] = field(init=False, default_factory=list)
     has_compacted: bool = False
-    keep_recent_user_turns: int = field(init=False)
-    recent_messages_token_limit: int = field(init=False)
-
-    def __post_init__(self):
-        compact_cfg = self.deps.config_mgr.get_config("compact")
-        context_limit = self.llm.context_limit
-        self.auto_compact_size = context_limit * compact_cfg["auto_compact_rate"]
-        self.keep_recent_user_turns = compact_cfg.get("keep_recent_user_turns", 3)
-        self.recent_messages_token_limit = int(
-            context_limit * compact_cfg.get("keep_recent_messages_token_rate", 0.25)
-        )
 
     def is_need_compact(self, messages: list, prompt: list, tools: list | None = None) -> bool:
         input_tokens = self.llm.estimate_tokens(messages, prompt, tools)
@@ -186,9 +181,8 @@ class CompactMgr:
             f"{recent_files_hint}"
         )
 
-    async def compact_history(self, messages: list, focus: str | None = None) -> list:
+    async def compact_history(self, messages: list, focus: str | None = None) -> CompactResult:
         transcript_path = await self.write_transcript(messages)
-        await self.deps.event_bus.request_output(f"[transcript saved: {transcript_path}]\n")
         preserved_messages, messages_to_summarize, recent_messages = self.split_history_for_compaction(messages)
         summary = await self.summarize_history(
             preserved_messages=preserved_messages,
@@ -202,7 +196,10 @@ class CompactMgr:
             recent_files_hint = f"\n\n如有需要，可重新打开这些近期文件：\n{recent_lines}"
         self.has_compacted = True
         if not messages_to_summarize:
-            return preserved_messages + recent_messages
+            return CompactResult(
+                messages=preserved_messages + recent_messages,
+                transcript_path=transcript_path,
+            )
 
         context_prefix = self.build_compacted_context_prefix(
             preserved_messages,
@@ -218,9 +215,15 @@ class CompactMgr:
                 f"{first_recent.get('content', '')}\n"
                 "</uncompressed_recent_user_message>"
             )
-            return [first_recent] + recent_messages[1:]
+            return CompactResult(
+                messages=[first_recent] + recent_messages[1:],
+                transcript_path=transcript_path,
+            )
 
-        return [{
-            "role": "user",
-            "content": context_prefix,
-        }] + recent_messages
+        return CompactResult(
+            messages=[{
+                "role": "user",
+                "content": context_prefix,
+            }] + recent_messages,
+            transcript_path=transcript_path,
+        )

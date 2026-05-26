@@ -18,7 +18,6 @@ from prompt_toolkit.styles import Style
 
 from src.events.types import (
     CompactDelta,
-    ErrorOccurred,
     LLMCallCompleted,
     LLMCallStarted,
     PermissionNotice,
@@ -190,12 +189,6 @@ class CLIInterface(UserInterface):
                 if answer in {"a", "always"}:
                     return "always"
                 self._print(HTML("<agent.error>请输入 y、n 或 a。</agent.error>"))
-
-    async def on_error(self, event: ErrorOccurred) -> None:
-        self._print(HTML(
-            f"<agent.error>  x {self._escape_html(event.source)} 错误: "
-            f"{self._escape_html(event.error)}</agent.error>"
-        ))
 
     async def on_response_delta(self, event: ResponseDelta, content: str) -> None:
         await self._write_markdown_delta(

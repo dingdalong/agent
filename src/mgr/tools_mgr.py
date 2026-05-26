@@ -1,7 +1,6 @@
 import logging
 import time
 from typing import Any, Dict, TYPE_CHECKING
-from uuid import UUID
 
 from pydantic import ValidationError
 
@@ -111,31 +110,30 @@ class ToolsMgr:
     async def _emit_tool_started(
         self,
         deps: Any,
-        context: dict[str, Any],
+        agent: Any,
         tool: ToolEntry,
         arguments: dict[str, Any],
-        tool_call_id: str,
+        current_tool_call_id: str,
     ) -> None:
         event_bus = getattr(deps, "event_bus", None) if deps is not None else None
         if event_bus is None or not hasattr(event_bus, "emit"):
             return
-        agent = context.get("agent")
         await event_bus.emit(ToolCallStarted(
             timestamp=time.time(),
             source="tools",
             tool_name=tool.name,
-            tool_call_id=tool_call_id,
+            tool_call_id=current_tool_call_id,
             detail=self._tool_detail(tool, arguments),
             caller_agent_type=getattr(agent, "agent_type", None),
-            caller_uuid=self._format_uuid(getattr(agent, "uuid", None)),
+            caller_uuid=str(agent.uuid) if agent is not None and hasattr(agent, "uuid") else None,
         ))
 
     async def _emit_tool_completed(
         self,
         deps: Any,
-        context: dict[str, Any],
+        agent: Any,
         tool: ToolEntry,
-        tool_call_id: str,
+        current_tool_call_id: str,
         status: str,
         duration_seconds: float,
         result: str,
@@ -143,36 +141,33 @@ class ToolsMgr:
         event_bus = getattr(deps, "event_bus", None) if deps is not None else None
         if event_bus is None or not hasattr(event_bus, "emit"):
             return
-        agent = context.get("agent")
         await event_bus.emit(ToolCallCompleted(
             timestamp=time.time(),
             source="tools",
             tool_name=tool.name,
-            tool_call_id=tool_call_id,
+            tool_call_id=current_tool_call_id,
             status=status,
             duration_seconds=duration_seconds,
             result_preview=self._result_preview(result),
             caller_agent_type=getattr(agent, "agent_type", None),
-            caller_uuid=self._format_uuid(getattr(agent, "uuid", None)),
+            caller_uuid=str(agent.uuid) if agent is not None and hasattr(agent, "uuid") else None,
         ))
 
-    def _format_uuid(self, value: Any) -> str | None:
-        if value is None:
-            return None
-        return str(value)
-
-    async def execute(self, tool_name: str, arguments: Dict[str, Any], context: Dict[str, Any] | None = None) -> str:
+    async def execute(
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        *,
+        current_tool_call_id: str = "",
+        deps: Any = None,
+        agent: Any = None,
+    ) -> str:
         """异步执行工具，返回结果字符串（错误信息也以字符串返回）"""
         if tool_name not in self._tools:
             return f"错误：未知工具 '{tool_name}'"
 
         tool = self._tools[tool_name]
-        context = context or {}
-        deps = context.get("deps")
-        agent = context.get("agent")
-        tool_call_id = context.get("current_tool_call_id") or ""
         hooks_mgr = getattr(deps, "hooks_mgr", None) if deps is not None else None
-        agent = context.get("agent")
         hook_kwargs = {}
         if hooks_mgr is not None:
             hook_kwargs = {
@@ -187,14 +182,12 @@ class ToolsMgr:
             pre_hook_result = await hooks_mgr.run_event(
                 "PreToolUse",
                 tool.name,
-                {"tool_name": tool.name, "tool_input": arguments, "tool_use_id": tool_call_id},
+                {"tool_name": tool.name, "tool_input": arguments, "tool_use_id": current_tool_call_id},
                 pre_tool=True,
                 **hook_kwargs,
             )
-            # hook blocked (exit code 2) → 直接拒绝
             if pre_hook_result.blocked:
                 return f"权限拒绝：{pre_hook_result.block_reason or 'hook blocked'}"
-            # hook deny → 直接拒绝，不进内置权限
             for decision, reason in pre_hook_result.permission_decisions:
                 if decision == "deny":
                     return f"权限拒绝：{reason}"
@@ -205,7 +198,6 @@ class ToolsMgr:
         permission_mgr = getattr(deps, "permission_mgr", None) if deps is not None else None
         if permission_mgr is not None:
             builtin_permission, builtin_reason = permission_mgr.check(tool, arguments)
-            # hook ask 或内置 ask → 取最严格的
             hook_has_ask = pre_hook_result is not None and any(
                 d == "ask" for d, _ in pre_hook_result.permission_decisions
             )
@@ -223,14 +215,15 @@ class ToolsMgr:
             else:
                 await permission_mgr.notify_decision(tool, arguments, deps, builtin_permission)
 
-        await self._emit_tool_started(deps, context, tool, arguments, tool_call_id)
+        await self._emit_tool_started(deps, agent, tool, arguments, current_tool_call_id)
         started_at = time.time()
+        context = {"current_tool_call_id": current_tool_call_id, "deps": deps, "agent": agent}
         result = await tool(context, **arguments)
         if hooks_mgr is not None:
             post_hook_result = await hooks_mgr.run_event(
                 "PostToolUse",
                 tool.name,
-                {"tool_name": tool.name, "tool_input": arguments, "tool_response": result, "tool_use_id": tool_call_id},
+                {"tool_name": tool.name, "tool_input": arguments, "tool_response": result, "tool_use_id": current_tool_call_id},
                 **hook_kwargs,
             )
             if post_hook_result.blocked:
@@ -240,9 +233,9 @@ class ToolsMgr:
         status = self._result_status(result)
         await self._emit_tool_completed(
             deps,
-            context,
+            agent,
             tool,
-            tool_call_id,
+            current_tool_call_id,
             status,
             time.time() - started_at,
             result,
@@ -250,10 +243,10 @@ class ToolsMgr:
         if tool.raw_output:
             return result
 
-        if not tool_call_id:
+        if not current_tool_call_id:
             return result
         llm = getattr(agent, "llm", None) if agent is not None else None
         if llm is None:
             return result
 
-        return self._truncate(result, tool_call_id, llm)
+        return self._truncate(result, current_tool_call_id, llm)

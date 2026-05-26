@@ -32,7 +32,6 @@ class AgentApp:
                 description = "入口",
                 deps = self.deps,
             )
-            history = []
             pending_input = ""
             while True:
                 try:
@@ -47,7 +46,6 @@ class AgentApp:
                     break
 
                 if user_input.strip().lower() == "/clear":
-                    history.clear()
                     for attr in ("memory_mgr", "tools_mgr", "permission_mgr",
                                  "config_mgr", "hooks_mgr"):
                         mgr = getattr(self.deps, attr, None)
@@ -63,7 +61,7 @@ class AgentApp:
                     await self.deps.event_bus.request_output("上下文已清理，所有组件已重载。\n")
                     continue
 
-                interrupted = await self._run_agent_turn(agent, user_input, history)
+                interrupted = await self._run_agent_turn(agent, user_input)
                 if interrupted:
                     pending_input = user_input
                     continue
@@ -105,7 +103,6 @@ class AgentApp:
         self,
         agent: Agent,
         user_input: str,
-        history: list[dict],
     ) -> bool:
         if self.deps.hooks_mgr is not None:
             hook_result = await self.deps.hooks_mgr.run_event(
@@ -122,14 +119,13 @@ class AgentApp:
                 return False
             if hook_result.additional_context:
                 user_input = user_input + "\n\n" + "\n\n".join(str(item) for item in hook_result.additional_context)
-        history_len = len(history)
-        self._work_task = asyncio.create_task(agent.run(user_input, history))
+        self._work_task = asyncio.create_task(agent.run(user_input))
         with self.deps.ui.watch_interrupt(self._request_interrupt):
             try:
                 await self._work_task
                 return False
             except (asyncio.CancelledError, KeyboardInterrupt):
-                await self._handle_interrupted_turn(history, history_len)
+                await self._handle_interrupted_turn()
                 return True
             finally:
                 self._work_task = None
@@ -162,11 +158,7 @@ class AgentApp:
         if event.future is not None and event.future.done():
             self._active_user_request = None
 
-    async def _handle_interrupted_turn(
-        self,
-        history: list[dict],
-        history_len: int,
-    ) -> None:
+    async def _handle_interrupted_turn(self) -> None:
         current_task = asyncio.current_task()
         if current_task is not None:
             while current_task.cancelling():
@@ -175,7 +167,6 @@ class AgentApp:
         self._cancel_active_user_request()
         if self._work_task:
             await asyncio.gather(self._work_task, return_exceptions=True)
-        del history[history_len:]
         await self.deps.event_bus.request_output("\n已中断当前任务。\n")
         await self.deps.event_bus.join()
 
