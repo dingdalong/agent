@@ -50,8 +50,9 @@ class SkillMgr:
             description = meta.get("description", "没有说明内容")
             manifest = SkillManifest(name=name, description=description, path=path)
             skill_dir = manifest.path.parent.resolve()
+            skill_dir_rel = skill_dir.relative_to(Path.cwd())
             parts = [
-                f"<skill name=\"{manifest.name}\" skill_dir=\"{skill_dir}\">",
+                f"<skill name=\"{manifest.name}\" skill_dir=\"{skill_dir_rel}\">",
                 body.strip(),
             ]
             for skill_file in sorted(
@@ -59,7 +60,7 @@ class SkillMgr:
                 if p.is_file() and p.name != "SKILL.md"
             ):
                 rel_path = skill_file.relative_to(skill_dir).as_posix()
-                parts.append(f"<skill-file path=\"{rel_path}\" ref=\"{skill_dir}/{rel_path}\" />")
+                parts.append(f"<skill-file path=\"{rel_path}\" ref=\"{skill_dir_rel}/{rel_path}\" />")
             parts.append("</skill>")
             self._documents[name] = SkillDocument(
                 manifest=manifest,

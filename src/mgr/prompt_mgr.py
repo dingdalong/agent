@@ -20,7 +20,7 @@ class PromptMgr:
     def _build_core(self) -> str:
         return (
             "# 核心身份\n"
-            f"你是一个运行在`{self.workdir}`中的智能体。\n"
+            "你是一个超级智能体。\n"
             "你的任务是理解用户需求，基于可用上下文和工具给出可靠结果。\n"
             "在做假设之前务必先验证。不要凭空猜测行事。"
         )
@@ -126,7 +126,7 @@ class PromptMgr:
         lines = [
             f"运行平台：`{os.uname().sysname}`",
             f"llm模型：`{self.model}`",
-            f"工作目录：`{self.workdir}`",
+            f"工作目录：`{self.workdir.relative_to(Path.cwd())}`",
         ]
         return "# 运行环境\n" + "\n".join(lines)
 

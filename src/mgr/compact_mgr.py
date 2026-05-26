@@ -47,7 +47,7 @@ class CompactMgr:
         with path.open("w") as handle:
             for message in messages:
                 handle.write(json.dumps(message, default=str) + "\n")
-        await self.track_recent_file(path.as_posix())
+        await self.track_recent_file(path.relative_to(Path.cwd()).as_posix())
         return path
 
     def split_history_for_compaction(self, messages: list) -> tuple[list, list, list]:
