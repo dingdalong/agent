@@ -9,5 +9,6 @@ from src.mgr.subagent_mgr import SubAgentMgr
 from src.mgr.permission_mgr import PermissionManager
 from src.mgr.config_mgr import ConfigManager
 from src.mgr.memory_mgr import MemoryMgr
+from src.mgr.hooks_mgr import HooksMgr
 
-__all__ = ["FileMgr", "CompactMgr", "RecoveryMgr", "TodoManager", "ToolsMgr", "PromptMgr", "SkillMgr", "SubAgentMgr", "PermissionManager", "ConfigManager", "MemoryMgr"]
+__all__ = ["FileMgr", "CompactMgr", "RecoveryMgr", "TodoManager", "ToolsMgr", "PromptMgr", "SkillMgr", "SubAgentMgr", "PermissionManager", "ConfigManager", "MemoryMgr", "HooksMgr"]

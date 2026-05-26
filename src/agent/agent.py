@@ -33,6 +33,9 @@ class AgentDeps(BaseModel):
     permission_mgr: Any = None  # PermissionManager
     config_mgr: Any = None  # ConfigManager
     memory_mgr: Any = None  # MemoryMgr
+    hooks_mgr: Any = None  # HooksMgr
+    session_context: list[str] = field(default_factory=list)
+    session_id: str = ""
 
 @dataclass
 class Agent:
@@ -74,6 +77,7 @@ class Agent:
 
         self._prompt_mgr = PromptMgr(agent = self, model = self.deps.llm.model, workdir = workspace, role_prompt = self.role_prompt)
 
+
     async def run(
         self,
         input: str,
@@ -87,6 +91,7 @@ class Agent:
         has_tool_calls = False
         compact_streak = 0
         max_compact_streak = 3
+        stop_hook_used = False
         while True:
             prompt = self._prompt_mgr.build()
             if self._compact_mgr.is_need_compact(messages, prompt, self._tools_schemas):
@@ -127,6 +132,23 @@ class Agent:
 
             messages.append(response.assistant_message)
             if not tool_calls:
+                if self.deps.hooks_mgr is not None and not stop_hook_used:
+                    stop_hook = await self.deps.hooks_mgr.run_event(
+                        "Stop",
+                        final_text,
+                        {"final_text": final_text},
+                        session_id=self.deps.session_id,
+                        agent_id=str(self.uuid),
+                        agent_type=self.agent_type,
+                    )
+                    if stop_hook.blocked:
+                        stop_hook_used = True
+                        reason = stop_hook.block_reason or "Stop hook blocked"
+                        messages.append({
+                            "role": "user",
+                            "content": f"<reminder>{reason}</reminder>",
+                        })
+                        continue
                 break
 
             has_tool_calls = True

@@ -104,6 +104,7 @@ class ToolsMgr:
             return preview
         return preview[: limit - 3] + "..."
 
+
     async def _emit_tool_started(
         self,
         deps: Any,
@@ -113,7 +114,7 @@ class ToolsMgr:
         tool_call_id: str,
     ) -> None:
         event_bus = getattr(deps, "event_bus", None) if deps is not None else None
-        if event_bus is None:
+        if event_bus is None or not hasattr(event_bus, "emit"):
             return
         agent = context.get("agent")
         await event_bus.emit(ToolCallStarted(
@@ -137,7 +138,7 @@ class ToolsMgr:
         result: str,
     ) -> None:
         event_bus = getattr(deps, "event_bus", None) if deps is not None else None
-        if event_bus is None:
+        if event_bus is None or not hasattr(event_bus, "emit"):
             return
         agent = context.get("agent")
         await event_bus.emit(ToolCallCompleted(
@@ -155,8 +156,6 @@ class ToolsMgr:
     def _format_uuid(self, value: Any) -> str | None:
         if value is None:
             return None
-        if isinstance(value, UUID):
-            return str(value)
         return str(value)
 
     async def execute(self, tool_name: str, arguments: Dict[str, Any], context: Dict[str, Any] | None = None) -> str:
@@ -167,16 +166,73 @@ class ToolsMgr:
         tool = self._tools[tool_name]
         context = context or {}
         deps = context.get("deps")
+        tool_call_id = context.get("current_tool_call_id") or ""
+        hooks_mgr = getattr(deps, "hooks_mgr", None) if deps is not None else None
+        agent = context.get("agent")
+        hook_kwargs = {}
+        if hooks_mgr is not None:
+            hook_kwargs = {
+                "session_id": getattr(deps, "session_id", "") if deps else "",
+                "agent_id": str(getattr(agent, "uuid", "")) if agent else "",
+                "agent_type": getattr(agent, "agent_type", "") if agent else "",
+            }
+
+        # 1. PreToolUse hook
+        pre_hook_result = None
+        if hooks_mgr is not None:
+            pre_hook_result = await hooks_mgr.run_event(
+                "PreToolUse",
+                tool.name,
+                {"tool_name": tool.name, "tool_input": arguments, "tool_use_id": tool_call_id},
+                pre_tool=True,
+                **hook_kwargs,
+            )
+            # hook blocked (exit code 2) → 直接拒绝
+            if pre_hook_result.blocked:
+                return f"权限拒绝：{pre_hook_result.block_reason or 'hook blocked'}"
+            # hook deny → 直接拒绝，不进内置权限
+            for decision, reason in pre_hook_result.permission_decisions:
+                if decision == "deny":
+                    return f"权限拒绝：{reason}"
+            if pre_hook_result.updated_input is not None:
+                arguments = pre_hook_result.updated_input
+
+        # 2. 内置权限检查（用 hook 可能修改后的 input）
         permission_mgr = getattr(deps, "permission_mgr", None) if deps is not None else None
         if permission_mgr is not None:
-            permission, reason = await permission_mgr.authorize(tool, arguments, deps)
-            if permission == "deny":
-                return f"权限拒绝：{reason}"
+            builtin_permission, builtin_reason = permission_mgr.check(tool, arguments)
+            # hook ask 或内置 ask → 取最严格的
+            hook_has_ask = pre_hook_result is not None and any(
+                d == "ask" for d, _ in pre_hook_result.permission_decisions
+            )
+            if builtin_permission == "deny":
+                await permission_mgr.notify_decision(tool, arguments, deps, "deny")
+                return f"权限拒绝：{builtin_reason}"
+            if builtin_permission == "ask" or hook_has_ask:
+                permission, reason = await permission_mgr.resolve_ask(
+                    tool, arguments, deps,
+                    persist_allowed=builtin_permission == "ask",
+                )
+                if permission == "deny":
+                    await permission_mgr.notify_decision(tool, arguments, deps, "deny")
+                    return f"权限拒绝：{reason}"
+            else:
+                await permission_mgr.notify_decision(tool, arguments, deps, builtin_permission)
 
-        tool_call_id = context.get("current_tool_call_id") or ""
         await self._emit_tool_started(deps, context, tool, arguments, tool_call_id)
         started_at = time.time()
         result = await tool(context, **arguments)
+        if hooks_mgr is not None:
+            post_hook_result = await hooks_mgr.run_event(
+                "PostToolUse",
+                tool.name,
+                {"tool_name": tool.name, "tool_input": arguments, "tool_response": result, "tool_use_id": tool_call_id},
+                **hook_kwargs,
+            )
+            if post_hook_result.blocked:
+                result = f"权限拒绝：{post_hook_result.block_reason or 'hook blocked'}"
+            elif post_hook_result.additional_context:
+                result = result + "\n\n" + "\n\n".join(str(item) for item in post_hook_result.additional_context)
         status = self._result_status(result)
         await self._emit_tool_completed(
             deps,

@@ -229,54 +229,69 @@ class PermissionManager:
 
         return "ask", f"{tool_name} 未匹配权限规则，默认询问"
 
-    async def authorize(self, tool: ToolEntry, tool_input: dict[str, Any], deps: Any) -> PermissionDecision:
-        """执行前权限确认。返回最终决策。"""
-        permission, reason = self.check(tool, tool_input)
-        should_notify = permission in {"allow", "deny"}
+    async def resolve_ask(
+        self,
+        tool: ToolEntry,
+        tool_input: dict[str, Any],
+        deps: Any,
+        *,
+        persist_allowed: bool,
+    ) -> PermissionDecision:
+        """Resolve a final ask decision through UI once."""
+        if deps is None or getattr(deps, "event_bus", None) is None:
+            return "deny", f"权限需要用户确认，但缺少 event_bus：{tool.name}"
 
-        if permission == "ask":
-            if deps is None or getattr(deps, "event_bus", None) is None:
-                permission = "deny"
-                reason = f"权限需要用户确认，但缺少 event_bus：{tool.name}"
-            else:
-                answer = await deps.event_bus.request_permission(
-                    tool_name=tool.name,
-                    detail=self._build_detail(tool, tool_input),
-                )
-                normalized = answer.strip().lower()
-                if normalized == "always":
-                    permission_args = tool.permission.args if tool.permission and tool.permission.args else []
-                    if not permission_args:
-                        entry = PermissionEntry(tool.name, "allow", {})
-                    else:
-                        values = self._format_args(tool, tool_input)
-                        args: dict[str, str] = {}
-                        for arg_name in permission_args:
-                            value = values.get(arg_name)
-                            if isinstance(value, str):
-                                args[arg_name] = value
-                        entry = PermissionEntry(tool.name, "allow", args) if set(args) == set(permission_args) else None
-                    if entry is not None:
-                        self.session_allow.append(entry)
-                        self._persist_allow_rule(entry)
-                    permission = "allow"
-                    reason = "用户在当前会话中始终允许"
-                elif normalized in {"y", "yes"}:
-                    permission = "allow"
-                    reason = "用户已允许"
-                else:
-                    permission = "deny"
-                    reason = "用户拒绝了权限请求"
-                    should_notify = True
+        answer = await deps.event_bus.request_permission(
+            tool_name=tool.name,
+            detail=self._build_detail(tool, tool_input),
+        )
+        normalized = answer.strip().lower()
+        if normalized == "always":
+            if persist_allowed:
+                entry = self._build_allow_entry(tool, tool_input)
+                if entry is not None:
+                    self.session_allow.append(entry)
+                    self._persist_allow_rule(entry)
+            return "allow", "用户在当前会话中始终允许"
+        if normalized in {"y", "yes"}:
+            return "allow", "用户已允许"
+        return "deny", "用户拒绝了权限请求"
 
+    def _build_allow_entry(
+        self,
+        tool: ToolEntry,
+        tool_input: dict[str, Any],
+    ) -> PermissionEntry | None:
+        permission_args = tool.permission.args if tool.permission and tool.permission.args else []
+        if not permission_args:
+            return PermissionEntry(tool.name, "allow", {})
+
+        values = self._format_args(tool, tool_input)
+        args: dict[str, str] = {}
+        for arg_name in permission_args:
+            value = values.get(arg_name)
+            if isinstance(value, str):
+                args[arg_name] = value
+        return PermissionEntry(tool.name, "allow", args) if set(args) == set(permission_args) else None
+
+    async def notify_decision(
+        self,
+        tool: ToolEntry,
+        tool_input: dict[str, Any],
+        deps: Any,
+        permission: str,
+        *,
+        force: bool = False,
+    ) -> None:
         event_bus = getattr(deps, "event_bus", None) if deps is not None else None
+        if event_bus is None:
+            return
         tips = tool.permission.tips if tool.permission else None
-        should_notify = should_notify and event_bus is not None and (permission == "deny" or tips is not None)
-        if should_notify:
-            detail = self._build_detail(tool, tool_input) if tips else ""
-            await event_bus.notify_permission(
-                status=permission,
-                tool_name=tool.name,
-                detail=detail,
-            )
-        return permission, reason
+        if not force and permission != "deny" and tips is None:
+            return
+        detail = self._build_detail(tool, tool_input) if tips else ""
+        await event_bus.notify_permission(
+            status=permission,
+            tool_name=tool.name,
+            detail=detail,
+        )

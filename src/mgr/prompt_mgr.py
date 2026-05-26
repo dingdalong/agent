@@ -138,6 +138,11 @@ class PromptMgr:
             return ""
         return memory_mgr.build_prompt()
 
+    def _build_session_context(self) -> str:
+        session_context = getattr(getattr(self.agent, "deps", None), "session_context", None)
+        if not session_context:
+            return ""
+        return "# 会话上下文\n" + "\n\n".join(str(item) for item in session_context if item)
 
     def _build_static_prefix(self) -> str:
         sections = []
@@ -171,6 +176,10 @@ class PromptMgr:
         memory_context = self._build_memory_context()
         if memory_context:
             sections.append(memory_context)
+
+        session_context = self._build_session_context()
+        if session_context:
+            sections.append(session_context)
 
         return "\n\n".join(s for s in sections if s)
 

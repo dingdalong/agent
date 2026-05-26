@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -23,6 +24,9 @@ class AgentApp:
             await asyncio.sleep(0)
 
             await self.deps.event_bus.request_output(self._startup_banner())
+            if not self.deps.session_id:
+                self.deps.session_id = str(uuid.uuid4())
+            await self._run_session_start_hooks()
             agent = Agent(
                 agent_type = "总控",
                 description = "入口",
@@ -55,6 +59,7 @@ class AgentApp:
                         description="入口",
                         deps=self.deps,
                     )
+                    await self._run_session_start_hooks(source="clear")
                     await self.deps.event_bus.request_output("上下文已清理，所有组件已重载。\n")
                     continue
 
@@ -63,6 +68,16 @@ class AgentApp:
                     pending_input = user_input
                     continue
         finally:
+            if self.deps.hooks_mgr is not None:
+                try:
+                    await self.deps.hooks_mgr.run_event(
+                        "SessionEnd",
+                        "exit",
+                        {"reason": "exit"},
+                        session_id=self.deps.session_id,
+                    )
+                except Exception:
+                    pass
             if self.deps.event_bus:
                 self.deps.event_bus.close()
             if consumer_task:
@@ -92,6 +107,21 @@ class AgentApp:
         user_input: str,
         history: list[dict],
     ) -> bool:
+        if self.deps.hooks_mgr is not None:
+            hook_result = await self.deps.hooks_mgr.run_event(
+                "UserPromptSubmit",
+                user_input,
+                {"prompt": user_input},
+                session_id=self.deps.session_id,
+                agent_id=str(agent.uuid),
+                agent_type=agent.agent_type,
+            )
+            if hook_result.blocked:
+                reason = hook_result.block_reason or "UserPromptSubmit hook blocked"
+                await self.deps.event_bus.request_output(f"{reason}\n")
+                return False
+            if hook_result.additional_context:
+                user_input = user_input + "\n\n" + "\n\n".join(str(item) for item in hook_result.additional_context)
         history_len = len(history)
         self._work_task = asyncio.create_task(agent.run(user_input, history))
         with self.deps.ui.watch_interrupt(self._request_interrupt):
@@ -151,6 +181,15 @@ class AgentApp:
 
     async def shutdown(self):
         pass
+
+    async def _run_session_start_hooks(self, source: str = "startup") -> None:
+        if self.deps.hooks_mgr is None:
+            return
+        result = await self.deps.hooks_mgr.run_event(
+            "SessionStart", source, {"source": source},
+            session_id=self.deps.session_id,
+        )
+        self.deps.session_context.extend(result.additional_context)
 
     def _startup_banner(self) -> str:
         model = getattr(getattr(self.deps, "llm", None), "model", "unknown")

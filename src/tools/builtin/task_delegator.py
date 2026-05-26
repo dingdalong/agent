@@ -15,4 +15,4 @@ class TaskDelegator(BaseModel):
 @tool(model=TaskDelegator, description="委托一个任务给子智能体",
       permission=ToolPermission(rules=[PermissionRule(permission="allow")]))
 async def task_delegator(description: str, agent_type: str, prompt: str, agent: Agent) -> str:
-    return await agent._subagent_mgr.task_delegator(agent_type, prompt)
+    return await agent._subagent_mgr.task_delegator(agent_type, prompt, parent_agent=agent)

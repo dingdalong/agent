@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 import re
 import yaml
@@ -73,7 +73,7 @@ class SubAgentMgr:
             lines.append(f"- {manifest.agent_type}: {manifest.description}")
         return "\n".join(lines)
 
-    async def task_delegator(self, agent_type: str, prompt: str) -> str:
+    async def task_delegator(self, agent_type: str, prompt: str, *, parent_agent: Any = None) -> str:
         document = self._documents.get(agent_type)
         if not document:
             known = ", ".join(sorted(self._documents)) or "(none)"
@@ -89,5 +89,36 @@ class SubAgentMgr:
             is_subagent = True,
             memory = document.manifest.memory,
         )
+
+        hooks_mgr = self.deps.hooks_mgr
+        fire_hooks = hooks_mgr is not None and parent_agent is not None
+        hook_kwargs = {}
+        if fire_hooks:
+            hook_kwargs = {
+                "session_id": self.deps.session_id,
+                "agent_id": str(getattr(parent_agent, "uuid", "")),
+                "agent_type": getattr(parent_agent, "agent_type", ""),
+            }
+            await hooks_mgr.run_event(
+                "SubagentStart",
+                agent_type,
+                {"subagent_type": agent_type, "subagent_id": str(agent.uuid), "prompt": prompt},
+                **hook_kwargs,
+            )
+
         history = []
-        return await agent.run(prompt, history)
+        result = await agent.run(prompt, history)
+
+        if fire_hooks:
+            stop_result = await hooks_mgr.run_event(
+                "SubagentStop",
+                agent_type,
+                {"subagent_type": agent_type, "subagent_id": str(agent.uuid), "result": result},
+                **hook_kwargs,
+            )
+            if stop_result.blocked:
+                result = stop_result.block_reason or result
+            elif stop_result.additional_context:
+                result = result + "\n\n" + "\n\n".join(str(c) for c in stop_result.additional_context)
+
+        return result
