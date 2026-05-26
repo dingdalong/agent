@@ -15,6 +15,20 @@ logger = logging.getLogger(__name__)
 class AnthropicProvider(LLMProvider):
     """Anthropic Provider (Messages API)"""
 
+    @classmethod
+    async def list_models(cls, api_key: str, base_url: str) -> list[str]:
+        client = AsyncAnthropic(api_key=api_key, base_url=base_url, timeout=10.0, max_retries=0)
+        try:
+            models = []
+            page = await client.models.list(limit=100)
+            models.extend(m.id for m in page.data)
+            while page.has_more:
+                page = await page.get_next_page()
+                models.extend(m.id for m in page.data)
+            return models
+        finally:
+            await client.close()
+
     def __post_init__(self):
         super().__post_init__()
         self.supports_native_structured_output = True

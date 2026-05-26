@@ -27,6 +27,7 @@ class AgentDeps(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
     llm: Any = None  # LLMProvider
+    llm_mgr: Any = None  # LLMMgr
     ui: Any = None  # UserInterface
     event_bus: Any = None  # EventBus
     tools_mgr: Any = None  # ToolsMgr

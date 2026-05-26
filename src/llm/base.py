@@ -51,6 +51,15 @@ class LLMProvider(ABC):
 
     def clear_reasoning_content(self, message): ...
 
+    @classmethod
+    async def list_models(cls, api_key: str, base_url: str) -> list[str]:
+        client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=10.0, max_retries=0)
+        try:
+            response = await client.models.list()
+            return [m.id for m in response.data]
+        finally:
+            await client.close()
+
     @abstractmethod
     def estimate_tokens(
         self,
