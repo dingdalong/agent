@@ -196,14 +196,106 @@ class LLMProvider(ABC):
     def _retry_delay(self, attempt: int) -> float:
         return min(2 ** attempt * 5, 60) + self._retry_jitter()
 
-    @abstractmethod
     def normalize_messages(
         self,
-        message: list[dict],
+        messages: list[dict],
         allow_developer_role: bool = False,
         allow_tool_calls: bool = True,
-        strict: bool = False
-    ) -> int: ...
+        strict: bool = False,
+    ) -> list[dict]:
+        VALID_ROLES = {"system", "user", "assistant", "tool"}
+        if allow_developer_role:
+            VALID_ROLES.add("developer")
+
+        if isinstance(messages, dict):
+            raw_messages = [messages]
+        elif isinstance(messages, list):
+            raw_messages = list(messages)
+        else:
+            raise TypeError(
+                f"messages 必须是 dict 或 list[dict]，当前类型: {type(messages).__name__}"
+            )
+
+        normalized: list[dict] = []
+
+        for idx, msg in enumerate(raw_messages):
+            if not isinstance(msg, dict):
+                if strict:
+                    raise TypeError(f"messages[{idx}] 必须是 dict，当前类型: {type(msg).__name__}")
+                continue
+
+            role = msg.get("role", "").strip().lower()
+            if not role:
+                if strict:
+                    raise ValueError(f"messages[{idx}] 缺少必填字段 'role'")
+                role = "user"
+
+            role = self._normalize_role(role)
+
+            if role not in VALID_ROLES:
+                if strict:
+                    raise ValueError(
+                        f"messages[{idx}] role='{role}' 不被支持。"
+                        f"支持的 role: {sorted(VALID_ROLES)}"
+                    )
+                role = "user"
+
+            content = self._normalize_content(msg.get("content", ""))
+            has_tool_calls = bool(msg.get("tool_calls"))
+
+            if not content and not has_tool_calls and role != "tool":
+                continue
+
+            norm_msg: dict = {"role": role, "content": content}
+
+            if role == "assistant" and has_tool_calls and allow_tool_calls:
+                tool_calls = self._normalize_tool_calls(msg.get("tool_calls"), idx)
+                if tool_calls:
+                    norm_msg["tool_calls"] = tool_calls
+
+            if role == "tool":
+                tool_call_id = msg.get("tool_call_id", "")
+                if not tool_call_id and strict:
+                    raise ValueError(f"messages[{idx}] role='tool' 但缺少 tool_call_id")
+                norm_msg["tool_call_id"] = tool_call_id
+                if not allow_tool_calls:
+                    norm_msg["role"] = "user"
+                    norm_msg.pop("tool_call_id", None)
+
+            if "name" in msg and isinstance(msg["name"], str):
+                norm_msg["name"] = msg["name"]
+
+            self._normalize_assistant_extra(msg, norm_msg, role)
+
+            normalized.append(norm_msg)
+
+        return normalized
+
+    def _normalize_role(self, role: str) -> str:
+        return role
+
+    def _normalize_content(self, content) -> str | list[dict] | None:
+        if isinstance(content, list):
+            return [p for p in content if isinstance(p, dict)] or ""
+        if content is not None and not isinstance(content, str):
+            return str(content)
+        return content
+
+    def _normalize_tool_calls(self, tool_calls, msg_index: int) -> list[dict] | None:
+        if not tool_calls or not isinstance(tool_calls, list):
+            return None
+        valid_calls = []
+        for call in tool_calls:
+            if isinstance(call, dict) and "function" in call:
+                valid_calls.append({
+                    "id": call.get("id", ""),
+                    "type": call.get("type", "function"),
+                    "function": call["function"],
+                })
+        return valid_calls or None
+
+    def _normalize_assistant_extra(self, msg: dict, norm_msg: dict, role: str) -> None:
+        pass
 
     async def chat(
         self,

@@ -83,94 +83,13 @@ class AnthropicProvider(LLMProvider):
                         if b.get("type") != "thinking"
                     ]
 
-    def normalize_messages(
-        self,
-        messages: list[dict],
-        allow_developer_role: bool = False,
-        allow_tool_calls: bool = True,
-        strict: bool = False,
-    ) -> list[dict]:
-        VALID_ROLES = {"system", "user", "assistant", "tool"}
-        if allow_developer_role:
-            VALID_ROLES.add("developer")
-
-        if isinstance(messages, dict):
-            raw_messages = [messages]
-        elif isinstance(messages, list):
-            raw_messages = list(messages)
-        else:
-            raise TypeError(
-                f"messages 必须是 dict 或 list[dict]，当前类型: {type(messages).__name__}"
-            )
-
-        normalized: list[dict] = []
-
-        for idx, msg in enumerate(raw_messages):
-            if not isinstance(msg, dict):
-                if strict:
-                    raise TypeError(f"messages[{idx}] 必须是 dict，当前类型: {type(msg).__name__}")
-                continue
-
-            role = msg.get("role", "").strip().lower()
-            if not role:
-                if strict:
-                    raise ValueError(f"messages[{idx}] 缺少必填字段 'role'")
-                role = "user"
-            if role not in VALID_ROLES:
-                if strict:
-                    raise ValueError(
-                        f"messages[{idx}] role='{role}' 不被支持。"
-                        f"支持的 role: {sorted(VALID_ROLES)}"
-                    )
-                role = "user"
-
-            content = msg.get("content", "")
-            if isinstance(content, list):
-                content = [p for p in content if isinstance(p, dict)] or ""
-            elif content is not None and not isinstance(content, str):
-                content = str(content)
-
-            has_tool_calls = bool(msg.get("tool_calls"))
-
-            if not content and not has_tool_calls and role != "tool":
-                continue
-
-            norm_msg: dict = {"role": role, "content": content}
-
-            if role == "assistant" and has_tool_calls and allow_tool_calls:
-                tool_calls = msg.get("tool_calls", [])
-                valid_calls = []
-                for call in (tool_calls if isinstance(tool_calls, list) else []):
-                    if isinstance(call, dict) and "function" in call:
-                        valid_calls.append({
-                            "id": call.get("id", ""),
-                            "type": call.get("type", "function"),
-                            "function": call["function"],
-                        })
-                if valid_calls:
-                    norm_msg["tool_calls"] = valid_calls
-
-            if role == "tool":
-                tool_call_id = msg.get("tool_call_id", "")
-                if not tool_call_id and strict:
-                    raise ValueError(f"messages[{idx}] role='tool' 但缺少 tool_call_id")
-                if tool_call_id:
-                    norm_msg["tool_call_id"] = tool_call_id
-                if not allow_tool_calls:
-                    norm_msg["role"] = "user"
-                    norm_msg.pop("tool_call_id", None)
-
-            if role == "assistant" and msg.get("reasoning_content"):
-                norm_msg["reasoning_content"] = msg["reasoning_content"]
-            if role == "assistant" and msg.get("_anthropic_content"):
-                norm_msg["_anthropic_content"] = msg["_anthropic_content"]
-
-            if "name" in msg and isinstance(msg["name"], str):
-                norm_msg["name"] = msg["name"]
-
-            normalized.append(norm_msg)
-
-        return normalized
+    def _normalize_assistant_extra(self, msg: dict, norm_msg: dict, role: str) -> None:
+        if role != "assistant":
+            return
+        if msg.get("reasoning_content"):
+            norm_msg["reasoning_content"] = msg["reasoning_content"]
+        if msg.get("_anthropic_content"):
+            norm_msg["_anthropic_content"] = msg["_anthropic_content"]
 
     # ---- 格式转换 ----
 
