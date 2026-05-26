@@ -297,6 +297,9 @@ class FileMgr:
             if not search_root.is_dir():
                 return f"Error: 不是目录: {path}"
 
+            # pattern 不含 "/" 时，加 **/ 前缀以支持递归搜索子目录
+            if "/" not in pattern:
+                pattern = f"**/{pattern}"
             matches = sorted(search_root.glob(pattern))
             matches = [m for m in matches if m.is_relative_to(self.workdir)]
 
