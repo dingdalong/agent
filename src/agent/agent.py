@@ -5,30 +5,39 @@ from uuid import UUID
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any, Callable, TYPE_CHECKING
-from pydantic import BaseModel, ConfigDict
 from src.tools import ToolDict
 from src.events.types import AgentStateChanged, CompactDelta
 from src.agent.states import AgentState, RunContext
 from src.mgr import FileMgr, TodoManager, CompactMgr, CompactResult, PromptMgr, SkillMgr, SubAgentMgr
 
+if TYPE_CHECKING:
+    from src.mgr.llm_mgr import LLMMgr
+    from src.interfaces.base import UserInterface
+    from src.events.bus import EventBus
+    from src.mgr.tools_mgr import ToolsMgr
+    from src.mgr.permission_mgr import PermissionManager
+    from src.mgr.config_mgr import ConfigManager
+    from src.mgr.memory_mgr import MemoryMgr
+    from src.mgr.hooks_mgr import HooksMgr
+
 logger = logging.getLogger(__name__)
 
-class AgentDeps(BaseModel):
+@dataclass
+class AgentDeps:
     """外部依赖（进程级全局对象）。
 
     /clear 时通过 hasattr(mgr, "reload") 判断并调用，
     仅在管理器有运行时可变状态需要重置时才实现 reload() 方法。
     """
 
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-    llm_mgr: Any = None  # LLMMgr
-    ui: Any = None  # UserInterface
-    event_bus: Any = None  # EventBus
-    tools_mgr: Any = None  # ToolsMgr
-    permission_mgr: Any = None  # PermissionManager
-    config_mgr: Any = None  # ConfigManager
-    memory_mgr: Any = None  # MemoryMgr
-    hooks_mgr: Any = None  # HooksMgr
+    llm_mgr: LLMMgr = None
+    ui: UserInterface = None
+    event_bus: EventBus = None
+    tools_mgr: ToolsMgr = None
+    permission_mgr: PermissionManager | None = None
+    config_mgr: ConfigManager = None
+    memory_mgr: MemoryMgr | None = None
+    hooks_mgr: HooksMgr | None = None
     session_context: list[str] = field(default_factory=list)
     session_id: str = ""
 
