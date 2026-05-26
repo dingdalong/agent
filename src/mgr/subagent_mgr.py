@@ -23,6 +23,12 @@ class SubAgentDocument:
     manifest: SubAgentManifest
     prompt: str
 
+# 受限子智能体（tools 非 None）自动获得的基础设施工具。
+# 判断标准：该工具是 agent 运行循环正常工作所需的基础设施（如分页、压缩、进度追踪），
+# 而非领域能力（如文件读写、shell、网络访问）。
+# 新增内置工具时须评估是否需要加入此集合。
+_AUTO_INJECT_TOOLS = {"read_tool_result", "compact", "todo_write"}
+
 @dataclass
 class SubAgentMgr:
     workdir: Path
@@ -47,7 +53,7 @@ class SubAgentMgr:
                 raw_tools = meta.get("tools", "")
                 tools = {t.strip() for t in raw_tools.split(",") if t.strip()} or None
                 if tools:
-                    tools.add("read_tool_result")
+                    tools.update(_AUTO_INJECT_TOOLS)
                 memory = meta.get("memory")
                 model = meta.get("model")
                 manifest = SubAgentManifest(

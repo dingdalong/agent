@@ -117,7 +117,10 @@ def tool(
     permission: ToolPermission | None = None,
     raw_output: bool = False,
 ) -> Callable:
-    """工具注册装饰器"""
+    """工具注册装饰器。
+
+    新增工具时须确认是否需要自动注入给子智能体，见 subagent_mgr._AUTO_INJECT_TOOLS。
+    """
     def decorator(func: Callable) -> Callable:
         tool_name = name or func.__name__
 
