@@ -145,12 +145,20 @@ class PromptMgr:
         return "# 会话上下文\n" + "\n\n".join(str(item) for item in session_context if item)
 
     def _build_static_prefix(self) -> str:
+        """组装 system prompt 的静态部分。
+
+        新增段时须判断是否适用于子智能体：
+        - 仅主 agent 使用的段（如决策顺序、子智能体列表、技能）放入 is_subagent 守卫内。
+        - 通用段（如真实性约束、环境）放在守卫外，主 agent 和子 agent 共享。
+        """
         sections = []
 
+        # —— 通用段：主 agent 和子 agent 共享 ——
         sections.append(self._build_core())
         sections.append(self._build_truthfulness_constraints())
         sections.append(self._build_context_and_tool_constraints())
 
+        # —— 仅主 agent：编排、委派、技能相关，子 agent 不需要 ——
         if not self.agent.is_subagent:
             decision_order = self._build_controller_decision_order()
             if decision_order:
@@ -158,11 +166,11 @@ class PromptMgr:
             subagents = self._build_subagent_listing()
             if subagents:
                 sections.append(subagents)
+            skills = self._build_skill_listing()
+            if skills:
+                sections.append(skills)
 
-        skills = self._build_skill_listing()
-        if skills:
-            sections.append(skills)
-
+        # —— 通用段：主 agent 和子 agent 共享 ——
         role_prompt = self._build_role_prompt()
         if role_prompt:
             sections.append(role_prompt)
