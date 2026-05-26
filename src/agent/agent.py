@@ -2,20 +2,14 @@ import json, logging, time, uuid
 from uuid import UUID
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Any, Type
+from typing import Any, Callable
 from pydantic import BaseModel, ConfigDict
 from src.tools import ToolDict
-from src.events.types import CompactDelta
-from src.mgr import FileMgr, TodoManager, CompactMgr, RecoveryMgr, PromptMgr, SkillMgr, SubAgentMgr
+from src.events.types import AgentStateChanged, CompactDelta
+from src.agent.states import AgentState, RunContext
+from src.mgr import FileMgr, TodoManager, CompactMgr, PromptMgr, SkillMgr, SubAgentMgr
 
 logger = logging.getLogger(__name__)
-
-@dataclass
-class StructOutputConfig:
-    """Agent.run 的结构化输出配置。"""
-    model_cls: Type[BaseModel]
-    schema_name: str = "structured_output"
-    schema_desc: str = "结构化输出"
 
 class AgentDeps(BaseModel):
     """外部依赖（进程级全局对象）。
@@ -59,151 +53,241 @@ class Agent:
     _tools_schemas: list[ToolDict] = field(init=False)
     _todo_mgr: TodoManager = field(init=False, default_factory=TodoManager, repr=False)
     _compact_mgr: CompactMgr = field(init=False, repr=False)
-    _recovery_mgr: RecoveryMgr = field(init=False, repr=False)
     _file_mgr: FileMgr = field(init=False, repr=False)
     _skill_mgr: SkillMgr = field(init=False, repr=False)
     _subagent_mgr: SubAgentMgr = field(init=False, repr=False)
-
-    _prompt_mgr: PromptMgr  = field(init=False, repr=False)
+    _prompt_mgr: PromptMgr = field(init=False, repr=False)
+    _handlers: dict[AgentState, Callable] = field(init=False, repr=False)
 
     def __post_init__(self):
         self.uuid = uuid.uuid4()
         self.llm = self.deps.llm_mgr.get(self.model)
         self._tools_schemas = self.deps.tools_mgr.get_schemas(self.tools)
         self._compact_mgr = CompactMgr(self.deps, llm=self.llm)
-        self._recovery_mgr = RecoveryMgr(self.deps, llm=self.llm)
         workspace = Path.cwd() / "workspace"
         self._file_mgr = FileMgr(workspace, self.deps)
         self._skill_mgr = SkillMgr(workspace)
         self._subagent_mgr = SubAgentMgr(workspace, self.deps)
+        self._prompt_mgr = PromptMgr(agent=self, model=self.llm.model, workdir=workspace, role_prompt=self.role_prompt)
+        self._handlers = {
+            AgentState.CHECK_COMPACT:    self._on_check_compact,
+            AgentState.COMPACT:          self._on_compact,
+            AgentState.LLM_CALL:         self._on_llm_call,
+            AgentState.PROCESS_RESPONSE: self._on_process_response,
+            AgentState.LENGTH_RETRY:     self._on_length_retry,
+            AgentState.EXECUTE_TOOLS:    self._on_execute_tools,
+            AgentState.CHECK_STOP:       self._on_check_stop,
+            AgentState.POST_ROUND:       self._on_post_round,
+            AgentState.SUMMARIZE_EXIT:   self._on_summarize_exit,
+            AgentState.CONTEXT_OVERFLOW: self._on_context_overflow,
+        }
 
-        self._prompt_mgr = PromptMgr(agent = self, model = self.llm.model, workdir = workspace, role_prompt = self.role_prompt)
-
-
-    async def run(
-        self,
-        input: str,
-        messages: list[dict],
-    ) -> str:
+    async def run(self, input: str, messages: list[dict]) -> str:
         messages.append({"role": "user", "content": input})
+        ctx = RunContext(
+            messages=messages,
+            round_start_idx=len(messages),
+        )
+        state = AgentState.CHECK_COMPACT
+        while state != AgentState.DONE:
+            prev = state
+            state = await self._handlers[state](ctx)
+            await self._emit_state_changed(prev, state)
 
-        final_text = ""
-        rounds_without_todo = 0
-        round_start_idx = len(messages)
-        has_tool_calls = False
-        compact_streak = 0
-        max_compact_streak = 3
-        stop_hook_used = False
-        while True:
-            prompt = self._prompt_mgr.build()
-            if self._compact_mgr.is_need_compact(messages, prompt, self._tools_schemas):
-                compact_streak += 1
-                if compact_streak > max_compact_streak:
-                    logger.warning("连续 %d 次 compact 后仍需压缩，请求模型总结当前进展", compact_streak - 1)
-                    response = await self._recovery_mgr.summarize_context_limit_exhaustion(
-                        prompt=prompt,
-                        messages=messages,
-                        caller_agent_type=self.agent_type,
-                        caller_uuid=str(self.uuid),
-                    )
-                    if response.content:
-                        final_text = response.content
-                    messages.append(response.assistant_message)
-                    break
-                await self.deps.event_bus.emit(CompactDelta(
-                    timestamp=time.time(),
-                    source=self.agent_type,
-                    content="auto manual",
-                ))
-                messages[:] = await self._compact_mgr.compact_history(messages)
-            else:
-                compact_streak = 0
+        if not ctx.has_tool_calls:
+            self.llm.clear_reasoning_content(messages[ctx.round_start_idx:])
+        return ctx.final_text
 
-            messages[:] = self.llm.normalize_messages(messages)
-            response = await self._recovery_mgr.chat_with_recovery(
-                prompt=prompt,
-                messages=messages,
+    # ---- state handlers ----
+
+    async def _on_check_compact(self, ctx: RunContext) -> AgentState:
+        ctx.prompt = self._prompt_mgr.build()
+        if not self._compact_mgr.is_need_compact(ctx.messages, ctx.prompt, self._tools_schemas):
+            ctx.compact_streak = 0
+            return AgentState.LLM_CALL
+        ctx.compact_streak += 1
+        if ctx.compact_streak > ctx.max_compact_streak:
+            logger.warning("连续 %d 次 compact 后仍需压缩", ctx.compact_streak - 1)
+            return AgentState.SUMMARIZE_EXIT
+        return AgentState.COMPACT
+
+    async def _on_compact(self, ctx: RunContext) -> AgentState:
+        await self.deps.event_bus.emit(CompactDelta(
+            timestamp=time.time(),
+            source=self.agent_type,
+            content="auto compact",
+        ))
+        ctx.messages[:] = await self._compact_mgr.compact_history(ctx.messages)
+        return AgentState.LLM_CALL
+
+    async def _on_llm_call(self, ctx: RunContext) -> AgentState:
+        ctx.messages[:] = self.llm.normalize_messages(ctx.messages)
+        try:
+            ctx.response = await self.llm.chat(
+                prompt=ctx.prompt,
+                messages=ctx.messages,
                 tools=self._tools_schemas,
                 caller_agent_type=self.agent_type,
                 caller_uuid=str(self.uuid),
             )
-            content, tool_calls = response.content, response.tool_calls
+        except Exception as exc:
+            if self.llm.is_context_too_long_error(exc):
+                return AgentState.CONTEXT_OVERFLOW
+            raise
+        return AgentState.PROCESS_RESPONSE
 
-            if content:
-                final_text = content
+    async def _on_process_response(self, ctx: RunContext) -> AgentState:
+        response = ctx.response
+        if response.content:
+            ctx.final_text = response.content
 
-            messages.append(response.assistant_message)
-            if not tool_calls:
-                if self.deps.hooks_mgr is not None and not stop_hook_used:
-                    stop_hook = await self.deps.hooks_mgr.run_event(
-                        "Stop",
-                        final_text,
-                        {"final_text": final_text},
-                        session_id=self.deps.session_id,
-                        agent_id=str(self.uuid),
-                        agent_type=self.agent_type,
-                    )
-                    if stop_hook.blocked:
-                        stop_hook_used = True
-                        reason = stop_hook.block_reason or "Stop hook blocked"
-                        messages.append({
-                            "role": "user",
-                            "content": f"<reminder>{reason}</reminder>",
-                        })
-                        continue
-                break
+        if response.finish_reason == "length":
+            return AgentState.LENGTH_RETRY
 
-            has_tool_calls = True
-            used_todo = False
-            manual_compact = False
-            compact_focus = None
-            for tc in tool_calls.values():
-                tool_name = tc["name"]
-                tool_call_id = tc["id"]
-                if self.tools is not None:
-                    if tool_name not in self.tools:
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": tool_call_id,
-                            "content": f"错误：未知工具 '{tool_name}'",
-                        })
-                        continue
+        ctx.messages.append(response.assistant_message)
 
-                if tool_name == "todo_write":
-                    used_todo = True
-                try:
-                    args = json.loads(tc["arguments"])
-                    if tool_name == "compact":
-                        manual_compact = True
-                        compact_focus = args.get("focus")
-                except json.JSONDecodeError:
-                    args = {}
+        if response.tool_calls:
+            return AgentState.EXECUTE_TOOLS
+        return AgentState.CHECK_STOP
 
-                result_text = await self._recovery_mgr.execute_tool_with_recovery(
-                    tool_name,
-                    args,
-                    {"current_tool_call_id": tool_call_id, "deps": self.deps, "agent": self},
-                )
+    async def _on_length_retry(self, ctx: RunContext) -> AgentState:
+        response = ctx.response
+        ctx.messages.append(
+            response.assistant_message
+            or {"role": "assistant", "content": response.content or None}
+        )
+        if ctx.length_recoveries >= ctx.max_length_recoveries:
+            ctx.final_text = "错误：模型输出连续被截断，已达到自动续写恢复上限。请缩小输出范围后重试。"
+            ctx.messages.append({"role": "assistant", "content": ctx.final_text})
+            return AgentState.DONE
 
-                messages.append({
+        ctx.length_recoveries += 1
+        ctx.messages.append({"role": "user", "content": "输出达到长度上限。请从中断处直接继续，不要回顾、不要重复，必要时可以从半句话接续。"})
+        ctx.messages[:] = self.llm.normalize_messages(ctx.messages)
+        return AgentState.LLM_CALL
+
+    async def _on_execute_tools(self, ctx: RunContext) -> AgentState:
+        ctx.has_tool_calls = True
+        used_todo = False
+        ctx.manual_compact = False
+        ctx.compact_focus = None
+
+        for tc in ctx.response.tool_calls.values():
+            tool_name = tc["name"]
+            tool_call_id = tc["id"]
+
+            if self.tools is not None and tool_name not in self.tools:
+                ctx.messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call_id,
-                    "content": str(result_text),
+                    "content": f"错误：未知工具 '{tool_name}'",
                 })
+                continue
 
-            rounds_without_todo = 0 if used_todo else rounds_without_todo + 1
-            if self._todo_mgr.has_open_items() and rounds_without_todo >= 3:
-                messages.append({"role": "user", "content": [{"type": "text", "text": "<reminder>更新你的待办事项。</reminder>"}]})
+            if tool_name == "todo_write":
+                used_todo = True
+            try:
+                args = json.loads(tc["arguments"])
+                if tool_name == "compact":
+                    ctx.manual_compact = True
+                    ctx.compact_focus = args.get("focus")
+            except json.JSONDecodeError:
+                args = {}
 
-            if manual_compact:
-                await self.deps.event_bus.emit(CompactDelta(
-                    timestamp=time.time(),
-                    source=self.agent_type,
-                    content="llm manual",
+            try:
+                result_text = str(await self.deps.tools_mgr.execute(
+                    tool_name, args,
+                    {"current_tool_call_id": tool_call_id, "deps": self.deps, "agent": self},
                 ))
-                messages[:] = await self._compact_mgr.compact_history(messages, focus=compact_focus)
+            except Exception as exc:
+                result_text = f"错误：工具 '{tool_name}' 执行失败: {type(exc).__name__}: {exc}"
 
-        if not has_tool_calls:
-            self.llm.clear_reasoning_content(messages[round_start_idx:])
+            ctx.messages.append({
+                "role": "tool",
+                "tool_call_id": tool_call_id,
+                "content": result_text,
+            })
 
-        return final_text
+        ctx.rounds_without_todo = 0 if used_todo else ctx.rounds_without_todo + 1
+        return AgentState.POST_ROUND
+
+    async def _on_check_stop(self, ctx: RunContext) -> AgentState:
+        if self.deps.hooks_mgr is not None and not ctx.stop_hook_used:
+            stop_hook = await self.deps.hooks_mgr.run_event(
+                "Stop",
+                ctx.final_text,
+                {"final_text": ctx.final_text},
+                session_id=self.deps.session_id,
+                agent_id=str(self.uuid),
+                agent_type=self.agent_type,
+            )
+            if stop_hook.blocked:
+                ctx.stop_hook_used = True
+                reason = stop_hook.block_reason or "Stop hook blocked"
+                ctx.messages.append({
+                    "role": "user",
+                    "content": f"<reminder>{reason}</reminder>",
+                })
+                return AgentState.CHECK_COMPACT
+        return AgentState.DONE
+
+    async def _on_post_round(self, ctx: RunContext) -> AgentState:
+        if self._todo_mgr.has_open_items() and ctx.rounds_without_todo >= 3:
+            ctx.messages.append({
+                "role": "user",
+                "content": [{"type": "text", "text": "<reminder>更新你的待办事项。</reminder>"}],
+            })
+
+        if ctx.manual_compact:
+            await self.deps.event_bus.emit(CompactDelta(
+                timestamp=time.time(),
+                source=self.agent_type,
+                content="llm manual",
+            ))
+            ctx.messages[:] = await self._compact_mgr.compact_history(
+                ctx.messages, focus=ctx.compact_focus,
+            )
+
+        return AgentState.CHECK_COMPACT
+
+    async def _on_summarize_exit(self, ctx: RunContext) -> AgentState:
+        ctx.messages.append({"role": "user", "content": "由于对话上下文过长且多次压缩仍无法继续，请你基于当前已完成的工作做一个总结："
+            "1) 已经完成了什么；2) 还有什么未完成；3) 给出后续建议。"})
+        ctx.messages[:] = self.llm.normalize_messages(ctx.messages)
+        try:
+            response = await self.llm.chat(
+                prompt=ctx.prompt,
+                messages=ctx.messages,
+                tools=[],
+                caller_agent_type=self.agent_type,
+                caller_uuid=str(self.uuid),
+            )
+        except Exception as exc:
+            if self.llm.is_context_too_long_error(exc):
+                ctx.final_text = "错误：上下文过长，已多次压缩仍无法继续。请缩小任务范围或重新开始较短的会话。"
+                ctx.messages.append({"role": "assistant", "content": ctx.final_text})
+                return AgentState.DONE
+            raise
+        if response.content:
+            ctx.final_text = response.content
+        ctx.messages.append(response.assistant_message)
+        return AgentState.DONE
+
+    async def _on_context_overflow(self, ctx: RunContext) -> AgentState:
+        ctx.final_text = "错误：上下文过长，已多次压缩仍无法继续。请缩小任务范围或重新开始较短的会话。"
+        ctx.messages.append({"role": "assistant", "content": ctx.final_text})
+        return AgentState.DONE
+
+    # ---- helpers ----
+
+    async def _emit_state_changed(self, from_state: AgentState, to_state: AgentState) -> None:
+        if self.deps.event_bus is None:
+            return
+        await self.deps.event_bus.emit(AgentStateChanged(
+            timestamp=time.time(),
+            source=self.agent_type,
+            agent_id=str(self.uuid),
+            agent_type=self.agent_type,
+            from_state=from_state.value,
+            to_state=to_state.value,
+        ))

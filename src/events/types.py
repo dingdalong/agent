@@ -168,6 +168,17 @@ class InputRequested(UserInputRequest):
     type: Literal["input_requested"] = field(default="input_requested", init=False)
 
 
+@dataclass
+class AgentStateChanged(Event):
+    """Agent 状态机状态转换。"""
+    agent_id: str = ""
+    agent_type: str = ""
+    from_state: str = ""
+    to_state: str = ""
+    level: EventLevel = field(default=EventLevel.DETAIL, init=False)
+    type: Literal["agent_state_changed"] = field(default="agent_state_changed", init=False)
+
+
 # 联合类型
 AgentEvent = Union[
     ErrorOccurred, InputRequested, OutputRequested, InterruptRequested,
@@ -175,4 +186,5 @@ AgentEvent = Union[
     CompactDelta, ToolCallCompleted, ToolCallStarted,
     LLMCallCompleted, LLMCallStarted,
     ResponseDelta, ThinkingDelta,
+    AgentStateChanged,
 ]

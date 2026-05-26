@@ -1,6 +1,5 @@
 from src.mgr.file_mgr import FileMgr
 from src.mgr.compact_mgr import CompactMgr
-from src.mgr.recovery_mgr import RecoveryMgr
 from src.mgr.todo_mgr import TodoManager
 from src.mgr.tools_mgr import ToolsMgr
 from src.mgr.prompt_mgr import PromptMgr
@@ -12,4 +11,4 @@ from src.mgr.memory_mgr import MemoryMgr
 from src.mgr.hooks_mgr import HooksMgr
 from src.mgr.llm_mgr import LLMMgr
 
-__all__ = ["FileMgr", "CompactMgr", "RecoveryMgr", "TodoManager", "ToolsMgr", "PromptMgr", "SkillMgr", "SubAgentMgr", "PermissionManager", "ConfigManager", "MemoryMgr", "HooksMgr", "LLMMgr"]
+__all__ = ["FileMgr", "CompactMgr", "TodoManager", "ToolsMgr", "PromptMgr", "SkillMgr", "SubAgentMgr", "PermissionManager", "ConfigManager", "MemoryMgr", "HooksMgr", "LLMMgr"]
