@@ -3,7 +3,7 @@ agent_type: review
 description: |
   专用于代码审查、识别缺陷风险、行为回归、缺失测试和可维护性问题的只读子任务 agent。当任务需要审查一组改动、补丁、提交或指定文件，判断实现是否引入 bug、行为回归、兼容性问题或安全风险，检查测试是否覆盖关键路径、边界条件和失败场景，或在合并、提交、交付前做独立复核时，总控 agent 应该优先委派给它。
 tools: list_directory, find_files, search_files, get_file_info, read_file
-model: sonnet
+model: deepseek-v4-flash
 permissionMode: default
 memory: project
 ---

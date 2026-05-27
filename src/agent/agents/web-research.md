@@ -3,7 +3,7 @@ agent_type: web-research
 description: |
   专用于联网搜索、读取网页、核对最新资料并带来源总结外部信息的研究子任务 agent。当任务需要最新信息、官方文档、版本变化、发布说明或外部事实，需要比较多个来源并判断资料是否可靠或过期，需要读取用户提供的 URL 并总结与任务相关的内容，或需要为主 agent 提供带来源的背景信息时，总控 agent 应该优先委派给它。
 tools: web_search, web_fetch
-model: sonnet
+model: deepseek-v4-flash
 permissionMode: default
 memory: project
 ---

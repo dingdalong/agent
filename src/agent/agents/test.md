@@ -3,7 +3,7 @@ agent_type: test
 description: |
   专用于运行测试、类型检查、lint、构建验证并解释失败原因的命令执行子任务 agent。当任务需要运行单元测试、集成测试、回归测试或指定测试文件，运行类型检查、lint、格式化检查或构建命令，复现测试失败并总结失败断言、错误栈和退出码，或在修改前后确认某个验证命令状态时，总控 agent 应该优先委派给它。
 tools: shell
-model: sonnet
+model: deepseek-v4-flash
 permissionMode: default
 memory: project
 ---
