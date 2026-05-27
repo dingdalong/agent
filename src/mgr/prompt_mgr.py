@@ -124,7 +124,7 @@ class PromptMgr:
         lines = [
             f"运行平台：`{os.uname().sysname}`",
             f"llm模型：`{self.model}`",
-            f"工作目录：`{self.workdir.relative_to(Path.cwd())}`",
+            f"工作目录：`{self.workdir}`",
         ]
         return "# 运行环境\n" + "\n".join(lines)
 

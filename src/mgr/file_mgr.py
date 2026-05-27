@@ -17,7 +17,18 @@ class FileMgr:
     deps: AgentDeps = field(repr=False)
 
     def safe_path(self, path_str: str) -> Path:
-        path = (self.workdir / path_str).resolve()
+        """将绝对路径字符串解析为 Path，校验是否在工作目录内。
+
+        Args:
+            path_str: 文件或目录的绝对路径字符串。
+
+        Returns:
+            解析后的 Path 对象。
+
+        Raises:
+            ValueError: 路径不在工作目录内时抛出。
+        """
+        path = Path(path_str).resolve()
         if not path.is_relative_to(self.workdir):
             raise ValueError(f"Path escapes workspace: {path_str}")
         return path
