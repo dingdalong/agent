@@ -189,8 +189,8 @@ class CLIInterface(UserInterface):
             "\n<agent.permission>工具请求权限</agent.permission>\n"
             f"  工具: {self._escape_html(tool_name)}\n"
             f"  内容: {self._escape_html(detail)}\n"
-            "  输入 y/n/a 后按 Enter 确认\n"
-            "  [y] 允许一次   [n] 拒绝   [a] 始终允许并保存\n"
+            "  输入 y/s/a/n 后按 Enter 确认\n"
+            "  [y] 允许一次   [s] 本次会话始终允许   [a] 始终允许并保存   [n] 拒绝\n"
         ))
         session: PromptSession[str] = PromptSession(
             key_bindings=self._build_permission_key_bindings(),
@@ -205,11 +205,13 @@ class CLIInterface(UserInterface):
                         self._resume_interrupt_reader()
                 if answer in {"y", "yes"}:
                     return "yes"
-                if answer in {"n", "no", "deny"}:
-                    return "deny"
+                if answer in {"s", "session"}:
+                    return "session"
                 if answer in {"a", "always"}:
                     return "always"
-                self._print(HTML("<agent.error>请输入 y、n 或 a。</agent.error>"))
+                if answer in {"n", "no", "deny"}:
+                    return "deny"
+                self._print(HTML("<agent.error>请输入 y、s、a 或 n。</agent.error>"))
 
     async def on_response_delta(self, event: ResponseDelta, content: str) -> None:
         await self._write_markdown_delta(

@@ -544,11 +544,15 @@ class PermissionManager:
             detail=detail,
         )
         normalized = answer.strip().lower()
+        if normalized == "session":
+            rule = self._build_session_rule(tool_name, tool_input)
+            self.session_allow.append(rule)
+            return "allow", "用户在当前会话中始终允许"
         if normalized == "always":
             rule = self._build_session_rule(tool_name, tool_input)
             self.session_allow.append(rule)
             self._persist_allow_rule(rule)
-            return "allow", "用户在当前会话中始终允许"
+            return "allow", "用户始终允许（已保存）"
         if normalized in {"y", "yes"}:
             return "allow", "用户已允许"
         return "deny", "用户拒绝了权限请求"
