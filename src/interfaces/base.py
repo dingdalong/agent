@@ -6,6 +6,7 @@ import asyncio
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from contextlib import contextmanager
+from dataclasses import dataclass
 
 from src.events.types import (
     CompactDelta,
@@ -24,6 +25,13 @@ from src.events.types import (
 )
 
 
+@dataclass(frozen=True, slots=True)
+class SystemState:
+    """UI 可查询的系统状态。"""
+
+    permission_mode: str = "default"
+
+
 class UserInterface(ABC):
     """I/O 抽象基类，封装各 interface 共享的事件处理逻辑。"""
 
@@ -31,6 +39,7 @@ class UserInterface(ABC):
         self._in_thinking = False
         self._in_response = False
         self._request_interrupt: Callable[[], None] | None = None
+        self._system_state_provider: Callable[[], SystemState] | None = None
 
     @contextmanager
     def watch_interrupt(self, request_interrupt: Callable[[], None]):
@@ -45,6 +54,28 @@ class UserInterface(ABC):
     def _request_user_interrupt(self) -> None:
         if self._request_interrupt is not None:
             self._request_interrupt()
+
+    def set_system_state_provider(self, provider: Callable[[], SystemState] | None) -> None:
+        """设置 UI 查询系统状态时使用的数据源。"""
+
+        self._system_state_provider = provider
+
+    def get_system_state(self) -> SystemState:
+        """获取当前系统状态。"""
+
+        if self._system_state_provider is None:
+            return SystemState()
+        return self._system_state_provider()
+
+    def on_system_state_changed(self) -> None:
+        """系统状态变化通知。固定状态栏 UI 可在这里触发刷新。"""
+
+        pass
+
+    def set_permission_mode_toggle_handler(self, handler: Callable[[], None] | None) -> None:
+        """设置输入期间的权限模式快捷键处理器。"""
+
+        pass
 
     async def start(self) -> None:
         """启动 UI 生命周期钩子。默认实现供同步 UI 使用。"""

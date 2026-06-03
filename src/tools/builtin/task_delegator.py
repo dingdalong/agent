@@ -1,7 +1,7 @@
 from __future__ import annotations
 from typing import TYPE_CHECKING
 
-from src.tools.decorator import PermissionRule, ToolPermission, tool
+from src.tools.decorator import ToolPermission, tool
 from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
@@ -13,6 +13,6 @@ class TaskDelegator(BaseModel):
     prompt: str = Field(..., description="传给子智能体执行的完整任务正文")
 
 @tool(model=TaskDelegator, description="委托一个任务给子智能体",
-      permission=ToolPermission(rules=[PermissionRule(permission="allow")]))
+      permission=ToolPermission(readonly=True))
 async def task_delegator(description: str, agent_type: str, prompt: str, agent: Agent) -> str:
     return await agent._subagent_mgr.task_delegator(agent_type, prompt, parent_agent=agent)

@@ -106,20 +106,26 @@ class ConfigManager:
                 raise
             self._user_settings = settings
 
-    def append_permission_rule(self, rule: dict[str, Any]) -> None:
+    def append_permission_list(self, list_name: str, rule_text: str) -> None:
+        """向 permissions 下指定列表追加规则。
+
+        Args:
+            list_name: "allow" 或 "deny"。
+            rule_text: 规则文本。
+        """
         with self._lock:
             settings = self.load_user_settings()
-            permission = settings.get("permission")
-            if not isinstance(permission, dict):
-                permission = {}
-                settings["permission"] = permission
+            permissions = settings.get("permissions")
+            if not isinstance(permissions, dict):
+                permissions = {}
+                settings["permissions"] = permissions
 
-            rules = permission.get("rules")
+            rules = permissions.get(list_name)
             if not isinstance(rules, list):
                 rules = []
-                permission["rules"] = rules
+                permissions[list_name] = rules
 
-            if rule not in rules:
-                rules.append(rule)
+            if rule_text not in rules:
+                rules.append(rule_text)
 
             self._save_user_settings(settings)

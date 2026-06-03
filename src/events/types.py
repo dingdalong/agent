@@ -137,7 +137,7 @@ class InterruptRequested(Event):
 @dataclass
 class PermissionNotice(Event):
     """工具权限状态通知，供 UI 自行组织展示。"""
-    status: Literal["allow", "deny"] = "allow"
+    status: Literal["allow", "deny", "auto_allow"] = "allow"
     tool_name: str = ""
     detail: str = ""
     level: EventLevel = field(default=EventLevel.PROGRESS, init=False)

@@ -1,7 +1,7 @@
 from __future__ import annotations
 from typing import TYPE_CHECKING
 
-from src.tools.decorator import PermissionRule, ToolPermission, tool
+from src.tools.decorator import ToolPermission, tool
 from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
@@ -14,7 +14,7 @@ class ReadToolResult(BaseModel):
 @tool(
     model=ReadToolResult,
     description="读取分页工具结果的后续页。",
-    permission=ToolPermission(rules=[PermissionRule(permission="allow")]),
+    permission=ToolPermission(readonly=True),
     raw_output=True,
 )
 async def read_tool_result(

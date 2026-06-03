@@ -1,7 +1,7 @@
 from __future__ import annotations
 from typing import TYPE_CHECKING, List, Literal
 
-from src.tools.decorator import PermissionRule, ToolPermission, tool
+from src.tools.decorator import ToolPermission, tool
 from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
@@ -17,6 +17,6 @@ class TodoWrite(BaseModel):
     items: List[TodoItem] = Field(..., description="待办事项列表")
 
 @tool(model=TodoWrite, description="更新待办事项。",
-      permission=ToolPermission(rules=[PermissionRule(permission="allow")]))
+      permission=ToolPermission(readonly=True))
 async def todo_write(items: list, agent: Agent) -> str:
     return await agent._todo_mgr.update(items)

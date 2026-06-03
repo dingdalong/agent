@@ -73,7 +73,7 @@ class Agent:
     def __post_init__(self):
         self.uuid = uuid.uuid4()
         self.llm = self.deps.llm_mgr.get(self.model)
-        self._tools_schemas = self.deps.tools_mgr.get_schemas(self.tools)
+        self.refresh_tools_schemas()
         compact_cfg = self.deps.config_mgr.get_config("compact")
         context_limit = self.llm.context_limit
         self._compact_mgr = CompactMgr(
@@ -99,6 +99,12 @@ class Agent:
             AgentState.SUMMARIZE_EXIT:   self._on_summarize_exit,
             AgentState.CONTEXT_OVERFLOW: self._on_context_overflow,
         }
+
+    def refresh_tools_schemas(self) -> None:
+        self._tools_schemas = self.deps.tools_mgr.get_schemas(
+            self.tools,
+            permission_mgr=self.deps.permission_mgr,
+        )
 
     async def run(self, input: str) -> str:
         self.history.append({"role": "user", "content": input})

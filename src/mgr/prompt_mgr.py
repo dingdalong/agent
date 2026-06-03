@@ -195,7 +195,15 @@ class PromptMgr:
         return "\n\n".join(s for s in sections if s)
 
     def _build_dynamic_context(self) -> str:
-        return f"当前时间：`{datetime.date.today().isoformat()}`"
+        """构建每次请求都重新计算的动态上下文（不缓存）。
+
+        Returns:
+            包含当前时间等每轮动态信息的上下文字符串。
+        """
+        parts = []
+
+        parts.append(f"当前时间：`{datetime.date.today().isoformat()}`")
+        return "\n\n".join(parts)
 
     def build(self) -> list:
         if self._static_prefix is None:

@@ -5,7 +5,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from src.mgr.memory_mgr import MemoryType
-from src.tools.decorator import PermissionRule, ToolPermission, tool
+from src.tools.decorator import ToolPermission, tool
 
 
 class SaveMemory(BaseModel):
@@ -34,7 +34,7 @@ def _memory_mgr(deps: Any) -> Any:
         "保存前必须检查已知记忆；如果语义相近，复用已有标题，合并新旧内容后覆盖，"
         "不要创建近似重复记忆。"
     ),
-    permission=ToolPermission(rules=[PermissionRule(permission="allow")]),
+    permission=ToolPermission(readonly=True),
 )
 async def save_memory(
     title: str,
@@ -59,7 +59,7 @@ async def save_memory(
 @tool(
     model=ReadMemory,
     description="读取一条项目记忆的完整内容。",
-    permission=ToolPermission(rules=[PermissionRule(permission="allow")]),
+    permission=ToolPermission(readonly=True),
 )
 async def read_memory(title: str, deps: Any) -> str:
     memory_mgr = _memory_mgr(deps)

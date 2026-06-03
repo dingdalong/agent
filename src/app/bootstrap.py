@@ -27,8 +27,8 @@ async def create_app() -> AgentApp:
     permission_mgr = PermissionManager(
         tools=tools_mgr.list_entries(),
         config_mgr=config_mgr,
+        workdir=str(workspace),
     )
-
     llm_mgr = LLMMgr(config_mgr=config_mgr, event_bus=event_bus)
     await llm_mgr.load_models()
     deps = AgentDeps(

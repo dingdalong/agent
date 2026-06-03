@@ -92,7 +92,7 @@ class EventBus:
 
     async def notify_permission(
         self,
-        status: Literal["allow", "deny"],
+        status: Literal["allow", "deny", "auto_allow"],
         tool_name: str,
         detail: str = "",
         source: str = "permission",

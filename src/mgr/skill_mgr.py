@@ -35,7 +35,7 @@ class SkillMgr:
             return
 
         paths = chain(
-            ((path, "buildin") for path in sorted(builtin_dir.rglob("SKILL.md"))),
+            ((path, "builtin") for path in sorted(builtin_dir.rglob("SKILL.md"))),
             (
                 (path, path.relative_to(plugins_dir).parts[0])
                 for path in sorted(plugins_dir.rglob("SKILL.md"))

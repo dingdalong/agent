@@ -4,7 +4,8 @@ import asyncio
 from pathlib import PurePosixPath
 import shlex
 from typing import Any
-from src.tools.decorator import PermissionRule, ToolPermission, tool
+from src.mgr.permission_mgr import PermissionCheckResult, PermissionContext
+from src.tools.decorator import ToolPermission, tool
 from pydantic import BaseModel, Field
 
 
@@ -184,19 +185,24 @@ def _is_shell_deny_segment(segment: list[str]) -> bool:
     if _is_dangerous_find(segment):
         return True
     shell_command = _shell_c_command(segment)
-    if shell_command is not None and check_shell_deny({"command": shell_command}):
+    if shell_command is not None and _is_dangerous_command(shell_command):
         return True
     return False
 
 
-def check_shell_deny(values: dict[str, Any]) -> bool:
-    command = values.get("command")
-    if not isinstance(command, str):
-        return False
+def _is_dangerous_command(command: str) -> bool:
+    """判断 shell 命令字符串是否包含危险操作。
+
+    Args:
+        command: 待检查的 shell 命令。
+
+    Returns:
+        True 表示命令危险，应拒绝执行。
+    """
     if "`" in command:
         return True
-    segments: list[list[str]] = []
     try:
+        segments: list[list[str]] = []
         for part in _split_unquoted_newlines(command):
             segments.extend(_shell_segments(_shell_tokens(part)))
     except ValueError:
@@ -217,16 +223,29 @@ def check_shell_deny(values: dict[str, Any]) -> bool:
     return False
 
 
+def check_shell_permissions(values: dict[str, Any], ctx: PermissionContext) -> PermissionCheckResult:
+    """shell 安全检查：检测危险命令并阻止执行。规则匹配由 check() 统一处理。
+
+    Args:
+        values: 工具调用参数，需包含 "command" 字段。
+        ctx: 权限上下文。
+
+    Returns:
+        PermissionCheckResult 权限检查结果。
+    """
+    command = values.get("command")
+    if not isinstance(command, str):
+        return PermissionCheckResult("passthrough")
+    if _is_dangerous_command(command):
+        return PermissionCheckResult("deny", f"危险命令被阻止：{command[:80]}", bypass_immune=True)
+    return PermissionCheckResult("passthrough")
+
+
 @tool(model=Shell, description="执行 shell 命令并返回输出",
       permission=ToolPermission(
+          specifier_arg="command",
           tips="{command}",
-          args=["command"],
-          rules=[
-              PermissionRule(
-                  permission="deny",
-                  checker=check_shell_deny,
-              ),
-          ],
+          check_permissions=check_shell_permissions,
       ))
 async def shell(command: str, timeout: int) -> str:
     try:

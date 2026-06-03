@@ -48,7 +48,8 @@ class LLMMgr:
                 if models:
                     logger.info("从 %s API 获取模型列表失败，使用配置中的模型列表", provider_name)
                 else:
-                    logger.warning("获取 %s 模型列表失败: %s", provider_name, e)
+                    error_msg = str(e) or type(e).__name__
+                    logger.warning("获取 %s 模型列表失败: %s", provider_name, error_msg)
             return provider_name, models
 
         results = await asyncio.gather(

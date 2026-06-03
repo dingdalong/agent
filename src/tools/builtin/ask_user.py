@@ -2,7 +2,7 @@
 from __future__ import annotations
 from typing import TYPE_CHECKING
 
-from src.tools.decorator import PermissionRule, ToolPermission, tool
+from src.tools.decorator import ToolPermission, tool
 from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
@@ -13,6 +13,6 @@ class AskUser(BaseModel):
     question: str = Field(description="要向用户提出的问题")
 
 @tool(model=AskUser, description="当你需要用户提供额外信息、做出选择或确认时调用此工具。",
-      permission=ToolPermission(rules=[PermissionRule(permission="allow")]))
+      permission=ToolPermission(readonly=True))
 async def ask_user(question: str, deps: AgentDeps) -> str:
     return await deps.event_bus.request_input(f"\n🤖提问: {question}\n你的回答: ")

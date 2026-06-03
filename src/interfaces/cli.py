@@ -37,6 +37,7 @@ class CLIInterface(UserInterface):
         super().__init__()
         self._resume_interrupt_reader: Callable[[], None] | None = None
         self._interrupt_watch_depth = 0
+        self._permission_mode_toggle_handler: Callable[[], None] | None = None
         self._style = Style.from_dict({
             "agent.response": "",
             "agent.thinking": "ansibrightblack",
@@ -144,12 +145,32 @@ class CLIInterface(UserInterface):
                     default=default,
                     multiline=True,
                     prompt_continuation="... ",
-                    bottom_toolbar="Enter 提交 · Shift+Enter/Ctrl+J 换行 · Ctrl+C 清空/退出",
+                    bottom_toolbar=self._input_bottom_toolbar,
                     handle_sigint=True,
                 )
         finally:
             if self._resume_interrupt_reader is not None:
                 self._resume_interrupt_reader()
+
+    def set_permission_mode_toggle_handler(
+        self,
+        handler: Callable[[], None] | None,
+    ) -> None:
+        self._permission_mode_toggle_handler = handler
+
+    def _input_bottom_toolbar(self) -> str:
+        permission_mode = self.get_system_state().permission_mode
+        if self._permission_mode_toggle_handler is None:
+            return (
+                "Enter 提交 · "
+                f"权限模式: {permission_mode} · "
+                "Shift+Enter/Ctrl+J 换行 · Ctrl+C 清空/退出"
+            )
+        return (
+            "Enter 提交 · "
+            f"Shift+Tab 权限模式: {permission_mode} · "
+            "Shift+Enter/Ctrl+J 换行 · Ctrl+C 清空/退出"
+        )
 
     async def _read_permission(self, tool_name: str, detail: str) -> str:
         return await self._prompt_permission(tool_name, detail)
@@ -250,9 +271,13 @@ class CLIInterface(UserInterface):
         raise ValueError(f"unknown markdown stream: {stream_name}")
 
     async def on_permission_notice(self, event: PermissionNotice) -> None:
+        if event.status == "auto_allow":
+            label = f"[auto] {event.detail or event.tool_name}"
+            self._print(HTML(f"<agent.success>{self._escape_html(label)}</agent.success>"))
+            return
         if event.status == "allow":
             return
-        elif event.detail:
+        if event.detail:
             await self._write(f"[deny] {event.detail}\n")
         else:
             await self._write(f"[deny] {event.tool_name}\n")
@@ -344,6 +369,7 @@ class CLIInterface(UserInterface):
             event.current_buffer.insert_text("\n")
 
         self._try_add_binding(bindings, "s-enter", lambda event: event.current_buffer.insert_text("\n"))
+        self._try_add_binding(bindings, "s-tab", self._handle_permission_mode_toggle)
 
         @bindings.add("c-c")
         def _(event) -> None:
@@ -353,6 +379,12 @@ class CLIInterface(UserInterface):
             event.app.exit(exception=KeyboardInterrupt)
 
         return bindings
+
+    def _handle_permission_mode_toggle(self, event) -> None:
+        if self._permission_mode_toggle_handler is None:
+            return
+        self._permission_mode_toggle_handler()
+        event.app.invalidate()
 
     def _build_permission_key_bindings(self) -> KeyBindings:
         bindings = KeyBindings()
