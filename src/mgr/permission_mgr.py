@@ -1,9 +1,8 @@
 """权限管理器 — 权限模式 + 规则引擎。
 
-评估顺序（8 步）：
-1. 工具级 deny → 2. 工具级 ask → 3. 内容级 deny/ask（specifier_arg + fnmatch）
-→ 4. check_permissions（工具安全逻辑）→ 5. 内容级 allow → 6. bypass 模式
-→ 7. 工具级 allow + session_allow → 8. 模式默认策略。
+评估顺序（6 步）：
+1. deny 规则 → 2. ask 规则 → 3. check_permissions（工具安全逻辑）
+→ 4. allow 规则（含 session_allow）→ 5. bypass 模式 → 6. 模式默认策略。
 """
 
 from __future__ import annotations
@@ -150,33 +149,28 @@ class PermissionRule:
     """一条权限规则，如 'shell(npm *)'。
 
     Attributes:
-        tool: 工具名，如 "shell"。
-        specifier: 括号内的匹配模式，None 表示匹配该工具全部调用。
+        tool: 工具名，如 "shell"。配置中的 "*" 通配符在加载时已展开为具体工具名。
+        specifier: fnmatch 匹配模式。"*" 表示匹配该工具的所有调用。
         permission: "allow"、"deny" 或 "ask"。
     """
     tool: str
-    specifier: str | None
+    specifier: str
     permission: Literal["allow", "deny", "ask"]
 
-    def matches_tool(self, tool_name: str) -> bool:
-        """判断规则是否匹配指定工具名（含 * 通配符）。
+    def matches_specifier(self, specifier_value: str) -> bool:
+        """判断规则的 specifier 是否匹配给定值。
 
         Args:
-            tool_name: 被调用的工具名。
+            specifier_value: 从 tool_input 中提取的匹配值，无值时传空字符串。
 
         Returns:
             是否匹配。
         """
-        return self.tool == "*" or self.tool == tool_name
-
-    @property
-    def is_tool_level(self) -> bool:
-        """是否为工具级规则（无 specifier，匹配该工具的所有调用）。"""
-        return self.specifier is None
+        return fnmatch(specifier_value, self.specifier)
 
     def __str__(self) -> str:
         """返回规则文本表示，如 'shell(npm *)'。"""
-        if self.specifier is None:
+        if self.specifier == "*":
             return self.tool
         return f"{self.tool}({self.specifier})"
 
@@ -197,60 +191,14 @@ def parse_rule(text: str, permission: Literal["allow", "deny", "ask"]) -> Permis
         logger.warning("忽略无法解析的权限规则：%r", text)
         return None
     tool = m.group(1)
-    specifier = m.group(2)
+    specifier = m.group(2) or "*"
     return PermissionRule(tool=tool, specifier=specifier, permission=permission)
-
-
-# ── 内容级规则匹配（仅被 check() 内部调用）─────────────────────────────
-
-
-def _match_deny_ask_rules(
-    content_rules: tuple[PermissionRule, ...],
-    value: str,
-) -> PermissionCheckResult | None:
-    """在内容级规则中匹配 deny 和 ask 规则。
-
-    Args:
-        content_rules: 当前工具的内容级规则列表（已按 deny→ask→allow 排序）。
-        value: 从 tool_input 中提取的匹配值（如命令字符串、文件路径）。
-
-    Returns:
-        匹配到的 PermissionCheckResult，无匹配返回 None。
-    """
-    for rule in content_rules:
-        if rule.specifier is None or rule.permission == "allow":
-            continue
-        if fnmatch(value, rule.specifier):
-            if rule.permission == "deny":
-                return PermissionCheckResult("deny", f"被 deny 规则阻止：{rule}")
-            if rule.permission == "ask":
-                return PermissionCheckResult("ask", f"被 ask 规则要求确认：{rule}", bypass_immune=True)
-    return None
-
-
-def _match_allow_rules(
-    content_rules: tuple[PermissionRule, ...],
-    value: str,
-) -> PermissionCheckResult | None:
-    """在内容级规则中匹配 allow 规则。
-
-    Args:
-        content_rules: 当前工具的内容级规则列表。
-        value: 从 tool_input 中提取的匹配值。
-
-    Returns:
-        匹配到的 PermissionCheckResult，无匹配返回 None。
-    """
-    for rule in content_rules:
-        if rule.specifier is None or rule.permission != "allow":
-            continue
-        if fnmatch(value, rule.specifier):
-            return PermissionCheckResult("allow", f"匹配 allow 规则：{rule}")
-    return None
 
 
 # ── PermissionManager ─────────────────────────────────────────────────
 
+# 规则字典类型：key 为 tool 名（含 "*" 通配符），value 为该工具的规则列表。
+RulesDict = dict[str, list[PermissionRule]]
 
 class PermissionManager:
     """管理工具调用的权限决策。
@@ -266,10 +214,10 @@ class PermissionManager:
     ):
         self.mode: PermissionMode = DEFAULT_MODE
         self._pre_plan_mode: PermissionMode | None = None
-        self.deny_rules: list[PermissionRule] = []
-        self.ask_rules: list[PermissionRule] = []
-        self.allow_rules: list[PermissionRule] = []
-        self.session_allow: list[PermissionRule] = []
+        self.deny_rules: RulesDict = {}
+        self.ask_rules: RulesDict = {}
+        self.allow_rules: RulesDict = {}
+        self.session_allow: RulesDict = {}
         self.config_mgr = config_mgr
         self._workdir = workdir
         self._check_permissions_fns: dict[str, Callable[[dict[str, Any], PermissionContext], PermissionCheckResult]] = {}
@@ -316,21 +264,31 @@ class PermissionManager:
         self._parse_rules(permissions.get("allow", []), "allow", self.allow_rules)
 
     @staticmethod
+    def _add_rule(rules: RulesDict, rule: PermissionRule) -> None:
+        """将规则添加到按工具名索引的规则字典中。
+
+        Args:
+            rules: 目标规则字典。
+            rule: 要添加的权限规则。
+        """
+        rules.setdefault(rule.tool, []).append(rule)
+
+    @staticmethod
     def _parse_rules(
         items: Iterable,
         permission: Literal["allow", "deny", "ask"],
-        target: list[PermissionRule],
+        target: RulesDict,
     ) -> None:
-        """将配置文本列表解析为 PermissionRule 并追加到目标列表。
+        """将配置文本列表解析为 PermissionRule 并添加到目标字典。
 
         Args:
             items: 规则文本列表（来自配置文件）。
             permission: 规则权限类型。
-            target: 追加解析结果的目标列表。
+            target: 按工具名索引的目标规则字典。
         """
         for text in items:
             if isinstance(text, str) and (rule := parse_rule(text, permission)):
-                target.append(rule)
+                target.setdefault(rule.tool, []).append(rule)
 
     def set_mode(self, mode: PermissionMode) -> bool:
         """切换权限模式，处理 plan 模式转换逻辑。
@@ -384,18 +342,29 @@ class PermissionManager:
         self.allow_rules.clear()
         self._load_config()
 
+    @staticmethod
+    def _get_rules(rules: RulesDict, tool_name: str) -> list[PermissionRule]:
+        """获取匹配指定工具名的规则。
+
+        Args:
+            rules: 按工具名索引的规则字典。
+            tool_name: 被调用的工具名。
+
+        Returns:
+            该工具的规则列表，无匹配时返回空列表。
+        """
+        return rules.get(tool_name, [])
+
     def check(self, tool_name: str, tool_input: dict[str, Any]) -> PermissionDecision:
         """权限检查核心流程。
 
         评估顺序：
-        1. 工具级 deny 规则 → deny
-        2. 工具级 ask 规则 → ask（bypass-immune）
-        3. 内容级 deny/ask 规则（用 specifier_arg 提取值，fnmatch 匹配）→ deny/ask
-        4. check_permissions（仅工具自身安全逻辑）→ deny/ask/allow/passthrough
-        5. 内容级 allow 规则（含 session_allow）→ allow
-        6. bypass 模式 → auto_allow
-        7. 工具级 allow 规则 + session_allow → allow
-        8. 模式默认策略（仅按 readonly 判断）
+        1. deny 规则 → deny
+        2. ask 规则 → ask
+        3. check_permissions（工具自身安全逻辑）→ deny/ask/allow/passthrough
+        4. allow 规则（含 session_allow）→ allow
+        5. bypass 模式 → auto_allow
+        6. 模式默认策略（按 readonly 判断）
 
         Args:
             tool_name: 被调用的工具名。
@@ -404,30 +373,19 @@ class PermissionManager:
         Returns:
             (decision, reason) 元组，decision 为 allow|deny|ask|auto_allow。
         """
-        # Step 1: 工具级 deny 规则
-        for rule in self.deny_rules:
-            if rule.is_tool_level and rule.matches_tool(tool_name):
+        specifier_value = self._extract_specifier(tool_name, tool_input)
+
+        # Step 1: deny 规则
+        for rule in self._get_rules(self.deny_rules, tool_name):
+            if rule.matches_specifier(specifier_value):
                 return "deny", f"被 deny 规则阻止：{rule}"
 
-        # Step 2: 工具级 ask 规则（强制询问，bypass 模式也不跳过）
-        for rule in self.ask_rules:
-            if rule.is_tool_level and rule.matches_tool(tool_name):
+        # Step 2: ask 规则
+        for rule in self._get_rules(self.ask_rules, tool_name):
+            if rule.matches_specifier(specifier_value):
                 return "ask", f"被 ask 规则要求确认：{rule}"
 
-        # 提取 specifier 值和内容级规则
-        specifier_value = self._extract_specifier(tool_name, tool_input)
-        content_rules = self._collect_content_rules(tool_name) if specifier_value is not None else ()
-
-        # Step 3: 内容级 deny/ask 规则
-        if specifier_value is not None:
-            result = _match_deny_ask_rules(content_rules, specifier_value)
-            if result is not None:
-                if result.decision == "deny":
-                    return "deny", result.reason
-                if result.decision == "ask":
-                    return "ask", result.reason
-
-        # Step 4: check_permissions（仅工具自身安全逻辑）
+        # Step 3: check_permissions（工具自身安全逻辑）
         check_fn = self._check_permissions_fns.get(tool_name)
         if check_fn is not None:
             ctx = PermissionContext(mode=self.mode, workdir=self._workdir, tool_name=tool_name)
@@ -440,25 +398,22 @@ class PermissionManager:
             if result.decision == "allow":
                 return "allow", result.reason or f"工具级检查放行：{tool_name}"
 
-        # Step 5: 内容级 allow 规则（含 session_allow）
-        if specifier_value is not None:
-            result = _match_allow_rules(content_rules, specifier_value)
-            if result is not None:
-                return "allow", result.reason
+        # Step 4: allow 规则（含 session_allow）
+        for rule in chain(
+            self._get_rules(self.allow_rules, tool_name),
+            self._get_rules(self.session_allow, tool_name),
+        ):
+            if rule.matches_specifier(specifier_value):
+                return "allow", f"匹配 allow 规则：{rule}"
 
-        # Step 6: bypass 模式
+        # Step 5: bypass 模式
         if self.mode is BYPASS_MODE:
             return "auto_allow", f"bypassPermissions 模式自动放行：{tool_name}"
 
-        # Step 7: 工具级 allow 规则 + session_allow
-        for rule in chain(self.allow_rules, self.session_allow):
-            if rule.is_tool_level and rule.matches_tool(tool_name):
-                return "allow", f"匹配 allow 规则：{rule}"
-
-        # Step 8: 模式默认策略
+        # Step 6: 模式默认策略
         return self._mode_default(tool_name)
 
-    def _extract_specifier(self, tool_name: str, tool_input: dict[str, Any]) -> str | None:
+    def _extract_specifier(self, tool_name: str, tool_input: dict[str, Any]) -> str:
         """根据 specifier_arg 从 tool_input 中提取 specifier 值。
 
         Args:
@@ -466,34 +421,13 @@ class PermissionManager:
             tool_input: 工具调用参数。
 
         Returns:
-            提取到的字符串值，未声明 specifier_arg 或值非字符串时返回 None。
+            提取到的字符串值，未声明 specifier_arg 或值非字符串时返回空字符串。
         """
         arg = self._specifier_args.get(tool_name)
         if arg is None:
-            return None
+            return ""
         value = tool_input.get(arg)
-        return value if isinstance(value, str) else None
-
-    def _collect_content_rules(self, tool_name: str) -> tuple[PermissionRule, ...]:
-        """收集与指定工具匹配的所有内容级规则，按 deny→ask→allow+session_allow 排序。
-
-        Args:
-            tool_name: 工具名。
-
-        Returns:
-            内容级规则元组。
-        """
-        rules: list[PermissionRule] = []
-        for rule in self.deny_rules:
-            if not rule.is_tool_level and rule.matches_tool(tool_name):
-                rules.append(rule)
-        for rule in self.ask_rules:
-            if not rule.is_tool_level and rule.matches_tool(tool_name):
-                rules.append(rule)
-        for rule in chain(self.allow_rules, self.session_allow):
-            if not rule.is_tool_level and rule.matches_tool(tool_name):
-                rules.append(rule)
-        return tuple(rules)
+        return value if isinstance(value, str) else ""
 
     def _mode_default(self, tool_name: str) -> PermissionDecision:
         """按当前模式和 readonly 标志返回默认权限决策。
@@ -546,11 +480,11 @@ class PermissionManager:
         normalized = answer.strip().lower()
         if normalized == "session":
             rule = self._build_session_rule(tool_name, tool_input)
-            self.session_allow.append(rule)
+            self._add_rule(self.session_allow, rule)
             return "allow", "用户在当前会话中始终允许"
         if normalized == "always":
             rule = self._build_session_rule(tool_name, tool_input)
-            self.session_allow.append(rule)
+            self._add_rule(self.session_allow, rule)
             self._persist_allow_rule(rule)
             return "allow", "用户始终允许（已保存）"
         if normalized in {"y", "yes"}:
@@ -566,7 +500,7 @@ class PermissionManager:
 
         使用工具声明的 specifier_arg 提取具体参数值作为 specifier，
         使 "always allow" 仅允许该特定值，而非该工具的所有调用。
-        无 specifier_arg 时构建工具级规则（specifier=None）。
+        无 specifier_arg 时 specifier 为 "*"（匹配所有调用）。
 
         Args:
             tool_name: 工具名。
@@ -576,7 +510,7 @@ class PermissionManager:
             构建的 PermissionRule。
         """
         value = self._extract_specifier(tool_name, tool_input)
-        return PermissionRule(tool=tool_name, specifier=value, permission="allow")
+        return PermissionRule(tool=tool_name, specifier=value or "*", permission="allow")
 
     def _persist_allow_rule(self, rule: PermissionRule) -> None:
         """将 allow 规则持久化到 settings.json。
