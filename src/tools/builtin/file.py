@@ -141,48 +141,27 @@ async def write_file(path: str, content: str, agent: Agent,
                      total_chunks: int | None = None) -> str:
     return await agent._file_mgr.write_file(path, content, append, chunk_index, total_chunks)
 
-class ReplaceInFile(BaseModel):
+class EditFileLines(BaseModel):
     file_path: str = Field(..., description="要编辑的文件绝对路径。")
-    old_text: str = Field(..., description="要精确查找的原文本，必须与文件内容完全一致。")
-    new_text: str = Field(..., description="替换后的新文本；传空字符串表示删除匹配文本。")
-    count: int = Field(1, description="替换次数，0=全部替换。")
+    start_line: int = Field(..., description="起始行号，从1开始。替换/删除时为范围起点；插入时内容插入到该行之前（传总行数+1追加到末尾）。")
+    new_text: str = Field("", description="新内容。非空时写入文件；为空时配合 end_line 表示删除。")
+    end_line: Optional[int] = Field(None, description="结束行号（包含该行）。传值时为替换/删除的范围终点；不传时为插入模式。")
 
-@tool(model=ReplaceInFile, description="精确替换文件中的文本。用于已知 old_text 完整内容时的局部编辑；count=0 表示全部替换。",
-      permission=ToolPermission(specifier_arg="file_path", tips="替换文件文本：{file_path}", check_permissions=check_file_edit_permissions))
-async def replace_in_file(file_path: str, old_text: str, new_text: str,
-                          agent: Agent, count: int = 1) -> str:
-    return await agent._file_mgr.replace_in_file(file_path, old_text, new_text, count)
+@tool(model=EditFileLines, description="按行号编辑文件：替换行范围(new_text+end_line)、插入(new_text，不传end_line)、删除(end_line，new_text为空)。",
+      permission=ToolPermission(specifier_arg="file_path", tips="编辑文件行：{file_path}，行号：{start_line}", check_permissions=check_file_edit_permissions))
+async def edit_file_lines(file_path: str, start_line: int, agent: Agent,
+                          new_text: str = "", end_line: int | None = None) -> str:
+    """按行号编辑文件，支持替换、插入和删除三种模式。"""
+    return await agent._file_mgr.edit_file_lines(file_path, start_line, new_text, end_line)
 
-class ReplaceFileLines(BaseModel):
+class ReplaceAllInFile(BaseModel):
     file_path: str = Field(..., description="要编辑的文件绝对路径。")
-    start_line: int = Field(..., description="要替换的起始行号，从1开始。")
-    end_line: int = Field(..., description="要替换的结束行号，包含该行。")
-    new_text: str = Field(..., description="用于替换该行范围的新内容。")
+    old_text: str = Field(..., description="要查找的原文本，必须与文件内容完全一致。")
+    new_text: str = Field(..., description="替换后的新文本。")
 
-@tool(model=ReplaceFileLines, description="按行号范围替换文件内容。适合 read_file 返回行号后进行精确行级编辑。",
-      permission=ToolPermission(specifier_arg="file_path", tips="替换文件行：{file_path}，行范围：{start_line}-{end_line}", check_permissions=check_file_edit_permissions))
-async def replace_file_lines(file_path: str, start_line: int, end_line: int,
-                             new_text: str, agent: Agent) -> str:
-    return await agent._file_mgr.replace_file_lines(file_path, start_line, end_line, new_text)
-
-class InsertFileLines(BaseModel):
-    file_path: str = Field(..., description="要编辑的文件绝对路径。")
-    start_line: int = Field(..., description="插入位置，从1开始；内容会插入到该行之前。传总行数+1表示追加到末尾。")
-    new_text: str = Field(..., description="要插入的新内容。")
-
-@tool(model=InsertFileLines, description="在指定行之前插入文件内容。传 start_line=总行数+1时 可追加到文件末尾。",
-      permission=ToolPermission(specifier_arg="file_path", tips="插入文件行：{file_path}，位置：{start_line}", check_permissions=check_file_edit_permissions))
-async def insert_file_lines(file_path: str, start_line: int,
-                            new_text: str, agent: Agent) -> str:
-    return await agent._file_mgr.insert_file_lines(file_path, start_line, new_text)
-
-class DeleteFileLines(BaseModel):
-    file_path: str = Field(..., description="要编辑的文件绝对路径。")
-    start_line: int = Field(..., description="要删除的起始行号，从1开始。")
-    end_line: int = Field(..., description="要删除的结束行号，包含该行。")
-
-@tool(model=DeleteFileLines, description="按行号范围删除文件内容。适合 read_file 返回行号后进行精确删除。",
-      permission=ToolPermission(specifier_arg="file_path", tips="删除文件行：{file_path}，行范围：{start_line}-{end_line}", check_permissions=check_file_edit_permissions))
-async def delete_file_lines(file_path: str, start_line: int,
-                            end_line: int, agent: Agent) -> str:
-    return await agent._file_mgr.delete_file_lines(file_path, start_line, end_line)
+@tool(model=ReplaceAllInFile, description="全局替换文件中所有匹配的文本。适合重命名变量、更新路径等批量替换场景。",
+      permission=ToolPermission(specifier_arg="file_path", tips="全局替换文件文本：{file_path}", check_permissions=check_file_edit_permissions))
+async def replace_all_in_file(file_path: str, old_text: str, new_text: str,
+                              agent: Agent) -> str:
+    """替换文件中所有匹配的文本。"""
+    return await agent._file_mgr.replace_all_in_file(file_path, old_text, new_text)
