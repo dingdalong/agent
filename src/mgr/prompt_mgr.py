@@ -194,22 +194,13 @@ class PromptMgr:
 
         return "\n\n".join(s for s in sections if s)
 
-    def _build_dynamic_context(self) -> str:
-        """构建每次请求都重新计算的动态上下文（不缓存）。
+    def build(self) -> list:
+        """构建 system prompt。
 
         Returns:
-            包含当前时间等每轮动态信息的上下文字符串。
+            包含单条 system 消息的列表。
         """
-        parts = []
-
-        parts.append(f"当前时间：`{datetime.date.today().isoformat()}`")
-        return "\n\n".join(parts)
-
-    def build(self) -> list:
         if self._static_prefix is None:
             self._static_prefix = self._build_static_prefix()
-        parts = [self._static_prefix, "=== 动态边界标记 ==="]
-        dynamic = self._build_dynamic_context()
-        if dynamic:
-            parts.append(dynamic)
-        return [{"role": "system", "content": "\n\n".join(parts)}]
+        content = self._static_prefix + f"\n\n当前时间：`{datetime.date.today().isoformat()}`"
+        return [{"role": "system", "content": content}]
