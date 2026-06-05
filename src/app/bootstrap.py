@@ -8,7 +8,7 @@ from src.interfaces import CLIInterface
 from src.events import EventBus, EventLevel
 from pathlib import Path
 
-from src.mgr import ConfigManager, HooksMgr, LLMMgr, MemoryMgr, PermissionManager, ToolsMgr
+from src.mgr import ConfigManager, HooksMgr, LLMMgr, MemoryMgr, PermissionManager, PlanMgr, ToolsMgr
 from src.agent import AgentDeps
 from src.app.app import AgentApp
 
@@ -24,6 +24,7 @@ async def create_app() -> AgentApp:
     workspace = Path.cwd() / "workspace"
     memory_mgr = MemoryMgr(workspace)
     hooks_mgr = HooksMgr(workspace)
+    plan_mgr = PlanMgr(workspace)
     permission_mgr = PermissionManager(
         tools=tools_mgr.list_entries(),
         config_mgr=config_mgr,
@@ -40,6 +41,7 @@ async def create_app() -> AgentApp:
         config_mgr = config_mgr,
         memory_mgr = memory_mgr,
         hooks_mgr = hooks_mgr,
+        plan_mgr = plan_mgr,
         session_context = [],
     )
     return AgentApp(

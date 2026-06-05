@@ -1,0 +1,160 @@
+"""计划工作流工具 — 进入/退出计划模式，以及 plan 专用文件操作。"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from pydantic import BaseModel, Field
+
+from src.tools.decorator import ToolPermission, tool
+
+if TYPE_CHECKING:
+    from src.agent import Agent, AgentDeps
+
+
+# ── enter_plan_mode ─────────────────────────────────────────────────
+
+
+class EnterPlanMode(BaseModel):
+    """无参数。"""
+    pass
+
+
+@tool(
+    model=EnterPlanMode,
+    description="切换到计划模式。计划模式下仅允许只读操作和 plan 专用文件工具，用于在实施前进行结构化规划。",
+    permission=ToolPermission(readonly=True),
+)
+async def enter_plan_mode(agent: Agent, deps: AgentDeps) -> str:
+    """切换到 PLAN_MODE 并刷新工具可见性。
+
+    Args:
+        agent: 当前 Agent 实例，用于刷新工具 schema。
+        deps: AgentDeps 依赖对象，提供 permission_mgr 和 plan_mgr。
+
+    Returns:
+        操作结果描述。
+    """
+    permission_mgr = deps.permission_mgr
+    if permission_mgr is None:
+        return "错误：权限管理器不可用"
+
+    plan_mgr = deps.plan_mgr
+    if plan_mgr is None:
+        return "错误：计划管理器不可用"
+
+    if not plan_mgr.enter_mode(permission_mgr):
+        return "已在计划模式中。"
+
+    agent.refresh_tools_schemas()
+    return "已进入计划模式。"
+
+
+# ── exit_plan_mode ──────────────────────────────────────────────────
+
+
+class ExitPlanMode(BaseModel):
+    """退出计划模式的参数。"""
+    file_path: str = Field(..., description="计划文件的绝对路径，必须位于 plans 目录下。")
+
+
+@tool(
+    model=ExitPlanMode,
+    description="退出计划模式。传入计划文件路径，展示计划内容供用户审核，用户可选择自动执行、手动执行或继续修改。",
+    permission=ToolPermission(plan_visible=True, readonly=True),
+)
+async def exit_plan_mode(file_path: str, agent: Agent, deps: AgentDeps) -> str:
+    """校验 file_path 在计划目录下、读取计划内容、让用户选择后续操作。
+
+    Args:
+        file_path: 计划文件的绝对路径，由 LLM 提供。
+        agent: 当前 Agent 实例，用于刷新工具 schema。
+        deps: AgentDeps 依赖对象，提供 permission_mgr 和 plan_mgr。
+
+    Returns:
+        用户选择的操作结果和后续指引。
+    """
+    from src.mgr.permission_mgr import ACCEPT_EDITS_MODE, PLAN_MODE
+
+    permission_mgr = deps.permission_mgr
+    if permission_mgr is None or permission_mgr.mode is not PLAN_MODE:
+        return "错误：当前不在计划模式中。"
+
+    plan_mgr = deps.plan_mgr
+    if plan_mgr is None:
+        return "错误：计划管理器不可用"
+
+    if not plan_mgr.is_plan_file(file_path):
+        return f"错误：文件不在计划目录下：{file_path}"
+
+    plan_file = Path(file_path)
+    if not plan_file.is_file():
+        restored = permission_mgr.restore_pre_plan_mode()
+        agent.refresh_tools_schemas()
+        return f"计划文件不存在，已退出计划模式，恢复到 {restored.value} 模式。"
+
+    plan_content = plan_file.read_text(encoding="utf-8")
+    if not plan_content.strip():
+        restored = permission_mgr.restore_pre_plan_mode()
+        agent.refresh_tools_schemas()
+        return f"计划为空，已退出计划模式，恢复到 {restored.value} 模式。"
+
+    prompt = (
+        f"计划文件：\n{file_path}\n\n"
+        f"计划内容：\n{plan_content}\n\n"
+        "选择操作：\n"
+        "  [1] 自动执行 — 在当前上下文中自动实施计划\n"
+        "  [2] 手动执行 — 退出计划模式，自行实施\n"
+        "  或直接输入修改意见\n"
+        "请选择: "
+    )
+    answer = await deps.event_bus.request_input(prompt)
+    choice = answer.strip()
+
+    if choice == "1":
+        permission_mgr.set_mode(ACCEPT_EDITS_MODE)
+        agent.refresh_tools_schemas()
+        return f"用户选择自动执行。已切换到 acceptEdits 模式。计划路径：{file_path}"
+
+    if choice == "2":
+        restored = permission_mgr.restore_pre_plan_mode()
+        agent.refresh_tools_schemas()
+        return f"用户选择手动执行。已恢复到 {restored.value} 模式。计划路径：{file_path}"
+
+    return f"用户对计划的修改意见：{choice}\n请根据以上意见与用户进一步沟通需求。"
+
+
+# ── plan 专用文件工具 ───────────────────────────────────────────────
+
+
+class PlanWriteFile(BaseModel):
+    """写入计划文件。"""
+    name: str = Field(..., description="计划名（如 'fix-auth-bug'），根据计划内容命名，用于生成文件名。")
+    content: str = Field(..., description="要写入的完整内容。")
+
+
+@tool(
+    model=PlanWriteFile,
+    description="写入计划文件内容（全量覆盖）。根据计划名自动生成文件路径。仅在计划模式下可用。",
+    permission=ToolPermission(plan_visible=True, readonly=True),
+)
+async def plan_write_file(name: str, content: str, agent: Agent, deps: AgentDeps) -> str:
+    """根据计划名生成文件路径并写入内容。
+
+    Args:
+        name: 计划名，由 LLM 根据计划内容命名。
+        content: 要写入的完整内容。
+        agent: 当前 Agent 实例，提供 file_mgr。
+        deps: AgentDeps 依赖对象，提供 plan_mgr。
+
+    Returns:
+        写入结果，包含计划文件路径。
+    """
+    plan_mgr = deps.plan_mgr
+    if plan_mgr is None:
+        return "错误：计划管理器不可用"
+
+    plan_path = plan_mgr.resolve_plan_path(name)
+    result = await agent._file_mgr.write_file(plan_path, content)
+    return f"{result}\n计划文件路径：{plan_path}"

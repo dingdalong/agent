@@ -291,9 +291,7 @@ class PermissionManager:
                 target.setdefault(rule.tool, []).append(rule)
 
     def set_mode(self, mode: PermissionMode) -> bool:
-        """切换权限模式，处理 plan 模式转换逻辑。
-
-        进入 plan 模式时保存当前模式以便 leave_plan_mode 恢复。
+        """切换权限模式，进入 plan 模式时保存当前模式。
 
         Args:
             mode: 目标权限模式。
@@ -308,29 +306,33 @@ class PermissionManager:
         self.mode = mode
         return True
 
-    def leave_plan_mode(self) -> bool:
-        """离开 plan 模式，恢复进入前保存的模式。
+    def restore_pre_plan_mode(self) -> PermissionMode:
+        """退出 plan 模式时恢复进入前的权限模式，同时清除计划文件路径。
 
         Returns:
-            是否成功离开（不在 plan 模式时返回 False）。
+            恢复后的权限模式。无保存记录时回退到 DEFAULT_MODE。
         """
-        if self.mode is not PLAN_MODE:
-            return False
-        self.mode = self._pre_plan_mode or DEFAULT_MODE
+        target = self._pre_plan_mode or DEFAULT_MODE
         self._pre_plan_mode = None
-        return True
+        self.mode = target
+        return target
 
     def is_tool_visible(self, tool: ToolEntry) -> bool:
-        """判断工具是否应在当前权限模式下暴露给 LLM。
+        """判断工具在当前权限模式下是否暴露给 LLM。
 
-        plan 模式下隐藏非只读工具；其他模式全部可见。
-        无权限元数据的外部工具始终可见。
+        可见性规则（按优先级）：
+        - 无权限元数据的外部工具：始终可见
+        - plan_visible 工具：仅 plan 模式可见（优先于 readonly）
+        - readonly 工具：所有模式可见
+        - 普通非只读工具：非 plan 模式可见，plan 模式隐藏
         """
-        if self.mode is not PLAN_MODE:
-            return True
         if tool.permission is None:
             return True
-        return tool.permission.readonly
+        if tool.permission.plan_visible:
+            return self.mode is PLAN_MODE
+        if tool.permission.readonly:
+            return True
+        return self.mode is not PLAN_MODE
 
     def reload(self) -> None:
         """重置会话级状态（/clear 时调用）。"""

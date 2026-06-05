@@ -85,6 +85,9 @@ class AgentApp:
                         if self._permission_mode_controller is not None:
                             await self._permission_mode_controller.prompt_selection(agent)
                         continue
+                    if cmd_name == "plan":
+                        await self._handle_plan_command(agent)
+                        continue
 
                 interrupted = await self._run_agent_turn(agent, user_input)
                 if interrupted:
@@ -184,13 +187,33 @@ class AgentApp:
             event_bus=event_bus,
         )
 
+    async def _handle_plan_command(self, agent: Agent) -> None:
+        """处理 /plan 命令，进入计划模式。
+
+        Args:
+            agent: 当前 Agent 实例。
+        """
+        plan_mgr = self.deps.plan_mgr
+        permission_mgr = self.deps.permission_mgr
+        if permission_mgr is None or plan_mgr is None:
+            return
+
+        if not plan_mgr.enter_mode(permission_mgr):
+            await self.deps.event_bus.request_output("已在计划模式中。\n")
+            return
+
+        agent.refresh_tools_schemas()
+        if self._permission_mode_controller is not None:
+            self._permission_mode_controller.notify_state_changed()
+        await self.deps.event_bus.request_output("已进入计划模式。\n")
+
     async def _reset_session(
         self,
         *,
         source: str = "clear",
     ) -> Agent:
         for attr in ("memory_mgr", "tools_mgr", "permission_mgr",
-                     "config_mgr", "hooks_mgr"):
+                     "config_mgr", "hooks_mgr", "plan_mgr"):
             mgr = getattr(self.deps, attr, None)
             if mgr is not None and hasattr(mgr, "reload"):
                 mgr.reload()

@@ -22,7 +22,9 @@ class ToolPermission:
     """工具权限元数据。
 
     Attributes:
-        readonly: 工具是否只读（不修改任何状态）。只读工具在所有模式下自动放行，plan 模式下可见。
+        readonly: 工具是否只读（不修改任何状态）。只读工具在所有模式下自动放行且始终可见。
+        plan_visible: plan 模式下保持可见。非只读工具默认在 plan 模式下隐藏，
+            设为 True 可让工具在 plan 模式下也保持可见（如 plan 专用文件工具）。
         specifier_arg: 用于内容级规则匹配的参数名。check() 自动提取该参数值做 fnmatch 匹配，
             同时用于构建 "always allow" session 规则。None 表示无内容级匹配。
         tips: 权限提示模板，如 "写入文件：{path}"，用于向用户展示操作详情。
@@ -31,6 +33,7 @@ class ToolPermission:
             不负责规则匹配——规则匹配由 check() 根据 specifier_arg 统一处理。None 表示无特殊检查。
     """
     readonly: bool = False
+    plan_visible: bool = False
     specifier_arg: str | None = None
     tips: str | None = None
     check_permissions: Callable[[dict[str, Any], PermissionContext], PermissionCheckResult] | None = None

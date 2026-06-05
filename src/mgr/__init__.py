@@ -10,5 +10,6 @@ from src.mgr.config_mgr import ConfigManager
 from src.mgr.memory_mgr import MemoryMgr
 from src.mgr.hooks_mgr import HooksMgr
 from src.mgr.llm_mgr import LLMMgr
+from src.mgr.plan_mgr import PlanMgr
 
-__all__ = ["FileMgr", "CompactMgr", "CompactResult", "TodoManager", "ToolsMgr", "PromptMgr", "SkillMgr", "SubAgentMgr", "PermissionManager", "ConfigManager", "MemoryMgr", "HooksMgr", "LLMMgr"]
+__all__ = ["FileMgr", "CompactMgr", "CompactResult", "TodoManager", "ToolsMgr", "PromptMgr", "SkillMgr", "SubAgentMgr", "PermissionManager", "ConfigManager", "MemoryMgr", "HooksMgr", "LLMMgr", "PlanMgr"]

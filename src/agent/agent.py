@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from src.mgr.config_mgr import ConfigManager
     from src.mgr.memory_mgr import MemoryMgr
     from src.mgr.hooks_mgr import HooksMgr
+    from src.mgr.plan_mgr import PlanMgr
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,7 @@ class AgentDeps:
     config_mgr: ConfigManager = None
     memory_mgr: MemoryMgr | None = None
     hooks_mgr: HooksMgr | None = None
+    plan_mgr: PlanMgr | None = None
     session_context: list[str] = field(default_factory=list)
     session_id: str = ""
 
@@ -107,6 +109,12 @@ class Agent:
         )
 
     async def run(self, input: str) -> str:
+        # plan 模式下将指令 prepend 到用户输入，避免放入 system prompt 导致 cache 失效
+        plan_mgr = self.deps.plan_mgr
+        if plan_mgr is not None and self.deps.permission_mgr is not None:
+            plan_instr = plan_mgr.build_instructions(self.deps.permission_mgr)
+            if plan_instr:
+                input = f"{plan_instr}\n\n{input}"
         self.history.append({"role": "user", "content": input})
         ctx = RunContext(
             messages=self.history,
@@ -240,6 +248,8 @@ class Agent:
             })
 
         ctx.rounds_without_todo = 0 if used_todo else ctx.rounds_without_todo + 1
+        if self.deps.plan_mgr is not None:
+            self.deps.plan_mgr.notify_round()
         return AgentState.POST_ROUND
 
     async def _on_check_stop(self, ctx: RunContext) -> AgentState:
@@ -268,6 +278,14 @@ class Agent:
                 "role": "user",
                 "content": [{"type": "text", "text": "<reminder>更新你的待办事项。</reminder>"}],
             })
+
+        if self.deps.plan_mgr is not None and self.deps.permission_mgr is not None:
+            plan_msg = self.deps.plan_mgr.pop_pending_message(self.deps.permission_mgr)
+            if plan_msg:
+                ctx.messages.append({
+                    "role": "user",
+                    "content": f"<plan-mode>{plan_msg}</plan-mode>",
+                })
 
         if ctx.manual_compact:
             await self.deps.event_bus.emit(CompactDelta(
