@@ -17,6 +17,6 @@ class TodoWrite(BaseModel):
     items: List[TodoItem] = Field(..., description="待办事项列表")
 
 @tool(model=TodoWrite, description="更新待办事项。",
-      permission=ToolPermission(readonly=True))
+      permission=ToolPermission(kind="readonly"))
 async def todo_write(items: list, agent: Agent) -> str:
     return await agent._todo_mgr.update(items)

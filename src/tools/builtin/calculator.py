@@ -47,7 +47,7 @@ class AsyncCalculator(BaseModel):
     expression: str = Field(description="要计算的数学表达式")
 
 @tool(model=AsyncCalculator, description="安全计算数学表达式",
-      permission=ToolPermission(readonly=True))
+      permission=ToolPermission(kind="readonly"))
 async def calculator(expression: str) -> str:
     await asyncio.sleep(0.1)
     try:

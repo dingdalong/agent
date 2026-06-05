@@ -14,7 +14,7 @@ class ReadToolResult(BaseModel):
 @tool(
     model=ReadToolResult,
     description="读取分页工具结果的后续页。",
-    permission=ToolPermission(readonly=True),
+    permission=ToolPermission(kind="readonly"),
     raw_output=True,
 )
 async def read_tool_result(

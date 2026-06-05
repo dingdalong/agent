@@ -25,7 +25,7 @@ class WebSearch(BaseModel):
     max_results: Optional[int] = Field(None, description="搜索结果条数")
 
 @tool(model=WebSearch, description="当需要实时信息、最新新闻或未知事实时，使用此工具进行联网搜索。",
-      permission=ToolPermission(readonly=True, specifier_arg="query", tips="搜索：{query}"))
+      permission=ToolPermission(kind="readonly", specifier_arg="query", tips="搜索：{query}"))
 async def web_search(query: str, max_results: int = 5) -> str:
     try:
         ddgs = DDGS()

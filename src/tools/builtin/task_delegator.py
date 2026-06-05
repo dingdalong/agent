@@ -13,6 +13,6 @@ class TaskDelegator(BaseModel):
     prompt: str = Field(..., description="传给子智能体执行的完整任务正文")
 
 @tool(model=TaskDelegator, description="委托一个任务给子智能体",
-      permission=ToolPermission(readonly=True))
+      permission=ToolPermission(kind="readonly"))
 async def task_delegator(description: str, agent_type: str, prompt: str, agent: Agent) -> str:
     return await agent._subagent_mgr.task_delegator(agent_type, prompt, parent_agent=agent)

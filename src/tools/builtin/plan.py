@@ -24,7 +24,7 @@ class EnterPlanMode(BaseModel):
 @tool(
     model=EnterPlanMode,
     description="切换到计划模式。计划模式下仅允许只读操作和 plan 专用文件工具，用于在实施前进行结构化规划。",
-    permission=ToolPermission(readonly=True),
+    permission=ToolPermission(kind="readonly"),
 )
 async def enter_plan_mode(agent: Agent, deps: AgentDeps) -> str:
     """切换到 PLAN_MODE 并刷新工具可见性。
@@ -62,7 +62,7 @@ class ExitPlanMode(BaseModel):
 @tool(
     model=ExitPlanMode,
     description="退出计划模式。传入计划文件路径，展示计划内容供用户审核，用户可选择自动执行、手动执行或继续修改。",
-    permission=ToolPermission(plan_visible=True, readonly=True),
+    permission=ToolPermission(plan_visible=True, kind="readonly"),
 )
 async def exit_plan_mode(file_path: str, agent: Agent, deps: AgentDeps) -> str:
     """校验 file_path 在计划目录下、读取计划内容、让用户选择后续操作。
@@ -137,7 +137,7 @@ class PlanWriteFile(BaseModel):
 @tool(
     model=PlanWriteFile,
     description="写入计划文件内容（全量覆盖）。根据计划名自动生成文件路径。仅在计划模式下可用。",
-    permission=ToolPermission(plan_visible=True, readonly=True),
+    permission=ToolPermission(plan_visible=True, kind="readonly"),
 )
 async def plan_write_file(name: str, content: str, agent: Agent, deps: AgentDeps) -> str:
     """根据计划名生成文件路径并写入内容。

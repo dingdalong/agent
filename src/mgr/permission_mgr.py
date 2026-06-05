@@ -50,18 +50,19 @@ class PermissionContext:
     tool_name: str
 
 
-def tool_sort_order(readonly: bool | None) -> int:
+def tool_sort_order(kind: str | None, *, has_permission: bool = True) -> int:
     """返回工具排序权重：只读工具排在前面，非只读次之，无权限元数据的排最后。
 
     Args:
-        readonly: 工具是否只读。None 表示无权限元数据的外部工具。
+        kind: 工具类别（"readonly"/"edit"/None）。
+        has_permission: 工具是否有权限元数据。False 表示外部工具。
 
     Returns:
         排序权重值（0=只读, 1=非只读, 2=外部工具）。
     """
-    if readonly is None:
+    if not has_permission:
         return 2
-    return 0 if readonly else 1
+    return 0 if kind == "readonly" else 1
 
 
 PermissionPolicy = Literal["allow", "deny", "ask"]
@@ -222,14 +223,14 @@ class PermissionManager:
         self._workdir = workdir
         self._check_permissions_fns: dict[str, Callable[[dict[str, Any], PermissionContext], PermissionCheckResult]] = {}
         self._tool_tips: dict[str, str] = {}
-        self._readonly_flags: dict[str, bool] = {}
+        self._tool_kinds: dict[str, str | None] = {}
         self._specifier_args: dict[str, str] = {}
 
         self._load_tool_metadata(tools or [])
         self._load_config()
 
     def _load_tool_metadata(self, tools: Iterable[ToolEntry]) -> None:
-        """从工具声明中提取 readonly 标志、specifier_arg、check_permissions 和 tips 模板。
+        """从工具声明中提取 kind 标志、specifier_arg、check_permissions 和 tips 模板。
 
         Args:
             tools: 所有已注册的工具列表。
@@ -237,7 +238,7 @@ class PermissionManager:
         for tool in tools:
             if tool.permission is None:
                 continue
-            self._readonly_flags[tool.name] = tool.permission.readonly
+            self._tool_kinds[tool.name] = tool.permission.kind
             if tool.permission.tips:
                 self._tool_tips[tool.name] = tool.permission.tips
             if tool.permission.check_permissions is not None:
@@ -330,7 +331,7 @@ class PermissionManager:
             return True
         if tool.permission.plan_visible:
             return self.mode is PLAN_MODE
-        if tool.permission.readonly:
+        if tool.permission.kind == "readonly":
             return True
         return self.mode is not PLAN_MODE
 
@@ -366,7 +367,7 @@ class PermissionManager:
         3. check_permissions（工具自身安全逻辑）→ deny/ask/allow/passthrough
         4. allow 规则（含 session_allow）→ allow
         5. bypass 模式 → auto_allow
-        6. 模式默认策略（按 readonly 判断）
+        6. 模式默认策略（按 kind 判断）
 
         Args:
             tool_name: 被调用的工具名。
@@ -432,7 +433,7 @@ class PermissionManager:
         return value if isinstance(value, str) else ""
 
     def _mode_default(self, tool_name: str) -> PermissionDecision:
-        """按当前模式和 readonly 标志返回默认权限决策。
+        """按当前模式和工具 kind 返回默认权限决策。
 
         Args:
             tool_name: 工具名。
@@ -440,18 +441,24 @@ class PermissionManager:
         Returns:
             (decision, reason) 元组。
         """
-        is_readonly = self._readonly_flags.get(tool_name, False)
+        kind = self._tool_kinds.get(tool_name)
 
         if self.mode is AUTO_MODE:
             return "auto_allow", f"auto 模式自动放行：{tool_name}"
 
         if self.mode is DONT_ASK_MODE:
-            if is_readonly:
+            if kind == "readonly":
                 return "auto_allow", f"dontAsk 模式放行只读：{tool_name}"
             return "deny", f"dontAsk 模式拒绝：{tool_name}"
 
-        # DEFAULT / PLAN / ACCEPT_EDITS 共享逻辑：只读放行，其余询问
-        if is_readonly:
+        # ACCEPT_EDITS：只读和文件编辑放行，其余询问
+        if self.mode is ACCEPT_EDITS_MODE:
+            if kind in ("readonly", "edit"):
+                return "auto_allow", f"acceptEdits 模式放行：{tool_name}"
+            return "ask", f"{tool_name} 需要用户确认"
+
+        # DEFAULT / PLAN：只读放行，其余询问
+        if kind == "readonly":
             return "auto_allow", f"自动放行只读：{tool_name}"
         return "ask", f"{tool_name} 需要用户确认"
 

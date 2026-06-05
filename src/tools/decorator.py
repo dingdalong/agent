@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio, inspect
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, TYPE_CHECKING, TypedDict
+from typing import Any, Callable, Dict, Literal, TYPE_CHECKING, TypedDict
 from pydantic import BaseModel, ValidationError
 
 if TYPE_CHECKING:
@@ -22,7 +22,8 @@ class ToolPermission:
     """工具权限元数据。
 
     Attributes:
-        readonly: 工具是否只读（不修改任何状态）。只读工具在所有模式下自动放行且始终可见。
+        kind: 工具类别。"readonly"=只读（所有模式自动放行且始终可见），
+            "edit"=文件编辑（acceptEdits 模式下自动放行），None=其他（如 shell）。
         plan_visible: plan 模式下保持可见。非只读工具默认在 plan 模式下隐藏，
             设为 True 可让工具在 plan 模式下也保持可见（如 plan 专用文件工具）。
         specifier_arg: 用于内容级规则匹配的参数名。check() 自动提取该参数值做 fnmatch 匹配，
@@ -32,7 +33,7 @@ class ToolPermission:
             仅处理工具特有的安全逻辑（如 shell 危险命令检测、file 敏感路径检查），
             不负责规则匹配——规则匹配由 check() 根据 specifier_arg 统一处理。None 表示无特殊检查。
     """
-    readonly: bool = False
+    kind: Literal["readonly", "edit"] | None = None
     plan_visible: bool = False
     specifier_arg: str | None = None
     tips: str | None = None

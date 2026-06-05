@@ -25,8 +25,8 @@ def _tool_sort_key(tool: ToolEntry) -> tuple[int, str]:
         (排序权重, 工具名) 元组。
     """
     if tool.permission is None:
-        return tool_sort_order(None), tool.name
-    return tool_sort_order(tool.permission.readonly), tool.name
+        return tool_sort_order(None, has_permission=False), tool.name
+    return tool_sort_order(tool.permission.kind), tool.name
 
 
 class ToolsMgr:

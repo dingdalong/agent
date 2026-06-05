@@ -244,7 +244,7 @@ def _decode_body(data: bytes, content_type: str) -> str:
 
 
 @tool(model=WebFetchInput, description="访问指定URL，返回网页正文内容。",
-      permission=ToolPermission(readonly=True, specifier_arg="url", tips="访问网页：{url}"))
+      permission=ToolPermission(kind="readonly", specifier_arg="url", tips="访问网页：{url}"))
 async def web_fetch(url: str) -> str:
     normalized_url = validate_public_url(url)
     if normalized_url.startswith(("错误", "访问失败")):
