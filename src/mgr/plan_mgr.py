@@ -42,15 +42,15 @@ class PlanMgr:
     计划文件存放在 workdir/.agent/plans/ 目录下，
     文件名由 LLM 在调用 plan_write_file 时根据计划内容命名。
 
-    指令注入通过两条路径：
-    - build_instructions()：每次 agent.run() 开始时调用，prepend 到用户输入。
-    - notify_round() + pop_pending_message()：轮中模式切换或周期性提醒。
+    指令注入通过两条路径（由 ReminderMgr 统一调度）：
+    - get_turn_start_reminder()：每次 agent.run() 开始时调用，prepend 到用户输入。
+    - notify_tool_round() + pop_post_round_reminder()：轮中模式切换或周期性提醒。
 
     Attributes:
         workdir: workspace 根目录。
         _plan_dir: 计划文件目录，workdir / ".agent" / "plans"。
         _full_instructions_sent: 是否已发送过完整指令。
-        _pending_injection: 轮中进入 plan 模式后置 True，下次 pop_pending_message() 消费。
+        _pending_injection: 轮中进入 plan 模式后置 True，下次 pop_post_round_reminder() 消费。
         _rounds_since_injection: 距离上次指令注入的工具执行轮数。
     """
 
@@ -178,42 +178,46 @@ class PlanMgr:
             "- 禁止以「任务简单」为由跳过任何步骤"
         )
 
-    def build_instructions(self, permission_mgr: PermissionManager) -> str:
-        """在 agent.run() 开始时调用，返回 prepend 到用户输入的 plan 指令。
+    def get_turn_start_reminder(self, permission_mgr: PermissionManager | None) -> str:
+        """在 agent.run() 开始时由 ReminderMgr 调用，返回 prepend 到用户输入的 plan 指令。
 
-        非 plan 模式返回空串。调用后重置轮次计数。
+        非 plan 模式或 permission_mgr 为 None 时返回空串。调用后重置轮次计数。
 
         Args:
-            permission_mgr: 权限管理器，用于判断当前模式。
+            permission_mgr: 权限管理器，用于判断当前模式。可为 None。
 
         Returns:
             plan 模式指令字符串，非 plan 模式返回空串。
         """
-        if not self._is_plan_mode(permission_mgr):
+        if permission_mgr is None or not self._is_plan_mode(permission_mgr):
             return ""
         self._rounds_since_injection = 0
         self._pending_injection = False
         return self._generate_instructions()
 
-    def notify_round(self) -> None:
-        """在 _on_execute_tools() 中调用，累积距离上次注入的轮数。"""
+    def notify_tool_round(self, tool_names: list[str]) -> None:
+        """工具执行轮结束时由 ReminderMgr 调用，累积距离上次注入的轮数。
+
+        Args:
+            tool_names: 本轮调用的工具名列表（PlanMgr 不使用，仅累计轮次）。
+        """
         self._rounds_since_injection += 1
 
-    def pop_pending_message(self, permission_mgr: PermissionManager) -> str | None:
-        """在 _on_post_round() 中调用，返回需要追加到 messages 的指令内容。
+    def pop_post_round_reminder(self, permission_mgr: PermissionManager | None) -> str | None:
+        """POST_ROUND 时由 ReminderMgr 调用，返回 plan 模式指令纯文本。
 
         触发条件（按优先级）：
         1. _pending_injection 为 True（轮中 enter_plan_mode 触发）
         2. _rounds_since_injection 超过阈值（周期性提醒）
-        无需注入时返回 None。
+        无需注入时返回 None。标签包装由 ReminderMgr 统一处理。
 
         Args:
-            permission_mgr: 权限管理器，用于判断当前模式。
+            permission_mgr: 权限管理器，用于判断当前模式。可为 None。
 
         Returns:
-            指令字符串或 None。
+            plan 模式指令纯文本，或 None 表示无需注入。
         """
-        if not self._is_plan_mode(permission_mgr):
+        if permission_mgr is None or not self._is_plan_mode(permission_mgr):
             return None
 
         if self._pending_injection:

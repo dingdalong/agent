@@ -10,7 +10,7 @@ from src.events.types import AgentStateChanged, CompactDelta
 from src.agent.states import AgentState, RunContext, RunResult, parse_command
 from src.events import NoEventSubscribers
 from src.mgr.permission_mgr import MENU_MODES, parse_permission_mode
-from src.mgr import FileMgr, TodoManager, CompactMgr, CompactResult, PromptMgr, SkillMgr, SubAgentMgr
+from src.mgr import FileMgr, TodoManager, CompactMgr, CompactResult, PromptMgr, SkillMgr, SubAgentMgr, ReminderMgr
 
 if TYPE_CHECKING:
     from src.mgr.llm_mgr import LLMMgr
@@ -76,6 +76,7 @@ class Agent:
     _skill_mgr: SkillMgr = field(init=False, repr=False)
     _subagent_mgr: SubAgentMgr = field(init=False, repr=False)
     _prompt_mgr: PromptMgr = field(init=False, repr=False)
+    _reminder_mgr: ReminderMgr = field(init=False, repr=False)
     _pending_input: str = field(init=False, default="")
     _handlers: dict[AgentState, Callable] = field(init=False, repr=False)
 
@@ -97,6 +98,10 @@ class Agent:
         self._skill_mgr = SkillMgr(workdir, global_dir=self.deps.global_dir, plugin_mgr=self.deps.plugin_mgr)
         self._subagent_mgr = SubAgentMgr(workdir, self.deps, global_dir=self.deps.global_dir)
         self._prompt_mgr = PromptMgr(agent=self, model=self.llm.model, workdir=workdir, role_prompt=self.role_prompt)
+        self._reminder_mgr = ReminderMgr()
+        self._reminder_mgr.register(self._todo_mgr)
+        if self.deps.plan_mgr is not None:
+            self._reminder_mgr.register(self.deps.plan_mgr)
         self._handlers = {
             AgentState.REQUEST_INPUT:    self._on_request_input,
             AgentState.CHECK_COMPACT:    self._on_check_compact,
@@ -132,11 +137,9 @@ class Agent:
         """
         if input is not None:
             ctx = RunContext(messages=self.history, round_start_idx=len(self.history))
-            plan_mgr = self.deps.plan_mgr
-            if plan_mgr is not None and self.deps.permission_mgr is not None:
-                plan_instr = plan_mgr.build_instructions(self.deps.permission_mgr)
-                if plan_instr:
-                    input = f"{plan_instr}\n\n{input}"
+            turn_instr = self._reminder_mgr.build_turn_start_instructions(self.deps.permission_mgr)
+            if turn_instr:
+                input = f"{turn_instr}\n\n{input}"
             self.history.append({"role": "user", "content": input})
             ctx.round_start_idx = len(self.history)
             ctx.user_input = input
@@ -244,11 +247,9 @@ class Agent:
                     str(item) for item in hook_result.additional_context
                 )
 
-        plan_mgr = self.deps.plan_mgr
-        if plan_mgr is not None and self.deps.permission_mgr is not None:
-            plan_instr = plan_mgr.build_instructions(self.deps.permission_mgr)
-            if plan_instr:
-                user_input = f"{plan_instr}\n\n{user_input}"
+        turn_instr = self._reminder_mgr.build_turn_start_instructions(self.deps.permission_mgr)
+        if turn_instr:
+            user_input = f"{turn_instr}\n\n{user_input}"
 
         self.history.append({"role": "user", "content": user_input})
         ctx.round_start_idx = len(self.history)
@@ -370,9 +371,9 @@ class Agent:
 
     async def _on_execute_tools(self, ctx: RunContext) -> AgentState:
         ctx.has_tool_calls = True
-        used_todo = False
         ctx.manual_compact = False
         ctx.compact_focus = None
+        called_tools: list[str] = []
 
         for tc in ctx.response.tool_calls.values():
             tool_name = tc["name"]
@@ -386,8 +387,7 @@ class Agent:
                 })
                 continue
 
-            if tool_name == "todo_write":
-                used_todo = True
+            called_tools.append(tool_name)
             try:
                 args = json.loads(tc["arguments"])
                 if tool_name == "compact":
@@ -410,9 +410,7 @@ class Agent:
                 "content": result_text,
             })
 
-        ctx.rounds_without_todo = 0 if used_todo else ctx.rounds_without_todo + 1
-        if self.deps.plan_mgr is not None:
-            self.deps.plan_mgr.notify_round()
+        self._reminder_mgr.notify_tool_round(called_tools)
         return AgentState.POST_ROUND
 
     async def _on_check_stop(self, ctx: RunContext) -> AgentState:
@@ -436,19 +434,8 @@ class Agent:
         return AgentState.DONE
 
     async def _on_post_round(self, ctx: RunContext) -> AgentState:
-        if self._todo_mgr.has_open_items() and ctx.rounds_without_todo >= 3:
-            ctx.messages.append({
-                "role": "user",
-                "content": [{"type": "text", "text": "<reminder>更新你的待办事项。</reminder>"}],
-            })
-
-        if self.deps.plan_mgr is not None and self.deps.permission_mgr is not None:
-            plan_msg = self.deps.plan_mgr.pop_pending_message(self.deps.permission_mgr)
-            if plan_msg:
-                ctx.messages.append({
-                    "role": "user",
-                    "content": f"<plan-mode>{plan_msg}</plan-mode>",
-                })
+        for msg in self._reminder_mgr.collect_post_round_messages(self.deps.permission_mgr):
+            ctx.messages.append(msg)
 
         if ctx.manual_compact:
             await self.deps.event_bus.emit(CompactDelta(

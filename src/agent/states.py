@@ -48,7 +48,6 @@ class RunContext:
     prompt: list[dict] | None = None
     final_text: str = ""
     has_tool_calls: bool = False
-    rounds_without_todo: int = 0
     round_start_idx: int = 0
     compact_streak: int = 0
     max_compact_streak: int = 3

@@ -12,5 +12,6 @@ from src.mgr.hooks_mgr import HooksMgr
 from src.mgr.llm_mgr import LLMMgr
 from src.mgr.plan_mgr import PlanMgr
 from src.mgr.plugin_mgr import PluginMgr, PluginInfo, PluginLayer
+from src.mgr.reminder_mgr import ReminderMgr
 
-__all__ = ["FileMgr", "CompactMgr", "CompactResult", "TodoManager", "ToolsMgr", "PromptMgr", "SkillMgr", "SubAgentMgr", "PermissionManager", "ConfigManager", "MemoryMgr", "HooksMgr", "LLMMgr", "PlanMgr", "PluginMgr", "PluginInfo", "PluginLayer"]
+__all__ = ["FileMgr", "CompactMgr", "CompactResult", "TodoManager", "ToolsMgr", "PromptMgr", "SkillMgr", "SubAgentMgr", "PermissionManager", "ConfigManager", "MemoryMgr", "HooksMgr", "LLMMgr", "PlanMgr", "PluginMgr", "PluginInfo", "PluginLayer", "ReminderMgr"]
