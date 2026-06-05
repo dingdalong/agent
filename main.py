@@ -18,11 +18,6 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="工作目录，默认为当前目录",
     )
-    parser.add_argument(
-        "--config-dir",
-        default=None,
-        help="全局配置目录，默认为 ~/.agent/",
-    )
     return parser.parse_args()
 
 
@@ -32,10 +27,7 @@ async def main(args: argparse.Namespace) -> None:
     Args:
         args: 命令行参数。
     """
-    app = await create_app(
-        workdir_override=args.workdir,
-        config_home_override=args.config_dir,
-    )
+    app = await create_app(workdir_override=args.workdir)
     try:
         await app.run()
     finally:

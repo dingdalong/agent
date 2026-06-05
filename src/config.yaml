@@ -1,6 +1,6 @@
 llm_provider:
   deepseek:
-    base_url: https://api.deepseek.com/v1
+    base_url: https://api.deepseek.com
     reasoning_effort: max # 推理力度
     context_limit: 400000 # 上下文限制
   openai:

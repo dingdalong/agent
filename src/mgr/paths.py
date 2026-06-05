@@ -1,69 +1,47 @@
-"""路径解析 — 集中管理全局配置目录、用户工作目录和首次运行初始化。"""
+"""路径解析 — 集中管理三层目录体系（内置 → 全局 → 项目）。"""
 
 from __future__ import annotations
 
 import os
 from pathlib import Path
 
-# 默认配置内容，首次运行时写入 ~/.agent/config.yaml
-_DEFAULT_CONFIG = """\
-llm_provider:
-  deepseek:
-    base_url: https://api.deepseek.com
-    reasoning_effort: max
-    context_limit: 400000
-  openai:
-    models:
-      - gpt-5.5
-    base_url: https://api.openai.com/v1
-    reasoning_effort: xhigh
-    context_limit: 200000
-  anthropic:
-    base_url: https://api.anthropic.com
-    reasoning_effort: high
-    context_limit: 200000
-  ollama:
-    base_url: http://127.0.0.1:8001/v1
-    reasoning_effort: high
-    preserve_thinking: true
-    context_limit: 70000
 
-llm:
-  default:
-    model: deepseek-v4-flash
-    concurrency: 5
-    max_retries: 3
+def builtin_root() -> Path:
+    """返回内置资源根目录。
 
-tool:
-  page_token_rate: 0.03
+    debug 时指向 src/ 源码目录，安装后指向 site-packages 中的包目录。
+    内置 config.yaml、skills/、agent/agents/ 等资源均在此目录下。
 
-compact:
-  auto_compact_rate: 0.8
-  keep_recent_user_turns: 3
-  keep_recent_messages_token_rate: 0.25
-
-events:
-    level: progress
-"""
-
-# 默认 .env 模板，首次运行时写入 ~/.agent/.env
-_DEFAULT_ENV = """\
-# 在此填写各 LLM provider 的 API Key
-# DEEPSEEK_API_KEY=
-# OPENAI_API_KEY=
-# ANTHROPIC_API_KEY=
-"""
+    Returns:
+        内置资源根目录的 Path 对象。
+    """
+    return Path(__file__).resolve().parent.parent
 
 
-def agent_home() -> Path:
+def global_data_dir() -> Path:
     """返回全局配置目录。
 
     优先使用环境变量 $AGENT_HOME，否则默认 ~/.agent/。
+    存放用户跨项目的配置、skills、agents、plugins 等。
 
     Returns:
         全局配置目录的 Path 对象。
     """
     return Path(os.environ.get("AGENT_HOME", Path.home() / ".agent"))
+
+
+def project_data_dir(workdir: Path) -> Path:
+    """返回项目配置目录。
+
+    存放项目特有的配置、skills、agents、plugins、memory、plans 等。
+
+    Args:
+        workdir: 用户工作目录。
+
+    Returns:
+        项目配置目录的 Path 对象（{workdir}/.agent/）。
+    """
+    return workdir / ".agent"
 
 
 def workdir(override: str | None = None) -> Path:
@@ -83,20 +61,3 @@ def workdir(override: str | None = None) -> Path:
     if env:
         return Path(env).resolve()
     return Path.cwd()
-
-
-def ensure_global_config(home: Path) -> None:
-    """首次运行时创建全局配置目录并写入默认文件。
-
-    如果 home 目录或 config.yaml 不存在则自动创建；已存在则跳过。
-
-    Args:
-        home: 全局配置目录路径。
-    """
-    home.mkdir(parents=True, exist_ok=True)
-    config_file = home / "config.yaml"
-    if not config_file.exists():
-        config_file.write_text(_DEFAULT_CONFIG)
-    env_file = home / ".env"
-    if not env_file.exists():
-        env_file.write_text(_DEFAULT_ENV)

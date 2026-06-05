@@ -45,6 +45,7 @@ class AgentDeps:
     session_context: list[str] = field(default_factory=list)
     session_id: str = ""
     workdir: Path | None = None
+    global_dir: Path | None = None
 
 @dataclass
 class Agent:
@@ -91,8 +92,8 @@ class Agent:
         )
         workdir = self.deps.workdir
         self._file_mgr = FileMgr(workdir, self.deps)
-        self._skill_mgr = SkillMgr(workdir)
-        self._subagent_mgr = SubAgentMgr(workdir, self.deps)
+        self._skill_mgr = SkillMgr(workdir, global_dir=self.deps.global_dir)
+        self._subagent_mgr = SubAgentMgr(workdir, self.deps, global_dir=self.deps.global_dir)
         self._prompt_mgr = PromptMgr(agent=self, model=self.llm.model, workdir=workdir, role_prompt=self.role_prompt)
         self._handlers = {
             AgentState.REQUEST_INPUT:    self._on_request_input,

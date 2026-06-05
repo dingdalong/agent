@@ -31,8 +31,16 @@ _AUTO_INJECT_TOOLS = {"read_tool_result", "compact", "todo_write"}
 
 @dataclass
 class SubAgentMgr:
+    """子智能体管理器 — 三层扫描：内置 → 全局 → 项目，同名覆盖。
+
+    Args:
+        workdir: 用户工作目录。
+        deps: 外部依赖。
+        global_dir: 全局配置目录（~/.agent/）。
+    """
     workdir: Path
     deps: AgentDeps = field(repr=False)
+    global_dir: Path | None = None
 
     _documents: dict[str, SubAgentDocument] = field(init=False, default_factory=dict)
 
@@ -40,10 +48,20 @@ class SubAgentMgr:
         self._load_all()
 
     def _load_all(self) -> None:
-        builtin_dir = Path(__file__).resolve().parent.parent / "agent" / "agents"
-        workspace_dir = self.workdir / ".agents"
+        """扫描三层目录加载子智能体定义，同名后者覆盖前者。
 
-        for directory in (builtin_dir, workspace_dir):
+        扫描顺序（低→高优先级）：内置 → 全局 → 项目。
+        """
+        from src.mgr.paths import builtin_root
+        builtin_dir = builtin_root() / "agent" / "agents"
+        project_dir = self.workdir / ".agent" / "agents"
+
+        scan_dirs = [builtin_dir]
+        if self.global_dir:
+            scan_dirs.append(self.global_dir / "agents")
+        scan_dirs.append(project_dir)
+
+        for directory in scan_dirs:
             if not directory.exists():
                 continue
             for path in sorted(directory.glob("*.md")):

@@ -57,23 +57,45 @@ class HookRunResult:
 
 class HooksMgr:
 
-    def __init__(self, workdir: str | Path):
-        """初始化 hook 管理器。
+    def __init__(self, workdir: str | Path, global_dir: Path | None = None):
+        """初始化 hook 管理器 — 两层扫描：全局 → 项目，hooks 全部追加。
 
         Args:
             workdir: 用户工作目录（启动时 cwd），即项目根目录。
+            global_dir: 全局配置目录（~/.agent/），为 None 时跳过全局层。
         """
         self.workdir = Path(workdir)
+        self.global_dir = global_dir
         self.project_root = self.workdir
         self._hooks = self._load_hooks()
 
     def reload(self) -> None:
+        """重新加载所有 hooks。"""
         self._hooks = self._load_hooks()
 
     # ── loading ──
 
     def _load_hooks(self) -> list[HookEntry]:
+        """加载双层 hooks，全部追加。
+
+        扫描顺序（全部追加，不覆盖）：
+        全局 plugins → 全局 settings → 项目 plugins → 项目 settings
+
+        Returns:
+            所有加载到的 HookEntry 列表。
+        """
         hooks: list[HookEntry] = []
+        # 全局层
+        if self.global_dir:
+            global_plugins = self.global_dir / "plugins"
+            if global_plugins.exists():
+                for plugin_root in sorted(p for p in global_plugins.iterdir() if p.is_dir()):
+                    hooks.extend(self._load_hook_file(
+                        plugin_root / "hooks" / "hooks.json",
+                        plugin_root=plugin_root,
+                    ))
+            hooks.extend(self._load_hook_file(self.global_dir / "settings.json"))
+        # 项目层
         plugins_dir = self.workdir / ".agent" / "plugins"
         if plugins_dir.exists():
             for plugin_root in sorted(p for p in plugins_dir.iterdir() if p.is_dir()):
