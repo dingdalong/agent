@@ -7,7 +7,7 @@ from pathlib import Path
 
 from src.interfaces import CLIInterface
 from src.events import EventBus, EventLevel
-from src.mgr import ConfigManager, HooksMgr, LLMMgr, MemoryMgr, PermissionManager, PlanMgr, ToolsMgr
+from src.mgr import ConfigManager, HooksMgr, LLMMgr, MemoryMgr, PermissionManager, PlanMgr, PluginMgr, ToolsMgr
 from src.mgr.paths import global_data_dir, workdir as resolve_workdir
 from src.agent import AgentDeps
 from src.app.app import AgentApp
@@ -32,7 +32,8 @@ async def create_app(
     ui = CLIInterface()
     tools_mgr = ToolsMgr()
     memory_mgr = MemoryMgr(work_dir)
-    hooks_mgr = HooksMgr(workdir=work_dir, global_dir=global_dir)
+    plugin_mgr = PluginMgr(workdir=work_dir, global_dir=global_dir)
+    hooks_mgr = HooksMgr(workdir=work_dir, global_dir=global_dir, plugin_mgr=plugin_mgr)
     plan_mgr = PlanMgr(work_dir)
     permission_mgr = PermissionManager(
         tools=tools_mgr.list_entries(),
@@ -51,6 +52,7 @@ async def create_app(
         memory_mgr=memory_mgr,
         hooks_mgr=hooks_mgr,
         plan_mgr=plan_mgr,
+        plugin_mgr=plugin_mgr,
         session_context=[],
         workdir=work_dir,
         global_dir=global_dir,

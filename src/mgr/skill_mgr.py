@@ -1,8 +1,14 @@
+from __future__ import annotations
+
 import re
 import yaml
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 from src.mgr.paths import builtin_root
+
+if TYPE_CHECKING:
+    from src.mgr.plugin_mgr import PluginMgr
 
 @dataclass
 class SkillManifest:
@@ -23,12 +29,14 @@ class SkillMgr:
     Args:
         workdir: 用户工作目录。
         global_dir: 全局配置目录（~/.agent/）。
+        plugin_mgr: 插件管理器，为 None 时跳过插件层技能。
     """
     workdir: Path
     global_dir: Path | None = None
+    plugin_mgr: PluginMgr | None = None
     _documents: dict[str, SkillDocument] = field(init=False, default_factory=dict)
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         self._load_all()
 
     def _load_all(self) -> None:
@@ -37,23 +45,33 @@ class SkillMgr:
         扫描顺序（低→高优先级）：
         内置 skills → 全局 plugins → 全局 skills → 项目 plugins → 项目 skills
         """
+        from src.mgr.plugin_mgr import PluginLayer
+
         builtin_dir = builtin_root() / "skills"
-        project_plugins = self.workdir / ".agent" / "plugins"
         project_skills = self.workdir / ".agent" / "skills"
 
-        # (目录, 是否为 plugins 目录) — plugins 目录用插件名做命名空间，其他用固定名
-        scan_dirs: list[tuple[Path, bool]] = [(builtin_dir, False)]
-        if self.global_dir:
-            scan_dirs.append((self.global_dir / "plugins", True))
-            scan_dirs.append((self.global_dir / "skills", False))
-        scan_dirs.append((project_plugins, True))
-        scan_dirs.append((project_skills, False))
+        # (目录, 命名空间) — 按优先级从低到高排列
+        scan_dirs: list[tuple[Path, str]] = [(builtin_dir, "builtin")]
 
-        for src_dir, is_plugins in scan_dirs:
+        if self.global_dir:
+            # 全局插件技能
+            if self.plugin_mgr is not None:
+                for p in self.plugin_mgr.plugins(layer=PluginLayer.GLOBAL):
+                    scan_dirs.append((p.root, p.name))
+            # 全局用户技能
+            scan_dirs.append((self.global_dir / "skills", "user"))
+
+        # 项目插件技能
+        if self.plugin_mgr is not None:
+            for p in self.plugin_mgr.plugins(layer=PluginLayer.PROJECT):
+                scan_dirs.append((p.root, p.name))
+        # 项目用户技能
+        scan_dirs.append((project_skills, "user"))
+
+        for src_dir, namespace in scan_dirs:
             if not src_dir.exists():
                 continue
             for path in sorted(src_dir.rglob("SKILL.md")):
-                namespace = path.relative_to(src_dir).parts[0] if is_plugins else "builtin" if src_dir == builtin_dir else "user"
                 self._load_skill(path, namespace)
 
     def _load_skill(self, path: Path, namespace: str) -> None:

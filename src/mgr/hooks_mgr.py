@@ -7,7 +7,10 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.mgr.plugin_mgr import PluginMgr
 
 logger = logging.getLogger(__name__)
 
@@ -57,15 +60,22 @@ class HookRunResult:
 
 class HooksMgr:
 
-    def __init__(self, workdir: str | Path, global_dir: Path | None = None):
+    def __init__(
+        self,
+        workdir: str | Path,
+        global_dir: Path | None = None,
+        plugin_mgr: PluginMgr | None = None,
+    ):
         """初始化 hook 管理器 — 两层扫描：全局 → 项目，hooks 全部追加。
 
         Args:
             workdir: 用户工作目录（启动时 cwd），即项目根目录。
             global_dir: 全局配置目录（~/.agent/），为 None 时跳过全局层。
+            plugin_mgr: 插件管理器，为 None 时跳过插件层 hooks。
         """
         self.workdir = Path(workdir)
         self.global_dir = global_dir
+        self.plugin_mgr = plugin_mgr
         self.project_root = self.workdir
         self._hooks = self._load_hooks()
 
@@ -84,24 +94,24 @@ class HooksMgr:
         Returns:
             所有加载到的 HookEntry 列表。
         """
+        from src.mgr.plugin_mgr import PluginLayer
+
         hooks: list[HookEntry] = []
         # 全局层
         if self.global_dir:
-            global_plugins = self.global_dir / "plugins"
-            if global_plugins.exists():
-                for plugin_root in sorted(p for p in global_plugins.iterdir() if p.is_dir()):
+            if self.plugin_mgr is not None:
+                for p in self.plugin_mgr.plugins(layer=PluginLayer.GLOBAL):
                     hooks.extend(self._load_hook_file(
-                        plugin_root / "hooks" / "hooks.json",
-                        plugin_root=plugin_root,
+                        p.root / "hooks" / "hooks.json",
+                        plugin_root=p.root,
                     ))
             hooks.extend(self._load_hook_file(self.global_dir / "settings.json"))
         # 项目层
-        plugins_dir = self.workdir / ".agent" / "plugins"
-        if plugins_dir.exists():
-            for plugin_root in sorted(p for p in plugins_dir.iterdir() if p.is_dir()):
+        if self.plugin_mgr is not None:
+            for p in self.plugin_mgr.plugins(layer=PluginLayer.PROJECT):
                 hooks.extend(self._load_hook_file(
-                    plugin_root / "hooks" / "hooks.json",
-                    plugin_root=plugin_root,
+                    p.root / "hooks" / "hooks.json",
+                    plugin_root=p.root,
                 ))
         hooks.extend(self._load_hook_file(self.workdir / ".agent" / "settings.json"))
         return hooks

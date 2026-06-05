@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from src.mgr.memory_mgr import MemoryMgr
     from src.mgr.hooks_mgr import HooksMgr
     from src.mgr.plan_mgr import PlanMgr
+    from src.mgr.plugin_mgr import PluginMgr
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,7 @@ class AgentDeps:
     memory_mgr: MemoryMgr | None = None
     hooks_mgr: HooksMgr | None = None
     plan_mgr: PlanMgr | None = None
+    plugin_mgr: PluginMgr | None = None
     session_context: list[str] = field(default_factory=list)
     session_id: str = ""
     workdir: Path | None = None
@@ -92,7 +94,7 @@ class Agent:
         )
         workdir = self.deps.workdir
         self._file_mgr = FileMgr(workdir, self.deps)
-        self._skill_mgr = SkillMgr(workdir, global_dir=self.deps.global_dir)
+        self._skill_mgr = SkillMgr(workdir, global_dir=self.deps.global_dir, plugin_mgr=self.deps.plugin_mgr)
         self._subagent_mgr = SubAgentMgr(workdir, self.deps, global_dir=self.deps.global_dir)
         self._prompt_mgr = PromptMgr(agent=self, model=self.llm.model, workdir=workdir, role_prompt=self.role_prompt)
         self._handlers = {

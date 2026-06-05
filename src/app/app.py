@@ -124,7 +124,7 @@ class AgentApp:
         source: str = "clear",
     ) -> Agent:
         for attr in ("memory_mgr", "tools_mgr", "permission_mgr",
-                     "config_mgr", "hooks_mgr", "plan_mgr"):
+                     "config_mgr", "plugin_mgr", "hooks_mgr", "plan_mgr"):
             mgr = getattr(self.deps, attr, None)
             if mgr is not None and hasattr(mgr, "reload"):
                 mgr.reload()
