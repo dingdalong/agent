@@ -17,21 +17,32 @@ class FileMgr:
     deps: AgentDeps = field(repr=False)
 
     def safe_path(self, path_str: str) -> Path:
-        """将绝对路径字符串解析为 Path，校验是否在工作目录内。
+        """将路径字符串解析为绝对 Path。
+
+        仅做路径解析，不做访问控制。
+        工作区外路径的访问控制由 check_permissions 回调在权限层处理。
 
         Args:
-            path_str: 文件或目录的绝对路径字符串。
+            path_str: 文件或目录的路径字符串。
 
         Returns:
-            解析后的 Path 对象。
-
-        Raises:
-            ValueError: 路径不在工作目录内时抛出。
+            解析后的绝对 Path 对象。
         """
-        path = Path(path_str).resolve()
-        if not path.is_relative_to(self.workdir):
-            raise ValueError(f"Path escapes workspace: {path_str}")
-        return path
+        return Path(path_str).resolve()
+
+    def _display_path(self, path: Path) -> str:
+        """将路径转为显示用字符串：工作区内返回相对路径，工作区外返回绝对路径。
+
+        Args:
+            path: 要显示的路径。
+
+        Returns:
+            适合显示的路径字符串。
+        """
+        try:
+            return str(path.relative_to(self.workdir))
+        except ValueError:
+            return str(path)
 
     async def read_file(self, path: str,
                         start_line: int | None = None,
@@ -202,7 +213,7 @@ class FileMgr:
                 return f"Error: 路径不存在: {path}"
 
             stat = file_path.stat()
-            rel = file_path.relative_to(self.workdir)
+            rel = self._display_path(file_path)
             kind = "目录" if file_path.is_dir() else "文件"
             created = datetime.fromtimestamp(stat.st_birthtime).strftime("%Y-%m-%d %H:%M:%S")
             modified = datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
@@ -278,7 +289,7 @@ class FileMgr:
             if not dir_path.is_dir():
                 return f"Error: 不是目录: {path}"
 
-            rel = dir_path.relative_to(self.workdir)
+            rel = self._display_path(dir_path)
             lines = [f"目录: {rel}/"]
             tree_lines, dir_count, file_count = self._build_tree(
                 dir_path, "", 1, max_depth)
@@ -309,7 +320,7 @@ class FileMgr:
                 dst_path = dst_path / src_path.name
             dst_path.parent.mkdir(parents=True, exist_ok=True)
             src_path.rename(dst_path)
-            dst_rel = dst_path.relative_to(self.workdir)
+            dst_rel = self._display_path(dst_path)
             kind = "目录" if dst_path.is_dir() else "文件"
             return f"已移动{kind}: {source} -> {dst_rel}"
         except Exception as exc:
@@ -327,16 +338,15 @@ class FileMgr:
             if "/" not in pattern:
                 pattern = f"**/{pattern}"
             matches = sorted(search_root.glob(pattern))
-            matches = [m for m in matches if m.is_relative_to(self.workdir)]
 
-            rel_root = search_root.relative_to(self.workdir)
+            rel_root = self._display_path(search_root)
             lines = [
                 f"匹配模式: {pattern}",
                 f"搜索路径: {rel_root}/",
                 f"找到 {len(matches)} 个文件:",
             ]
             for m in matches:
-                rel = m.relative_to(self.workdir)
+                rel = self._display_path(m)
                 if m.is_dir():
                     lines.append(f"  [DIR]  {rel}/")
                 else:
@@ -391,7 +401,7 @@ class FileMgr:
                         break
 
                 if file_matches:
-                    rel = file_path.relative_to(self.workdir).as_posix()
+                    rel = self._display_path(file_path)
                     grouped[rel] = [
                         (line_no, line)
                         for line_no, line in sorted(rendered.items())
@@ -400,7 +410,7 @@ class FileMgr:
                 if truncated:
                     break
 
-            rel_root = search_root.relative_to(self.workdir).as_posix()
+            rel_root = self._display_path(search_root)
             if rel_root == ".":
                 display_root = "."
             elif search_root.is_dir():
@@ -431,14 +441,25 @@ class FileMgr:
     def _iter_search_files(self,
                            search_root: Path,
                            ignore_spec: pathspec.PathSpec | None):
+        """遍历搜索根目录下的所有文件，跳过 .gitignore 匹配的文件。
+
+        工作区外的文件不受 .gitignore 规则限制。
+
+        Args:
+            search_root: 搜索起始路径（文件或目录）。
+            ignore_spec: .gitignore 匹配规则，None 表示无 .gitignore。
+
+        Yields:
+            匹配条件的文件 Path 对象。
+        """
         candidates = [search_root] if search_root.is_file() else sorted(search_root.rglob("*"))
         for file_path in candidates:
             if not file_path.is_file():
                 continue
-            rel = file_path.relative_to(self.workdir)
-            rel_posix = rel.as_posix()
-            if ignore_spec is not None and ignore_spec.match_file(rel_posix):
-                continue
+            if ignore_spec is not None and file_path.is_relative_to(self.workdir):
+                rel_posix = file_path.relative_to(self.workdir).as_posix()
+                if ignore_spec.match_file(rel_posix):
+                    continue
             yield file_path
 
     def _load_gitignore_spec(self) -> pathspec.PathSpec | None:
