@@ -33,12 +33,24 @@ class ReminderMgr:
         self._providers: list[Any] = []
 
     def register(self, provider: Any) -> None:
-        """注册提醒源。
+        """注册提醒源。重复注册同一对象会被忽略。
 
         Args:
             provider: 实现了至少一个提醒接口方法的对象。
         """
-        self._providers.append(provider)
+        if provider not in self._providers:
+            self._providers.append(provider)
+
+    def unregister(self, provider: Any) -> None:
+        """注销提醒源。provider 不存在时静默跳过。
+
+        Args:
+            provider: 要注销的提醒源对象。
+        """
+        try:
+            self._providers.remove(provider)
+        except ValueError:
+            pass
 
     def build_turn_start_instructions(
         self, permission_mgr: PermissionManager | None,

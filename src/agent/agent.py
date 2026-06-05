@@ -100,8 +100,6 @@ class Agent:
         self._prompt_mgr = PromptMgr(agent=self, model=self.llm.model, workdir=workdir, role_prompt=self.role_prompt)
         self._reminder_mgr = ReminderMgr()
         self._reminder_mgr.register(self._todo_mgr)
-        if self.deps.plan_mgr is not None:
-            self._reminder_mgr.register(self.deps.plan_mgr)
         self._handlers = {
             AgentState.REQUEST_INPUT:    self._on_request_input,
             AgentState.CHECK_COMPACT:    self._on_check_compact,
@@ -262,7 +260,7 @@ class Agent:
         permission_mgr = self.deps.permission_mgr
         if permission_mgr is None or plan_mgr is None:
             return
-        if not plan_mgr.enter_mode(permission_mgr):
+        if not plan_mgr.enter_mode(permission_mgr, self._reminder_mgr):
             await self.deps.event_bus.request_output("已在计划模式中。\n")
             return
         self.refresh_tools_schemas()
@@ -294,7 +292,18 @@ class Agent:
         if mode is None:
             await self.deps.event_bus.request_output(f"无效选择，保持当前权限模式: {current}\n")
             return
-        changed = permission_mgr.set_mode(mode)
+
+        from src.mgr.permission_mgr import PLAN_MODE
+        plan_mgr = self.deps.plan_mgr
+        changed = False
+
+        if mode is PLAN_MODE and plan_mgr is not None:
+            changed = plan_mgr.enter_mode(permission_mgr, self._reminder_mgr)
+        else:
+            if permission_mgr.mode is PLAN_MODE and plan_mgr is not None:
+                plan_mgr.exit_mode(permission_mgr, self._reminder_mgr)
+            changed = permission_mgr.set_mode(mode)
+
         await self.deps.event_bus.request_output(f"已切换到 {mode.value} 权限模式。\n")
         if changed:
             self.refresh_tools_schemas()

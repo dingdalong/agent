@@ -44,7 +44,7 @@ async def enter_plan_mode(agent: Agent, deps: AgentDeps) -> str:
     if plan_mgr is None:
         return "错误：计划管理器不可用"
 
-    if not plan_mgr.enter_mode(permission_mgr):
+    if not plan_mgr.enter_mode(permission_mgr, agent._reminder_mgr):
         return "已在计划模式中。"
 
     agent.refresh_tools_schemas()
@@ -88,17 +88,19 @@ async def exit_plan_mode(file_path: str, agent: Agent, deps: AgentDeps) -> str:
     if not plan_mgr.is_plan_file(file_path):
         return f"错误：文件不在计划目录下：{file_path}"
 
+    reminder_mgr = agent._reminder_mgr
+
     plan_file = Path(file_path)
     if not plan_file.is_file():
-        restored = permission_mgr.restore_pre_plan_mode()
+        plan_mgr.exit_mode(permission_mgr, reminder_mgr)
         agent.refresh_tools_schemas()
-        return f"计划文件不存在，已退出计划模式，恢复到 {restored.value} 模式。"
+        return f"计划文件不存在，已退出计划模式，恢复到 {permission_mgr.mode.value} 模式。"
 
     plan_content = plan_file.read_text(encoding="utf-8")
     if not plan_content.strip():
-        restored = permission_mgr.restore_pre_plan_mode()
+        plan_mgr.exit_mode(permission_mgr, reminder_mgr)
         agent.refresh_tools_schemas()
-        return f"计划为空，已退出计划模式，恢复到 {restored.value} 模式。"
+        return f"计划为空，已退出计划模式，恢复到 {permission_mgr.mode.value} 模式。"
 
     prompt = (
         f"计划文件：\n{file_path}\n\n"
@@ -113,14 +115,15 @@ async def exit_plan_mode(file_path: str, agent: Agent, deps: AgentDeps) -> str:
     choice = answer.strip()
 
     if choice == "1":
+        plan_mgr.exit_mode(permission_mgr, reminder_mgr)
         permission_mgr.set_mode(ACCEPT_EDITS_MODE)
         agent.refresh_tools_schemas()
         return f"用户选择自动执行。已切换到 acceptEdits 模式。计划路径：{file_path}"
 
     if choice == "2":
-        restored = permission_mgr.restore_pre_plan_mode()
+        plan_mgr.exit_mode(permission_mgr, reminder_mgr)
         agent.refresh_tools_schemas()
-        return f"用户选择手动执行。已恢复到 {restored.value} 模式。计划路径：{file_path}"
+        return f"用户选择手动执行。已恢复到 {permission_mgr.mode.value} 模式。计划路径：{file_path}"
 
     return f"用户对计划的修改意见：{choice}\n请根据以上意见与用户进一步沟通需求。"
 

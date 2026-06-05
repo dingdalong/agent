@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from src.mgr.permission_mgr import PermissionManager
+    from src.mgr.reminder_mgr import ReminderMgr
 
 logger = logging.getLogger(__name__)
 
@@ -65,13 +66,14 @@ class PlanMgr:
 
     # ── 模式切换 ──────────────────────────────────────────────────────
 
-    def enter_mode(self, permission_mgr: PermissionManager) -> bool:
-        """进入计划模式的统一入口。切换权限模式并重置注入状态。
+    def enter_mode(self, permission_mgr: PermissionManager, reminder_mgr: ReminderMgr) -> bool:
+        """进入计划模式的统一入口。切换权限模式、重置注入状态并注册提醒。
 
-        三条入口（enter_plan_mode 工具、/plan 命令、Shift+Tab）均应调用此方法。
+        三条入口（enter_plan_mode 工具、/plan 命令、/mode 命令）均应调用此方法。
 
         Args:
             permission_mgr: 权限管理器，用于切换模式。
+            reminder_mgr: 提醒管理器，用于注册 plan 提醒源。
 
         Returns:
             是否成功进入（已在 plan 模式时返回 False）。
@@ -85,6 +87,32 @@ class PlanMgr:
         self._full_instructions_sent = False
         self._pending_injection = True
         self._rounds_since_injection = 0
+
+        reminder_mgr.register(self)
+        return True
+
+    def exit_mode(self, permission_mgr: PermissionManager, reminder_mgr: ReminderMgr) -> bool:
+        """退出计划模式的统一出口。恢复权限模式、重置注入状态并注销提醒。
+
+        所有退出 plan 模式的路径（exit_plan_mode 工具、/mode 命令）均应调用此方法。
+
+        Args:
+            permission_mgr: 权限管理器，用于恢复进入前的模式。
+            reminder_mgr: 提醒管理器，用于注销 plan 提醒源。
+
+        Returns:
+            是否成功退出（不在 plan 模式时返回 False）。
+        """
+        if not self._is_plan_mode(permission_mgr):
+            return False
+
+        permission_mgr.restore_pre_plan_mode()
+
+        self._full_instructions_sent = False
+        self._pending_injection = False
+        self._rounds_since_injection = 0
+
+        reminder_mgr.unregister(self)
         return True
 
     # ── 计划文件路径 ──────────────────────────────────────────────────
