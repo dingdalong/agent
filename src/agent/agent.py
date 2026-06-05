@@ -9,6 +9,7 @@ from src.tools import ToolDict
 from src.events.types import AgentStateChanged, CompactDelta
 from src.agent.states import AgentState, RunContext, RunResult, parse_command
 from src.events import NoEventSubscribers
+from src.mgr.permission_mgr import MENU_MODES, parse_permission_mode
 from src.mgr import FileMgr, TodoManager, CompactMgr, CompactResult, PromptMgr, SkillMgr, SubAgentMgr
 
 if TYPE_CHECKING:
@@ -112,22 +113,20 @@ class Agent:
         )
 
     async def run(self, input: str | None = None) -> RunResult:
-        """运行一轮 agent 对话。
+        """运行 agent 对话。
+
+        交互模式（input=None）下内部循环多轮对话，仅在 exit 或 /clear 时返回；
+        子智能体模式（input 不为 None）下执行单轮后立即返回。
 
         Args:
-            input: 用户输入文本。为 None 时从 REQUEST_INPUT 状态开始，
-                   通过 event_bus 收集用户输入；不为 None 时直接从
-                   CHECK_COMPACT 开始（子智能体路径）。
+            input: 用户输入文本。为 None 时从 REQUEST_INPUT 开始并循环；
+                   不为 None 时从 CHECK_COMPACT 开始执行单轮（子智能体路径）。
 
         Returns:
             RunResult，包含最终文本、斜杠命令、退出请求等信息。
         """
-        ctx = RunContext(
-            messages=self.history,
-            round_start_idx=len(self.history),
-        )
-
         if input is not None:
+            ctx = RunContext(messages=self.history, round_start_idx=len(self.history))
             plan_mgr = self.deps.plan_mgr
             if plan_mgr is not None and self.deps.permission_mgr is not None:
                 plan_instr = plan_mgr.build_instructions(self.deps.permission_mgr)
@@ -136,19 +135,35 @@ class Agent:
             self.history.append({"role": "user", "content": input})
             ctx.round_start_idx = len(self.history)
             ctx.user_input = input
-            state = AgentState.CHECK_COMPACT
-        else:
-            state = AgentState.REQUEST_INPUT
+            result = await self._run_single_turn(ctx, AgentState.CHECK_COMPACT)
+            if not ctx.has_tool_calls:
+                self.llm.clear_reasoning_content(self.history[ctx.round_start_idx:])
+            return result
 
+        while True:
+            ctx = RunContext(messages=self.history, round_start_idx=len(self.history))
+            result = await self._run_single_turn(ctx, AgentState.REQUEST_INPUT)
+            if result.exit_requested or result.command is not None:
+                return result
+            if not ctx.has_tool_calls:
+                self.llm.clear_reasoning_content(self.history[ctx.round_start_idx:])
+
+    async def _run_single_turn(self, ctx: RunContext, start_state: AgentState) -> RunResult:
+        """运行状态机从 start_state 到 DONE 的单轮执行。
+
+        Args:
+            ctx: 当前运行上下文。
+            start_state: 起始状态。
+
+        Returns:
+            RunResult，包含本轮结果。
+        """
+        state = start_state
         try:
             while state != AgentState.DONE:
                 prev = state
                 state = await self._handlers[state](ctx)
                 await self._emit_state_changed(prev, state)
-
-            if not ctx.command and not ctx.exit_requested and not ctx.has_tool_calls:
-                self.llm.clear_reasoning_content(self.history[ctx.round_start_idx:])
-
             return RunResult(
                 final_text=ctx.final_text,
                 command=ctx.command,
@@ -193,8 +208,18 @@ class Agent:
 
         cmd = parse_command(user_input)
         if cmd is not None:
-            ctx.command = cmd
-            return AgentState.DONE
+            cmd_name, cmd_args = cmd
+            if cmd_name == "plan":
+                await self._handle_plan_command()
+                return AgentState.REQUEST_INPUT
+            if cmd_name == "mode":
+                await self._handle_mode_command()
+                return AgentState.REQUEST_INPUT
+            if cmd_name == "clear":
+                ctx.command = cmd
+                return AgentState.DONE
+            await self.deps.event_bus.request_output(f"未知命令: /{cmd_name}\n")
+            return AgentState.REQUEST_INPUT
 
         if self.deps.hooks_mgr is not None:
             hook_result = await self.deps.hooks_mgr.run_event(
@@ -224,6 +249,50 @@ class Agent:
         ctx.round_start_idx = len(self.history)
 
         return AgentState.CHECK_COMPACT
+
+    async def _handle_plan_command(self) -> None:
+        """处理 /plan 命令：进入计划模式。"""
+        plan_mgr = self.deps.plan_mgr
+        permission_mgr = self.deps.permission_mgr
+        if permission_mgr is None or plan_mgr is None:
+            return
+        if not plan_mgr.enter_mode(permission_mgr):
+            await self.deps.event_bus.request_output("已在计划模式中。\n")
+            return
+        self.refresh_tools_schemas()
+        self.deps.ui.on_system_state_changed()
+        await self.deps.event_bus.request_output("已进入计划模式。\n")
+
+    async def _handle_mode_command(self) -> None:
+        """处理 /mode 命令：显示权限模式菜单并切换。"""
+        permission_mgr = self.deps.permission_mgr
+        if permission_mgr is None:
+            return
+        current = permission_mgr.mode.value
+        menu = "\n权限模式:\n" + "\n".join(
+            f"  [{i}] {mode.value:<20} - {mode.description}"
+            for i, mode in enumerate(MENU_MODES, start=1)
+        ) + "\n"
+        await self.deps.event_bus.request_output(f"{menu}  当前权限模式: {current}\n")
+        try:
+            answer = await self.deps.event_bus.request_input(
+                f"选择 (1-{len(MENU_MODES)} 或模式名): "
+            )
+        except (asyncio.CancelledError, KeyboardInterrupt, NoEventSubscribers):
+            current_task = asyncio.current_task()
+            if current_task is not None:
+                while current_task.cancelling():
+                    current_task.uncancel()
+            return
+        mode = parse_permission_mode(answer)
+        if mode is None:
+            await self.deps.event_bus.request_output(f"无效选择，保持当前权限模式: {current}\n")
+            return
+        changed = permission_mgr.set_mode(mode)
+        await self.deps.event_bus.request_output(f"已切换到 {mode.value} 权限模式。\n")
+        if changed:
+            self.refresh_tools_schemas()
+            self.deps.ui.on_system_state_changed()
 
     async def _on_check_compact(self, ctx: RunContext) -> AgentState:
         ctx.prompt = self._prompt_mgr.build()

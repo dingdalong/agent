@@ -67,9 +67,12 @@ class RunContext:
 class RunResult:
     """Agent.run() 的返回值。
 
+    /plan 和 /mode 在 agent 内部处理，不会出现在 command 中。
+    仅 /clear 会通过 command 字段传递给 app 层。
+
     Attributes:
         final_text: LLM 最终输出文本。
-        command: 解析出的斜杠命令 (名称, 参数列表)，无命令时为 None。
+        command: 需要 app 层处理的斜杠命令（仅 /clear），无命令时为 None。
         exit_requested: 用户是否请求退出（输入 exit/quit 或输入被取消）。
         user_input: 用户原始输入文本。
     """

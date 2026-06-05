@@ -36,31 +36,15 @@ class AgentApp:
                 self.deps.session_id = str(uuid.uuid4())
             agent = await self._reset_session(source="startup")
             while True:
-                if self._permission_mode_controller is not None:
-                    self._permission_mode_controller.install_shortcut(agent)
-
                 result = await self._run_agent_turn(agent)
-
-                if self._permission_mode_controller is not None:
-                    self._permission_mode_controller.clear_shortcut()
-
                 if result is None:
                     continue
                 if result.exit_requested:
                     break
-                if result.command is not None:
-                    cmd_name, cmd_args = result.command
-                    if cmd_name == "clear":
-                        agent = await self._reset_session(source="clear")
-                        await self.deps.event_bus.request_output("上下文已清理，所有组件已重载。\n")
-                        continue
-                    if cmd_name == "mode":
-                        if self._permission_mode_controller is not None:
-                            await self._permission_mode_controller.prompt_selection(agent)
-                        continue
-                    if cmd_name == "plan":
-                        await self._handle_plan_command(agent)
-                        continue
+                if result.command is not None and result.command[0] == "clear":
+                    agent = await self._reset_session(source="clear")
+                    await self.deps.event_bus.request_output("上下文已清理，所有组件已重载。\n")
+                    continue
         finally:
             if self.deps.hooks_mgr is not None:
                 try:
@@ -98,10 +82,10 @@ class AgentApp:
         self._clear_completed_user_request(event)
 
     async def _run_agent_turn(self, agent: Agent) -> RunResult | None:
-        """执行一轮 agent 对话（含输入收集）。
+        """执行 agent 对话循环。
 
-        Agent 内部通过 REQUEST_INPUT 状态收集用户输入，
-        本方法仅负责任务调度和中断处理。
+        Agent 内部循环多轮对话（REQUEST_INPUT → LLM → DONE → REQUEST_INPUT），
+        仅在 exit 或 /clear 时返回 RunResult。本方法负责任务调度和中断处理。
 
         Args:
             agent: Agent 实例。
@@ -109,9 +93,6 @@ class AgentApp:
         Returns:
             RunResult 表示正常完成；None 表示被中断。
         """
-        if self._permission_mode_controller is not None:
-            self._permission_mode_controller.clear_shortcut()
-
         self._work_task = asyncio.create_task(agent.run())
         with self.deps.ui.watch_interrupt(self._request_interrupt):
             try:
@@ -137,26 +118,6 @@ class AgentApp:
             ui=ui,
             event_bus=event_bus,
         )
-
-    async def _handle_plan_command(self, agent: Agent) -> None:
-        """处理 /plan 命令，进入计划模式。
-
-        Args:
-            agent: 当前 Agent 实例。
-        """
-        plan_mgr = self.deps.plan_mgr
-        permission_mgr = self.deps.permission_mgr
-        if permission_mgr is None or plan_mgr is None:
-            return
-
-        if not plan_mgr.enter_mode(permission_mgr):
-            await self.deps.event_bus.request_output("已在计划模式中。\n")
-            return
-
-        agent.refresh_tools_schemas()
-        if self._permission_mode_controller is not None:
-            self._permission_mode_controller.notify_state_changed()
-        await self.deps.event_bus.request_output("已进入计划模式。\n")
 
     async def _reset_session(
         self,
