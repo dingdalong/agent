@@ -104,11 +104,6 @@ class PromptMgr:
         if project_agent.exists():
             sources.append(("project root (AGENT.md)", project_agent.read_text()))
 
-        cwd = Path.cwd()
-        if cwd != self.workdir:
-            subdir_agent = cwd / "AGENT.md"
-            if subdir_agent.exists():
-                sources.append((f"subdir ({cwd.name}/AGENT.md)", subdir_agent.read_text()))
         if not sources:
             return ""
         parts = [

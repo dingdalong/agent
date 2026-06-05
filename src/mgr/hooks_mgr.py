@@ -57,9 +57,14 @@ class HookRunResult:
 
 class HooksMgr:
 
-    def __init__(self, workspace: str | Path):
-        self.workspace = Path(workspace)
-        self.project_root = self.workspace.parent
+    def __init__(self, workdir: str | Path):
+        """初始化 hook 管理器。
+
+        Args:
+            workdir: 用户工作目录（启动时 cwd），即项目根目录。
+        """
+        self.workdir = Path(workdir)
+        self.project_root = self.workdir
         self._hooks = self._load_hooks()
 
     def reload(self) -> None:
@@ -69,14 +74,14 @@ class HooksMgr:
 
     def _load_hooks(self) -> list[HookEntry]:
         hooks: list[HookEntry] = []
-        plugins_dir = self.workspace / ".agent" / "plugins"
+        plugins_dir = self.workdir / ".agent" / "plugins"
         if plugins_dir.exists():
             for plugin_root in sorted(p for p in plugins_dir.iterdir() if p.is_dir()):
                 hooks.extend(self._load_hook_file(
                     plugin_root / "hooks" / "hooks.json",
                     plugin_root=plugin_root,
                 ))
-        hooks.extend(self._load_hook_file(self.workspace / ".agent" / "settings.json"))
+        hooks.extend(self._load_hook_file(self.workdir / ".agent" / "settings.json"))
         return hooks
 
     def _load_hook_file(self, path: Path, *, plugin_root: Path | None = None) -> list[HookEntry]:

@@ -559,12 +559,21 @@ def check_shell_permissions(values: dict[str, Any], ctx: PermissionContext) -> P
           tips="{command}",
           check_permissions=check_shell_permissions,
       ))
-async def shell(command: str, timeout: int) -> str:
+async def shell(command: str, timeout: int, deps=None) -> str:
+    """执行 shell 命令并返回输出。
+
+    Args:
+        command: 要执行的 shell 命令。
+        timeout: 超时时间（秒）。
+        deps: AgentDeps，自动注入，用于获取工作目录。
+    """
+    cwd = str(deps.workdir) if deps and deps.workdir else None
     try:
         proc = await asyncio.create_subprocess_shell(
             command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            cwd=cwd,
         )
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except asyncio.TimeoutError:

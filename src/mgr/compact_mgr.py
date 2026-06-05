@@ -7,9 +7,6 @@ from dataclasses import dataclass, field
 
 from src.llm.base import LLMProvider
 
-WORKDIR = Path.cwd()
-TRANSCRIPT_DIR = WORKDIR / ".transcripts"
-
 
 @dataclass
 class CompactResult:
@@ -19,7 +16,15 @@ class CompactResult:
 
 @dataclass
 class CompactMgr:
+    """上下文压缩管理器。
+
+    Args:
+        llm: LLM provider 实例，用于估算 token 和生成摘要。
+        workdir: 用户工作目录，transcript 存放在 workdir/.transcripts/。
+    """
+
     llm: LLMProvider = field(repr=False)
+    workdir: Path = field(repr=False)
     auto_compact_size: int = 0.8
     keep_recent_user_turns: int = 3
     recent_messages_token_limit: int = 0.25
@@ -42,12 +47,21 @@ class CompactMgr:
 
 
     async def write_transcript(self, messages: list) -> Path:
-        TRANSCRIPT_DIR.mkdir(parents=True, exist_ok=True)
-        path = TRANSCRIPT_DIR / f"transcript_{int(time.time())}.jsonl"
+        """将对话历史写入 transcript 文件。
+
+        Args:
+            messages: 待写入的消息列表。
+
+        Returns:
+            transcript 文件路径。
+        """
+        transcript_dir = self.workdir / ".transcripts"
+        transcript_dir.mkdir(parents=True, exist_ok=True)
+        path = transcript_dir / f"transcript_{int(time.time())}.jsonl"
         with path.open("w") as handle:
             for message in messages:
                 handle.write(json.dumps(message, default=str) + "\n")
-        await self.track_recent_file(path.relative_to(Path.cwd()).as_posix())
+        await self.track_recent_file(path.relative_to(self.workdir).as_posix())
         return path
 
     def split_history_for_compaction(self, messages: list) -> tuple[list, list, list]:

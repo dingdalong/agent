@@ -50,7 +50,10 @@ class SkillMgr:
             description = meta.get("description", "没有说明内容")
             manifest = SkillManifest(name=name, description=description, path=path)
             skill_dir = manifest.path.parent.resolve()
-            skill_dir_rel = skill_dir.relative_to(Path.cwd())
+            try:
+                skill_dir_rel = skill_dir.relative_to(self.workdir)
+            except ValueError:
+                skill_dir_rel = skill_dir
             parts = [
                 f"<skill name=\"{manifest.name}\" skill_dir=\"{skill_dir_rel}\">",
                 body.strip(),

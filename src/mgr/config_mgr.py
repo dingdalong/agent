@@ -15,20 +15,28 @@ logger = logging.getLogger(__name__)
 
 
 class ConfigManager:
+    """全局配置和用户设置管理器。
+
+    Args:
+        config_home: 全局配置目录（~/.agent/），包含 config.yaml 和 .env。
+        workdir: 用户工作目录（启动时 cwd），用户设置存放在 workdir/.agent/settings.json。
+    """
+
     def __init__(
         self,
-        config_path: str | Path = "config.yaml",
-        workspace: Path | None = None,
+        config_home: Path,
+        workdir: Path,
     ) -> None:
-        self.config_path = Path(config_path)
-        self.workspace = workspace or Path.cwd() / "workspace"
-        self.settings_path = self.workspace / ".agent" / "settings.json"
+        self.config_home = Path(config_home)
+        self.config_path = self.config_home / "config.yaml"
+        self.workdir = Path(workdir)
+        self.settings_path = self.workdir / ".agent" / "settings.json"
         self._lock = threading.RLock()
         self._config: dict[str, Any] = self.load_config()
         self._user_settings: dict[str, Any] = self.load_user_settings()
 
     def load_config(self) -> dict[str, Any]:
-        load_dotenv()
+        load_dotenv(self.config_home / ".env")
         config: dict[str, Any] = {}
         if self.config_path.exists():
             with self.config_path.open() as f:

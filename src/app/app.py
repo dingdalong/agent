@@ -4,7 +4,6 @@ import asyncio
 import logging
 import uuid
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from src.agent import Agent, AgentDeps
 from src.agent.states import RunResult
@@ -201,6 +200,6 @@ class AgentApp:
             "Agent workbench ready\n"
             f"model: {model}\n"
             f"permission mode: {permission_mode}\n"
-            f"workdir: {Path.cwd()}\n"
+            f"workdir: {self.deps.workdir}\n"
             "Enter submits · Ctrl+J newline · Ctrl+C interrupts · exit/quit to leave · /mode to switch\n"
         )

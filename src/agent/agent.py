@@ -44,6 +44,7 @@ class AgentDeps:
     plan_mgr: PlanMgr | None = None
     session_context: list[str] = field(default_factory=list)
     session_id: str = ""
+    workdir: Path | None = None
 
 @dataclass
 class Agent:
@@ -83,15 +84,16 @@ class Agent:
         context_limit = self.llm.context_limit
         self._compact_mgr = CompactMgr(
             llm=self.llm,
+            workdir=self.deps.workdir,
             auto_compact_size=int(context_limit * compact_cfg["auto_compact_rate"]),
             keep_recent_user_turns=compact_cfg.get("keep_recent_user_turns", 3),
             recent_messages_token_limit=int(context_limit * compact_cfg.get("keep_recent_messages_token_rate", 0.25)),
         )
-        workspace = Path.cwd() / "workspace"
-        self._file_mgr = FileMgr(workspace, self.deps)
-        self._skill_mgr = SkillMgr(workspace)
-        self._subagent_mgr = SubAgentMgr(workspace, self.deps)
-        self._prompt_mgr = PromptMgr(agent=self, model=self.llm.model, workdir=workspace, role_prompt=self.role_prompt)
+        workdir = self.deps.workdir
+        self._file_mgr = FileMgr(workdir, self.deps)
+        self._skill_mgr = SkillMgr(workdir)
+        self._subagent_mgr = SubAgentMgr(workdir, self.deps)
+        self._prompt_mgr = PromptMgr(agent=self, model=self.llm.model, workdir=workdir, role_prompt=self.role_prompt)
         self._handlers = {
             AgentState.REQUEST_INPUT:    self._on_request_input,
             AgentState.CHECK_COMPACT:    self._on_check_compact,
