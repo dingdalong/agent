@@ -4,7 +4,30 @@ from dataclasses import dataclass, field
 from src.llm.base import LLMResponse
 
 
+def parse_command(user_input: str) -> tuple[str, list[str]] | None:
+    """尝试将用户输入解析为斜杠命令。
+
+    按空格分割输入，第一个 token 必须以 "/" 开头才视为命令。
+    命令名称转换为小写，参数保留原始大小写。
+
+    Args:
+        user_input: 用户原始输入字符串。
+
+    Returns:
+        解析成功返回 (命令名称, 参数列表) 元组，命令名称为小写且不含 "/" 前缀；
+        输入不是斜杠命令时返回 None。
+    """
+    stripped = user_input.strip()
+    if not stripped or not stripped.startswith("/"):
+        return None
+    parts = stripped.split()
+    name = parts[0][1:].lower()
+    args = parts[1:]
+    return (name, args)
+
+
 class AgentState(Enum):
+    REQUEST_INPUT = "request_input"
     CHECK_COMPACT = "check_compact"
     COMPACT = "compact"
     LLM_CALL = "llm_call"
@@ -35,3 +58,22 @@ class RunContext:
     response: LLMResponse | None = None
     manual_compact: bool = False
     compact_focus: str | None = None
+    user_input: str = ""
+    command: tuple[str, list[str]] | None = None
+    exit_requested: bool = False
+
+
+@dataclass
+class RunResult:
+    """Agent.run() 的返回值。
+
+    Attributes:
+        final_text: LLM 最终输出文本。
+        command: 解析出的斜杠命令 (名称, 参数列表)，无命令时为 None。
+        exit_requested: 用户是否请求退出（输入 exit/quit 或输入被取消）。
+        user_input: 用户原始输入文本。
+    """
+    final_text: str = ""
+    command: tuple[str, list[str]] | None = None
+    exit_requested: bool = False
+    user_input: str = ""

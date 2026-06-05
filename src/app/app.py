@@ -7,33 +7,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from src.agent import Agent, AgentDeps
+from src.agent.states import RunResult
 from src.app.permission_mode_controller import PermissionModeController
-from src.events import NoEventSubscribers
 from src.events.types import InterruptRequested, UserInputRequest
 
 logger = logging.getLogger(__name__)
-
-
-def parse_command(user_input: str) -> tuple[str, list[str]] | None:
-    """尝试将用户输入解析为斜杠命令。
-
-    按空格分割输入，第一个 token 必须以 "/" 开头才视为命令。
-    命令名称转换为小写，参数保留原始大小写。
-
-    Args:
-        user_input: 用户原始输入字符串。
-
-    Returns:
-        解析成功返回 (命令名称, 参数列表) 元组，命令名称为小写且不含 "/" 前缀；
-        输入不是斜杠命令时返回 None。
-    """
-    stripped = user_input.strip()
-    if not stripped or not stripped.startswith("/"):
-        return None
-    parts = stripped.split()
-    name = parts[0][1:].lower()
-    args = parts[1:]
-    return (name, args)
 
 
 @dataclass
@@ -57,26 +35,21 @@ class AgentApp:
             if not self.deps.session_id:
                 self.deps.session_id = str(uuid.uuid4())
             agent = await self._reset_session(source="startup")
-            pending_input = ""
             while True:
-                try:
-                    if self._permission_mode_controller is not None:
-                        self._permission_mode_controller.install_shortcut(agent)
-                    user_input = await self.deps.event_bus.request_input(
-                        "\n\n你: ",
-                        default=pending_input,
-                    )
-                    if self._permission_mode_controller is not None:
-                        self._permission_mode_controller.clear_shortcut()
-                    pending_input = ""
-                except (asyncio.CancelledError, KeyboardInterrupt, NoEventSubscribers):
-                    break
-                if user_input.strip().lower() in ("exit", "quit"):
-                    break
+                if self._permission_mode_controller is not None:
+                    self._permission_mode_controller.install_shortcut(agent)
 
-                cmd = parse_command(user_input)
-                if cmd is not None:
-                    cmd_name, cmd_args = cmd
+                result = await self._run_agent_turn(agent)
+
+                if self._permission_mode_controller is not None:
+                    self._permission_mode_controller.clear_shortcut()
+
+                if result is None:
+                    continue
+                if result.exit_requested:
+                    break
+                if result.command is not None:
+                    cmd_name, cmd_args = result.command
                     if cmd_name == "clear":
                         agent = await self._reset_session(source="clear")
                         await self.deps.event_bus.request_output("上下文已清理，所有组件已重载。\n")
@@ -88,11 +61,6 @@ class AgentApp:
                     if cmd_name == "plan":
                         await self._handle_plan_command(agent)
                         continue
-
-                interrupted = await self._run_agent_turn(agent, user_input)
-                if interrupted:
-                    pending_input = user_input
-                    continue
         finally:
             if self.deps.hooks_mgr is not None:
                 try:
@@ -129,46 +97,29 @@ class AgentApp:
             await self.deps.ui.on_event(event)
         self._clear_completed_user_request(event)
 
-    async def _run_agent_turn(
-        self,
-        agent: Agent,
-        user_input: str,
-    ) -> bool:
-        """执行一轮 agent 对话。
+    async def _run_agent_turn(self, agent: Agent) -> RunResult | None:
+        """执行一轮 agent 对话（含输入收集）。
+
+        Agent 内部通过 REQUEST_INPUT 状态收集用户输入，
+        本方法仅负责任务调度和中断处理。
 
         Args:
             agent: Agent 实例。
-            user_input: 用户输入。
 
         Returns:
-            是否被中断。
+            RunResult 表示正常完成；None 表示被中断。
         """
         if self._permission_mode_controller is not None:
             self._permission_mode_controller.clear_shortcut()
-        if self.deps.hooks_mgr is not None:
-            hook_result = await self.deps.hooks_mgr.run_event(
-                "UserPromptSubmit",
-                user_input,
-                {"prompt": user_input},
-                session_id=self.deps.session_id,
-                agent_id=str(agent.uuid),
-                agent_type=agent.agent_type,
-            )
-            if hook_result.blocked:
-                reason = hook_result.block_reason or "UserPromptSubmit hook blocked"
-                await self.deps.event_bus.request_output(f"{reason}\n")
-                return False
-            if hook_result.additional_context:
-                user_input = user_input + "\n\n" + "\n\n".join(str(item) for item in hook_result.additional_context)
 
-        self._work_task = asyncio.create_task(agent.run(user_input))
+        self._work_task = asyncio.create_task(agent.run())
         with self.deps.ui.watch_interrupt(self._request_interrupt):
             try:
-                await self._work_task
-                return False
+                result = await self._work_task
+                return result
             except (asyncio.CancelledError, KeyboardInterrupt):
                 await self._handle_interrupted_turn()
-                return True
+                return None
             finally:
                 self._work_task = None
 

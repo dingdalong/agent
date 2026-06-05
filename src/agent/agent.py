@@ -7,7 +7,8 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, TYPE_CHECKING
 from src.tools import ToolDict
 from src.events.types import AgentStateChanged, CompactDelta
-from src.agent.states import AgentState, RunContext
+from src.agent.states import AgentState, RunContext, RunResult, parse_command
+from src.events import NoEventSubscribers
 from src.mgr import FileMgr, TodoManager, CompactMgr, CompactResult, PromptMgr, SkillMgr, SubAgentMgr
 
 if TYPE_CHECKING:
@@ -70,6 +71,7 @@ class Agent:
     _skill_mgr: SkillMgr = field(init=False, repr=False)
     _subagent_mgr: SubAgentMgr = field(init=False, repr=False)
     _prompt_mgr: PromptMgr = field(init=False, repr=False)
+    _pending_input: str = field(init=False, default="")
     _handlers: dict[AgentState, Callable] = field(init=False, repr=False)
 
     def __post_init__(self):
@@ -90,6 +92,7 @@ class Agent:
         self._subagent_mgr = SubAgentMgr(workspace, self.deps)
         self._prompt_mgr = PromptMgr(agent=self, model=self.llm.model, workdir=workspace, role_prompt=self.role_prompt)
         self._handlers = {
+            AgentState.REQUEST_INPUT:    self._on_request_input,
             AgentState.CHECK_COMPACT:    self._on_check_compact,
             AgentState.COMPACT:          self._on_compact,
             AgentState.LLM_CALL:         self._on_llm_call,
@@ -108,33 +111,119 @@ class Agent:
             permission_mgr=self.deps.permission_mgr,
         )
 
-    async def run(self, input: str) -> str:
-        # plan 模式下将指令 prepend 到用户输入，避免放入 system prompt 导致 cache 失效
-        plan_mgr = self.deps.plan_mgr
-        if plan_mgr is not None and self.deps.permission_mgr is not None:
-            plan_instr = plan_mgr.build_instructions(self.deps.permission_mgr)
-            if plan_instr:
-                input = f"{plan_instr}\n\n{input}"
-        self.history.append({"role": "user", "content": input})
+    async def run(self, input: str | None = None) -> RunResult:
+        """运行一轮 agent 对话。
+
+        Args:
+            input: 用户输入文本。为 None 时从 REQUEST_INPUT 状态开始，
+                   通过 event_bus 收集用户输入；不为 None 时直接从
+                   CHECK_COMPACT 开始（子智能体路径）。
+
+        Returns:
+            RunResult，包含最终文本、斜杠命令、退出请求等信息。
+        """
         ctx = RunContext(
             messages=self.history,
             round_start_idx=len(self.history),
         )
-        try:
+
+        if input is not None:
+            plan_mgr = self.deps.plan_mgr
+            if plan_mgr is not None and self.deps.permission_mgr is not None:
+                plan_instr = plan_mgr.build_instructions(self.deps.permission_mgr)
+                if plan_instr:
+                    input = f"{plan_instr}\n\n{input}"
+            self.history.append({"role": "user", "content": input})
+            ctx.round_start_idx = len(self.history)
+            ctx.user_input = input
             state = AgentState.CHECK_COMPACT
+        else:
+            state = AgentState.REQUEST_INPUT
+
+        try:
             while state != AgentState.DONE:
                 prev = state
                 state = await self._handlers[state](ctx)
                 await self._emit_state_changed(prev, state)
 
-            if not ctx.has_tool_calls:
+            if not ctx.command and not ctx.exit_requested and not ctx.has_tool_calls:
                 self.llm.clear_reasoning_content(self.history[ctx.round_start_idx:])
-            return ctx.final_text
+
+            return RunResult(
+                final_text=ctx.final_text,
+                command=ctx.command,
+                exit_requested=ctx.exit_requested,
+                user_input=ctx.user_input,
+            )
         except (asyncio.CancelledError, KeyboardInterrupt):
             del self.history[ctx.round_start_idx:]
+            self._pending_input = ctx.user_input
             raise
 
     # ---- state handlers ----
+
+    async def _on_request_input(self, ctx: RunContext) -> AgentState:
+        """REQUEST_INPUT: 收集用户输入、解析命令、执行 UserPromptSubmit hook。
+
+        Args:
+            ctx: 当前运行上下文。
+
+        Returns:
+            下一个状态：DONE（退出/命令）、REQUEST_INPUT（hook 阻断）或 CHECK_COMPACT。
+        """
+        try:
+            user_input = await self.deps.event_bus.request_input(
+                "\n\n你: ",
+                default=self._pending_input,
+            )
+        except (asyncio.CancelledError, KeyboardInterrupt, NoEventSubscribers):
+            ctx.exit_requested = True
+            current_task = asyncio.current_task()
+            if current_task is not None:
+                while current_task.cancelling():
+                    current_task.uncancel()
+            return AgentState.DONE
+
+        self._pending_input = ""
+        ctx.user_input = user_input
+
+        if user_input.strip().lower() in ("exit", "quit"):
+            ctx.exit_requested = True
+            return AgentState.DONE
+
+        cmd = parse_command(user_input)
+        if cmd is not None:
+            ctx.command = cmd
+            return AgentState.DONE
+
+        if self.deps.hooks_mgr is not None:
+            hook_result = await self.deps.hooks_mgr.run_event(
+                "UserPromptSubmit",
+                user_input,
+                {"prompt": user_input},
+                session_id=self.deps.session_id,
+                agent_id=str(self.uuid),
+                agent_type=self.agent_type,
+            )
+            if hook_result.blocked:
+                reason = hook_result.block_reason or "UserPromptSubmit hook blocked"
+                await self.deps.event_bus.request_output(f"{reason}\n")
+                return AgentState.REQUEST_INPUT
+            if hook_result.additional_context:
+                user_input = user_input + "\n\n" + "\n\n".join(
+                    str(item) for item in hook_result.additional_context
+                )
+
+        plan_mgr = self.deps.plan_mgr
+        if plan_mgr is not None and self.deps.permission_mgr is not None:
+            plan_instr = plan_mgr.build_instructions(self.deps.permission_mgr)
+            if plan_instr:
+                user_input = f"{plan_instr}\n\n{user_input}"
+
+        self.history.append({"role": "user", "content": user_input})
+        ctx.round_start_idx = len(self.history)
+
+        return AgentState.CHECK_COMPACT
 
     async def _on_check_compact(self, ctx: RunContext) -> AgentState:
         ctx.prompt = self._prompt_mgr.build()

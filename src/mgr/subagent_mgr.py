@@ -116,7 +116,7 @@ class SubAgentMgr:
                 **hook_kwargs,
             )
 
-        result = await agent.run(prompt)
+        result = (await agent.run(prompt)).final_text
 
         if fire_hooks:
             stop_result = await hooks_mgr.run_event(
