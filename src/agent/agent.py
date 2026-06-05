@@ -9,7 +9,6 @@ from src.tools import ToolDict
 from src.events.types import AgentStateChanged, CompactDelta
 from src.agent.states import AgentState, RunContext, RunResult, parse_command
 from src.events import NoEventSubscribers
-from src.mgr.permission_mgr import MENU_MODES, parse_permission_mode
 from src.mgr import FileMgr, TodoManager, CompactMgr, CompactResult, PromptMgr, SkillMgr, SubAgentMgr, ReminderMgr
 
 if TYPE_CHECKING:
@@ -44,6 +43,7 @@ class AgentDeps:
     hooks_mgr: HooksMgr | None = None
     plan_mgr: PlanMgr | None = None
     plugin_mgr: PluginMgr | None = None
+    permission_mode_controller: Any = None
     session_context: list[str] = field(default_factory=list)
     session_id: str = ""
     workdir: Path | None = None
@@ -115,10 +115,34 @@ class Agent:
         }
 
     def refresh_tools_schemas(self) -> None:
+        """刷新工具 schema 列表。"""
         self._tools_schemas = self.deps.tools_mgr.get_schemas(
             self.tools,
             permission_mgr=self.deps.permission_mgr,
         )
+
+    def set_permission_mode(self, mode) -> bool:
+        """切换权限模式，处理计划模式的特殊进入/退出逻辑。
+
+        统一入口：/mode 命令、Shift+Tab 轮转、prompt_selection 菜单均通过此方法切换。
+
+        Args:
+            mode: 目标权限模式（PermissionMode 实例）。
+
+        Returns:
+            模式是否发生了变化。
+        """
+        from src.mgr.permission_mgr import PLAN_MODE
+        permission_mgr = self.deps.permission_mgr
+        plan_mgr = self.deps.plan_mgr
+
+        if mode is PLAN_MODE and plan_mgr is not None:
+            return plan_mgr.enter_mode(permission_mgr, self._reminder_mgr)
+
+        if permission_mgr.mode is PLAN_MODE and plan_mgr is not None:
+            plan_mgr.exit_mode(permission_mgr, self._reminder_mgr)
+
+        return permission_mgr.set_mode(mode)
 
     async def run(self, input: str | None = None) -> RunResult:
         """运行 agent 对话。
@@ -256,11 +280,10 @@ class Agent:
 
     async def _handle_plan_command(self) -> None:
         """处理 /plan 命令：进入计划模式。"""
-        plan_mgr = self.deps.plan_mgr
-        permission_mgr = self.deps.permission_mgr
-        if permission_mgr is None or plan_mgr is None:
+        from src.mgr.permission_mgr import PLAN_MODE
+        if self.deps.permission_mgr is None:
             return
-        if not plan_mgr.enter_mode(permission_mgr, self._reminder_mgr):
+        if not self.set_permission_mode(PLAN_MODE):
             await self.deps.event_bus.request_output("已在计划模式中。\n")
             return
         self.refresh_tools_schemas()
@@ -268,46 +291,10 @@ class Agent:
         await self.deps.event_bus.request_output("已进入计划模式。\n")
 
     async def _handle_mode_command(self) -> None:
-        """处理 /mode 命令：显示权限模式菜单并切换。"""
-        permission_mgr = self.deps.permission_mgr
-        if permission_mgr is None:
-            return
-        current = permission_mgr.mode.value
-        menu = "\n权限模式:\n" + "\n".join(
-            f"  [{i}] {mode.value:<20} - {mode.description}"
-            for i, mode in enumerate(MENU_MODES, start=1)
-        ) + "\n"
-        await self.deps.event_bus.request_output(f"{menu}  当前权限模式: {current}\n")
-        try:
-            answer = await self.deps.event_bus.request_input(
-                f"选择 (1-{len(MENU_MODES)} 或模式名): "
-            )
-        except (asyncio.CancelledError, KeyboardInterrupt, NoEventSubscribers):
-            current_task = asyncio.current_task()
-            if current_task is not None:
-                while current_task.cancelling():
-                    current_task.uncancel()
-            return
-        mode = parse_permission_mode(answer)
-        if mode is None:
-            await self.deps.event_bus.request_output(f"无效选择，保持当前权限模式: {current}\n")
-            return
-
-        from src.mgr.permission_mgr import PLAN_MODE
-        plan_mgr = self.deps.plan_mgr
-        changed = False
-
-        if mode is PLAN_MODE and plan_mgr is not None:
-            changed = plan_mgr.enter_mode(permission_mgr, self._reminder_mgr)
-        else:
-            if permission_mgr.mode is PLAN_MODE and plan_mgr is not None:
-                plan_mgr.exit_mode(permission_mgr, self._reminder_mgr)
-            changed = permission_mgr.set_mode(mode)
-
-        await self.deps.event_bus.request_output(f"已切换到 {mode.value} 权限模式。\n")
-        if changed:
-            self.refresh_tools_schemas()
-            self.deps.ui.on_system_state_changed()
+        """处理 /mode 命令：委托给 PermissionModeController。"""
+        controller = self.deps.permission_mode_controller
+        if controller is not None:
+            await controller.prompt_selection(self)
 
     async def _on_check_compact(self, ctx: RunContext) -> AgentState:
         ctx.prompt = self._prompt_mgr.build()

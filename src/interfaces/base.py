@@ -40,6 +40,7 @@ class UserInterface(ABC):
         self._in_response = False
         self._request_interrupt: Callable[[], None] | None = None
         self._system_state_provider: Callable[[], SystemState] | None = None
+        self._active_user_request: UserInputRequest | None = None
 
     @contextmanager
     def watch_interrupt(self, request_interrupt: Callable[[], None]):
@@ -54,6 +55,20 @@ class UserInterface(ABC):
     def _request_user_interrupt(self) -> None:
         if self._request_interrupt is not None:
             self._request_interrupt()
+
+    def cancel_active_input(self) -> bool:
+        """取消当前活跃的用户输入请求。
+
+        由应用层在中断时调用。在抽象基类中实现，所有 UI 子类共享同一取消逻辑。
+
+        Returns:
+            是否成功取消了输入请求。
+        """
+        if self._active_user_request is None:
+            return False
+        self._active_user_request.cancel()
+        self._active_user_request = None
+        return True
 
     def set_system_state_provider(self, provider: Callable[[], SystemState] | None) -> None:
         """设置 UI 查询系统状态时使用的数据源。"""
@@ -152,24 +167,34 @@ class UserInterface(ABC):
             case OutputRequested(content=content):
                 await self._write(content)
             case InputRequested(prompt=prompt, default=default):
-                next_prompt = prompt
-                next_default = default
+                self._active_user_request = event
+                try:
+                    next_prompt = prompt
+                    next_default = default
 
-                async def read_input() -> str:
-                    nonlocal next_prompt, next_default
-                    answer = await self._read_input(next_prompt, next_default)
-                    next_prompt = ""
-                    next_default = ""
-                    return answer if answer.strip() else ""
+                    async def read_input() -> str:
+                        nonlocal next_prompt, next_default
+                        answer = await self._read_input(next_prompt, next_default)
+                        next_prompt = ""
+                        next_default = ""
+                        return answer if answer.strip() else ""
 
-                await self._complete_user_request(event, read_input)
+                    await self._complete_user_request(event, read_input)
+                finally:
+                    if self._active_user_request is event:
+                        self._active_user_request = None
             case PermissionNotice():
                 await self.on_permission_notice(event)
             case PermissionRequested(tool_name=tool_name, detail=detail):
-                await self._complete_user_request(
-                    event,
-                    lambda: self._read_permission(tool_name, detail),
-                )
+                self._active_user_request = event
+                try:
+                    await self._complete_user_request(
+                        event,
+                        lambda: self._read_permission(tool_name, detail),
+                    )
+                finally:
+                    if self._active_user_request is event:
+                        self._active_user_request = None
             case CompactDelta():
                 await self.on_compact_delta(event)
             case ToolCallStarted():

@@ -66,7 +66,7 @@ class PermissionModeController:
             )
             return False
 
-        changed = self.permission_mgr.set_mode(mode)
+        changed = agent.set_permission_mode(mode)
         await self.event_bus.request_output(f"已切换到 {mode.value} 权限模式。\n")
         if changed:
             self._refresh_agent(agent)
@@ -104,7 +104,7 @@ class PermissionModeController:
                 current_index = index
                 break
         next_mode = CAROUSEL_MODES[(current_index + 1) % len(CAROUSEL_MODES)]
-        changed = self.permission_mgr.set_mode(next_mode)
+        changed = agent.set_permission_mode(next_mode)
         if changed:
             self._refresh_agent(agent)
         return changed

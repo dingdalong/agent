@@ -7,8 +7,8 @@ from dataclasses import dataclass, field
 
 from src.agent import Agent, AgentDeps
 from src.agent.states import RunResult
-from src.app.permission_mode_controller import PermissionModeController
-from src.events.types import InterruptRequested, UserInputRequest
+from src.interfaces.permission_mode_controller import PermissionModeController
+from src.events.types import InterruptRequested
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +19,6 @@ class AgentApp:
 
     deps: AgentDeps = field(repr=False)
     _work_task: asyncio.Task | None = field(default=None, init=False, repr=False)
-    _active_user_request: UserInputRequest | None = field(default=None, init=False, repr=False)
     _permission_mode_controller: PermissionModeController | None = field(default=None, init=False, repr=False)
 
     async def run(self) -> None:
@@ -68,17 +67,7 @@ class AgentApp:
             if isinstance(event, InterruptRequested):
                 self._handle_interrupt_requested()
                 continue
-            if isinstance(event, UserInputRequest):
-                await self._dispatch_user_request(event)
-                continue
             await self.deps.ui.on_event(event)
-
-    async def _dispatch_user_request(self, event: UserInputRequest) -> None:
-        """分发用户输入请求到 UI 层。"""
-        self._active_user_request = event
-        with self.deps.ui.watch_interrupt(self._request_interrupt):
-            await self.deps.ui.on_event(event)
-        self._clear_completed_user_request(event)
 
     async def _run_agent_turn(self, agent: Agent) -> RunResult | None:
         """执行 agent 对话循环。
@@ -130,6 +119,7 @@ class AgentApp:
                 mgr.reload()
         self.deps.session_context.clear()
         self._install_permission_mode_controller()
+        self.deps.permission_mode_controller = self._permission_mode_controller
         if self._permission_mode_controller is not None:
             self._permission_mode_controller.notify_state_changed()
         agent = Agent(
@@ -143,29 +133,16 @@ class AgentApp:
         return agent
 
     def _handle_interrupt_requested(self) -> None:
-        if self._cancel_current_work():
-            self._cancel_active_user_request()
-            return
-        self._cancel_active_user_request()
+        """处理中断请求：取消工作任务和活跃输入。"""
+        self._cancel_current_work()
+        self.deps.ui.cancel_active_input()
 
     def _cancel_current_work(self) -> bool:
+        """取消当前正在执行的 agent 任务。"""
         if self._work_task is None or self._work_task.done():
             return False
         self._work_task.cancel()
         return True
-
-    def _cancel_active_user_request(self) -> bool:
-        if self._active_user_request is None:
-            return False
-        self._active_user_request.cancel()
-        self._active_user_request = None
-        return True
-
-    def _clear_completed_user_request(self, event: UserInputRequest) -> None:
-        if self._active_user_request is not event:
-            return
-        if event.future is not None and event.future.done():
-            self._active_user_request = None
 
     async def _handle_interrupted_turn(self) -> None:
         current_task = asyncio.current_task()
@@ -173,7 +150,7 @@ class AgentApp:
             while current_task.cancelling():
                 current_task.uncancel()
         self._cancel_current_work()
-        self._cancel_active_user_request()
+        self.deps.ui.cancel_active_input()
         if self._work_task:
             await asyncio.gather(self._work_task, return_exceptions=True)
         await self.deps.event_bus.request_output("\n已中断当前任务。\n")
