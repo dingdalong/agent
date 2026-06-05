@@ -38,7 +38,7 @@ READONLY_COMMANDS: frozenset[str] = frozenset({
     "which", "whereis", "type",
     # Shell 内建 / 系统信息
     "echo", "printf", "true", "false", "test", "[",
-    "pwd", "realpath", "dirname", "basename",
+    "cd", "pwd", "realpath", "dirname", "basename",
     "date", "cal", "uptime", "uname", "hostname",
     "whoami", "id", "groups", "who", "w",
     "arch", "nproc", "getconf",
