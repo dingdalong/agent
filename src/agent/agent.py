@@ -97,7 +97,7 @@ class Agent:
         self._file_mgr = FileMgr(workdir, self.deps)
         self._skill_mgr = SkillMgr(workdir, global_dir=self.deps.global_dir, plugin_mgr=self.deps.plugin_mgr)
         self._subagent_mgr = SubAgentMgr(workdir, self.deps, global_dir=self.deps.global_dir)
-        self._prompt_mgr = PromptMgr(agent=self, model=self.llm.model, workdir=workdir, role_prompt=self.role_prompt)
+        self._prompt_mgr = PromptMgr(agent=self, model=self.llm.model, workdir=workdir, global_dir=self.deps.global_dir, role_prompt=self.role_prompt)
         self._reminder_mgr = ReminderMgr()
         self._reminder_mgr.register(self._todo_mgr)
         self._handlers = {

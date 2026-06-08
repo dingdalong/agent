@@ -14,6 +14,7 @@ class PromptMgr:
     agent: Agent
     model: str
     workdir: Path
+    global_dir: Path | None = None
     role_prompt: str | None = None
     _static_prefix: str | None = field(init=False, default=None)
 
@@ -107,9 +108,10 @@ class PromptMgr:
         if builtin_agent.exists():
             sources.append(("builtin (src/AGENT.md)", builtin_agent.read_text()))
 
-        user_agent = Path.home() / ".Agent" / "AGENT.md"
-        if user_agent.exists():
-            sources.append(("user global (~/.Agent/AGENT.md)", user_agent.read_text()))
+        if self.global_dir:
+            user_agent = self.global_dir / "AGENT.md"
+            if user_agent.exists():
+                sources.append(("user global (AGENT.md)", user_agent.read_text()))
 
         project_agent = self.workdir / "AGENT.md"
         if project_agent.exists():
