@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 import shlex
 from typing import Any
 from src.mgr.permission_mgr import PermissionCheckResult, PermissionContext
+from src.tools.builtin.file import is_sensitive_path
 from src.tools.decorator import ToolPermission, tool
 from pydantic import BaseModel, Field
 
@@ -531,6 +532,103 @@ def _is_dangerous_command(command: str) -> bool:
     return False
 
 
+def _extract_path_candidates(segment: list[str]) -> list[str]:
+    """从命令段中提取可能的文件路径 token。
+
+    跳过命令名和标志参数，收集剩余 token 及重定向目标作为路径候选。
+    跳过明显非路径的 token（纯数字、含 = 的环境变量赋值、URL）。
+
+    Args:
+        segment: 经过分隔符分割后的单个命令段 token 列表。
+
+    Returns:
+        可能的文件路径 token 列表。
+    """
+    segment = _strip_shell_wrappers(segment)
+    if not segment:
+        return []
+    candidates: list[str] = []
+    past_double_dash = False
+    i = 1
+    while i < len(segment):
+        token = segment[i]
+        if token == "--":
+            past_double_dash = True
+            i += 1
+            continue
+        # 收集重定向目标
+        if token in {">", ">>", "1>", "2>"}:
+            if i + 1 < len(segment):
+                target = segment[i + 1]
+                if target != "/dev/null":
+                    candidates.append(target)
+                i += 2
+                continue
+            i += 1
+            continue
+        # -- 之后所有 token 都是位置参数
+        if past_double_dash:
+            candidates.append(token)
+            i += 1
+            continue
+        # 跳过标志参数
+        if token.startswith("-"):
+            i += 1
+            continue
+        # 跳过纯数字、环境变量赋值、URL
+        if token.isdigit() or "=" in token or token.startswith(("http://", "https://")):
+            i += 1
+            continue
+        candidates.append(token)
+        i += 1
+    return candidates
+
+
+def _check_sensitive_paths(command: str, workdir: str) -> str | None:
+    """扫描 shell 命令中的文件路径参数，返回第一个匹配的敏感路径。
+
+    对命令进行分词和分段，提取每段中的路径候选 token，
+    解析相对路径后调用 is_sensitive_path 检查。
+    支持 bash -c "..." 的递归检查。
+
+    Args:
+        command: 完整的 shell 命令字符串。
+        workdir: 工作区根目录路径。
+
+    Returns:
+        第一个敏感路径字符串，未找到时返回 None。
+    """
+    if "`" in command:
+        return None
+    try:
+        segments: list[list[str]] = []
+        for part in _split_unquoted_newlines(command):
+            segments.extend(_shell_segments(_shell_tokens(part)))
+    except ValueError:
+        return None
+    for segment in segments:
+        if segment == ["|"]:
+            continue
+        # 递归检查 bash -c "..." 内部命令
+        stripped = _strip_shell_wrappers(segment)
+        if stripped:
+            inner = _shell_c_command(stripped)
+            if inner is not None:
+                result = _check_sensitive_paths(inner, workdir)
+                if result is not None:
+                    return result
+        candidates = _extract_path_candidates(segment)
+        for token in candidates:
+            # ~ 展开
+            path_str = str(Path(token).expanduser()) if token.startswith("~") else token
+            # 相对路径基于 workdir 解析
+            if not PurePosixPath(path_str).is_absolute():
+                path_str = str(Path(workdir) / path_str)
+            if is_sensitive_path(path_str, workdir):
+                return token
+    return None
+
+
 def check_shell_permissions(values: dict[str, Any], ctx: PermissionContext) -> PermissionCheckResult:
     """shell 安全检查：检测危险命令阻止执行，识别只读命令自动放行。
 
@@ -548,6 +646,9 @@ def check_shell_permissions(values: dict[str, Any], ctx: PermissionContext) -> P
         return PermissionCheckResult("passthrough")
     if _is_dangerous_command(command):
         return PermissionCheckResult("deny", f"危险命令被阻止：{command[:80]}", bypass_immune=True)
+    sensitive = _check_sensitive_paths(command, ctx.workdir)
+    if sensitive is not None:
+        return PermissionCheckResult("ask", f"命令涉及敏感路径需确认：{sensitive}", bypass_immune=True)
     if _is_readonly_command(command):
         return PermissionCheckResult("allow", f"只读命令自动放行：{command[:80]}")
     return PermissionCheckResult("passthrough")

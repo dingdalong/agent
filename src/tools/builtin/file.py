@@ -10,10 +10,10 @@ if TYPE_CHECKING:
     from src.agent import Agent
 
 
-_SENSITIVE_NAMES = {".env", ".env.local", ".env.production", "credentials.json", ".npmrc", ".pypirc"}
+SENSITIVE_NAMES = {".env", ".env.local", ".env.production", "credentials.json", ".npmrc", ".pypirc"}
 
 
-def _is_outside_workspace(path: str, workdir: str) -> bool:
+def is_outside_workspace(path: str, workdir: str) -> bool:
     """判断文件路径是否在工作目录之外。
 
     Args:
@@ -33,7 +33,7 @@ def _is_outside_workspace(path: str, workdir: str) -> bool:
         return True
 
 
-def _is_sensitive_path(path: str, workdir: str) -> bool:
+def is_sensitive_path(path: str, workdir: str) -> bool:
     """判断文件路径是否为敏感路径（.git 目录、敏感配置文件、工作目录外路径）。
 
     Args:
@@ -48,7 +48,7 @@ def _is_sensitive_path(path: str, workdir: str) -> bool:
     normalized = PurePosixPath(path).as_posix()
     if "/.git/" in normalized or normalized.endswith("/.git"):
         return True
-    if PurePosixPath(path).name.lower() in _SENSITIVE_NAMES:
+    if PurePosixPath(path).name.lower() in SENSITIVE_NAMES:
         return True
     try:
         resolved = Path(path).resolve()
@@ -71,7 +71,7 @@ def check_file_edit_permissions(tool_input: dict[str, Any], ctx: PermissionConte
         PermissionCheckResult 权限检查结果。
     """
     path = tool_input.get("path") or tool_input.get("file_path") or tool_input.get("source") or ""
-    if _is_sensitive_path(path, ctx.workdir):
+    if is_sensitive_path(path, ctx.workdir):
         return PermissionCheckResult("ask", f"敏感路径需确认：{path}", bypass_immune=True)
     return PermissionCheckResult("passthrough")
 
@@ -90,7 +90,7 @@ def check_file_read_permissions(tool_input: dict[str, Any], ctx: PermissionConte
         PermissionCheckResult 权限检查结果。
     """
     path = tool_input.get("path") or tool_input.get("file_path") or ""
-    if _is_outside_workspace(path, ctx.workdir):
+    if is_outside_workspace(path, ctx.workdir):
         return PermissionCheckResult("ask", f"工作目录外路径需确认：{path}", bypass_immune=True)
     return PermissionCheckResult("passthrough")
 
