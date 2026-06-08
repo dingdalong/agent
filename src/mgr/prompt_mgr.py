@@ -94,7 +94,18 @@ class PromptMgr:
         return f"# 角色提示词：\n{self.role_prompt}"
 
     def _build_agent_md(self) -> str:
+        """三层加载 AGENT.md：内置 → 用户全局 → 项目级，内容叠加。
+
+        Returns:
+            拼接后的 AGENT.md 提示词段落；无任何来源时返回空字符串。
+        """
+        from src.mgr.paths import builtin_root
+
         sources = []
+
+        builtin_agent = builtin_root() / "AGENT.md"
+        if builtin_agent.exists():
+            sources.append(("builtin (src/AGENT.md)", builtin_agent.read_text()))
 
         user_agent = Path.home() / ".Agent" / "AGENT.md"
         if user_agent.exists():
