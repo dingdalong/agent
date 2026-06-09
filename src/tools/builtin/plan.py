@@ -23,7 +23,20 @@ class EnterPlanMode(BaseModel):
 
 @tool(
     model=EnterPlanMode,
-    description="切换到计划模式。计划模式下仅允许只读操作和 plan 专用文件工具，用于在实施前进行结构化规划。",
+    description=(
+        "切换到计划模式，用于在实施前进行结构化规划。计划模式下仅允许只读操作和 plan 专用文件工具。\n\n"
+        "何时使用：\n"
+        "- 用户明确要求制定计划或进入计划模式\n"
+        "- 任务涉及多个文件或模块、需要先理解后实施\n"
+        "- 存在多种可行方案、需要探索和设计（如架构选型、缓存策略）\n"
+        "- 需求不明确，需先探索代码库再确定实现路径\n"
+        "- 用户请求较复杂（超过 3 个步骤）且你不确定最佳路径\n\n"
+        "何时不使用：\n"
+        "- 简单的单文件修改或明确的小任务\n"
+        "- 用户明确要求直接实施、不要计划\n"
+        "- 纯研究或探索任务（用子智能体即可）\n"
+        "- 已在计划模式中"
+    ),
     permission=ToolPermission(kind="readonly"),
 )
 async def enter_plan_mode(agent: Agent, deps: AgentDeps) -> str:
@@ -61,7 +74,13 @@ class ExitPlanMode(BaseModel):
 
 @tool(
     model=ExitPlanMode,
-    description="退出计划模式。传入计划文件路径，展示计划内容供用户审核，用户可选择自动执行、手动执行或继续修改。",
+    description=(
+        "退出计划模式并提交计划供用户审核。传入计划文件路径，展示计划内容，用户可选择自动执行、手动执行或返回修改意见。\n\n"
+        "使用要求：\n"
+        "- 必须先通过 plan_write_file 写入计划文件，再调用此工具\n"
+        "- 不要用 ask_user 询问\"计划可以吗\"——提交审核必须用此工具\n"
+        "- 如果用户返回修改意见，根据意见修改计划后再次提交"
+    ),
     permission=ToolPermission(plan_visible=True, kind="readonly"),
 )
 async def exit_plan_mode(file_path: str, agent: Agent, deps: AgentDeps) -> str:
@@ -161,3 +180,52 @@ async def plan_write_file(name: str, content: str, agent: Agent, deps: AgentDeps
     plan_path = plan_mgr.resolve_plan_path(name)
     result = await agent._file_mgr.write_file(plan_path, content)
     return f"{result}\n计划文件路径：{plan_path}"
+
+
+# ── plan 专用编辑工具 ──────────────────────────────────────────────
+
+
+class PlanEditFile(BaseModel):
+    """按行号编辑计划文件。"""
+    file_path: str = Field(..., description="计划文件的绝对路径，必须位于 plans 目录下。")
+    start_line: int = Field(..., description="起始行号，从 1 开始。")
+    new_text: str = Field(default="", description="替换或插入的内容。为空表示删除模式。")
+    end_line: int | None = Field(default=None, description="结束行号（包含）。不传表示插入模式。")
+
+
+@tool(
+    model=PlanEditFile,
+    description=(
+        "按行号编辑计划文件（增量修改，无需重写全文）。仅在计划模式下可用。\n"
+        "操作模式：\n"
+        "- 替换：new_text + end_line → 替换 start_line 到 end_line 的内容\n"
+        "- 插入：new_text + 不传 end_line → 在 start_line 前插入\n"
+        "- 删除：end_line + new_text 为空 → 删除 start_line 到 end_line"
+    ),
+    permission=ToolPermission(plan_visible=True, kind="readonly"),
+)
+async def plan_edit_file(
+    file_path: str, start_line: int, agent: Agent, deps: AgentDeps,
+    new_text: str = "", end_line: int | None = None,
+) -> str:
+    """校验文件在计划目录下后委托 FileMgr 执行行级编辑。
+
+    Args:
+        file_path: 计划文件的绝对路径。
+        start_line: 起始行号（1-based）。
+        agent: 当前 Agent 实例，提供 file_mgr。
+        deps: AgentDeps 依赖对象，提供 plan_mgr。
+        new_text: 替换或插入的文本，空字符串表示删除。
+        end_line: 结束行号（包含），None 表示插入模式。
+
+    Returns:
+        编辑结果描述。
+    """
+    plan_mgr = deps.plan_mgr
+    if plan_mgr is None:
+        return "错误：计划管理器不可用"
+
+    if not plan_mgr.is_plan_file(file_path):
+        return f"错误：文件不在计划目录下：{file_path}"
+
+    return await agent._file_mgr.edit_file_lines(file_path, start_line, new_text, end_line)
