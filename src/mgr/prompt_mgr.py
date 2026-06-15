@@ -168,6 +168,13 @@ class PromptMgr:
         sections.append(self._build_truthfulness_constraints())
         sections.append(self._build_context_and_tool_constraints())
 
+        # —— 任务管理指导 ——
+        task_mgr = getattr(self.agent, "_task_mgr", None)
+        if task_mgr is not None:
+            task_guidance = task_mgr.describe(self.agent.is_subagent)
+            if task_guidance:
+                sections.append(task_guidance)
+
         # —— 共享参考/上下文材料（中间）——
         agent_md = self._build_agent_md()
         if agent_md:

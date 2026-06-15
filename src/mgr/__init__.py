@@ -1,6 +1,6 @@
 from src.mgr.file_mgr import FileMgr
 from src.mgr.compact_mgr import CompactMgr, CompactResult
-from src.mgr.todo_mgr import TodoManager
+from src.mgr.task_mgr import TaskManager
 from src.mgr.tools_mgr import ToolsMgr
 from src.mgr.prompt_mgr import PromptMgr
 from src.mgr.skill_mgr import SkillMgr
@@ -14,4 +14,4 @@ from src.mgr.plan_mgr import PlanMgr
 from src.mgr.plugin_mgr import PluginMgr, PluginInfo, PluginLayer
 from src.mgr.reminder_mgr import ReminderMgr
 
-__all__ = ["FileMgr", "CompactMgr", "CompactResult", "TodoManager", "ToolsMgr", "PromptMgr", "SkillMgr", "SubAgentMgr", "PermissionManager", "ConfigManager", "MemoryMgr", "HooksMgr", "LLMMgr", "PlanMgr", "PluginMgr", "PluginInfo", "PluginLayer", "ReminderMgr"]
+__all__ = ["FileMgr", "CompactMgr", "CompactResult", "TaskManager", "ToolsMgr", "PromptMgr", "SkillMgr", "SubAgentMgr", "PermissionManager", "ConfigManager", "MemoryMgr", "HooksMgr", "LLMMgr", "PlanMgr", "PluginMgr", "PluginInfo", "PluginLayer", "ReminderMgr"]

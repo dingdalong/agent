@@ -92,11 +92,41 @@ class SubAgentMgr:
             lines.append(f"- {manifest.agent_type}: {manifest.description}")
         return "\n".join(lines)
 
-    async def task_delegator(self, agent_type: str, prompt: str, *, parent_agent: Any = None) -> str:
+    async def task_delegator(
+        self,
+        agent_type: str,
+        prompt: str,
+        *,
+        parent_agent: Any = None,
+        task_id: str | None = None,
+    ) -> str:
+        """委派任务给子智能体并返回执行结果。
+
+        若指定 task_id，委派前自动将任务标记为 in_progress 并设置 owner；
+        子智能体异常退出时自动回滚为 pending。正常返回时不标 completed，
+        留给主 agent 评估结果后决定。
+
+        Args:
+            agent_type: 目标子智能体类型标识。
+            prompt: 传给子智能体的完整任务正文。
+            parent_agent: 调用方 Agent 实例，用于共享 task_mgr 和 hooks。
+            task_id: 关联的任务 ID（可选），指定后框架自动管理任务状态。
+
+        Returns:
+            子智能体的执行结果文本，或错误信息。
+        """
         document = self._documents.get(agent_type)
         if not document:
             known = ", ".join(sorted(self._documents)) or "(none)"
             return f"错误: 不存在的子智能体：'{agent_type}'。可用子智能体列表：{known}"
+
+        # —— 自动标记任务为 in_progress ——
+        task_mgr = getattr(parent_agent, '_task_mgr', None) if parent_agent else None
+        if task_id and task_mgr:
+            try:
+                task_mgr.update(task_id, status="in_progress", owner=agent_type)
+            except ValueError:
+                pass
 
         # 解析子 agent 的最终工具集（自动注入 subagent=True、排除 subagent=False）
         tools = self.deps.tools_mgr.resolve_subagent_tools(document.manifest.tools)
@@ -109,6 +139,7 @@ class SubAgentMgr:
             deps = self.deps,
             tools = tools,
             is_subagent = True,
+            _task_mgr = task_mgr,
             memory = document.manifest.memory,
             model = document.manifest.model,
         )
@@ -129,7 +160,16 @@ class SubAgentMgr:
                 **hook_kwargs,
             )
 
-        result = (await agent.run(prompt)).final_text
+        try:
+            result = (await agent.run(prompt)).final_text
+        except Exception:
+            # —— 子智能体异常退出，回滚任务状态 ——
+            if task_id and task_mgr:
+                try:
+                    task_mgr.update(task_id, status="pending", owner="")
+                except ValueError:
+                    pass
+            raise
 
         if fire_hooks:
             stop_result = await hooks_mgr.run_event(

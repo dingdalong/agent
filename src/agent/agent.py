@@ -9,7 +9,7 @@ from src.tools import ToolDict
 from src.events.types import AgentStateChanged, CompactDelta
 from src.agent.states import AgentState, RunContext, RunResult, parse_command
 from src.events import NoEventSubscribers
-from src.mgr import FileMgr, TodoManager, CompactMgr, CompactResult, PromptMgr, SkillMgr, SubAgentMgr, ReminderMgr
+from src.mgr import FileMgr, TaskManager, CompactMgr, CompactResult, PromptMgr, SkillMgr, SubAgentMgr, ReminderMgr
 
 if TYPE_CHECKING:
     from src.mgr.llm_mgr import LLMMgr
@@ -70,7 +70,7 @@ class Agent:
     model: str | None = field(default=None)
     history: list[dict] = field(init=False, default_factory=list)
     _tools_schemas: list[ToolDict] = field(init=False)
-    _todo_mgr: TodoManager = field(init=False, default_factory=TodoManager, repr=False)
+    _task_mgr: TaskManager | None = field(default=None, repr=False)
     _compact_mgr: CompactMgr = field(init=False, repr=False)
     _file_mgr: FileMgr = field(init=False, repr=False)
     _skill_mgr: SkillMgr = field(init=False, repr=False)
@@ -98,8 +98,14 @@ class Agent:
         self._skill_mgr = SkillMgr(workdir, global_dir=self.deps.global_dir, plugin_mgr=self.deps.plugin_mgr)
         self._subagent_mgr = SubAgentMgr(workdir, self.deps, global_dir=self.deps.global_dir)
         self._prompt_mgr = PromptMgr(agent=self, model=self.llm.model, workdir=workdir, global_dir=self.deps.global_dir, role_prompt=self.role_prompt)
+        # 外部未传入 TaskManager 时新建独立实例（含文件持久化），传入时共享（子 agent 场景）。
+        if self._task_mgr is None:
+            tasks_dir = None
+            if self.deps.global_dir and self.deps.session_id:
+                tasks_dir = self.deps.global_dir / "tasks" / self.deps.session_id
+            self._task_mgr = TaskManager(tasks_dir=tasks_dir)
         self._reminder_mgr = ReminderMgr()
-        self._reminder_mgr.register(self._todo_mgr)
+        self._reminder_mgr.register(self._task_mgr)
         self._handlers = {
             AgentState.REQUEST_INPUT:    self._on_request_input,
             AgentState.CHECK_COMPACT:    self._on_check_compact,

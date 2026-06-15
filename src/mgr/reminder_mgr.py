@@ -1,6 +1,6 @@
 """提醒注入管理器 — 集中管理 agent 运行循环中的提醒注入。
 
-通过 register() 注册提醒源（如 PlanMgr、TodoManager），
+通过 register() 注册提醒源（如 PlanMgr、TaskManager），
 在 agent 状态机的三个时机统一调度注入：
 - turn start: prepend 到用户输入
 - tool round: 通知各提醒源更新内部状态
