@@ -16,6 +16,7 @@ class ReadToolResult(BaseModel):
     description="读取分页工具结果的后续页。",
     permission=ToolPermission(kind="readonly"),
     raw_output=True,
+    subagent=True,
 )
 async def read_tool_result(
     deps: AgentDeps,

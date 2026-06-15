@@ -23,12 +23,6 @@ class SubAgentDocument:
     manifest: SubAgentManifest
     prompt: str
 
-# 受限子智能体（tools 非 None）自动获得的基础设施工具。
-# 判断标准：该工具是 agent 运行循环正常工作所需的基础设施（如分页、压缩、进度追踪），
-# 而非领域能力（如文件读写、shell、网络访问）。
-# 新增内置工具时须评估是否需要加入此集合。
-_AUTO_INJECT_TOOLS = {"read_tool_result", "compact", "todo_write"}
-
 @dataclass
 class SubAgentMgr:
     """子智能体管理器 — 三层扫描：内置 → 全局 → 项目，同名覆盖。
@@ -70,8 +64,6 @@ class SubAgentMgr:
                 description = meta.get("description", "没有说明内容")
                 raw_tools = meta.get("tools", "")
                 tools = {t.strip() for t in raw_tools.split(",") if t.strip()} or None
-                if tools:
-                    tools.update(_AUTO_INJECT_TOOLS)
                 memory = meta.get("memory")
                 model = meta.get("model")
                 manifest = SubAgentManifest(
@@ -106,13 +98,16 @@ class SubAgentMgr:
             known = ", ".join(sorted(self._documents)) or "(none)"
             return f"错误: 不存在的子智能体：'{agent_type}'。可用子智能体列表：{known}"
 
+        # 解析子 agent 的最终工具集（自动注入 subagent=True、排除 subagent=False）
+        tools = self.deps.tools_mgr.resolve_subagent_tools(document.manifest.tools)
+
         from src.agent import Agent
         agent = Agent(
             agent_type = agent_type,
             description = document.manifest.description,
             role_prompt = document.prompt or None,
             deps = self.deps,
-            tools = document.manifest.tools,
+            tools = tools,
             is_subagent = True,
             memory = document.manifest.memory,
             model = document.manifest.model,

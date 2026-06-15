@@ -52,6 +52,8 @@ class ToolEntry:
         parameters_schema: OpenAI 格式的参数 schema。
         permission: 权限元数据，None 表示无特殊声明。
         raw_output: 是否跳过结果分页截断。
+        subagent: 子 agent 可见性控制。True=自动注入（即使 agent 定义未列出）；
+                  False=强制排除（即使 agent 定义为全量）；None=按 agent 的 tools 集合决定。
     """
     name: str
     func: Callable
@@ -60,6 +62,7 @@ class ToolEntry:
     parameters_schema: dict[str, Any]
     permission: ToolPermission | None = None
     raw_output: bool = False
+    subagent: bool | None = None
 
     async def __call__(self, context: Dict[str, Any], **kwds: Any) -> Any:
         """验证参数并执行工具函数。
@@ -127,6 +130,7 @@ def tool(
     name: str | None = None,
     permission: ToolPermission | None = None,
     raw_output: bool = False,
+    subagent: bool | None = None,
 ) -> Callable:
     """工具注册装饰器。
 
@@ -136,11 +140,10 @@ def tool(
         name: 工具名称，默认使用函数名。
         permission: 权限元数据。
         raw_output: 是否跳过结果分页。
+        subagent: 子 agent 可见性。True=自动注入；False=强制排除；None=按 agent 定义决定。
 
     Returns:
         装饰后的原函数。
-
-    新增工具时须确认是否需要自动注入给子智能体，见 subagent_mgr._AUTO_INJECT_TOOLS。
     """
     def decorator(func: Callable) -> Callable:
         tool_name = name or func.__name__
@@ -164,6 +167,7 @@ def tool(
             parameters_schema=parameters_schema,
             permission=permission,
             raw_output=raw_output,
+            subagent=subagent,
         )
         _registry.append(entry)
         return func

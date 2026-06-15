@@ -64,6 +64,30 @@ class ToolsMgr:
         """返回所有已注册的工具列表。"""
         return sorted(self._tools.values(), key=_tool_sort_key)
 
+    def resolve_subagent_tools(self, tool_names: set[str] | None) -> set[str]:
+        """解析子 agent 的最终工具集。
+
+        在 agent 定义的 tools 基础上：
+        - 追加所有 subagent=True 的工具（自动注入）
+        - 移除所有 subagent=False 的工具（强制排除）
+
+        Args:
+            tool_names: agent 定义中声明的工具名集合，None 表示全量。
+
+        Returns:
+            解析后的工具名集合（始终为 set，不再是 None）。
+        """
+        if tool_names is None:
+            base = set(self._tools.keys())
+        else:
+            base = set(tool_names)
+        for name, entry in self._tools.items():
+            if entry.subagent is True:
+                base.add(name)
+            elif entry.subagent is False:
+                base.discard(name)
+        return base
+
     def get_schemas(
         self,
         tool_names: set[str] | list[str] | None = None,
