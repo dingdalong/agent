@@ -584,7 +584,7 @@ def _extract_path_candidates(segment: list[str]) -> list[str]:
     return candidates
 
 
-def _check_sensitive_paths(command: str, workdir: str) -> str | None:
+def _check_sensitive_paths(command: str, workdir: str, extra_trusted: tuple[str, ...] = ()) -> str | None:
     """扫描 shell 命令中的文件路径参数，返回第一个匹配的敏感路径。
 
     对命令进行分词和分段，提取每段中的路径候选 token，
@@ -594,6 +594,7 @@ def _check_sensitive_paths(command: str, workdir: str) -> str | None:
     Args:
         command: 完整的 shell 命令字符串。
         workdir: 工作区根目录路径。
+        extra_trusted: 额外可信目录路径列表（如 global_dir），这些目录内的路径不视为敏感。
 
     Returns:
         第一个敏感路径字符串，未找到时返回 None。
@@ -614,7 +615,7 @@ def _check_sensitive_paths(command: str, workdir: str) -> str | None:
         if stripped:
             inner = _shell_c_command(stripped)
             if inner is not None:
-                result = _check_sensitive_paths(inner, workdir)
+                result = _check_sensitive_paths(inner, workdir, extra_trusted)
                 if result is not None:
                     return result
         candidates = _extract_path_candidates(segment)
@@ -624,7 +625,7 @@ def _check_sensitive_paths(command: str, workdir: str) -> str | None:
             # 相对路径基于 workdir 解析
             if not PurePosixPath(path_str).is_absolute():
                 path_str = str(Path(workdir) / path_str)
-            if is_sensitive_path(path_str, workdir):
+            if is_sensitive_path(path_str, workdir, extra_trusted):
                 return token
     return None
 
@@ -646,7 +647,7 @@ def check_shell_permissions(values: dict[str, Any], ctx: PermissionContext) -> P
         return PermissionCheckResult("passthrough")
     if _is_dangerous_command(command):
         return PermissionCheckResult("deny", f"危险命令被阻止：{command[:80]}", bypass_immune=True)
-    sensitive = _check_sensitive_paths(command, ctx.workdir)
+    sensitive = _check_sensitive_paths(command, ctx.workdir, ctx.trusted_dirs)
     if sensitive is not None:
         return PermissionCheckResult("ask", f"命令涉及敏感路径需确认：{sensitive}", bypass_immune=True)
     if _is_readonly_command(command):

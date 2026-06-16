@@ -44,10 +44,12 @@ class PermissionContext:
         mode: 当前权限模式。
         workdir: 工作区根目录路径。
         tool_name: 被调用的工具名。
+        trusted_dirs: 可信目录路径列表（如 global_dir），这些目录内的文件读写无需询问。
     """
     mode: PermissionMode
     workdir: str
     tool_name: str
+    trusted_dirs: tuple[str, ...] = ()
 
 
 def tool_sort_order(kind: str | None, *, has_permission: bool = True) -> int:
@@ -212,6 +214,7 @@ class PermissionManager:
         config_mgr: Any = None,
         tools: Iterable[ToolEntry] | None = None,
         workdir: str = "",
+        trusted_dirs: tuple[str, ...] = (),
     ):
         self.mode: PermissionMode = DEFAULT_MODE
         self._pre_plan_mode: PermissionMode | None = None
@@ -221,6 +224,7 @@ class PermissionManager:
         self.session_allow: RulesDict = {}
         self.config_mgr = config_mgr
         self._workdir = workdir
+        self._trusted_dirs = trusted_dirs
         self._check_permissions_fns: dict[str, Callable[[dict[str, Any], PermissionContext], PermissionCheckResult]] = {}
         self._tool_tips: dict[str, str] = {}
         self._tool_kinds: dict[str, str | None] = {}
@@ -391,7 +395,7 @@ class PermissionManager:
         # Step 3: check_permissions（工具自身安全逻辑）
         check_fn = self._check_permissions_fns.get(tool_name)
         if check_fn is not None:
-            ctx = PermissionContext(mode=self.mode, workdir=self._workdir, tool_name=tool_name)
+            ctx = PermissionContext(mode=self.mode, workdir=self._workdir, tool_name=tool_name, trusted_dirs=self._trusted_dirs)
             result = check_fn(tool_input, ctx)
             if result.decision == "deny":
                 return "deny", result.reason or f"被内置安全检测阻止：{tool_name}"

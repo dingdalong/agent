@@ -39,6 +39,7 @@ async def create_app(
         tools=tools_mgr.list_entries(),
         config_mgr=config_mgr,
         workdir=str(work_dir),
+        trusted_dirs=(str(global_dir),),
     )
     session_mgr = SessionMgr(global_dir=global_dir, workdir=work_dir)
     llm_mgr = LLMMgr(config_mgr=config_mgr, event_bus=event_bus)

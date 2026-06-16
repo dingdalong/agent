@@ -13,32 +13,39 @@ if TYPE_CHECKING:
 SENSITIVE_NAMES = {".env", ".env.local", ".env.production", "credentials.json", ".npmrc", ".pypirc"}
 
 
-def is_outside_workspace(path: str, workdir: str) -> bool:
-    """判断文件路径是否在工作目录之外。
+def is_outside_workspace(path: str, workdir: str, extra_trusted: tuple[str, ...] = ()) -> bool:
+    """判断文件路径是否在工作目录及可信目录之外。
 
     Args:
         path: 待检查的文件路径。
         workdir: 工作区根目录路径。
+        extra_trusted: 额外可信目录路径列表（如 global_dir），这些目录内的路径视同工作目录内。
 
     Returns:
-        True 表示路径在工作目录外。
+        True 表示路径在所有可信目录外。
     """
     if not path:
         return False
     try:
         resolved = Path(path).resolve()
         workdir_resolved = Path(workdir).resolve()
-        return not resolved.is_relative_to(workdir_resolved)
+        if resolved.is_relative_to(workdir_resolved):
+            return False
+        for trusted in extra_trusted:
+            if trusted and resolved.is_relative_to(Path(trusted).resolve()):
+                return False
+        return True
     except (OSError, ValueError):
         return True
 
 
-def is_sensitive_path(path: str, workdir: str) -> bool:
-    """判断文件路径是否为敏感路径（.git 目录、敏感配置文件、工作目录外路径）。
+def is_sensitive_path(path: str, workdir: str, extra_trusted: tuple[str, ...] = ()) -> bool:
+    """判断文件路径是否为敏感路径（.git 目录、敏感配置文件、可信目录外路径）。
 
     Args:
         path: 待检查的文件路径。
         workdir: 工作区根目录路径。
+        extra_trusted: 额外可信目录路径列表（如 global_dir），这些目录内的路径不视为"外部路径"。
 
     Returns:
         True 表示路径敏感，需要用户确认。
@@ -50,12 +57,7 @@ def is_sensitive_path(path: str, workdir: str) -> bool:
         return True
     if PurePosixPath(path).name.lower() in SENSITIVE_NAMES:
         return True
-    try:
-        resolved = Path(path).resolve()
-        workdir_resolved = Path(workdir).resolve()
-        if not str(resolved).startswith(str(workdir_resolved)):
-            return True
-    except (OSError, ValueError):
+    if is_outside_workspace(path, workdir, extra_trusted):
         return True
     return False
 
@@ -65,32 +67,32 @@ def check_file_edit_permissions(tool_input: dict[str, Any], ctx: PermissionConte
 
     Args:
         tool_input: 工具调用参数。
-        ctx: 权限上下文，包含当前模式、工作目录和工具名。
+        ctx: 权限上下文，包含当前模式、工作目录、工具名和全局配置目录。
 
     Returns:
         PermissionCheckResult 权限检查结果。
     """
     path = tool_input.get("path") or tool_input.get("file_path") or tool_input.get("source") or ""
-    if is_sensitive_path(path, ctx.workdir):
+    if is_sensitive_path(path, ctx.workdir, ctx.trusted_dirs):
         return PermissionCheckResult("ask", f"敏感路径需确认：{path}", bypass_immune=True)
     return PermissionCheckResult("passthrough")
 
 
 def check_file_read_permissions(tool_input: dict[str, Any], ctx: PermissionContext) -> PermissionCheckResult:
-    """只读文件工具安全检查：工作目录外路径需用户确认。
+    """只读文件工具安全检查：工作目录及可信目录外的路径需用户确认。
 
-    仅检查路径是否在工作区外，不检查敏感文件名。
+    仅检查路径是否在工作区和可信目录外，不检查敏感文件名。
     模式策略由 PermissionManager._mode_default() 统一处理。
 
     Args:
         tool_input: 工具调用参数。
-        ctx: 权限上下文，包含当前模式、工作目录和工具名。
+        ctx: 权限上下文，包含当前模式、工作目录、工具名和全局配置目录。
 
     Returns:
         PermissionCheckResult 权限检查结果。
     """
     path = tool_input.get("path") or tool_input.get("file_path") or ""
-    if is_outside_workspace(path, ctx.workdir):
+    if is_outside_workspace(path, ctx.workdir, ctx.trusted_dirs):
         return PermissionCheckResult("ask", f"工作目录外路径需确认：{path}", bypass_immune=True)
     return PermissionCheckResult("passthrough")
 
