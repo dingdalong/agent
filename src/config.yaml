@@ -17,13 +17,14 @@ llm_provider:
     base_url: http://127.0.0.1:8001/v1
     reasoning_effort: high
     preserve_thinking: true # Qwen3.6 agent 场景保留历史 reasoning
-    context_limit: 70000 # 上下文限制
+    context_limit: 100000 # 上下文限制
 
 llm:
-  default: # 默认模型
-    model: deepseek-v4-flash
-    concurrency: 5 # 最大并发数量
-    max_retries: 3 # 重试次数
+  default: Qwen3.6-35B-A3B-4bit # 必填，默认模型，子agent通过别名引用
+  # best: ...                   # 可选，最强模型，不填时使用 default
+  # fast: ...                   # 可选，最快/最便宜模型，不填时使用 default
+  concurrency: 5 # 最大并发数量
+  max_retries: 3 # 重试次数
 
 tool:
   page_token_rate: 0.03 # 工具调用结果每页最多占上下文比例

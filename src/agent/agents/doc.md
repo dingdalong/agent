@@ -3,8 +3,8 @@ agent_type: doc
 description: |
   专用于编写、整理和维护文档、说明、计划、变更记录和面向用户文字的子任务 agent。当任务需要更新 README、设计文档、使用说明、开发指南或变更记录，整理需求、计划、排障记录或交付说明，把代码行为、配置项、命令流程转成面向读者的说明，或修正文档中的过期信息、歧义、格式问题或结构问题时，总控 agent 应该优先委派给它。
 tools: list_directory, find_files, search_files, get_file_info, read_file, write_file, edit_file_lines, replace_all_in_file
-model: deepseek-v4-flash
-permissionMode: default
+model: default
+permissionMode: acceptEdits
 memory: project
 ---
 

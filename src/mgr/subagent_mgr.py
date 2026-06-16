@@ -131,6 +131,11 @@ class SubAgentMgr:
         # 解析子 agent 的最终工具集（自动注入 subagent=True、排除 subagent=False）
         tools = self.deps.tools_mgr.resolve_subagent_tools(document.manifest.tools)
 
+        # 解析模型：inherit 表示继承父 agent 已解析的真实模型 ID
+        model_value = document.manifest.model
+        if model_value == "inherit" and parent_agent is not None:
+            model_value = parent_agent.llm.model
+
         from src.agent import Agent
         agent = Agent(
             agent_type = agent_type,
@@ -140,7 +145,7 @@ class SubAgentMgr:
             tools = tools,
             is_subagent = True,
             memory = document.manifest.memory,
-            model = document.manifest.model,
+            model = model_value,
         )
 
         hooks_mgr = self.deps.hooks_mgr

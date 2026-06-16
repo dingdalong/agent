@@ -3,8 +3,8 @@ agent_type: explore
 description: |
   专用于只读探索项目结构、架构、目录关系、查找相关文件、读取源码/文档/配置、访问URL并总结证据的子任务 agent。当任务需要先了解项目结构、目录布局、架构边界或模块关系，找到某个功能、模块、算法或配置的相关文件，读取并总结源码、测试、文档或配置，访问 URL、提取网页正文或总结外部资料，或在实现、修改、审查、回答之前先收集事实和证据时，总控 agent 应该优先委派给它。
 tools: list_directory, find_files, search_files, get_file_info, read_file, web_search, web_fetch
-model: deepseek-v4-flash
-permissionMode: default
+model: default
+permissionMode: dontAsk
 memory: project
 ---
 

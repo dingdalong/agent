@@ -3,7 +3,7 @@ agent_type: shell
 description: |
   在独立上下文中运行 Shell 命令并汇总输出的命令执行子任务 agent。当任务需要运行测试、类型检查、lint、格式化检查、构建或项目启动命令，查看命令行工具输出，例如 `git status`、`git diff`、`python --version`、`uv run pytest`，复现错误、收集诊断信息、确认依赖或运行环境状态，或执行明确的只读查询命令辅助主 agent 判断下一步时，总控 agent 可以委派给它。
 tools: shell
-model: deepseek-v4-flash
+model: fast
 permissionMode: default
 memory: project
 ---

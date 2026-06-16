@@ -3,7 +3,7 @@ agent_type: git
 description: |
   专用于检查 Git 状态、查看 diff、总结改动、辅助提交信息和提交前检查的命令执行子任务 agent。当任务需要查看工作区状态、分支、最近提交或指定 diff，总结改动涉及的文件、行为变化和风险，生成或润色 commit message、变更摘要、PR 描述草稿，或提交前确认是否存在未跟踪文件、无关改动或冲突迹象时，总控 agent 应该优先委派给它。
 tools: shell
-model: deepseek-v4-flash
+model: fast
 permissionMode: default
 memory: project
 ---

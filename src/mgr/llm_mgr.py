@@ -13,6 +13,13 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Claude Code 兼容映射：将 Claude Code 的模型别名映射到本项目的通用别名
+_CLAUDECODE_ALIASES: dict[str, str] = {
+    "opus": "best",
+    "sonnet": "default",
+    "haiku": "fast",
+}
+
 
 @dataclass
 class LLMMgr:
@@ -28,9 +35,9 @@ class LLMMgr:
     _page_token_rate: float = field(init=False)
 
     def __post_init__(self) -> None:
-        default_llm_cfg = self.config_mgr.get_config("llm.default")
-        self._default_concurrency = default_llm_cfg.get("concurrency", 5)
-        self._default_max_retries = default_llm_cfg.get("max_retries", 3)
+        llm_cfg = self.config_mgr.get_config("llm")
+        self._default_concurrency = llm_cfg.get("concurrency", 5)
+        self._default_max_retries = llm_cfg.get("max_retries", 3)
         self._page_token_rate = self.config_mgr.get_config("tool.page_token_rate")
 
     async def load_models(self) -> None:
@@ -63,8 +70,33 @@ class LLMMgr:
                 logger.info("从 %s 获取到 %d 个可用模型", provider_name, len(models))
 
     def resolve_model(self, model: str | None = None) -> str:
+        """解析模型名或别名为真实模型标识符。
+
+        解析顺序：None → "default" → Claude Code 兼容映射 → 配置别名 → 精确匹配 → 模糊匹配 → 回退默认。
+
+        Args:
+            model: 模型名、别名或 None。
+
+        Returns:
+            真实模型标识符。
+        """
         if model is None:
-            return self.config_mgr.get_config("llm.default")["model"]
+            model = "default"
+
+        # Claude Code 兼容映射（opus→best 等）
+        model = _CLAUDECODE_ALIASES.get(model, model)
+
+        # 别名解析（default/best/fast → 实际模型 ID，best/fast 不存在时回退 default）
+        llm_cfg = self.config_mgr.get_config("llm")
+        default_model = llm_cfg["default"]
+        aliases = {
+            "default": default_model,
+            "best": llm_cfg.get("best", default_model),
+            "fast": llm_cfg.get("fast", default_model),
+        }
+        if model in aliases:
+            model = aliases[model]
+
         if model in self._model_to_provider:
             return model
         candidates = [m for m in self._model_to_provider if model in m]
@@ -73,7 +105,7 @@ class LLMMgr:
         if len(candidates) > 1:
             return min(candidates, key=len)
         logger.warning("未找到匹配模型 %r，使用默认模型", model)
-        return self.config_mgr.get_config("llm.default")["model"]
+        return default_model
 
     def get(self, model: str | None = None) -> LLMProvider:
         resolved = self.resolve_model(model)

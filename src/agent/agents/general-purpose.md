@@ -1,7 +1,7 @@
 ---
 agent_type: general-purpose
 description: 通用任务执行 agent。用于执行总控委派的单个完整任务 prompt。
-model: deepseek-v4-flash
+model: default
 permissionMode: default
 memory: project
 ---
