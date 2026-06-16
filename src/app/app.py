@@ -30,8 +30,6 @@ class AgentApp:
             await asyncio.sleep(0)
 
             await self.deps.event_bus.request_output(self._startup_banner())
-            if not self.deps.session_id:
-                self.deps.session_id = str(uuid.uuid4())
             agent = await self._reset_session(source="startup")
             while True:
                 result = await self._run_agent_turn(agent)
@@ -112,6 +110,18 @@ class AgentApp:
         *,
         source: str = "clear",
     ) -> Agent:
+        """重置会话状态，创建新的 Agent 实例。
+
+        生成 session_id，使新 Agent 的
+        TaskManager 指向空目录（旧 task 文件留在磁盘上可通过 /resume 找回）。
+
+        Args:
+            source: 重置来源，"startup" 或 "clear"。
+
+        Returns:
+            新创建的 Agent 实例。
+        """
+        self.deps.session_id = str(uuid.uuid4())
         for attr in ("memory_mgr", "tools_mgr", "permission_mgr",
                      "config_mgr", "plugin_mgr", "hooks_mgr", "plan_mgr"):
             mgr = getattr(self.deps, attr, None)

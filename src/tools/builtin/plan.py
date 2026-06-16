@@ -162,13 +162,13 @@ class PlanWriteFile(BaseModel):
     permission=ToolPermission(plan_visible=True, kind="readonly"),
 )
 async def plan_write_file(name: str, content: str, agent: Agent, deps: AgentDeps) -> str:
-    """根据计划名生成文件路径并写入内容。
+    """根据计划名生成文件路径并写入内容，同时将计划名同步为会话主题。
 
     Args:
         name: 计划名，由 LLM 根据计划内容命名。
         content: 要写入的完整内容。
         agent: 当前 Agent 实例，提供 file_mgr。
-        deps: AgentDeps 依赖对象，提供 plan_mgr。
+        deps: AgentDeps 依赖对象，提供 plan_mgr 和 session_mgr。
 
     Returns:
         写入结果，包含计划文件路径。
@@ -179,6 +179,8 @@ async def plan_write_file(name: str, content: str, agent: Agent, deps: AgentDeps
 
     plan_path = plan_mgr.resolve_plan_path(name)
     result = await agent._file_mgr.write_file(plan_path, content)
+    if deps.session_mgr is not None and deps.session_id:
+        deps.session_mgr.save_metadata(deps.session_id, topic=name)
     return f"{result}\n计划文件路径：{plan_path}"
 
 
