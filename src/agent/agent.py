@@ -480,24 +480,33 @@ class Agent:
         return AgentState.LLM_CALL
 
     async def _on_execute_tools(self, ctx: RunContext) -> AgentState:
+        """并行执行当前轮次的所有工具调用。
+
+        同一轮 LLM 回复中的多个工具调用通过 asyncio.gather 并发执行，
+        结果按原始顺序追加到 ctx.messages。
+        """
         ctx.has_tool_calls = True
         ctx.manual_compact = False
         ctx.compact_focus = None
-        called_tools: list[str] = []
 
-        for tc in ctx.response.tool_calls.values():
+        tool_calls = list(ctx.response.tool_calls.values())
+
+        async def _run_one(tc: dict) -> tuple[str, str, str | None]:
+            """执行单个工具调用。
+
+            Args:
+                tc: 包含 id、name、arguments 的工具调用字典。
+
+            Returns:
+                (tool_call_id, result_text, tool_name)；
+                未知工具时 tool_name 为 None。
+            """
             tool_name = tc["name"]
             tool_call_id = tc["id"]
 
             if self.tools is not None and tool_name not in self.tools:
-                ctx.messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call_id,
-                    "content": f"错误：未知工具 '{tool_name}'",
-                })
-                continue
+                return tool_call_id, f"错误：未知工具 '{tool_name}'", None
 
-            called_tools.append(tool_name)
             try:
                 args = json.loads(tc["arguments"])
                 if tool_name == "compact":
@@ -514,6 +523,12 @@ class Agent:
             except Exception as exc:
                 result_text = f"错误：工具 '{tool_name}' 执行失败: {type(exc).__name__}: {exc}"
 
+            return tool_call_id, result_text, tool_name
+
+        results = await asyncio.gather(*(_run_one(tc) for tc in tool_calls))
+
+        called_tools = [name for _, _, name in results if name is not None]
+        for tool_call_id, result_text, _ in results:
             ctx.messages.append({
                 "role": "tool",
                 "tool_call_id": tool_call_id,
