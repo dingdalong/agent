@@ -41,6 +41,8 @@ class SessionMgr:
         *,
         is_new: bool = False,
         topic: str = "",
+        permission_mode: str = "",
+        pre_plan_mode: str = "",
     ) -> None:
         """保存或更新会话元数据文件。
 
@@ -50,6 +52,8 @@ class SessionMgr:
             session_id: 会话 UUID。
             is_new: 是否为新会话首次写入。
             topic: 会话主题（截取前 100 字符）。非空时写入或覆盖 topic 字段。
+            permission_mode: 当前权限模式的 value 字符串（如 "default", "plan"）。
+            pre_plan_mode: plan 模式下进入前的权限模式 value 字符串，非 plan 模式时传空。
         """
         self._sessions_dir.mkdir(parents=True, exist_ok=True)
         meta_path = self._sessions_dir / f"{session_id}.json"
@@ -70,6 +74,12 @@ class SessionMgr:
         meta["updated_at"] = now
         if topic:
             meta["topic"] = topic[:100]
+        if permission_mode:
+            meta["permission_mode"] = permission_mode
+        if pre_plan_mode:
+            meta["pre_plan_mode"] = pre_plan_mode
+        elif "pre_plan_mode" in meta:
+            del meta["pre_plan_mode"]
 
         try:
             meta_path.write_text(

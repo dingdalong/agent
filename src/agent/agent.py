@@ -368,6 +368,16 @@ class Agent:
             await self.deps.event_bus.request_output(f"会话 {target_id[:8]}... 没有保存的对话历史。\n")
             return
 
+        # 工作目录不一致时取消恢复
+        saved_workdir = target_session.get("workdir", "")
+        current_workdir = str(self.deps.workdir) if self.deps.workdir else ""
+        if saved_workdir and current_workdir and saved_workdir != current_workdir:
+            await self.deps.event_bus.request_output(
+                f"无法恢复：原会话工作目录为 {saved_workdir}，当前为 {current_workdir}。\n"
+                f"请在原工作目录下启动后再恢复该会话。\n"
+            )
+            return
+
         # 恢复会话状态
         self.history.clear()
         self.history.extend(messages)
@@ -381,6 +391,31 @@ class Agent:
             self._reminder_mgr = ReminderMgr()
             self._reminder_mgr.register(self._task_mgr)
 
+        # 恢复权限模式
+        mode_info = ""
+        saved_mode_value = target_session.get("permission_mode", "")
+        if saved_mode_value and self.deps.permission_mgr is not None:
+            from src.mgr.permission_mgr import PLAN_MODE, parse_permission_mode, DEFAULT_MODE
+            if saved_mode_value == PLAN_MODE.value:
+                # 恢复 plan 模式：先设置 pre_plan_mode，再通过 enter_mode 完整恢复
+                pre_plan_value = target_session.get("pre_plan_mode", "")
+                pre_plan = parse_permission_mode(pre_plan_value) if pre_plan_value else None
+                self.deps.permission_mgr.mode = pre_plan or DEFAULT_MODE
+                plan_mgr = self.deps.plan_mgr
+                if plan_mgr is not None:
+                    plan_mgr.enter_mode(self.deps.permission_mgr, self._reminder_mgr)
+                mode_info = f"，权限模式: plan"
+            else:
+                mode = parse_permission_mode(saved_mode_value)
+                if mode is not None:
+                    self.set_permission_mode(mode)
+                    mode_info = f"，权限模式: {mode.value}"
+            self.refresh_tools_schemas()
+            if self.deps.permission_mode_controller is not None:
+                self.deps.permission_mode_controller.notify_state_changed()
+            if self.deps.ui is not None:
+                self.deps.ui.on_system_state_changed()
+
         topic = target_session.get("topic", "")
         msg_count = len(messages)
         task_info = ""
@@ -390,7 +425,7 @@ class Agent:
             task_info = f"，{open_count} 个未完成任务"
 
         await self.deps.event_bus.request_output(
-            f"已恢复会话 {target_id[:8]}...（{msg_count} 条消息{task_info}）\n"
+            f"已恢复会话 {target_id[:8]}...（{msg_count} 条消息{task_info}{mode_info}）\n"
         )
 
         # 向 session_context 注入恢复提示，让 LLM 知道上下文来自恢复
@@ -399,6 +434,9 @@ class Agent:
             f"会话主题: \"{topic}\"。"
             "请基于恢复的上下文继续对话。"
         )
+
+        # 清除系统提示词缓存以反映新的 session_context
+        self._prompt_mgr.invalidate_cache()
 
     async def _handle_mode_command(self) -> None:
         """处理 /mode 命令：委托给 PermissionModeController。"""
@@ -605,10 +643,17 @@ class Agent:
         self.deps.session_mgr.save_history(session_id, self.history)
         if user_input and self.history:
             is_new = self.deps.session_mgr.get_metadata(session_id) is None
+            permission_mgr = self.deps.permission_mgr
+            perm_mode = permission_mgr.mode.value if permission_mgr else ""
+            pre_plan = ""
+            if permission_mgr and permission_mgr._pre_plan_mode is not None:
+                pre_plan = permission_mgr._pre_plan_mode.value
             self.deps.session_mgr.save_metadata(
                 session_id,
                 is_new=is_new,
                 topic=user_input if is_new else "",
+                permission_mode=perm_mode,
+                pre_plan_mode=pre_plan,
             )
 
     async def _emit_state_changed(self, from_state: AgentState, to_state: AgentState) -> None:

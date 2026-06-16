@@ -209,6 +209,10 @@ class PromptMgr:
 
         return "\n\n".join(s for s in sections if s)
 
+    def invalidate_cache(self) -> None:
+        """清除缓存的系统提示词前缀，下次 build() 时重新构建。"""
+        self._static_prefix = None
+
     def build(self) -> list:
         """构建 system prompt。
 
