@@ -94,7 +94,7 @@ async def exit_plan_mode(file_path: str, agent: Agent, deps: AgentDeps) -> str:
     Returns:
         用户选择的操作结果和后续指引。
     """
-    from src.mgr.permission_mgr import ACCEPT_EDITS_MODE, PLAN_MODE
+    from src.mgr.permission_mgr import AUTO_MODE, PLAN_MODE
 
     permission_mgr = deps.permission_mgr
     if permission_mgr is None or permission_mgr.mode is not PLAN_MODE:
@@ -136,7 +136,7 @@ async def exit_plan_mode(file_path: str, agent: Agent, deps: AgentDeps) -> str:
 
     if choice == "1":
         plan_mgr.exit_mode(permission_mgr, reminder_mgr)
-        permission_mgr.set_mode(ACCEPT_EDITS_MODE)
+        permission_mgr.set_mode(AUTO_MODE)
         agent.refresh_tools_schemas()
         return f"用户选择自动执行。已切换到 acceptEdits 模式。计划路径：{file_path}"
 
