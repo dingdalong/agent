@@ -109,7 +109,7 @@ class SubAgentMgr:
         Args:
             agent_type: 目标子智能体类型标识。
             prompt: 传给子智能体的完整任务正文。
-            parent_agent: 调用方 Agent 实例，用于共享 task_mgr 和 hooks。
+            parent_agent: 调用方 Agent 实例，用于管理父任务状态和触发 hooks。
             task_id: 关联的任务 ID（可选），指定后框架自动管理任务状态。
 
         Returns:
@@ -139,7 +139,6 @@ class SubAgentMgr:
             deps = self.deps,
             tools = tools,
             is_subagent = True,
-            _task_mgr = task_mgr,
             memory = document.manifest.memory,
             model = document.manifest.model,
         )

@@ -80,7 +80,7 @@ class TaskManager:
 
     通过 duck typing 向 ReminderMgr 提供提醒注入接口。
     当 tasks_dir 不为 None 时，每次变更自动写入磁盘（每个 task 一个 JSON 文件）。
-    tasks_dir 为 None 时退化为纯内存模式（子 agent 共享父实例场景）。
+    tasks_dir 为 None 时退化为纯内存模式（子 agent 独立实例，不持久化）。
 
     Attributes:
         _tasks: 任务存储，键为任务 ID。
@@ -535,17 +535,35 @@ class TaskManager:
     def describe(self, is_subagent: bool) -> str:
         """返回任务管理系统的 prompt 指导文本，供 PromptMgr 注入系统提示词。
 
-        主 agent 返回完整指导（创建时机、字段规范、状态工作流、依赖管理、委派工作流）。
-        子 agent 返回空字符串（任务状态由主 agent 全权管理，子 agent 无需感知）。
+        主/子 agent 各返回独立的完整提示词。
 
         Args:
             is_subagent: 是否为子智能体。
 
         Returns:
-            Markdown 格式的任务管理指导文本；子智能体返回空字符串。
+            Markdown 格式的任务管理指导文本。
         """
         if is_subagent:
-            return ""
+            return (
+                "# 任务管理\n\n"
+                "## 何时使用\n"
+                "- 复杂多步任务（3 步以上）需要追踪进度时\n"
+                "- 一次性收到多个独立子任务时\n\n"
+                "## 何时不使用\n"
+                "- 单个简单任务，直接执行即可\n"
+                "- 3 步以内的简单操作\n\n"
+                "## 字段规范\n"
+                '- subject：祈使句形式的简短标题（如"修复登录认证 bug"）\n'
+                "- description：完整的需求描述\n"
+                '- active_form：进行时描述，用于 spinner 显示（如"修复认证 bug 中"），省略时使用 subject\n\n'
+                "## 状态工作流\n"
+                "状态流转：pending → in_progress → completed\n\n"
+                "- 执行任务前，先用 task_update 标记为 in_progress\n"
+                "- 只有完全完成时才标记 completed\n"
+                "- 遇到错误或阻塞时，保持 in_progress，尝试自行解决\n"
+                "- 任务不再需要（需求取消、被其他任务合并覆盖）或创建有误（重复、描述错误）时，status 设为 deleted 永久删除\n"
+                "- 已完成的任务保留 completed 状态，不要删除；全部 completed 后框架自动清理"
+            )
         return (
             "# 任务管理\n\n"
             "## 何时使用\n"
@@ -565,7 +583,8 @@ class TaskManager:
             "- 亲自执行任务（不委派）前，先用 task_update 标记为 in_progress\n"
             "- 只有完全完成时才标记 completed\n"
             "- 遇到错误或阻塞时，保持 in_progress，尝试自行解决；无法解决时向用户说明阻塞原因等待指示\n"
-            "- status 设为 deleted 永久删除任务\n\n"
+            "- 任务不再需要（需求取消、被其他任务合并覆盖）或创建有误（重复、描述错误）时，status 设为 deleted 永久删除\n"
+            "- 已完成的任务保留 completed 状态，不要删除；全部 completed 后框架自动清理\n\n"
             "## 创建与依赖管理\n"
             "先批量创建所有任务（获得 ID），再通过 task_update 设置依赖关系：\n"
             "1. 在同一轮中调用多个 task_create 一次性创建所有子任务\n"
