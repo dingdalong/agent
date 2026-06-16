@@ -303,121 +303,47 @@ class Agent:
         await self.deps.event_bus.request_output("已进入计划模式。\n")
 
     async def _handle_resume_command(self, cmd_args: list[str]) -> None:
-        """处理 /resume 命令：列出或恢复历史会话。
-
-        无参数时列出最近 10 个会话；有参数时按序号或 session_id 恢复。
-        恢复时替换 self.history、切换 session_id、重建 TaskManager。
+        """处理 /resume 命令：委托 SessionMgr 解析会话，应用状态变更。
 
         Args:
-            cmd_args: 命令参数列表，可为空、序号或 session_id。
+            cmd_args: 命令参数列表，可为空（列出会话）、序号或 session_id。
         """
         session_mgr = self.deps.session_mgr
         if session_mgr is None:
             await self.deps.event_bus.request_output("会话管理器未初始化。\n")
             return
 
-        sessions = session_mgr.list_sessions(limit=10)
-        # 过滤掉当前会话
-        sessions = [s for s in sessions if s.get("session_id") != self.deps.session_id]
+        from src.mgr.session_mgr import ResumeResult
+        result = session_mgr.resolve_resume(
+            cmd_args,
+            current_session_id=self.deps.session_id,
+            current_workdir=str(self.deps.workdir) if self.deps.workdir else "",
+        )
 
-        if not sessions:
-            await self.deps.event_bus.request_output("没有可恢复的历史会话。\n")
+        # 解析失败或列出会话：直接输出文本
+        if isinstance(result, str):
+            await self.deps.event_bus.request_output(result)
             return
 
-        if not cmd_args:
-            # 列出会话
-            lines = ["最近的历史会话：\n"]
-            for i, s in enumerate(sessions, 1):
-                updated = s.get("updated_at", "?")[:19].replace("T", " ")
-                topic = s.get("topic", "")
-                workdir = s.get("workdir", "")
-                lines.append(f"  {i}. [{updated}] {workdir}\n     {topic}\n")
-            lines.append("输入 /resume <序号> 恢复指定会话。\n")
-            await self.deps.event_bus.request_output("\n".join(lines))
-            return
-
-        # 解析目标会话
-        target_arg = cmd_args[0]
-        target_session: dict | None = None
-
-        # 尝试按序号解析
-        try:
-            idx = int(target_arg)
-            if 1 <= idx <= len(sessions):
-                target_session = sessions[idx - 1]
-        except ValueError:
-            pass
-
-        # 尝试按 session_id 精确匹配或前缀匹配
-        if target_session is None:
-            for s in sessions:
-                sid = s.get("session_id", "")
-                if sid == target_arg or sid.startswith(target_arg):
-                    target_session = s
-                    break
-
-        if target_session is None:
-            await self.deps.event_bus.request_output(f"未找到匹配的会话: {target_arg}\n")
-            return
-
-        target_id = target_session["session_id"]
-
-        # 加载历史
-        messages = session_mgr.load_history(target_id)
-        if not messages:
-            await self.deps.event_bus.request_output(f"会话 {target_id[:8]}... 没有保存的对话历史。\n")
-            return
-
-        # 工作目录不一致时取消恢复
-        saved_workdir = target_session.get("workdir", "")
-        current_workdir = str(self.deps.workdir) if self.deps.workdir else ""
-        if saved_workdir and current_workdir and saved_workdir != current_workdir:
-            await self.deps.event_bus.request_output(
-                f"无法恢复：原会话工作目录为 {saved_workdir}，当前为 {current_workdir}。\n"
-                f"请在原工作目录下启动后再恢复该会话。\n"
-            )
-            return
-
-        # 恢复会话状态
+        # 替换对话历史和 session_id
         self.history.clear()
-        self.history.extend(messages)
-        self.deps.session_id = target_id
+        self.history.extend(result.messages)
+        self.deps.session_id = result.session_id
 
         # 重建 TaskManager 指向恢复会话的 tasks 目录
         if self.deps.global_dir:
-            tasks_dir = self.deps.global_dir / "tasks" / target_id
+            tasks_dir = self.deps.global_dir / "tasks" / result.session_id
             from src.mgr import TaskManager
             self._task_mgr = TaskManager(tasks_dir=tasks_dir)
             self._reminder_mgr = ReminderMgr()
             self._reminder_mgr.register(self._task_mgr)
 
         # 恢复权限模式
-        mode_info = ""
-        saved_mode_value = target_session.get("permission_mode", "")
-        if saved_mode_value and self.deps.permission_mgr is not None:
-            from src.mgr.permission_mgr import PLAN_MODE, parse_permission_mode, DEFAULT_MODE
-            if saved_mode_value == PLAN_MODE.value:
-                # 恢复 plan 模式：先设置 pre_plan_mode，再通过 enter_mode 完整恢复
-                pre_plan_value = target_session.get("pre_plan_mode", "")
-                pre_plan = parse_permission_mode(pre_plan_value) if pre_plan_value else None
-                self.deps.permission_mgr.mode = pre_plan or DEFAULT_MODE
-                plan_mgr = self.deps.plan_mgr
-                if plan_mgr is not None:
-                    plan_mgr.enter_mode(self.deps.permission_mgr, self._reminder_mgr)
-                mode_info = f"，权限模式: plan"
-            else:
-                mode = parse_permission_mode(saved_mode_value)
-                if mode is not None:
-                    self.set_permission_mode(mode)
-                    mode_info = f"，权限模式: {mode.value}"
-            self.refresh_tools_schemas()
-            if self.deps.permission_mode_controller is not None:
-                self.deps.permission_mode_controller.notify_state_changed()
-            if self.deps.ui is not None:
-                self.deps.ui.on_system_state_changed()
+        mode_info = self._restore_permission_mode(result.metadata)
 
-        topic = target_session.get("topic", "")
-        msg_count = len(messages)
+        # 构建并输出恢复摘要
+        topic = result.metadata.get("topic", "")
+        msg_count = len(result.messages)
         task_info = ""
         if self._task_mgr.has_open_items():
             task_list = self._task_mgr.list_tasks()
@@ -425,18 +351,58 @@ class Agent:
             task_info = f"，{open_count} 个未完成任务"
 
         await self.deps.event_bus.request_output(
-            f"已恢复会话 {target_id[:8]}...（{msg_count} 条消息{task_info}{mode_info}）\n"
+            f"已恢复会话 {result.session_id[:8]}...（{msg_count} 条消息{task_info}{mode_info}）\n"
         )
 
-        # 向 session_context 注入恢复提示，让 LLM 知道上下文来自恢复
+        # 注入 session_context 让 LLM 知道上下文来自恢复
         self.deps.session_context.append(
-            f"当前会话已从历史会话恢复（session {target_id[:8]}...）。"
+            f"当前会话已从历史会话恢复（session {result.session_id[:8]}...）。"
             f"会话主题: \"{topic}\"。"
             "请基于恢复的上下文继续对话。"
         )
-
-        # 清除系统提示词缓存以反映新的 session_context
         self._prompt_mgr.invalidate_cache()
+
+    def _restore_permission_mode(self, metadata: dict) -> str:
+        """从会话元数据恢复权限模式。
+
+        处理 plan 模式的特殊恢复（先设 pre_plan_mode，再 enter_mode），
+        恢复后刷新工具 schema 和 UI 状态。
+
+        Args:
+            metadata: 目标会话的元数据字典。
+
+        Returns:
+            权限模式描述文本（如 "，权限模式: plan"），无变更时返回空串。
+        """
+        saved_mode_value = metadata.get("permission_mode", "")
+        if not saved_mode_value or self.deps.permission_mgr is None:
+            return ""
+
+        from src.mgr.permission_mgr import PLAN_MODE, parse_permission_mode, DEFAULT_MODE
+
+        if saved_mode_value == PLAN_MODE.value:
+            pre_plan_value = metadata.get("pre_plan_mode", "")
+            pre_plan = parse_permission_mode(pre_plan_value) if pre_plan_value else None
+            self.deps.permission_mgr.mode = pre_plan or DEFAULT_MODE
+            plan_mgr = self.deps.plan_mgr
+            if plan_mgr is not None:
+                plan_mgr.enter_mode(self.deps.permission_mgr, self._reminder_mgr)
+            mode_info = "，权限模式: plan"
+        else:
+            mode = parse_permission_mode(saved_mode_value)
+            if mode is not None:
+                self.set_permission_mode(mode)
+                mode_info = f"，权限模式: {mode.value}"
+            else:
+                return ""
+
+        self.refresh_tools_schemas()
+        if self.deps.permission_mode_controller is not None:
+            self.deps.permission_mode_controller.notify_state_changed()
+        if self.deps.ui is not None:
+            self.deps.ui.on_system_state_changed()
+
+        return mode_info
 
     async def _handle_mode_command(self) -> None:
         """处理 /mode 命令：委托给 PermissionModeController。"""

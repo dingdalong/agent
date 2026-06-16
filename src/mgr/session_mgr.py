@@ -10,11 +10,26 @@ from __future__ import annotations
 import json
 import logging
 import os
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ResumeResult:
+    """resolve_resume() 解析成功时的返回值。
+
+    Attributes:
+        session_id: 目标会话 UUID。
+        messages: 加载的完整对话历史。
+        metadata: 目标会话的元数据字典（含 permission_mode、pre_plan_mode、topic 等）。
+    """
+    session_id: str
+    messages: list[dict[str, Any]]
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class SessionMgr:
@@ -153,6 +168,83 @@ class SessionMgr:
         except (json.JSONDecodeError, OSError) as e:
             logger.warning("加载会话历史失败: %s", e)
         return []
+
+    def resolve_resume(
+        self,
+        cmd_args: list[str],
+        current_session_id: str,
+        current_workdir: str,
+    ) -> str | ResumeResult:
+        """处理 /resume 命令的会话解析与加载逻辑。
+
+        无参数时返回格式化的会话列表文本；有参数时解析目标、加载历史、校验工作目录。
+        Agent 侧只需判断返回类型：str 直接输出，ResumeResult 应用状态变更。
+
+        Args:
+            cmd_args: 命令参数列表，可为空（列出会话）、序号或 session_id 前缀。
+            current_session_id: 当前会话 ID，用于从列表中排除。
+            current_workdir: 当前工作目录路径字符串，用于校验一致性。
+
+        Returns:
+            str: 要显示给用户的文本（会话列表或错误信息）。
+            ResumeResult: 成功解析的会话数据，调用方负责应用到 Agent 状态。
+        """
+        sessions = self.list_sessions(limit=10)
+        sessions = [s for s in sessions if s.get("session_id") != current_session_id]
+
+        if not sessions:
+            return "没有可恢复的历史会话。\n"
+
+        if not cmd_args:
+            lines = ["最近的历史会话：\n"]
+            for i, s in enumerate(sessions, 1):
+                updated = s.get("updated_at", "?")[:19].replace("T", " ")
+                topic = s.get("topic", "")
+                workdir = s.get("workdir", "")
+                lines.append(f"  {i}. [{updated}] {workdir}\n     {topic}\n")
+            lines.append("输入 /resume <序号> 恢复指定会话。\n")
+            return "\n".join(lines)
+
+        # 解析目标会话：先尝试序号，再尝试 session_id 前缀匹配
+        target_arg = cmd_args[0]
+        target_session: dict | None = None
+
+        try:
+            idx = int(target_arg)
+            if 1 <= idx <= len(sessions):
+                target_session = sessions[idx - 1]
+        except ValueError:
+            pass
+
+        if target_session is None:
+            for s in sessions:
+                sid = s.get("session_id", "")
+                if sid == target_arg or sid.startswith(target_arg):
+                    target_session = s
+                    break
+
+        if target_session is None:
+            return f"未找到匹配的会话: {target_arg}\n"
+
+        target_id = target_session["session_id"]
+
+        messages = self.load_history(target_id)
+        if not messages:
+            return f"会话 {target_id[:8]}... 没有保存的对话历史。\n"
+
+        # 工作目录不一致时拒绝恢复
+        saved_workdir = target_session.get("workdir", "")
+        if saved_workdir and current_workdir and saved_workdir != current_workdir:
+            return (
+                f"无法恢复：原会话工作目录为 {saved_workdir}，当前为 {current_workdir}。\n"
+                f"请在原工作目录下启动后再恢复该会话。\n"
+            )
+
+        return ResumeResult(
+            session_id=target_id,
+            messages=messages,
+            metadata=target_session,
+        )
 
     def get_metadata(self, session_id: str) -> dict[str, Any] | None:
         """获取指定会话的元数据。
