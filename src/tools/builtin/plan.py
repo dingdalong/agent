@@ -121,16 +121,17 @@ async def exit_plan_mode(file_path: str, agent: Agent, deps: AgentDeps) -> str:
         agent.refresh_tools_schemas()
         return f"计划为空，已退出计划模式，恢复到 {permission_mgr.mode.value} 模式。"
 
-    prompt = (
-        f"计划文件：\n{file_path}\n\n"
-        f"计划内容：\n{plan_content}\n\n"
+    await deps.event_bus.request_output(
+        f"\n计划文件：\n{file_path}\n\n"
+        f"计划内容：\n{plan_content}\n"
+    )
+    answer = await deps.event_bus.request_input(
         "选择操作：\n"
         "  [1] 自动执行 — 在当前上下文中自动实施计划\n"
         "  [2] 手动执行 — 退出计划模式，自行实施\n"
         "  或直接输入修改意见\n"
         "请选择: "
     )
-    answer = await deps.event_bus.request_input(prompt)
     choice = answer.strip()
 
     if choice == "1":
