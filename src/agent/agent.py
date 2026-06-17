@@ -170,7 +170,6 @@ class Agent:
             if turn_instr:
                 input = f"{turn_instr}\n\n{input}"
             self.history.append({"role": "user", "content": input})
-            ctx.round_start_idx = len(self.history)
             ctx.user_input = input
             result = await self._run_single_turn(ctx, AgentState.CHECK_COMPACT)
             if not ctx.has_tool_calls:
@@ -285,8 +284,8 @@ class Agent:
         if turn_instr:
             user_input = f"{turn_instr}\n\n{user_input}"
 
-        self.history.append({"role": "user", "content": user_input})
         ctx.round_start_idx = len(self.history)
+        self.history.append({"role": "user", "content": user_input})
 
         return AgentState.CHECK_COMPACT
 
