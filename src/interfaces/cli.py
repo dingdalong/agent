@@ -11,10 +11,12 @@ from collections.abc import Callable
 from contextlib import contextmanager
 
 from prompt_toolkit import PromptSession, print_formatted_text
-from prompt_toolkit.formatted_text import ANSI, HTML
+from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.styles import Style
+from rich.console import Console
+from rich.text import Text
 
 from src.events.types import (
     CompactDelta,
@@ -47,6 +49,11 @@ class CLIInterface(UserInterface):
             "agent.success": "ansigreen",
             "agent.tool": "ansibrightblack",
         })
+        self._rich_console = Console(
+            force_terminal=True,
+            color_system="standard",
+            legacy_windows=False,
+        )
         self._session: PromptSession[str] = PromptSession(
             key_bindings=self._build_input_key_bindings(),
             style=self._style,
@@ -176,7 +183,8 @@ class CLIInterface(UserInterface):
         return await self._prompt_permission(tool_name, detail, suggested_rules)
 
     async def _write(self, message: str) -> None:
-        self._print(message, end="")
+        """输出纯文本，按终端宽度自动换行。"""
+        self._print_rich(message, end="")
 
     async def _write_response_prefix(self, event: ResponseDelta) -> None:
         await self._write(f"\n{self._response_prefix(event)}")
@@ -185,19 +193,18 @@ class CLIInterface(UserInterface):
         await self._write(f"\n{self._thinking_prefix(event)}")
 
     async def _prompt_permission(self, tool_name: str, detail: str, suggested_rules: list[str] | None = None) -> str:
-        suggestion_line = ""
-        if suggested_rules:
-            suggestion_line = f"  建议规则: {self._escape_html(suggested_rules[0])}\n"
         session_label = "会话允许(上述规则)" if suggested_rules else "本次会话始终允许"
         always_label = "始终允许并保存(上述规则)" if suggested_rules else "始终允许并保存"
-        self._print(HTML(
-            "\n<agent.permission>工具请求权限</agent.permission>\n"
-            f"  工具: {self._escape_html(tool_name)}\n"
-            f"  内容: {self._escape_html(detail)}\n"
-            f"{suggestion_line}"
-            "  输入 y/s/a/n 后按 Enter 确认\n"
-            f"  [y] 允许一次   [s] {session_label}   [a] {always_label}   [n] 拒绝\n"
-        ))
+        prompt_text = Text()
+        prompt_text.append("\n")
+        prompt_text.append("工具请求权限", style="yellow")
+        prompt_text.append(f"\n  工具: {tool_name}\n")
+        prompt_text.append(f"  内容: {detail}\n")
+        if suggested_rules:
+            prompt_text.append(f"  建议规则: {suggested_rules[0]}\n")
+        prompt_text.append("  输入 y/s/a/n 后按 Enter 确认\n")
+        prompt_text.append(f"  [y] 允许一次   [s] {session_label}   [a] {always_label}   [n] 拒绝\n")
+        self._print_rich(prompt_text, end="")
         session: PromptSession[str] = PromptSession(
             key_bindings=self._build_permission_key_bindings(),
             style=self._style,
@@ -217,7 +224,7 @@ class CLIInterface(UserInterface):
                     return "always"
                 if answer in {"n", "no", "deny"}:
                     return "deny"
-                self._print(HTML("<agent.error>请输入 y、s、a 或 n。</agent.error>"))
+                self._print_rich("请输入 y、s、a 或 n。", style="red")
 
     async def on_response_delta(self, event: ResponseDelta, content: str) -> None:
         await self._write_markdown_delta(
@@ -281,7 +288,7 @@ class CLIInterface(UserInterface):
     async def on_permission_notice(self, event: PermissionNotice) -> None:
         if event.status == "auto_allow":
             label = f"[auto] {event.detail or event.tool_name}"
-            self._print(HTML(f"<agent.success>{self._escape_html(label)}</agent.success>"))
+            self._print_rich(label, style="green")
             return
         if event.status == "allow":
             return
@@ -292,9 +299,7 @@ class CLIInterface(UserInterface):
 
     async def on_compact_delta(self, event: CompactDelta) -> None:
         detail = event.content.strip() or "context"
-        self._print(HTML(
-            f"<agent.muted>[compact] {self._escape_html(detail)}</agent.muted>"
-        ))
+        self._print_rich(f"[compact] {detail}", style="bright_black")
 
     async def on_tool_call_started(self, event: ToolCallStarted) -> None:
         agent = self._agent_label(event.caller_agent_type, event.caller_uuid)
@@ -305,31 +310,27 @@ class CLIInterface(UserInterface):
         pieces.append(event.tool_name)
         if detail:
             pieces.append(detail)
-        self._print(HTML(
-            f"<agent.tool>{self._escape_html(' '.join(pieces))}</agent.tool>"
-        ))
+        self._print_rich(' '.join(pieces), style="bright_black")
 
     async def on_tool_call_completed(self, event: ToolCallCompleted) -> None:
         label = "done" if event.status == "success" else "error"
-        style = "agent.success" if event.status == "success" else "agent.error"
         line = f"[{label}] {event.tool_name} {event.duration_seconds:.2f}s"
         if event.status != "success" and event.result_preview:
             line += f" {event.result_preview}"
-        self._print(HTML(
-            f"<{style}>{self._escape_html(line)}</{style}>"
-        ))
+        rich_style = "green" if event.status == "success" else "red"
+        self._print_rich(line, style=rich_style)
 
     async def on_llm_call_started(self, event: LLMCallStarted) -> None:
-        self._print(
+        self._print_rich(
             "LLM call start: "
             f"model={event.model} "
             f"estimated_input_tokens={event.estimated_input_tokens} "
             f"messages={event.message_count} "
-            f"tools={event.tool_count}",
+            f"tools={event.tool_count}"
         )
 
     async def on_llm_call_completed(self, event: LLMCallCompleted) -> None:
-        self._print(
+        self._print_rich(
             "LLM usage: "
             f"model={event.model} "
             f"input={self._format_optional_int(event.input_tokens)} "
@@ -339,7 +340,7 @@ class CLIInterface(UserInterface):
             f"cache_created={self._format_optional_int(event.cache_creation_input_tokens)} "
             f"duration={self._format_optional_float(event.duration_seconds)}s "
             f"output_tps={self._format_optional_float(event.output_tokens_per_second)} "
-            f"total_tps={self._format_optional_float(event.total_tokens_per_second)}",
+            f"total_tps={self._format_optional_float(event.total_tokens_per_second)}"
         )
 
     def _response_prefix(self, event: ResponseDelta) -> str:
@@ -359,10 +360,27 @@ class CLIInterface(UserInterface):
             return ""
         return agent_type
 
-    def _print(self, *values, **kwargs) -> None:
-        print_formatted_text(*values, style=self._style, **kwargs)
+    def _print_rich(self, content: str | Text, *, style: str = "", end: str = "\n") -> None:
+        """通过 Rich 渲染文本并输出，自动按终端宽度换行。
+
+        使用共享 Rich Console 渲染，正确处理中文双宽字符的宽度计算。
+        渲染结果通过 _print_ansi 输出，保持与 prompt_toolkit 输入的兼容。
+
+        Args:
+            content: 纯文本字符串或 Rich Text 对象。传入字符串时可通过 style 指定样式。
+            style: Rich 样式名（如 "bright_black"、"red"），仅 content 为 str 时生效。
+            end: 结尾字符，默认换行。
+        """
+        if isinstance(content, str):
+            renderable = Text(content, style=style) if style else Text(content)
+        else:
+            renderable = content
+        with self._rich_console.capture() as capture:
+            self._rich_console.print(renderable, end=end)
+        self._print_ansi(capture.get())
 
     def _print_ansi(self, value: str) -> None:
+        """输出预渲染的 ANSI 字符串。"""
         print_formatted_text(ANSI(value), end="")
 
     def _build_input_key_bindings(self) -> KeyBindings:
@@ -404,13 +422,6 @@ class CLIInterface(UserInterface):
             bindings.add(key)(handler)
         except ValueError:
             pass
-
-    def _escape_html(self, value: str) -> str:
-        return (
-            value.replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-        )
 
     def _format_optional_int(self, value: int | None) -> str:
         if value is None:
