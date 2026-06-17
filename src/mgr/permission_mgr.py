@@ -444,6 +444,12 @@ class PermissionManager:
             if rule.matches_specifier(specifier_value):
                 return "deny", f"被 deny 规则阻止：{rule}"
 
+        # Step 1.5: 复合命令逐段 deny 检查
+        if tool_name == "shell" and specifier_value and self._is_compound_command(specifier_value):
+            deny_reason = self._check_compound_against_deny_rules(specifier_value)
+            if deny_reason is not None:
+                return "deny", deny_reason
+
         # Step 2: ask 规则
         for rule in self._get_rules(self.ask_rules, tool_name):
             if rule.matches_specifier(specifier_value):
@@ -468,29 +474,27 @@ class PermissionManager:
             if result.decision == "allow":
                 return "allow", result.reason or f"工具级检查放行：{tool_name}"
 
-        # Step 4: allow 规则（含 session_allow）— 含复合命令防护和包装剥离
-        specifier_candidates = [specifier_value]
-        if tool_name == "shell" and specifier_value:
-            from src.tools.builtin.shell import strip_safe_wrappers_for_matching
-            stripped = strip_safe_wrappers_for_matching(specifier_value)
-            if stripped != specifier_value:
-                specifier_candidates.append(stripped)
+        # Step 4: allow 规则（含 session_allow）— 复合命令逐段匹配，简单命令含包装剥离
+        if tool_name == "shell" and specifier_value and self._is_compound_command(specifier_value):
+            # 复合命令：逐段检查，所有段均被 allow 规则覆盖才放行
+            if self._check_compound_against_allow_rules(specifier_value):
+                return "allow", "复合命令各段均匹配 allow 规则"
+        else:
+            # 简单命令：原有匹配逻辑（含包装剥离）
+            specifier_candidates = [specifier_value]
+            if tool_name == "shell" and specifier_value:
+                from src.tools.builtin.shell import strip_safe_wrappers_for_matching
+                stripped = strip_safe_wrappers_for_matching(specifier_value)
+                if stripped != specifier_value:
+                    specifier_candidates.append(stripped)
 
-        for rule in chain(
-            self._get_rules(self.allow_rules, tool_name),
-            self._get_rules(self.session_allow, tool_name),
-        ):
-            for candidate in specifier_candidates:
-                # 复合命令防护：前缀/通配符 allow 规则不匹配复合命令
-                if (
-                    tool_name == "shell"
-                    and rule.rule_type in ("prefix", "wildcard")
-                    and rule.specifier != "*"
-                    and self._is_compound_command(candidate)
-                ):
-                    continue
-                if rule.matches_specifier(candidate):
-                    return "allow", f"匹配 allow 规则：{rule}"
+            for rule in chain(
+                self._get_rules(self.allow_rules, tool_name),
+                self._get_rules(self.session_allow, tool_name),
+            ):
+                for candidate in specifier_candidates:
+                    if rule.matches_specifier(candidate):
+                        return "allow", f"匹配 allow 规则：{rule}"
 
         # Step 4.5: 处理 Step 3 中记录的非 bypass_immune 的 tool ask
         # 仅 BYPASS 模式跳过（AUTO 不跳过，AUTO 更保守——不确定的操作仍需确认）
@@ -590,9 +594,13 @@ class PermissionManager:
 
         detail = format_tool_tips(self._tool_tips.get(tool_name), tool_input, tool_name)
 
-        # 计算建议规则，供 UI 展示给用户
-        suggested_rule = self._build_session_rule(tool_name, tool_input)
-        suggested_rules = [str(suggested_rule)] if suggested_rule.specifier != "*" else []
+        # 计算建议规则，供 UI 展示给用户（复合命令生成多条规则）
+        compound_rules = self._build_compound_session_rules(tool_name, tool_input)
+        if compound_rules:
+            rules_to_apply = compound_rules
+        else:
+            rules_to_apply = [self._build_session_rule(tool_name, tool_input)]
+        suggested_rules = [str(r) for r in rules_to_apply if r.specifier != "*"]
 
         answer = await deps.event_bus.request_permission(
             tool_name=tool_name,
@@ -601,13 +609,13 @@ class PermissionManager:
         )
         normalized = answer.strip().lower()
         if normalized == "session":
-            rule = self._build_session_rule(tool_name, tool_input)
-            self._add_rule(self.session_allow, rule)
+            for rule in rules_to_apply:
+                self._add_rule(self.session_allow, rule)
             return "allow", "用户在当前会话中始终允许"
         if normalized == "always":
-            rule = self._build_session_rule(tool_name, tool_input)
-            self._add_rule(self.session_allow, rule)
-            self._persist_allow_rule(rule)
+            for rule in rules_to_apply:
+                self._add_rule(self.session_allow, rule)
+                self._persist_allow_rule(rule)
             return "allow", "用户始终允许（已保存）"
         if normalized in {"y", "yes"}:
             return "allow", "用户已允许"
@@ -644,6 +652,121 @@ class PermissionManager:
                 return PermissionRule(tool=tool_name, specifier=f"{first_word}:*", permission="allow")
 
         return PermissionRule(tool=tool_name, specifier=value, permission="allow")
+
+    def _build_compound_session_rules(
+        self,
+        tool_name: str,
+        tool_input: dict[str, Any],
+    ) -> list[PermissionRule] | None:
+        """为复合 shell 命令的每个段构建前缀规则列表。
+
+        仅对 shell 复合命令生效。调用 get_compound_segment_prefixes 拆段提取前缀，
+        为每个前缀生成 prefix 规则。无法分解时返回 None，调用方退回单规则路径。
+
+        Args:
+            tool_name: 工具名。
+            tool_input: 工具调用参数。
+
+        Returns:
+            前缀规则列表，非 shell / 非复合 / 无法分解时返回 None。
+        """
+        if tool_name != "shell":
+            return None
+        value = self._extract_specifier(tool_name, tool_input)
+        if not value:
+            return None
+        from src.tools.builtin.shell import get_compound_segment_prefixes
+        prefixes = get_compound_segment_prefixes(value)
+        if prefixes is None:
+            return None
+        return [
+            PermissionRule(tool="shell", specifier=f"{prefix}:*", permission="allow")
+            for prefix in prefixes
+        ]
+
+    def _check_compound_against_allow_rules(self, command: str) -> bool:
+        """逐段检查复合命令是否被 allow 规则完全覆盖。
+
+        将复合命令拆分为段，每段独立匹配 allow_rules + session_allow 中的规则。
+        每段应用 strip_safe_wrappers_for_matching 生成额外候选。
+        所有段均被至少一条规则匹配时返回 True。
+
+        Args:
+            command: 完整 shell 命令字符串。
+
+        Returns:
+            True 表示所有段均被 allow 规则覆盖。
+        """
+        from src.tools.builtin.shell import (
+            _split_unquoted_newlines, _shell_tokens, _shell_segments,
+            strip_safe_wrappers_for_matching,
+        )
+        try:
+            segments: list[list[str]] = []
+            for part in _split_unquoted_newlines(command):
+                segments.extend(_shell_segments(_shell_tokens(part)))
+        except ValueError:
+            return False
+
+        all_rules = list(chain(
+            self._get_rules(self.allow_rules, "shell"),
+            self._get_rules(self.session_allow, "shell"),
+        ))
+
+        for segment in segments:
+            if segment == ["|"]:
+                continue
+            seg_str = " ".join(segment)
+            candidates = [seg_str]
+            stripped = strip_safe_wrappers_for_matching(seg_str)
+            if stripped != seg_str:
+                candidates.append(stripped)
+            matched = False
+            for rule in all_rules:
+                for candidate in candidates:
+                    if rule.matches_specifier(candidate):
+                        matched = True
+                        break
+                if matched:
+                    break
+            if not matched:
+                return False
+        return True
+
+    def _check_compound_against_deny_rules(self, command: str) -> str | None:
+        """逐段检查复合命令是否被 deny 规则命中。
+
+        将复合命令拆分为段，每段独立匹配 deny_rules。
+        任一段被命中即返回拒绝原因。
+
+        Args:
+            command: 完整 shell 命令字符串。
+
+        Returns:
+            拒绝原因字符串，无命中时返回 None。
+        """
+        from src.tools.builtin.shell import (
+            _split_unquoted_newlines, _shell_tokens, _shell_segments,
+        )
+        try:
+            segments: list[list[str]] = []
+            for part in _split_unquoted_newlines(command):
+                segments.extend(_shell_segments(_shell_tokens(part)))
+        except ValueError:
+            return None
+
+        deny_rules = self._get_rules(self.deny_rules, "shell")
+        if not deny_rules:
+            return None
+
+        for segment in segments:
+            if segment == ["|"]:
+                continue
+            seg_str = " ".join(segment)
+            for rule in deny_rules:
+                if rule.matches_specifier(seg_str):
+                    return f"复合命令中的 '{seg_str}' 被 deny 规则阻止：{rule}"
+        return None
 
     def _persist_allow_rule(self, rule: PermissionRule) -> None:
         """将 allow 规则持久化到 settings.json。

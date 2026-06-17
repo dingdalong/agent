@@ -171,6 +171,76 @@ def get_first_word_prefix(command: str) -> str | None:
     return cmd
 
 
+def _segment_prefix(segment: list[str]) -> str | None:
+    """从单个已分词的命令段中提取前缀（双词或单词），用于生成前缀规则。
+
+    与 get_simple_command_prefix / get_first_word_prefix 逻辑一致，
+    但直接操作 token 列表，避免重复分词和误触复合命令检测。
+
+    Args:
+        segment: 单个命令段的 token 列表（应已经过 _strip_shell_wrappers 处理）。
+
+    Returns:
+        双词前缀（如 'git commit'）或单词前缀（如 'pytest'），不满足条件时返回 None。
+    """
+    tokens = list(segment)
+    i = 0
+    while i < len(tokens) and _ENV_VAR_PATTERN.match(tokens[i]):
+        var_name = tokens[i].split("=", 1)[0]
+        if var_name not in SAFE_ENV_VARS:
+            return None
+        i += 1
+    remaining = tokens[i:]
+    if not remaining:
+        return None
+    cmd = remaining[0]
+    if not _SUBCOMMAND_PATTERN.match(cmd):
+        return None
+    if cmd in DANGEROUS_BARE_PREFIXES:
+        return None
+    # 优先双词前缀
+    if len(remaining) >= 2 and _SUBCOMMAND_PATTERN.match(remaining[1]):
+        return f"{cmd} {remaining[1]}"
+    return cmd
+
+
+def get_compound_segment_prefixes(command: str) -> list[str] | None:
+    """提取复合命令中每个段的前缀，用于生成多条建议规则。
+
+    将复合命令按分隔符拆分为段，对每段提取前缀规则。
+    非复合命令返回 None（调用方应走单命令路径）。
+    任一段无法提取前缀时整体返回 None（无法安全分解）。
+
+    Args:
+        command: 完整 shell 命令字符串。
+
+    Returns:
+        去重后的前缀列表（如 ['git status', 'git diff']），
+        非复合命令或无法分解时返回 None。
+    """
+    if not is_compound_command(command):
+        return None
+    try:
+        segments: list[list[str]] = []
+        for part in _split_unquoted_newlines(command):
+            segments.extend(_shell_segments(_shell_tokens(part)))
+    except ValueError:
+        return None
+    prefixes: list[str] = []
+    seen: set[str] = set()
+    for segment in segments:
+        if segment == ["|"]:
+            continue
+        stripped = _strip_shell_wrappers(segment)
+        prefix = _segment_prefix(stripped)
+        if prefix is None:
+            return None
+        if prefix not in seen:
+            seen.add(prefix)
+            prefixes.append(prefix)
+    return prefixes if prefixes else None
+
+
 def strip_safe_wrappers_for_matching(command: str) -> str:
     """在匹配 allow 规则前剥离安全包装命令和环境变量。
 

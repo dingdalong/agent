@@ -201,7 +201,12 @@ class CLIInterface(UserInterface):
         prompt_text.append(f"\n  工具: {tool_name}\n")
         prompt_text.append(f"  内容: {detail}\n")
         if suggested_rules:
-            prompt_text.append(f"  建议规则: {suggested_rules[0]}\n")
+            if len(suggested_rules) == 1:
+                prompt_text.append(f"  建议规则: {suggested_rules[0]}\n")
+            else:
+                prompt_text.append("  建议规则:\n")
+                for rule_str in suggested_rules:
+                    prompt_text.append(f"    - {rule_str}\n")
         prompt_text.append("  输入 y/s/a/n 后按 Enter 确认\n")
         prompt_text.append(f"  [y] 允许一次   [s] {session_label}   [a] {always_label}   [n] 拒绝\n")
         self._print_rich(prompt_text, end="")
