@@ -10,7 +10,18 @@ if TYPE_CHECKING:
     from src.agent import Agent
 
 
-SENSITIVE_NAMES = {".env", ".env.local", ".env.production", "credentials.json", ".npmrc", ".pypirc"}
+# 敏感文件名集合 — 写入这些文件始终需要用户确认（对齐 CC v2.1.173 的 checkPathSafetyForAutoEdit）
+SENSITIVE_NAMES = {
+    # 环境变量 / 凭证
+    ".env", ".env.local", ".env.production", "credentials.json", ".npmrc", ".pypirc",
+    # Shell 配置
+    ".bashrc", ".zshrc", ".bash_profile", ".profile", ".zprofile",
+    # Git 配置
+    ".gitconfig",
+}
+
+# 敏感目录前缀 — 路径中包含这些目录时需要用户确认
+SENSITIVE_DIRS = {"/.agent/", "/.vscode/", "/.idea/"}
 
 
 def is_outside_workspace(path: str, workdir: str, extra_trusted: tuple[str, ...] = ()) -> bool:
@@ -40,7 +51,7 @@ def is_outside_workspace(path: str, workdir: str, extra_trusted: tuple[str, ...]
 
 
 def is_sensitive_path(path: str, workdir: str, extra_trusted: tuple[str, ...] = ()) -> bool:
-    """判断文件路径是否为敏感路径（.git 目录、敏感配置文件、可信目录外路径）。
+    """判断文件路径是否为敏感路径（.git 目录、敏感配置文件、敏感目录、可信目录外路径）。
 
     Args:
         path: 待检查的文件路径。
@@ -53,13 +64,38 @@ def is_sensitive_path(path: str, workdir: str, extra_trusted: tuple[str, ...] = 
     if not path:
         return False
     normalized = PurePosixPath(path).as_posix()
-    if "/.git/" in normalized or normalized.endswith("/.git"):
+    lower = normalized.lower()
+    # .git 目录检查（大小写不敏感，兼容 macOS APFS 等大小写不敏感文件系统）
+    if "/.git/" in lower or lower.endswith("/.git"):
         return True
     if PurePosixPath(path).name.lower() in SENSITIVE_NAMES:
         return True
+    # 敏感目录检查（.agent/、.vscode/、.idea/ 等项目配置目录，大小写不敏感）
+    for sensitive_dir in SENSITIVE_DIRS:
+        if sensitive_dir in lower or lower.endswith(sensitive_dir.rstrip("/")):
+            return True
     if is_outside_workspace(path, workdir, extra_trusted):
         return True
     return False
+
+
+def _extract_edit_path(tool_input: dict[str, Any], ctx: PermissionContext) -> str:
+    """从工具调用参数中提取文件编辑路径。
+
+    优先使用 ctx.specifier_arg 指定的参数名，兜底按常见参数名查找。
+
+    Args:
+        tool_input: 工具调用参数。
+        ctx: 权限上下文。
+
+    Returns:
+        提取到的路径字符串，未找到时返回空字符串。
+    """
+    if ctx.specifier_arg:
+        value = tool_input.get(ctx.specifier_arg, "")
+        if isinstance(value, str) and value:
+            return value
+    return tool_input.get("path") or tool_input.get("file_path") or tool_input.get("source") or ""
 
 
 def check_file_edit_permissions(tool_input: dict[str, Any], ctx: PermissionContext) -> PermissionCheckResult:
@@ -72,9 +108,26 @@ def check_file_edit_permissions(tool_input: dict[str, Any], ctx: PermissionConte
     Returns:
         PermissionCheckResult 权限检查结果。
     """
-    path = tool_input.get("path") or tool_input.get("file_path") or tool_input.get("source") or ""
+    path = _extract_edit_path(tool_input, ctx)
     if is_sensitive_path(path, ctx.workdir, ctx.trusted_dirs):
         return PermissionCheckResult("ask", f"敏感路径需确认：{path}", bypass_immune=True)
+    return PermissionCheckResult("passthrough")
+
+
+def check_file_move_permissions(tool_input: dict[str, Any], ctx: PermissionContext) -> PermissionCheckResult:
+    """move_file 安全检查：同时检查源路径和目标路径的敏感性。
+
+    Args:
+        tool_input: 工具调用参数，需包含 "source" 和 "destination" 字段。
+        ctx: 权限上下文，包含当前模式、工作目录、工具名和全局配置目录。
+
+    Returns:
+        PermissionCheckResult 权限检查结果。
+    """
+    for key in ("source", "destination"):
+        path = tool_input.get(key, "")
+        if is_sensitive_path(path, ctx.workdir, ctx.trusted_dirs):
+            return PermissionCheckResult("ask", f"敏感路径需确认：{path}", bypass_immune=True)
     return PermissionCheckResult("passthrough")
 
 
@@ -91,9 +144,9 @@ def check_file_read_permissions(tool_input: dict[str, Any], ctx: PermissionConte
     Returns:
         PermissionCheckResult 权限检查结果。
     """
-    path = tool_input.get("path") or tool_input.get("file_path") or ""
+    path = _extract_edit_path(tool_input, ctx)
     if is_outside_workspace(path, ctx.workdir, ctx.trusted_dirs):
-        return PermissionCheckResult("ask", f"工作目录外路径需确认：{path}", bypass_immune=True)
+        return PermissionCheckResult("ask", f"工作目录外路径需确认：{path}", bypass_immune=False)
     return PermissionCheckResult("passthrough")
 
 
@@ -160,7 +213,7 @@ class MoveFile(BaseModel):
     destination: str = Field(..., description="目标绝对路径。若目标是已有目录，则移入该目录内。")
 
 @tool(model=MoveFile, description="移动或重命名文件/目录。",
-      permission=ToolPermission(kind="edit", specifier_arg="source", tips="移动或重命名：{source} -> {destination}", check_permissions=check_file_edit_permissions))
+      permission=ToolPermission(kind="edit", specifier_arg="source", tips="移动或重命名：{source} -> {destination}", check_permissions=check_file_move_permissions))
 async def move_file(source: str, destination: str, agent: Agent) -> str:
     return await agent._file_mgr.move_file(source, destination)
 

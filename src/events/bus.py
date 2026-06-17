@@ -111,8 +111,19 @@ class EventBus:
         tool_name: str,
         detail: str,
         source: str = "permission",
+        suggested_rules: list[str] | None = None,
     ) -> str:
-        """通过事件队列请求 UI 读取工具权限确认。"""
+        """通过事件队列请求 UI 读取工具权限确认。
+
+        Args:
+            tool_name: 工具名。
+            detail: 权限请求的详细说明。
+            source: 事件来源标识。
+            suggested_rules: 建议的 allow 规则列表，供 UI 展示给用户。
+
+        Returns:
+            用户的确认结果（yes/session/always/deny）。
+        """
         if not self._subscribers:
             raise NoEventSubscribers("permission")
         loop = asyncio.get_running_loop()
@@ -122,6 +133,7 @@ class EventBus:
             source=source,
             tool_name=tool_name,
             detail=detail,
+            suggested_rules=suggested_rules or [],
             future=future,
         ))
         return await future

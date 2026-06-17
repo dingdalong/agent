@@ -111,8 +111,14 @@ class UserInterface(ABC):
         ...
 
     @abstractmethod
-    async def _read_permission(self, tool_name: str, detail: str) -> str:
-        """读取权限确认结果。"""
+    async def _read_permission(self, tool_name: str, detail: str, suggested_rules: list[str] | None = None) -> str:
+        """读取权限确认结果。
+
+        Args:
+            tool_name: 工具名。
+            detail: 权限请求详情。
+            suggested_rules: 建议的 allow 规则列表，供 UI 展示。
+        """
         ...
 
     @abstractmethod
@@ -185,12 +191,12 @@ class UserInterface(ABC):
                         self._active_user_request = None
             case PermissionNotice():
                 await self.on_permission_notice(event)
-            case PermissionRequested(tool_name=tool_name, detail=detail):
+            case PermissionRequested(tool_name=tool_name, detail=detail, suggested_rules=suggested_rules):
                 self._active_user_request = event
                 try:
                     await self._complete_user_request(
                         event,
-                        lambda: self._read_permission(tool_name, detail),
+                        lambda: self._read_permission(tool_name, detail, suggested_rules),
                     )
                 finally:
                     if self._active_user_request is event:

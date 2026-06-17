@@ -1,8 +1,9 @@
 """权限管理器 — 权限模式 + 规则引擎。
 
-评估顺序（6 步）：
-1. deny 规则 → 2. ask 规则 → 3. check_permissions（工具安全逻辑）
-→ 4. allow 规则（含 session_allow）→ 5. bypass 模式 → 6. 模式默认策略。
+评估顺序：
+1. deny 规则 → 2. ask 规则 → 3. check_permissions（工具安全逻辑，bypass_immune 立即返回，
+非 bypass_immune 记录后穿透）→ 4. allow 规则（含 session_allow）→ 4.5. 处理穿透的 tool ask
+（按模式分流）→ 5. bypass 模式 → 6. 模式默认策略。
 """
 
 from __future__ import annotations
@@ -45,11 +46,13 @@ class PermissionContext:
         workdir: 工作区根目录路径。
         tool_name: 被调用的工具名。
         trusted_dirs: 可信目录路径列表（如 global_dir），这些目录内的文件读写无需询问。
+        specifier_arg: 该工具用于规则匹配的参数名（如 "command"、"path"），None 表示无内容级匹配。
     """
     mode: PermissionMode
     workdir: str
     tool_name: str
     trusted_dirs: tuple[str, ...] = ()
+    specifier_arg: str | None = None
 
 
 def tool_sort_order(kind: str | None, *, has_permission: bool = True) -> int:
@@ -102,7 +105,7 @@ BYPASS_MODE = PermissionMode(
 )
 AUTO_MODE = PermissionMode(
     value="auto",
-    description="自动放行所有操作；deny 和 ask 规则仍生效",
+    description="文件编辑和安全 shell 命令自动放行；其余操作询问；deny 和 ask 规则仍生效",
 )
 DONT_ASK_MODE = PermissionMode(
     value="dontAsk",
@@ -151,17 +154,53 @@ PermissionDecision = tuple[Literal["allow", "deny", "ask", "auto_allow"], str]
 class PermissionRule:
     """一条权限规则，如 'shell(npm *)'。
 
+    支持三种匹配模式：
+    - exact：精确匹配（如 'git commit -m "fix"'）
+    - prefix：前缀匹配，以 ':*' 结尾（如 'git commit:*'），要求完整词边界
+    - wildcard：通配符匹配，含 '*' 或 '?'（如 'npm *'），走 fnmatch
+
     Attributes:
         tool: 工具名，如 "shell"。配置中的 "*" 通配符在加载时已展开为具体工具名。
-        specifier: fnmatch 匹配模式。"*" 表示匹配该工具的所有调用。
+        specifier: 匹配模式字符串。"*" 表示匹配该工具的所有调用。
         permission: "allow"、"deny" 或 "ask"。
     """
     tool: str
     specifier: str
     permission: Literal["allow", "deny", "ask"]
 
+    @property
+    def rule_type(self) -> Literal["exact", "prefix", "wildcard"]:
+        """返回规则的匹配类型。
+
+        Returns:
+            'prefix'（以 ':*' 结尾）、'wildcard'（含 '*'/'?'）、'exact'（精确匹配）。
+        """
+        if self.specifier == "*":
+            return "wildcard"
+        if self.specifier.endswith(":*"):
+            return "prefix"
+        if "*" in self.specifier or "?" in self.specifier:
+            return "wildcard"
+        return "exact"
+
+    @property
+    def prefix_value(self) -> str | None:
+        """提取前缀规则中 ':*' 之前的前缀值。
+
+        Returns:
+            前缀字符串（如 'git commit:*' → 'git commit'），非前缀规则返回 None。
+        """
+        if self.specifier.endswith(":*"):
+            return self.specifier[:-2]
+        return None
+
     def matches_specifier(self, specifier_value: str) -> bool:
         """判断规则的 specifier 是否匹配给定值。
+
+        按 rule_type 分派匹配策略：
+        - prefix：前缀后须跟空格或到末尾（词边界）
+        - wildcard：fnmatch 通配符匹配
+        - exact：精确相等
 
         Args:
             specifier_value: 从 tool_input 中提取的匹配值，无值时传空字符串。
@@ -169,7 +208,15 @@ class PermissionRule:
         Returns:
             是否匹配。
         """
-        return fnmatch(specifier_value, self.specifier)
+        if self.specifier == "*":
+            return True
+        rt = self.rule_type
+        if rt == "prefix":
+            prefix = self.prefix_value
+            return specifier_value == prefix or specifier_value.startswith(prefix + " ")
+        if rt == "wildcard":
+            return fnmatch(specifier_value, self.specifier)
+        return specifier_value == self.specifier
 
     def __str__(self) -> str:
         """返回规则文本表示，如 'shell(npm *)'。"""
@@ -270,13 +317,15 @@ class PermissionManager:
 
     @staticmethod
     def _add_rule(rules: RulesDict, rule: PermissionRule) -> None:
-        """将规则添加到按工具名索引的规则字典中。
+        """将规则添加到按工具名索引的规则字典中（自动去重）。
 
         Args:
             rules: 目标规则字典。
             rule: 要添加的权限规则。
         """
-        rules.setdefault(rule.tool, []).append(rule)
+        existing = rules.setdefault(rule.tool, [])
+        if not any(r.tool == rule.tool and r.specifier == rule.specifier for r in existing):
+            existing.append(rule)
 
     @staticmethod
     def _parse_rules(
@@ -367,9 +416,17 @@ class PermissionManager:
 
         评估顺序：
         1. deny 规则 → deny
-        2. ask 规则 → ask
-        3. check_permissions（工具自身安全逻辑）→ deny/ask/allow/passthrough
+        2. ask 规则 → ask（bypass-immune，任何模式都不跳过）
+        3. check_permissions（工具自身安全逻辑）：
+           - deny → deny
+           - ask + bypass_immune → ask（dontAsk 模式转 deny）
+           - ask + 非 bypass_immune → 记录后穿透到 Step 4
+           - allow → allow
         4. allow 规则（含 session_allow）→ allow
+        4.5. 处理 Step 3 记录的非 bypass_immune ask：
+             - BYPASS/AUTO → 穿透到 Step 5/6
+             - DONT_ASK → deny（从不弹窗）
+             - 其他模式 → ask
         5. bypass 模式 → auto_allow
         6. 模式默认策略（按 kind 判断）
 
@@ -393,25 +450,55 @@ class PermissionManager:
                 return "ask", f"被 ask 规则要求确认：{rule}"
 
         # Step 3: check_permissions（工具自身安全逻辑）
+        tool_ask_reason: str | None = None
         check_fn = self._check_permissions_fns.get(tool_name)
         if check_fn is not None:
-            ctx = PermissionContext(mode=self.mode, workdir=self._workdir, tool_name=tool_name, trusted_dirs=self._trusted_dirs)
+            ctx = PermissionContext(mode=self.mode, workdir=self._workdir, tool_name=tool_name, trusted_dirs=self._trusted_dirs, specifier_arg=self._specifier_args.get(tool_name))
             result = check_fn(tool_input, ctx)
             if result.decision == "deny":
                 return "deny", result.reason or f"被内置安全检测阻止：{tool_name}"
             if result.decision == "ask":
-                if result.bypass_immune or self.mode is not BYPASS_MODE:
+                if result.bypass_immune:
+                    # dontAsk 模式从不弹窗，bypass_immune 的 ask 直接转 deny
+                    if self.mode is DONT_ASK_MODE:
+                        return "deny", f"dontAsk 模式拒绝（需安全确认）：{result.reason}"
                     return "ask", result.reason or f"需要用户确认：{tool_name}"
+                # 非 bypass_immune：记录原因，穿透到 allow 规则（Step 4）
+                tool_ask_reason = result.reason or f"需要用户确认：{tool_name}"
             if result.decision == "allow":
                 return "allow", result.reason or f"工具级检查放行：{tool_name}"
 
-        # Step 4: allow 规则（含 session_allow）
+        # Step 4: allow 规则（含 session_allow）— 含复合命令防护和包装剥离
+        specifier_candidates = [specifier_value]
+        if tool_name == "shell" and specifier_value:
+            from src.tools.builtin.shell import strip_safe_wrappers_for_matching
+            stripped = strip_safe_wrappers_for_matching(specifier_value)
+            if stripped != specifier_value:
+                specifier_candidates.append(stripped)
+
         for rule in chain(
             self._get_rules(self.allow_rules, tool_name),
             self._get_rules(self.session_allow, tool_name),
         ):
-            if rule.matches_specifier(specifier_value):
-                return "allow", f"匹配 allow 规则：{rule}"
+            for candidate in specifier_candidates:
+                # 复合命令防护：前缀/通配符 allow 规则不匹配复合命令
+                if (
+                    tool_name == "shell"
+                    and rule.rule_type in ("prefix", "wildcard")
+                    and rule.specifier != "*"
+                    and self._is_compound_command(candidate)
+                ):
+                    continue
+                if rule.matches_specifier(candidate):
+                    return "allow", f"匹配 allow 规则：{rule}"
+
+        # Step 4.5: 处理 Step 3 中记录的非 bypass_immune 的 tool ask
+        # 仅 BYPASS 模式跳过（AUTO 不跳过，AUTO 更保守——不确定的操作仍需确认）
+        if tool_ask_reason is not None:
+            if self.mode is DONT_ASK_MODE:
+                return "deny", f"dontAsk 模式拒绝：{tool_ask_reason}"
+            if self.mode is not BYPASS_MODE:
+                return "ask", tool_ask_reason
 
         # Step 5: bypass 模式
         if self.mode is BYPASS_MODE:
@@ -419,6 +506,19 @@ class PermissionManager:
 
         # Step 6: 模式默认策略
         return self._mode_default(tool_name)
+
+    @staticmethod
+    def _is_compound_command(command: str) -> bool:
+        """检查 shell 命令是否为复合命令，用于复合命令安全防护。
+
+        Args:
+            command: shell 命令字符串。
+
+        Returns:
+            True 表示命令含分隔符（;、&&、||、| 等），是复合命令。
+        """
+        from src.tools.builtin.shell import is_compound_command
+        return is_compound_command(command)
 
     def _extract_specifier(self, tool_name: str, tool_input: dict[str, Any]) -> str:
         """根据 specifier_arg 从 tool_input 中提取 specifier 值。
@@ -447,8 +547,11 @@ class PermissionManager:
         """
         kind = self._tool_kinds.get(tool_name)
 
+        # AUTO：只读和文件编辑放行，其余询问（与 BYPASS 区分；安全 shell 命令由 check_shell_permissions 放行）
         if self.mode is AUTO_MODE:
-            return "auto_allow", f"auto 模式自动放行：{tool_name}"
+            if kind in ("readonly", "edit"):
+                return "auto_allow", f"auto 模式放行：{tool_name}"
+            return "ask", f"{tool_name} 需要用户确认"
 
         if self.mode is DONT_ASK_MODE:
             if kind == "readonly":
@@ -486,9 +589,15 @@ class PermissionManager:
             return "deny", f"权限需要用户确认，但缺少 event_bus：{tool_name}"
 
         detail = format_tool_tips(self._tool_tips.get(tool_name), tool_input, tool_name)
+
+        # 计算建议规则，供 UI 展示给用户
+        suggested_rule = self._build_session_rule(tool_name, tool_input)
+        suggested_rules = [str(suggested_rule)] if suggested_rule.specifier != "*" else []
+
         answer = await deps.event_bus.request_permission(
             tool_name=tool_name,
             detail=detail,
+            suggested_rules=suggested_rules,
         )
         normalized = answer.strip().lower()
         if normalized == "session":
@@ -509,11 +618,10 @@ class PermissionManager:
         tool_name: str,
         tool_input: dict[str, Any],
     ) -> PermissionRule:
-        """根据工具调用构建 session allow 规则。
+        """根据工具调用构建智能 session allow 规则。
 
-        使用工具声明的 specifier_arg 提取具体参数值作为 specifier，
-        使 "always allow" 仅允许该特定值，而非该工具的所有调用。
-        无 specifier_arg 时 specifier 为 "*"（匹配所有调用）。
+        Shell 工具优先生成前缀规则（如 'git commit:*'），减少后续同类命令的 ask 弹窗。
+        其他工具保持精确匹配。
 
         Args:
             tool_name: 工具名。
@@ -523,7 +631,19 @@ class PermissionManager:
             构建的 PermissionRule。
         """
         value = self._extract_specifier(tool_name, tool_input)
-        return PermissionRule(tool=tool_name, specifier=value or "*", permission="allow")
+        if not value:
+            return PermissionRule(tool=tool_name, specifier="*", permission="allow")
+
+        if tool_name == "shell":
+            from src.tools.builtin.shell import get_simple_command_prefix, get_first_word_prefix
+            prefix = get_simple_command_prefix(value)
+            if prefix:
+                return PermissionRule(tool=tool_name, specifier=f"{prefix}:*", permission="allow")
+            first_word = get_first_word_prefix(value)
+            if first_word:
+                return PermissionRule(tool=tool_name, specifier=f"{first_word}:*", permission="allow")
+
+        return PermissionRule(tool=tool_name, specifier=value, permission="allow")
 
     def _persist_allow_rule(self, rule: PermissionRule) -> None:
         """将 allow 规则持久化到 settings.json。

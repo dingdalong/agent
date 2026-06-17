@@ -149,6 +149,7 @@ class PermissionRequested(UserInputRequest):
     """请求 UI 读取工具权限确认，并通过 future 返回结果。"""
     tool_name: str = ""
     detail: str = ""
+    suggested_rules: list[str] = field(default_factory=list)
     level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
     type: Literal["permission_requested"] = field(default="permission_requested", init=False)
 

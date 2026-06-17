@@ -172,8 +172,8 @@ class CLIInterface(UserInterface):
             "Shift+Enter/Ctrl+J 换行 · Ctrl+C 清空/退出"
         )
 
-    async def _read_permission(self, tool_name: str, detail: str) -> str:
-        return await self._prompt_permission(tool_name, detail)
+    async def _read_permission(self, tool_name: str, detail: str, suggested_rules: list[str] | None = None) -> str:
+        return await self._prompt_permission(tool_name, detail, suggested_rules)
 
     async def _write(self, message: str) -> None:
         self._print(message, end="")
@@ -184,13 +184,19 @@ class CLIInterface(UserInterface):
     async def _write_thinking_prefix(self, event: ThinkingDelta) -> None:
         await self._write(f"\n{self._thinking_prefix(event)}")
 
-    async def _prompt_permission(self, tool_name: str, detail: str) -> str:
+    async def _prompt_permission(self, tool_name: str, detail: str, suggested_rules: list[str] | None = None) -> str:
+        suggestion_line = ""
+        if suggested_rules:
+            suggestion_line = f"  建议规则: {self._escape_html(suggested_rules[0])}\n"
+        session_label = "会话允许(上述规则)" if suggested_rules else "本次会话始终允许"
+        always_label = "始终允许并保存(上述规则)" if suggested_rules else "始终允许并保存"
         self._print(HTML(
             "\n<agent.permission>工具请求权限</agent.permission>\n"
             f"  工具: {self._escape_html(tool_name)}\n"
             f"  内容: {self._escape_html(detail)}\n"
+            f"{suggestion_line}"
             "  输入 y/s/a/n 后按 Enter 确认\n"
-            "  [y] 允许一次   [s] 本次会话始终允许   [a] 始终允许并保存   [n] 拒绝\n"
+            f"  [y] 允许一次   [s] {session_label}   [a] {always_label}   [n] 拒绝\n"
         ))
         session: PromptSession[str] = PromptSession(
             key_bindings=self._build_permission_key_bindings(),

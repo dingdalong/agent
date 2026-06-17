@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from pathlib import Path, PurePosixPath
 import shlex
 from typing import Any
@@ -18,8 +19,44 @@ class Shell(BaseModel):
 SHELL_SEPARATORS = {";", "&&", "||", "|", "&", "(", ")", "{", "}", "\n"}
 SHELL_WRAPPERS = {"command", "builtin", "exec", "nohup", "nice"}
 SHELL_PRIVILEGE_COMMANDS = {"sudo", "su", "doas"}
+
+# 安全环境变量白名单 — 在前缀提取和规则匹配前可安全跳过的环境变量
+SAFE_ENV_VARS: frozenset[str] = frozenset({
+    "NODE_ENV", "NODE_OPTIONS", "NODE_PATH",
+    "RUST_BACKTRACE", "RUST_LOG", "RUSTFLAGS",
+    "PYTHONUNBUFFERED", "PYTHONDONTWRITEBYTECODE", "PYTHONPATH", "PYTHONHASHSEED",
+    "VIRTUAL_ENV", "UV_PYTHON",
+    "GO111MODULE", "CGO_ENABLED", "GOOS", "GOARCH", "GOPATH", "GOFLAGS",
+    "LANG", "LC_ALL", "LC_CTYPE", "LANGUAGE",
+    "TERM", "COLORTERM", "CLICOLOR", "CLICOLOR_FORCE",
+    "NO_COLOR", "FORCE_COLOR",
+    "TZ", "HOME", "USER", "SHELL", "PATH",
+    "CI", "GITHUB_ACTIONS", "GITLAB_CI",
+    "DEBUG", "VERBOSE", "LOG_LEVEL",
+    "EDITOR", "VISUAL", "PAGER",
+    "CC", "CXX", "CFLAGS", "CXXFLAGS", "LDFLAGS",
+    "JAVA_HOME", "JAVA_OPTS", "MAVEN_OPTS",
+    "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR",
+})
+
+# 禁止作为前缀规则的危险命令 — 这些命令后跟任意子命令都有安全风险
+DANGEROUS_BARE_PREFIXES: frozenset[str] = frozenset({
+    "sh", "bash", "zsh", "fish", "csh", "dash",
+    "env", "xargs", "nice", "nohup", "timeout", "time",
+    "sudo", "su", "doas",
+    "eval", "exec",
+    "python", "python3", "node", "ruby", "perl",
+})
+
+_ENV_VAR_PATTERN = re.compile(r"^[A-Za-z_]\w*=")
+_SUBCOMMAND_PATTERN = re.compile(r"^[a-z][a-z0-9]*(-[a-z0-9]+)*$")
 SHELL_SCRIPT_INTERPRETERS = {"sh", "bash", "zsh", "fish", "dash"}
 SHELL_DISK_ERASE_COMMANDS = {"diskutil"}
+
+# acceptEdits/auto 模式下自动放行的文件系统操作命令（对齐 Claude Code v2.1.173）
+ACCEPT_EDITS_COMMANDS: frozenset[str] = frozenset({
+    "mkdir", "touch", "rm", "rmdir", "mv", "cp", "sed",
+})
 
 # 无条件只读命令 — 无论参数如何都不会修改文件系统或外部状态
 READONLY_COMMANDS: frozenset[str] = frozenset({
@@ -66,7 +103,135 @@ GIT_READONLY_SUBCOMMANDS: frozenset[str] = frozenset({
 })
 
 
+def get_simple_command_prefix(command: str) -> str | None:
+    """提取 shell 命令的双词前缀，用于生成前缀规则（如 'git commit'）。
+
+    跳过安全环境变量赋值，要求第二个 token 是小写子命令，过滤危险前缀。
+    复合命令直接返回 None（前缀规则不适用于复合命令）。
+
+    Args:
+        command: 完整 shell 命令字符串。
+
+    Returns:
+        双词前缀（如 'git commit'），不满足条件时返回 None。
+    """
+    if is_compound_command(command):
+        return None
+    tokens = command.strip().split()
+    if not tokens:
+        return None
+    i = 0
+    while i < len(tokens) and _ENV_VAR_PATTERN.match(tokens[i]):
+        var_name = tokens[i].split("=", 1)[0]
+        if var_name not in SAFE_ENV_VARS:
+            return None
+        i += 1
+    remaining = tokens[i:]
+    if len(remaining) < 2:
+        return None
+    cmd = remaining[0]
+    subcmd = remaining[1]
+    if not _SUBCOMMAND_PATTERN.match(subcmd):
+        return None
+    if cmd in DANGEROUS_BARE_PREFIXES:
+        return None
+    return f"{cmd} {subcmd}"
+
+
+def get_first_word_prefix(command: str) -> str | None:
+    """提取 shell 命令的第一个命令词，作为双词前缀的兜底（如 'pytest'）。
+
+    跳过安全环境变量赋值，过滤危险前缀。
+    复合命令直接返回 None（前缀规则不适用于复合命令）。
+
+    Args:
+        command: 完整 shell 命令字符串。
+
+    Returns:
+        命令词（如 'pytest'），不满足条件时返回 None。
+    """
+    if is_compound_command(command):
+        return None
+    tokens = command.strip().split()
+    if not tokens:
+        return None
+    i = 0
+    while i < len(tokens) and _ENV_VAR_PATTERN.match(tokens[i]):
+        var_name = tokens[i].split("=", 1)[0]
+        if var_name not in SAFE_ENV_VARS:
+            return None
+        i += 1
+    if i >= len(tokens):
+        return None
+    cmd = tokens[i]
+    if not _SUBCOMMAND_PATTERN.match(cmd):
+        return None
+    if cmd in DANGEROUS_BARE_PREFIXES:
+        return None
+    return cmd
+
+
+def strip_safe_wrappers_for_matching(command: str) -> str:
+    """在匹配 allow 规则前剥离安全包装命令和环境变量。
+
+    两阶段固定点循环：
+    - 阶段 1：剥离安全环境变量赋值（仅白名单内的变量）
+    - 阶段 2：剥离安全包装命令（timeout/time/nice/nohup），不再剥离环境变量
+
+    使 'timeout 10 NODE_ENV=prod npm install foo' 能匹配 'shell(npm install:*)' 规则。
+
+    Args:
+        command: 完整 shell 命令字符串。
+
+    Returns:
+        剥离后的命令字符串。
+    """
+    stripped = command.strip()
+    # 阶段 1：剥离安全环境变量
+    prev = ""
+    while stripped != prev:
+        prev = stripped
+        parts = stripped.split(None, 1)
+        if parts and _ENV_VAR_PATTERN.match(parts[0]):
+            var_name = parts[0].split("=", 1)[0]
+            if var_name in SAFE_ENV_VARS:
+                stripped = parts[1] if len(parts) > 1 else ""
+                continue
+            break
+    # 阶段 2：剥离安全包装命令
+    prev = ""
+    while stripped != prev:
+        prev = stripped
+        try:
+            segment = _shell_tokens(stripped)
+        except ValueError:
+            break
+        new_segment = _strip_shell_wrappers(segment)
+        if new_segment != segment:
+            stripped = " ".join(new_segment)
+    return stripped.strip()
+
+
+def is_compound_command(command: str) -> bool:
+    """检查 shell 命令是否为复合命令（含 ;、&&、||、| 等分隔符）。
+
+    复合命令中的前缀/通配符 allow 规则不应匹配，防止安全绕过。
+
+    Args:
+        command: 完整 shell 命令字符串。
+
+    Returns:
+        True 表示命令包含分隔符，是复合命令。
+    """
+    try:
+        tokens = _shell_tokens(command)
+        return any(t in SHELL_SEPARATORS for t in tokens)
+    except ValueError:
+        return True
+
+
 def _shell_tokens(command: str) -> list[str]:
+    """将 shell 命令字符串分词为 token 列表。"""
     lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
     return list(lexer)
@@ -186,12 +351,23 @@ def _is_dangerous_find(segment: list[str]) -> bool:
 
 
 def _is_dangerous_git(segment: list[str]) -> bool:
+    """检测危险的 git 操作。
+
+    git clean 带 -f（force）即为不可逆的删除操作，包括 -f、-fd、-fx 等变体。
+    带 -n/--dry-run 时为安全的预览模式，不拦截。
+
+    Args:
+        segment: 以 git 开头的 token 列表。
+
+    Returns:
+        True 表示命令危险，应拒绝执行。
+    """
     if len(segment) < 3 or _command_name(segment[0]) != "git" or segment[1] != "clean":
         return False
     options = [token for token in segment[2:] if token.startswith("-")]
-    if any(token in {"--dry-run", "-n"} or token.startswith("-") and "n" in token for token in options):
+    if any(token in {"--dry-run", "-n"} or (token.startswith("-") and not token.startswith("--") and "n" in token) for token in options):
         return False
-    return any(token.startswith("-") and "f" in token and "d" in token for token in options)
+    return any(token == "--force" or (token.startswith("-") and not token.startswith("--") and "f" in token) for token in options)
 
 
 def _shell_c_command(segment: list[str]) -> str | None:
@@ -355,6 +531,23 @@ def _is_readonly_git(segment: list[str]) -> bool:
     elif subcmd == "config":
         CONFIG_READ_FLAGS = {"--get", "--get-all", "--list", "-l", "--get-regexp"}
         if not any(t in CONFIG_READ_FLAGS for t in rest):
+            return False
+
+    elif subcmd == "worktree":
+        # git worktree list 只读，add/remove/prune/move/repair 等非只读
+        worktree_sub = rest[0] if rest else None
+        if worktree_sub not in {"list", None}:
+            return False
+
+    elif subcmd == "remote":
+        # git remote / git remote -v / git remote show 只读，add/remove/rename/set-url 等非只读
+        REMOTE_READ_SUBS = {"show", "get-url"}
+        remote_sub = None
+        for t in rest:
+            if not t.startswith("-"):
+                remote_sub = t
+                break
+        if remote_sub is not None and remote_sub not in REMOTE_READ_SUBS:
             return False
 
     return True
@@ -571,8 +764,12 @@ def _extract_path_candidates(segment: list[str]) -> list[str]:
             candidates.append(token)
             i += 1
             continue
-        # 跳过标志参数
+        # 标志参数：--key=value 格式提取 value 部分作为路径候选
         if token.startswith("-"):
+            if "=" in token:
+                value = token.split("=", 1)[1]
+                if value and not value.isdigit():
+                    candidates.append(value)
             i += 1
             continue
         # 跳过纯数字、环境变量赋值、URL
@@ -630,10 +827,47 @@ def _check_sensitive_paths(command: str, workdir: str, extra_trusted: tuple[str,
     return None
 
 
-def check_shell_permissions(values: dict[str, Any], ctx: PermissionContext) -> PermissionCheckResult:
-    """shell 安全检查：检测危险命令阻止执行，识别只读命令自动放行。
+def _is_accept_edits_command(command: str) -> bool:
+    """检查命令是否为 acceptEdits/auto 模式可自动放行的文件系统操作。
 
-    评估顺序：危险 → deny，只读 → allow，其余 → passthrough（由后续流程决定）。
+    每个命令段的基础命令名必须在 ACCEPT_EDITS_COMMANDS 白名单中，
+    且不能包含递归 rm（rm -r/rm -R）。复合命令中任一段不满足则返回 False。
+
+    Args:
+        command: 完整 shell 命令字符串。
+
+    Returns:
+        True 表示所有命令段均为安全文件系统操作。
+    """
+    if "`" in command:
+        return False
+    try:
+        segments: list[list[str]] = []
+        for part in _split_unquoted_newlines(command):
+            segments.extend(_shell_segments(_shell_tokens(part)))
+    except ValueError:
+        return False
+    has_real_segment = False
+    for segment in segments:
+        if segment == ["|"]:
+            continue
+        stripped = _strip_shell_wrappers(segment)
+        if not stripped:
+            continue
+        has_real_segment = True
+        cmd = _command_name(stripped[0])
+        if cmd not in ACCEPT_EDITS_COMMANDS:
+            return False
+        # rm 必须非递归
+        if cmd == "rm" and _is_recursive_rm(stripped):
+            return False
+    return has_real_segment
+
+
+def check_shell_permissions(values: dict[str, Any], ctx: PermissionContext) -> PermissionCheckResult:
+    """shell 安全检查：检测危险命令阻止执行，识别只读命令自动放行，acceptEdits/auto 模式下放行安全文件操作。
+
+    评估顺序：危险 → deny，敏感路径 → ask，acceptEdits/auto 文件操作 → allow，只读 → allow，其余 → passthrough。
 
     Args:
         values: 工具调用参数，需包含 "command" 字段。
@@ -642,6 +876,8 @@ def check_shell_permissions(values: dict[str, Any], ctx: PermissionContext) -> P
     Returns:
         PermissionCheckResult 权限检查结果。
     """
+    from src.mgr.permission_mgr import ACCEPT_EDITS_MODE, AUTO_MODE
+
     command = values.get("command")
     if not isinstance(command, str):
         return PermissionCheckResult("passthrough")
@@ -650,6 +886,9 @@ def check_shell_permissions(values: dict[str, Any], ctx: PermissionContext) -> P
     sensitive = _check_sensitive_paths(command, ctx.workdir, ctx.trusted_dirs)
     if sensitive is not None:
         return PermissionCheckResult("ask", f"命令涉及敏感路径需确认：{sensitive}", bypass_immune=True)
+    # acceptEdits/auto 模式：安全文件操作命令自动放行（对齐 CC v2.1.173 的 checkPermissionMode）
+    if ctx.mode in (ACCEPT_EDITS_MODE, AUTO_MODE) and _is_accept_edits_command(command):
+        return PermissionCheckResult("allow", f"{ctx.mode.value} 模式放行文件操作：{command[:80]}")
     if _is_readonly_command(command):
         return PermissionCheckResult("allow", f"只读命令自动放行：{command[:80]}")
     return PermissionCheckResult("passthrough")
