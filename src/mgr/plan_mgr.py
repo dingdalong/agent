@@ -187,7 +187,7 @@ class PlanMgr:
         if self._full_instructions_sent:
             return (
                 "当前处于计划模式。仅允许只读操作和 plan 文件工具。"
-                "按照已加载的计划工作流技能执行。如果尚未加载，调用 load_skill('builtin:plan-workflow')。"
+                "按照已加载的计划工作流执行。如果尚未加载，调用 load_skill('builtin:plan-workflow')。"
                 "每轮回复只能以 ask_user（澄清）或 exit_plan_mode（提交审核）结束。"
             )
 
@@ -200,9 +200,7 @@ class PlanMgr:
             "- 禁止执行会修改系统状态的 shell 命令\n"
             "- 允许使用只读工具（读取文件、搜索、浏览等）进行探索\n\n"
             "## 下一步\n"
-            "调用 load_skill('builtin:plan-workflow') 加载默认计划工作流，除非用户指定加载其他计划类工作流技能。\n"
-            "加载技能后严格按照其指令执行。\n"
-            "注意：同时只加载一种影响计划工作流的技能。\n"
+            "调用 load_skill('builtin:plan-workflow') 加载计划工作流，然后严格按照其指令执行。\n"
         )
 
         if self._has_exited_plan:
