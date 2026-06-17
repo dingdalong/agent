@@ -138,12 +138,20 @@ async def exit_plan_mode(file_path: str, agent: Agent, deps: AgentDeps) -> str:
         plan_mgr.exit_mode(permission_mgr, reminder_mgr)
         permission_mgr.set_mode(AUTO_MODE)
         agent.refresh_tools_schemas()
-        return f"用户选择自动执行。已切换到 acceptEdits 模式。计划路径：{file_path}"
+        return (
+            f"用户已批准计划，选择自动执行。已切换到 auto 模式。\n\n"
+            f"计划文件路径：{file_path}\n\n"
+            f"## 已批准的计划：\n{plan_content}"
+        )
 
     if choice == "2":
         plan_mgr.exit_mode(permission_mgr, reminder_mgr)
         agent.refresh_tools_schemas()
-        return f"用户选择手动执行。已恢复到 {permission_mgr.mode.value} 模式。计划路径：{file_path}"
+        return (
+            f"用户已批准计划，选择手动执行。已恢复到 {permission_mgr.mode.value} 模式。\n\n"
+            f"计划文件路径：{file_path}\n\n"
+            f"## 已批准的计划：\n{plan_content}"
+        )
 
     return f"用户对计划的修改意见：{choice}\n请根据以上意见与用户进一步沟通需求。"
 

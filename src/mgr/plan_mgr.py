@@ -53,6 +53,8 @@ class PlanMgr:
         _full_instructions_sent: 是否已发送过完整指令。
         _pending_injection: 轮中进入 plan 模式后置 True，下次 pop_post_round_reminder() 消费。
         _rounds_since_injection: 距离上次指令注入的工具执行轮数。
+        _need_exit_reminder: 退出 plan 模式后置 True，下次 turn start 输出一次性退出提醒后清除。
+        _has_exited_plan: 本会话中是否曾退出过 plan 模式。用于重新进入时判断是否需要 re-entry 提醒。
     """
 
     workdir: Path
@@ -60,6 +62,8 @@ class PlanMgr:
     _full_instructions_sent: bool = field(init=False, default=False)
     _pending_injection: bool = field(init=False, default=False)
     _rounds_since_injection: int = field(init=False, default=0)
+    _need_exit_reminder: bool = field(init=False, default=False)
+    _has_exited_plan: bool = field(init=False, default=False)
 
     def __post_init__(self) -> None:
         self._plan_dir = self.workdir / ".agent" / "plans"
@@ -70,6 +74,7 @@ class PlanMgr:
         """进入计划模式的统一入口。切换权限模式、重置注入状态并注册提醒。
 
         三条入口（enter_plan_mode 工具、/plan 命令、/mode 命令）均应调用此方法。
+        如果本会话中曾退出过 plan 模式，首次指令会追加 re-entry 提醒。
 
         Args:
             permission_mgr: 权限管理器，用于切换模式。
@@ -87,18 +92,21 @@ class PlanMgr:
         self._full_instructions_sent = False
         self._pending_injection = True
         self._rounds_since_injection = 0
+        self._need_exit_reminder = False
 
+        self._reminder_mgr = reminder_mgr
         reminder_mgr.register(self)
         return True
 
     def exit_mode(self, permission_mgr: PermissionManager, reminder_mgr: ReminderMgr) -> bool:
-        """退出计划模式的统一出口。恢复权限模式、重置注入状态并注销提醒。
+        """退出计划模式的统一出口。恢复权限模式、重置注入状态、设置退出提醒标志。
 
-        所有退出 plan 模式的路径（exit_plan_mode 工具、/mode 命令）均应调用此方法。
+        不立即注销 reminder_mgr，保留一轮用于输出退出提醒，
+        在下次 get_turn_start_reminder() 中输出后自动注销。
 
         Args:
             permission_mgr: 权限管理器，用于恢复进入前的模式。
-            reminder_mgr: 提醒管理器，用于注销 plan 提醒源。
+            reminder_mgr: 提醒管理器，退出提醒输出后才注销。
 
         Returns:
             是否成功退出（不在 plan 模式时返回 False）。
@@ -111,8 +119,9 @@ class PlanMgr:
         self._full_instructions_sent = False
         self._pending_injection = False
         self._rounds_since_injection = 0
-
-        reminder_mgr.unregister(self)
+        self._need_exit_reminder = True
+        self._has_exited_plan = True
+        self._reminder_mgr = reminder_mgr
         return True
 
     # ── 计划文件路径 ──────────────────────────────────────────────────
@@ -170,20 +179,20 @@ class PlanMgr:
         """生成 plan 模式指令文本（完整或简短）。
 
         首次调用返回完整指令（含基础限制和技能加载指令），后续调用返回简短提醒。
-        具体计划工作流由 builtin:plan-workflow 技能提供，不在此处硬编码。
+        如果是重新进入 plan 模式（_has_exited_plan 为 True），在完整指令末尾追加 re-entry 提醒。
 
         Returns:
             plan 模式指令字符串。
         """
         if self._full_instructions_sent:
             return (
-                "# 计划模式\n"
-                "当前处于计划模式。仅允许只读操作和 plan 文件工具。\n"
+                "当前处于计划模式。仅允许只读操作和 plan 文件工具。"
                 "按照已加载的计划工作流技能执行。如果尚未加载，调用 load_skill('builtin:plan-workflow')。"
+                "每轮回复只能以 ask_user（澄清）或 exit_plan_mode（提交审核）结束。"
             )
 
         self._full_instructions_sent = True
-        return (
+        text = (
             "# 计划模式\n"
             "当前处于计划模式。此指令覆盖其他指令中与之冲突的部分。\n\n"
             "## 限制\n"
@@ -196,19 +205,50 @@ class PlanMgr:
             "注意：同时只加载一种影响计划工作流的技能。\n"
         )
 
-    def get_turn_start_reminder(self, permission_mgr: PermissionManager | None) -> str:
-        """在 agent.run() 开始时由 ReminderMgr 调用，返回 prepend 到用户输入的 plan 指令。
+        if self._has_exited_plan:
+            plan_dir = str(self._plan_dir)
+            text += (
+                "\n## 重新进入计划模式\n"
+                f"你正在重新进入计划模式。计划目录（{plan_dir}）中可能存在之前的计划文件。\n"
+                "在开始新的规划前：\n"
+                "1. 检查计划目录中是否有现有计划文件\n"
+                "2. 判断用户当前请求是否与现有计划相关\n"
+                "3. 如果是不同任务，直接覆盖；如果是同一任务的延续，在现有计划基础上修改\n"
+            )
 
-        非 plan 模式或 permission_mgr 为 None 时返回空串。调用后重置轮次计数。
+        return text
+
+    def get_turn_start_reminder(self, permission_mgr: PermissionManager | None) -> str:
+        """在 agent.run() 开始时由 ReminderMgr 调用，返回 prepend 到用户输入的提醒。
+
+        处理两种场景：
+        1. 在 plan 模式中：返回 plan 指令（完整或精简）。
+        2. 刚退出 plan 模式：返回一次性退出提醒，然后注销自身。
 
         Args:
             permission_mgr: 权限管理器，用于判断当前模式。可为 None。
 
         Returns:
-            plan 模式指令字符串，非 plan 模式返回空串。
+            提醒字符串，无需注入时返回空串。
         """
-        if permission_mgr is None or not self._is_plan_mode(permission_mgr):
+        if permission_mgr is None:
             return ""
+
+        # 退出 plan 模式后的一次性提醒
+        if self._need_exit_reminder and not self._is_plan_mode(permission_mgr):
+            self._need_exit_reminder = False
+            reminder_mgr = getattr(self, "_reminder_mgr", None)
+            if reminder_mgr is not None:
+                reminder_mgr.unregister(self)
+            plan_dir = str(self._plan_dir)
+            return (
+                "## 已退出计划模式\n"
+                f"你现在可以编辑文件、运行工具和执行操作。计划目录：{plan_dir}"
+            )
+
+        if not self._is_plan_mode(permission_mgr):
+            return ""
+
         self._rounds_since_injection = 0
         self._pending_injection = False
         return self._generate_instructions()
@@ -254,3 +294,5 @@ class PlanMgr:
         self._full_instructions_sent = False
         self._pending_injection = False
         self._rounds_since_injection = 0
+        self._need_exit_reminder = False
+        self._has_exited_plan = False
