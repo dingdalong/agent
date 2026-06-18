@@ -44,6 +44,9 @@ async def create_app(
     session_mgr = SessionMgr(global_dir=global_dir, workdir=work_dir)
     llm_mgr = LLMMgr(config_mgr=config_mgr, event_bus=event_bus)
     await llm_mgr.load_models()
+    # 启动前置校验：默认模型不可用时抛 ModelUnavailableError，由 main.cli 捕获后
+    # 清晰退出（提示而非深层堆栈）。须在 UI 启动前，避免 Textual 接管终端后输出错乱。
+    llm_mgr.ensure_default_available()
     deps = AgentDeps(
         llm_mgr=llm_mgr,
         ui=ui,

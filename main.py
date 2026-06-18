@@ -2,8 +2,10 @@
 
 import argparse
 import asyncio
+import sys
 
 from app.bootstrap import create_app
+from src.mgr import ModelUnavailableError
 
 
 def parse_args() -> argparse.Namespace:
@@ -41,6 +43,10 @@ def cli() -> None:
         asyncio.run(main(args))
     except KeyboardInterrupt:
         pass
+    except ModelUnavailableError as exc:
+        # 默认模型不可用：打印可操作提示并以非零码退出，不抛堆栈。
+        print(f"\n启动失败：{exc}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

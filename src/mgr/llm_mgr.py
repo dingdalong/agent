@@ -21,6 +21,14 @@ _CLAUDECODE_ALIASES: dict[str, str] = {
 }
 
 
+class ModelUnavailableError(Exception):
+    """默认模型在 load_models() 之后仍不可用。
+
+    用于启动期前置校验：携带面向用户的可操作提示，由入口层（main.cli）捕获后
+    清晰退出，避免在创建 Agent 时抛出深层 ValueError 堆栈。
+    """
+
+
 @dataclass
 class LLMMgr:
     """LLM 管理器 — 根据模型名返回可用的 LLMProvider 实例。"""
@@ -106,6 +114,33 @@ class LLMMgr:
             return min(candidates, key=len)
         logger.warning("未找到匹配模型 %r，使用默认模型", model)
         return default_model
+
+    def ensure_default_available(self) -> None:
+        """校验默认模型已成功加载，否则抛 ModelUnavailableError。
+
+        在 load_models() 之后调用：将默认别名解析为真实模型 ID，若该 ID 没有
+        对应的 provider（说明其所属 provider 未能加载到模型，如认证失败/服务
+        不可达，或 config 中 llm.default 配置有误），抛出带可操作提示的异常，
+        由入口层捕获后清晰退出，避免创建 Agent 时抛出深层 ValueError 堆栈。
+
+        Raises:
+            ModelUnavailableError: 默认模型不在已加载的可用模型集合中。
+        """
+        default_model = self.config_mgr.get_config("llm")["default"]
+        resolved = self.resolve_model(None)
+        if resolved in self._model_to_provider:
+            return
+        available = ", ".join(sorted(self._model_to_provider)) or "(无)"
+        resolved_note = "" if resolved == default_model else f"（解析为 {resolved!r}）"
+        raise ModelUnavailableError(
+            f"默认模型 {default_model!r}{resolved_note} 不可用，无法启动。\n"
+            f"当前可用模型：{available}\n"
+            f"请排查：\n"
+            f"  1. 该模型所属 provider 的认证/连通性 —— 检查 .env 中的 "
+            f"*_API_KEY / *_API_URL 是否被正确加载"
+            f"（.env 需位于 ~/.agent/.env、仓库根 .env 或 .agent/.env）。\n"
+            f"  2. src/config.yaml 中 llm.default 是否指向一个可用模型。"
+        )
 
     def get(self, model: str | None = None) -> LLMProvider:
         resolved = self.resolve_model(model)

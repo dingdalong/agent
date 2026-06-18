@@ -103,18 +103,20 @@ class ConfigManager:
         self._user_settings: dict[str, Any] = self.load_user_settings()
 
     def load_config(self) -> dict[str, Any]:
-        """加载三层配置并深度合并，同时加载双层 .env。
+        """加载三层配置并深度合并，同时加载三层 .env。
 
         Returns:
             合并后的配置 dict。
         """
-        # .env 加载：全局 → 项目（后者覆盖前者同名变量）
+        # .env 加载优先级（低→高，override=True 后加载者覆盖同名变量）：
+        # 全局 ~/.agent/.env → 仓库根 {workdir}/.env → 项目 {workdir}/.agent/.env
+        # 仓库根 .env 是最常见的放置位置，纳入加载以避免配置读取不到。
         global_env = self.global_dir / ".env"
+        root_env = self.workdir / ".env"
         project_env = self.project_dir / ".env"
-        if global_env.exists():
-            load_dotenv(global_env, override=True)
-        if project_env.exists():
-            load_dotenv(project_env, override=True)
+        for env_path in (global_env, root_env, project_env):
+            if env_path.exists():
+                load_dotenv(env_path, override=True)
 
         # 三层 config.yaml 深度合并
         builtin_config = _load_yaml(builtin_root() / "config.yaml")
