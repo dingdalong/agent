@@ -44,6 +44,11 @@ REQUEST_INPUT → CHECK_COMPACT → [COMPACT →] LLM_CALL → PROCESS_RESPONSE
 
 **工具注册** — 使用 `@tool` 装饰器（`src/tools/decorator.py`）+ Pydantic 参数模型，自动注册到全局 `_registry`。工具实现在 `src/tools/builtin/`。新增工具时须确认是否需要自动注入给子智能体（见 `subagent_mgr._AUTO_INJECT_TOOLS`）。
 
+**异步/阻塞契约（必须遵守）** — 整个框架跑在单线程 asyncio 事件循环上（UI 状态条按 100ms 重绘、事件分发、Agent 轮次共用同一循环）。事件循环只在 `await` 真异步原语时让出控制权；任何在事件循环上运行的 `async def` 一旦做*同步阻塞*工作（同步网络、文件 I/O、`socket.getaddrinfo`、CPU 密集循环）且不 `await`，就会冻结 UI 并停滞事件分发。因此每个工具 / Manager 方法只能是两类之一：
+  - **真异步**：函数体只 `await` 真正的异步原语（如 `asyncio.create_subprocess_shell` + `await proc.communicate()`、`AsyncAnthropic`/`AsyncOpenAI`、事件总线等待）。保持 `async def`。正例：`shell`（`src/tools/builtin/shell.py`）、hooks（`src/mgr/hooks_mgr.py`）、LLM provider（`src/llm/`）。
+  - **阻塞型**：函数体做同步 I/O / CPU 工作。叶子工具直接声明为普通 `def`——装饰器（`decorator.py:94-97`）会用 `asyncio.to_thread` 自动卸载到线程；若方法必须保留 `async def`（被异步调用方 `await` 的 Manager 方法），则把阻塞段包进 `await asyncio.to_thread(...)`。范例：`web_search`/`web_fetch` 用同步库（`ddgs`/`urllib`），声明为 `def`；`FileMgr`（`src/mgr/file_mgr.py`）各方法为普通 `def`，其工具包装（`file.py`/`plan.py`）也是普通 `def`，由装饰器统一经 `to_thread` 卸载（装饰器是唯一的线程卸载点，无需层层手写 `to_thread`）。
+  - **禁止**：`async def` 里直接跑同步阻塞工作而不 `await`。排查此类问题可用 `python main.py --debug`（启用 asyncio 调试，事件循环被占用超过 0.1s 即打印 `Executing ... took N seconds` 告警）。
+
 **子智能体** — 定义为 `src/agent/agents/*.md`，带 YAML frontmatter 声明 `agent_type`、`tools`、`model`、`memory` 等。主 Agent 通过 `task_delegator` 工具调度子智能体，每个子智能体是共享 `AgentDeps` 的完整 `Agent` 实例。
 
 **技能系统** — 5 层加载 `SKILL.md` 文件，通过 `load_skill` 工具按需注入系统提示词。
@@ -60,7 +65,7 @@ REQUEST_INPUT → CHECK_COMPACT → [COMPACT →] LLM_CALL → PROCESS_RESPONSE
 
 2. **避免过度抽象**：不要为了"统一"而强行拆分或封装函数。例如：若 `on_enter()`、`on_exit()`、`on_fire()` 等函数内部仅仅是调用 `on_event(event_type, xxx)`，则应直接使用 `on_event` 或最多封装一个通用的 `on_event` 函数，而不必保留多个仅转发调用的函数。优先保持代码直观、扁平，减少不必要的间接层。
 
-3. **添加注释**：为每个新增或修改的函数添加注释，注释为精炼的纯文档描述。
+3. **添加注释**：为每个新增或修改的函数添加注释，注释为精炼的纯文档描述，不要写原由。
 
 4. **命名规范**：函数命名必须与其实际用途强相关，做到"见名知义"。
 

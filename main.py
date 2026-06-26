@@ -20,6 +20,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="工作目录，默认为当前目录",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="启用 asyncio 调试模式：事件循环被任一回调占用超过 0.1s 即打印慢回调告警，"
+             "用于排查在 async 中误跑同步阻塞工作的代码。默认关闭。",
+    )
     return parser.parse_args()
 
 
@@ -40,7 +46,8 @@ def cli() -> None:
     """CLI 入口点。"""
     args = parse_args()
     try:
-        asyncio.run(main(args))
+        # debug=True 启用 asyncio 慢回调告警（阈值默认 0.1s），暴露阻塞事件循环的协程。
+        asyncio.run(main(args), debug=args.debug)
     except KeyboardInterrupt:
         pass
     except ModelUnavailableError as exc:

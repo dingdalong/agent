@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -115,7 +116,8 @@ async def exit_plan_mode(file_path: str, agent: Agent, deps: AgentDeps) -> str:
         agent.refresh_tools_schemas()
         return f"计划文件不存在，已退出计划模式，恢复到 {permission_mgr.mode.value} 模式。"
 
-    plan_content = plan_file.read_text(encoding="utf-8")
+    # 阻塞读取卸载到线程，避免占用事件循环（exit_plan_mode 须保持 async，因其还 await 事件总线）。
+    plan_content = await asyncio.to_thread(plan_file.read_text, encoding="utf-8")
     if not plan_content.strip():
         plan_mgr.exit_mode(permission_mgr, reminder_mgr)
         agent.refresh_tools_schemas()
@@ -170,8 +172,10 @@ class PlanWriteFile(BaseModel):
     description="写入计划文件内容（全量覆盖）。根据计划名自动生成文件路径。仅在计划模式下可用。",
     permission=ToolPermission(plan_visible=True, kind="readonly"),
 )
-async def plan_write_file(name: str, content: str, agent: Agent, deps: AgentDeps) -> str:
+def plan_write_file(name: str, content: str, agent: Agent, deps: AgentDeps) -> str:
     """根据计划名生成文件路径并写入内容，同时将计划名同步为会话主题。
+
+    本工具为普通 def（同步文件 I/O），由 @tool 装饰器经 asyncio.to_thread 整体卸载到线程。
 
     Args:
         name: 计划名，由 LLM 根据计划内容命名。
@@ -187,7 +191,7 @@ async def plan_write_file(name: str, content: str, agent: Agent, deps: AgentDeps
         return "错误：计划管理器不可用"
 
     plan_path = plan_mgr.resolve_plan_path(name)
-    result = await agent._file_mgr.write_file(plan_path, content)
+    result = agent._file_mgr.write_file(plan_path, content)
     if deps.session_mgr is not None and deps.session_id:
         deps.session_mgr.save_metadata(deps.session_id, topic=name)
     return f"{result}\n计划文件路径：{plan_path}"
@@ -215,11 +219,13 @@ class PlanEditFile(BaseModel):
     ),
     permission=ToolPermission(plan_visible=True, kind="readonly"),
 )
-async def plan_edit_file(
+def plan_edit_file(
     file_path: str, start_line: int, agent: Agent, deps: AgentDeps,
     new_text: str = "", end_line: int | None = None,
 ) -> str:
     """校验文件在计划目录下后委托 FileMgr 执行行级编辑。
+
+    本工具为普通 def（同步文件 I/O），由 @tool 装饰器经 asyncio.to_thread 整体卸载到线程。
 
     Args:
         file_path: 计划文件的绝对路径。
@@ -239,4 +245,4 @@ async def plan_edit_file(
     if not plan_mgr.is_plan_file(file_path):
         return f"错误：文件不在计划目录下：{file_path}"
 
-    return await agent._file_mgr.edit_file_lines(file_path, start_line, new_text, end_line)
+    return agent._file_mgr.edit_file_lines(file_path, start_line, new_text, end_line)

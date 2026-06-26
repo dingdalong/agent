@@ -16,6 +16,11 @@ class FileMgr:
     workdir: Path
     deps: AgentDeps = field(repr=False)
 
+    # 设计约定：本类所有公开方法均为「阻塞型」——内部做同步文件 I/O（read_text/
+    # write_text/glob/rglob 等），因此一律声明为普通 def。卸载到线程由 @tool 装饰器
+    # （decorator.py）统一处理：调用它们的工具包装也是普通 def，装饰器看到非协程即用
+    # asyncio.to_thread 把整次调用丢进工作线程，事件循环全程不被阻塞。
+
     def safe_path(self, path_str: str) -> Path:
         """将路径字符串解析为绝对 Path。
 
@@ -44,9 +49,19 @@ class FileMgr:
         except ValueError:
             return str(path)
 
-    async def read_file(self, path: str,
-                        start_line: int | None = None,
-                        end_line: int | None = None) -> str:
+    def read_file(self, path: str,
+                  start_line: int | None = None,
+                  end_line: int | None = None) -> str:
+        """读取文件内容并附带行号，可指定行范围。
+
+        Args:
+            path: 文件路径。
+            start_line: 起始行号（从 1 开始）；None 表示从文件开头。
+            end_line: 结束行号（包含该行）；None 表示读到文件末尾。
+
+        Returns:
+            带行号的文件内容文本，或错误描述字符串。
+        """
         try:
             all_lines = self.safe_path(path).read_text().splitlines()
             total = len(all_lines)
@@ -78,10 +93,22 @@ class FileMgr:
             for line_no, line in enumerate(all_lines, first_line_no)
         )
 
-    async def write_file(self, path: str, content: str,
-                         append: bool = False,
-                         chunk_index: int | None = None,
-                         total_chunks: int | None = None) -> str:
+    def write_file(self, path: str, content: str,
+                   append: bool = False,
+                   chunk_index: int | None = None,
+                   total_chunks: int | None = None) -> str:
+        """写入或追加文件内容，支持分块写入。
+
+        Args:
+            path: 文件路径。
+            content: 要写入的内容。
+            append: 是否追加写入。
+            chunk_index: 分块写入时当前分块序号（从 1 开始）；None 表示非分块。
+            total_chunks: 分块写入时总分块数；None 表示非分块。
+
+        Returns:
+            写入结果描述字符串，或错误描述字符串。
+        """
         try:
             file_path = self.safe_path(path)
             file_path.parent.mkdir(parents=True, exist_ok=True)
@@ -112,8 +139,8 @@ class FileMgr:
         except Exception as exc:
             return f"Error: {exc}"
 
-    async def edit_file_lines(self, path: str, start_line: int,
-                              new_text: str = "", end_line: int | None = None) -> str:
+    def edit_file_lines(self, path: str, start_line: int,
+                        new_text: str = "", end_line: int | None = None) -> str:
         """按行号编辑文件：替换、插入或删除。
 
         根据参数组合自动选择操作模式：
@@ -173,7 +200,7 @@ class FileMgr:
         except Exception as exc:
             return f"Error: {exc}"
 
-    async def replace_all_in_file(self, path: str, old_text: str, new_text: str) -> str:
+    def replace_all_in_file(self, path: str, old_text: str, new_text: str) -> str:
         """替换文件中所有匹配的文本。
 
         Args:
@@ -206,7 +233,15 @@ class FileMgr:
             lines[-1] += "\n"
         return lines
 
-    async def get_file_info(self, path: str) -> str:
+    def get_file_info(self, path: str) -> str:
+        """获取文件或目录的元信息。
+
+        Args:
+            path: 文件或目录路径。
+
+        Returns:
+            元信息描述文本，或错误描述字符串。
+        """
         try:
             file_path = self.safe_path(path)
             if not file_path.exists():
@@ -281,7 +316,16 @@ class FileMgr:
 
         return lines, dir_count, file_count
 
-    async def list_directory(self, path: str, max_depth: int = 3) -> str:
+    def list_directory(self, path: str, max_depth: int = 3) -> str:
+        """以树状结构列出目录内容。
+
+        Args:
+            path: 目录路径。
+            max_depth: 递归展开的最大深度。
+
+        Returns:
+            目录树文本，或错误描述字符串。
+        """
         try:
             dir_path = self.safe_path(path)
             if not dir_path.exists():
@@ -300,7 +344,15 @@ class FileMgr:
         except Exception as exc:
             return f"Error: {exc}"
 
-    async def create_directory(self, path: str) -> str:
+    def create_directory(self, path: str) -> str:
+        """创建目录（含父目录）。
+
+        Args:
+            path: 要创建的目录路径。
+
+        Returns:
+            创建结果描述字符串。
+        """
         try:
             dir_path = self.safe_path(path)
             if dir_path.exists():
@@ -310,7 +362,16 @@ class FileMgr:
         except Exception as exc:
             return f"Error: {exc}"
 
-    async def move_file(self, source: str, destination: str) -> str:
+    def move_file(self, source: str, destination: str) -> str:
+        """移动或重命名文件/目录。
+
+        Args:
+            source: 源路径。
+            destination: 目标路径；若为已存在目录，则移动到该目录下。
+
+        Returns:
+            移动结果描述字符串。
+        """
         try:
             src_path = self.safe_path(source)
             dst_path = self.safe_path(destination)
@@ -326,7 +387,16 @@ class FileMgr:
         except Exception as exc:
             return f"Error: {exc}"
 
-    async def find_files(self, pattern: str, path: str = ".") -> str:
+    def find_files(self, pattern: str, path: str = ".") -> str:
+        """按 glob 模式查找文件/目录。
+
+        Args:
+            pattern: glob 模式；不含 "/" 时自动加 **/ 前缀以递归搜索子目录。
+            path: 搜索起始目录。
+
+        Returns:
+            匹配结果文本，或错误描述字符串。
+        """
         try:
             search_root = self.safe_path(path)
             if not search_root.exists():
@@ -357,7 +427,16 @@ class FileMgr:
         except Exception as exc:
             return f"Error: {exc}"
 
-    async def search_files(self, query: str, path: str = ".") -> str:
+    def search_files(self, query: str, path: str = ".") -> str:
+        """在目录下搜索包含 query 的文本行。
+
+        Args:
+            query: 要搜索的文本（不区分大小写，按字面匹配）。
+            path: 搜索起始路径（文件或目录）。
+
+        Returns:
+            分组的匹配结果文本，或错误描述字符串。
+        """
         try:
             if not query:
                 return "Error: query 不能为空"

@@ -26,7 +26,7 @@ class WebSearch(BaseModel):
 
 @tool(model=WebSearch, description="当需要实时信息、最新新闻或未知事实时，使用此工具进行联网搜索。",
       permission=ToolPermission(kind="readonly", specifier_arg="query", tips="搜索：{query}"))
-async def web_search(query: str, max_results: int = 5) -> str:
+def web_search(query: str, max_results: int = 5) -> str:
     try:
         ddgs = DDGS()
         text_results = list(ddgs.text(query, region = "wt-wt", safesearch="strict", timelimit="w", max_results=max_results))
