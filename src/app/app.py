@@ -131,8 +131,6 @@ class AgentApp:
         self.deps.session_context.clear()
         self._install_permission_mode_controller()
         self.deps.permission_mode_controller = self._permission_mode_controller
-        if self._permission_mode_controller is not None:
-            self._permission_mode_controller.notify_state_changed()
         agent = Agent(
             agent_type="总控",
             description="入口",
@@ -140,6 +138,7 @@ class AgentApp:
         )
         if self._permission_mode_controller is not None:
             self._permission_mode_controller.install_shortcut(agent)
+            self._permission_mode_controller.notify_state_changed()
         await self._run_session_start_hooks(source=source)
         return agent
 
@@ -183,7 +182,7 @@ class AgentApp:
         model = getattr(self.deps.llm_mgr.get(), "model", "unknown") if self.deps.llm_mgr else "unknown"
         permission_mode = "unknown"
         if getattr(self.deps, "permission_mgr", None) is not None:
-            permission_mode = self.deps.permission_mgr.mode.value
+            permission_mode = self.deps.permission_mgr.default_mode.value
         return (
             "Agent workbench ready\n"
             f"model: {model}\n"

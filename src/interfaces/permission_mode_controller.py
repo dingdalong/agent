@@ -33,24 +33,31 @@ class PermissionModeController:
         self.permission_mgr = permission_mgr
         self.ui = ui
         self.event_bus = event_bus
+        self.agent: Any = None
         self.install_state_provider()
 
     def install_state_provider(self) -> None:
-        """向 UI 注册权限模式状态提供函数。"""
+        """向 UI 注册权限模式状态提供函数。
+
+        状态条显示主 agent 的当前模式；agent 尚未绑定时回退到 default_mode。
+        """
         self.ui.set_system_state_provider(
-            lambda: SystemState(permission_mode=self.permission_mgr.mode.value)
+            lambda: SystemState(
+                permission_mode=(
+                    self.agent.permission_mode.value
+                    if self.agent is not None
+                    else self.permission_mgr.default_mode.value
+                )
+            )
         )
 
-    async def prompt_selection(self, agent: Any) -> bool:
-        """显示权限模式菜单并等待用户选择。
-
-        Args:
-            agent: Agent 实例，模式变更后刷新其 schema。
+    async def prompt_selection(self) -> bool:
+        """显示权限模式菜单并等待用户选择，作用于已绑定的主 agent。
 
         Returns:
             模式是否发生了变化。
         """
-        current = self.permission_mgr.mode.value
+        current = self.agent.permission_mode.value
         await self.event_bus.request_output(
             f"{_PERMISSION_MODE_MENU}  当前权限模式: {current}\n"
         )
@@ -66,54 +73,44 @@ class PermissionModeController:
             )
             return False
 
-        changed = agent.set_permission_mode(mode)
+        changed = self.agent.set_permission_mode(mode)
         await self.event_bus.request_output(f"已切换到 {mode.value} 权限模式。\n")
         if changed:
-            self._refresh_agent(agent)
+            self._refresh_agent()
         return changed
 
     def install_shortcut(self, agent: Any) -> None:
-        """注册 Shift+Tab 权限模式轮转快捷键。
+        """绑定主 agent 并注册 Shift+Tab 权限模式轮转快捷键。
 
         Args:
-            agent: Agent 实例。
+            agent: 主 Agent 实例，同时作为状态条显示的模式来源。
         """
-        self.ui.set_permission_mode_toggle_handler(lambda: self._cycle(agent))
-
-    def clear_shortcut(self) -> None:
-        """移除 Shift+Tab 快捷键绑定。"""
-        self.ui.set_permission_mode_toggle_handler(None)
+        self.agent = agent
+        self.ui.set_permission_mode_toggle_handler(lambda: self.cycle_mode())
 
     def notify_state_changed(self) -> None:
         """通知 UI 权限模式已变更。"""
         self.ui.on_system_state_changed()
 
-    def cycle_mode(self, agent: Any) -> bool:
-        """在 CAROUSEL_MODES 中循环切换权限模式。
-
-        Args:
-            agent: Agent 实例。
+    def cycle_mode(self) -> bool:
+        """在 CAROUSEL_MODES 中循环切换已绑定主 agent 的权限模式（Shift+Tab 回调）。
 
         Returns:
             模式是否发生了变化。
         """
         current_index = 0
         for index, mode in enumerate(CAROUSEL_MODES):
-            current_mode = self.permission_mgr.mode
+            current_mode = self.agent.permission_mode
             if mode is current_mode or mode.value == current_mode.value:
                 current_index = index
                 break
         next_mode = CAROUSEL_MODES[(current_index + 1) % len(CAROUSEL_MODES)]
-        changed = agent.set_permission_mode(next_mode)
+        changed = self.agent.set_permission_mode(next_mode)
         if changed:
-            self._refresh_agent(agent)
+            self._refresh_agent()
         return changed
 
-    def _cycle(self, agent: Any) -> None:
-        """Shift+Tab 快捷键回调。"""
-        self.cycle_mode(agent)
-
-    def _refresh_agent(self, agent: Any) -> None:
-        """刷新 agent schema 和 UI 状态。"""
-        agent.refresh_tools_schemas()
+    def _refresh_agent(self) -> None:
+        """刷新已绑定主 agent 的 schema 和 UI 状态。"""
+        self.agent.refresh_tools_schemas()
         self.notify_state_changed()

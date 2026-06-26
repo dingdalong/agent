@@ -263,8 +263,7 @@ class PermissionManager:
         workdir: str = "",
         trusted_dirs: tuple[str, ...] = (),
     ):
-        self.mode: PermissionMode = DEFAULT_MODE
-        self._pre_plan_mode: PermissionMode | None = None
+        self.default_mode: PermissionMode = DEFAULT_MODE
         self.deny_rules: RulesDict = {}
         self.ask_rules: RulesDict = {}
         self.allow_rules: RulesDict = {}
@@ -309,7 +308,7 @@ class PermissionManager:
             if mode is None:
                 logger.warning("忽略无效的 permissions.defaultMode：%r", default_mode)
             else:
-                self.mode = mode
+                self.default_mode = mode
 
         self._parse_rules(permissions.get("deny", []), "deny", self.deny_rules)
         self._parse_rules(permissions.get("ask", []), "ask", self.ask_rules)
@@ -344,54 +343,33 @@ class PermissionManager:
             if isinstance(text, str) and (rule := parse_rule(text, permission)):
                 target.setdefault(rule.tool, []).append(rule)
 
-    def set_mode(self, mode: PermissionMode) -> bool:
-        """切换权限模式，进入 plan 模式时保存当前模式。
-
-        Args:
-            mode: 目标权限模式。
-
-        Returns:
-            模式是否发生了变化。
-        """
-        if mode is self.mode:
-            return False
-        if mode is PLAN_MODE:
-            self._pre_plan_mode = self.mode
-        self.mode = mode
-        return True
-
-    def restore_pre_plan_mode(self) -> PermissionMode:
-        """退出 plan 模式时恢复进入前的权限模式，同时清除计划文件路径。
-
-        Returns:
-            恢复后的权限模式。无保存记录时回退到 DEFAULT_MODE。
-        """
-        target = self._pre_plan_mode or DEFAULT_MODE
-        self._pre_plan_mode = None
-        self.mode = target
-        return target
-
-    def is_tool_visible(self, tool: ToolEntry) -> bool:
-        """判断工具在当前权限模式下是否暴露给 LLM。
+    def is_tool_visible(self, tool: ToolEntry, mode: PermissionMode) -> bool:
+        """判断工具在给定权限模式下是否暴露给 LLM。
 
         可见性规则（按优先级）：
         - 无权限元数据的外部工具：始终可见
         - plan_visible 工具：仅 plan 模式可见（优先于 readonly）
         - readonly 工具：所有模式可见
         - 普通非只读工具：非 plan 模式可见，plan 模式隐藏
+
+        Args:
+            tool: 工具条目。
+            mode: 调用方 agent 的权限模式。
+
+        Returns:
+            True 表示该工具在此模式下对 LLM 可见。
         """
         if tool.permission is None:
             return True
         if tool.permission.plan_visible:
-            return self.mode is PLAN_MODE
+            return mode is PLAN_MODE
         if tool.permission.kind == "readonly":
             return True
-        return self.mode is not PLAN_MODE
+        return mode is not PLAN_MODE
 
     def reload(self) -> None:
         """重置会话级状态（/clear 时调用）。"""
-        self.mode = DEFAULT_MODE
-        self._pre_plan_mode = None
+        self.default_mode = DEFAULT_MODE
         self.session_allow.clear()
         self.deny_rules.clear()
         self.ask_rules.clear()
@@ -411,7 +389,7 @@ class PermissionManager:
         """
         return rules.get(tool_name, [])
 
-    def check(self, tool_name: str, tool_input: dict[str, Any]) -> PermissionDecision:
+    def check(self, tool_name: str, tool_input: dict[str, Any], mode: PermissionMode) -> PermissionDecision:
         """权限检查核心流程。
 
         评估顺序：
@@ -433,6 +411,7 @@ class PermissionManager:
         Args:
             tool_name: 被调用的工具名。
             tool_input: 工具调用参数。
+            mode: 调用方 agent 的权限模式。
 
         Returns:
             (decision, reason) 元组，decision 为 allow|deny|ask|auto_allow。
@@ -459,14 +438,14 @@ class PermissionManager:
         tool_ask_reason: str | None = None
         check_fn = self._check_permissions_fns.get(tool_name)
         if check_fn is not None:
-            ctx = PermissionContext(mode=self.mode, workdir=self._workdir, tool_name=tool_name, trusted_dirs=self._trusted_dirs, specifier_arg=self._specifier_args.get(tool_name))
+            ctx = PermissionContext(mode=mode, workdir=self._workdir, tool_name=tool_name, trusted_dirs=self._trusted_dirs, specifier_arg=self._specifier_args.get(tool_name))
             result = check_fn(tool_input, ctx)
             if result.decision == "deny":
                 return "deny", result.reason or f"被内置安全检测阻止：{tool_name}"
             if result.decision == "ask":
                 if result.bypass_immune:
                     # dontAsk 模式从不弹窗，bypass_immune 的 ask 直接转 deny
-                    if self.mode is DONT_ASK_MODE:
+                    if mode is DONT_ASK_MODE:
                         return "deny", f"dontAsk 模式拒绝（需安全确认）：{result.reason}"
                     return "ask", result.reason or f"需要用户确认：{tool_name}"
                 # 非 bypass_immune：记录原因，穿透到 allow 规则（Step 4）
@@ -499,17 +478,17 @@ class PermissionManager:
         # Step 4.5: 处理 Step 3 中记录的非 bypass_immune 的 tool ask
         # 仅 BYPASS 模式跳过（AUTO 不跳过，AUTO 更保守——不确定的操作仍需确认）
         if tool_ask_reason is not None:
-            if self.mode is DONT_ASK_MODE:
+            if mode is DONT_ASK_MODE:
                 return "deny", f"dontAsk 模式拒绝：{tool_ask_reason}"
-            if self.mode is not BYPASS_MODE:
+            if mode is not BYPASS_MODE:
                 return "ask", tool_ask_reason
 
         # Step 5: bypass 模式
-        if self.mode is BYPASS_MODE:
+        if mode is BYPASS_MODE:
             return "auto_allow", f"bypassPermissions 模式自动放行：{tool_name}"
 
         # Step 6: 模式默认策略
-        return self._mode_default(tool_name)
+        return self._mode_default(tool_name, mode)
 
     @staticmethod
     def _is_compound_command(command: str) -> bool:
@@ -540,11 +519,12 @@ class PermissionManager:
         value = tool_input.get(arg)
         return value if isinstance(value, str) else ""
 
-    def _mode_default(self, tool_name: str) -> PermissionDecision:
-        """按当前模式和工具 kind 返回默认权限决策。
+    def _mode_default(self, tool_name: str, mode: PermissionMode) -> PermissionDecision:
+        """按给定模式和工具 kind 返回默认权限决策。
 
         Args:
             tool_name: 工具名。
+            mode: 调用方 agent 的权限模式。
 
         Returns:
             (decision, reason) 元组。
@@ -552,18 +532,18 @@ class PermissionManager:
         kind = self._tool_kinds.get(tool_name)
 
         # AUTO：只读和文件编辑放行，其余询问（与 BYPASS 区分；安全 shell 命令由 check_shell_permissions 放行）
-        if self.mode is AUTO_MODE:
+        if mode is AUTO_MODE:
             if kind in ("readonly", "edit"):
                 return "auto_allow", f"auto 模式放行：{tool_name}"
             return "ask", f"{tool_name} 需要用户确认"
 
-        if self.mode is DONT_ASK_MODE:
+        if mode is DONT_ASK_MODE:
             if kind == "readonly":
                 return "auto_allow", f"dontAsk 模式放行只读：{tool_name}"
             return "deny", f"dontAsk 模式拒绝：{tool_name}"
 
         # ACCEPT_EDITS：只读和文件编辑放行，其余询问
-        if self.mode is ACCEPT_EDITS_MODE:
+        if mode is ACCEPT_EDITS_MODE:
             if kind in ("readonly", "edit"):
                 return "auto_allow", f"acceptEdits 模式放行：{tool_name}"
             return "ask", f"{tool_name} 需要用户确认"

@@ -9,7 +9,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from src.mgr.permission_mgr import PermissionManager
+    from src.agent import Agent
+    from src.mgr.permission_mgr import PermissionMode
     from src.mgr.reminder_mgr import ReminderMgr
 
 logger = logging.getLogger(__name__)
@@ -70,24 +71,26 @@ class PlanMgr:
 
     # ── 模式切换 ──────────────────────────────────────────────────────
 
-    def enter_mode(self, permission_mgr: PermissionManager, reminder_mgr: ReminderMgr) -> bool:
-        """进入计划模式的统一入口。切换权限模式、重置注入状态并注册提醒。
+    def enter_mode(self, agent: Agent, reminder_mgr: ReminderMgr) -> bool:
+        """进入计划模式的统一入口。切换该 agent 的权限模式、重置注入状态并注册提醒。
 
-        三条入口（enter_plan_mode 工具、/plan 命令、/mode 命令）均应调用此方法。
+        三条入口（enter_plan_mode 工具、/plan 命令、/mode 命令）均应调用此方法，
+        仅作用于主 agent；记录进入前模式到 agent._pre_plan_mode 以便退出时恢复。
         如果本会话中曾退出过 plan 模式，首次指令会追加 re-entry 提醒。
 
         Args:
-            permission_mgr: 权限管理器，用于切换模式。
+            agent: 目标 Agent，持有 permission_mode 与 _pre_plan_mode。
             reminder_mgr: 提醒管理器，用于注册 plan 提醒源。
 
         Returns:
             是否成功进入（已在 plan 模式时返回 False）。
         """
-        if self._is_plan_mode(permission_mgr):
+        if self._is_plan_mode(agent.permission_mode):
             return False
 
         from src.mgr.permission_mgr import PLAN_MODE
-        permission_mgr.set_mode(PLAN_MODE)
+        agent._pre_plan_mode = agent.permission_mode
+        agent.permission_mode = PLAN_MODE
 
         self._full_instructions_sent = False
         self._pending_injection = True
@@ -98,23 +101,25 @@ class PlanMgr:
         reminder_mgr.register(self)
         return True
 
-    def exit_mode(self, permission_mgr: PermissionManager, reminder_mgr: ReminderMgr) -> bool:
-        """退出计划模式的统一出口。恢复权限模式、重置注入状态、设置退出提醒标志。
+    def exit_mode(self, agent: Agent, reminder_mgr: ReminderMgr) -> bool:
+        """退出计划模式的统一出口。恢复该 agent 的权限模式、重置注入状态、设置退出提醒标志。
 
         不立即注销 reminder_mgr，保留一轮用于输出退出提醒，
         在下次 get_turn_start_reminder() 中输出后自动注销。
 
         Args:
-            permission_mgr: 权限管理器，用于恢复进入前的模式。
+            agent: 目标 Agent，恢复其 _pre_plan_mode 记录的进入前模式。
             reminder_mgr: 提醒管理器，退出提醒输出后才注销。
 
         Returns:
             是否成功退出（不在 plan 模式时返回 False）。
         """
-        if not self._is_plan_mode(permission_mgr):
+        if not self._is_plan_mode(agent.permission_mode):
             return False
 
-        permission_mgr.restore_pre_plan_mode()
+        from src.mgr.permission_mgr import DEFAULT_MODE
+        agent.permission_mode = agent._pre_plan_mode or DEFAULT_MODE
+        agent._pre_plan_mode = None
 
         self._full_instructions_sent = False
         self._pending_injection = False
@@ -163,17 +168,17 @@ class PlanMgr:
 
     # ── 指令注入 ──────────────────────────────────────────────────────
 
-    def _is_plan_mode(self, permission_mgr: PermissionManager) -> bool:
-        """检查当前是否处于 plan 模式。
+    def _is_plan_mode(self, mode: PermissionMode | None) -> bool:
+        """检查给定权限模式是否为 plan 模式。
 
         Args:
-            permission_mgr: 权限管理器实例。
+            mode: 待判断的权限模式（PermissionMode 实例），可为 None。
 
         Returns:
             True 表示处于 plan 模式。
         """
         from src.mgr.permission_mgr import PLAN_MODE
-        return permission_mgr.mode is PLAN_MODE
+        return mode is PLAN_MODE
 
     def _generate_instructions(self) -> str:
         """生成 plan 模式指令文本（完整或简短）。
@@ -216,7 +221,7 @@ class PlanMgr:
 
         return text
 
-    def get_turn_start_reminder(self, permission_mgr: PermissionManager | None) -> str:
+    def get_turn_start_reminder(self, mode: PermissionMode | None) -> str:
         """在 agent.run() 开始时由 ReminderMgr 调用，返回 prepend 到用户输入的提醒。
 
         处理两种场景：
@@ -224,16 +229,16 @@ class PlanMgr:
         2. 刚退出 plan 模式：返回一次性退出提醒，然后注销自身。
 
         Args:
-            permission_mgr: 权限管理器，用于判断当前模式。可为 None。
+            mode: 调用方 agent 的权限模式，用于判断当前模式。可为 None。
 
         Returns:
             提醒字符串，无需注入时返回空串。
         """
-        if permission_mgr is None:
+        if mode is None:
             return ""
 
         # 退出 plan 模式后的一次性提醒
-        if self._need_exit_reminder and not self._is_plan_mode(permission_mgr):
+        if self._need_exit_reminder and not self._is_plan_mode(mode):
             self._need_exit_reminder = False
             reminder_mgr = getattr(self, "_reminder_mgr", None)
             if reminder_mgr is not None:
@@ -244,7 +249,7 @@ class PlanMgr:
                 f"你现在可以编辑文件、运行工具和执行操作。计划目录：{plan_dir}"
             )
 
-        if not self._is_plan_mode(permission_mgr):
+        if not self._is_plan_mode(mode):
             return ""
 
         self._rounds_since_injection = 0
@@ -259,7 +264,7 @@ class PlanMgr:
         """
         self._rounds_since_injection += 1
 
-    def pop_post_round_reminder(self, permission_mgr: PermissionManager | None) -> str | None:
+    def pop_post_round_reminder(self, mode: PermissionMode | None) -> str | None:
         """POST_ROUND 时由 ReminderMgr 调用，返回 plan 模式指令纯文本。
 
         触发条件（按优先级）：
@@ -268,12 +273,12 @@ class PlanMgr:
         无需注入时返回 None。标签包装由 ReminderMgr 统一处理。
 
         Args:
-            permission_mgr: 权限管理器，用于判断当前模式。可为 None。
+            mode: 调用方 agent 的权限模式，用于判断当前模式。可为 None。
 
         Returns:
             plan 模式指令纯文本，或 None 表示无需注入。
         """
-        if permission_mgr is None or not self._is_plan_mode(permission_mgr):
+        if mode is None or not self._is_plan_mode(mode):
             return None
 
         if self._pending_injection:

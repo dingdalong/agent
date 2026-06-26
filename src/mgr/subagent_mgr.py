@@ -2,12 +2,16 @@ from __future__ import annotations
 from typing import Any, TYPE_CHECKING
 
 import re
+import logging
 import yaml
 from dataclasses import dataclass, field
 from pathlib import Path
 
 if TYPE_CHECKING:
     from src.agent import Agent, AgentDeps
+    from src.mgr.permission_mgr import PermissionMode
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class SubAgentManifest:
@@ -17,6 +21,7 @@ class SubAgentManifest:
     tools: set[str] | None = None
     memory: str | None = None
     model: str | None = None
+    permission_mode: PermissionMode | None = None
 
 @dataclass
 class SubAgentDocument:
@@ -47,6 +52,7 @@ class SubAgentMgr:
         扫描顺序（低→高优先级）：内置 → 全局 → 项目。
         """
         from src.mgr.paths import builtin_root
+        from src.mgr.permission_mgr import parse_permission_mode
         builtin_dir = builtin_root() / "agent" / "agents"
         project_dir = self.workdir / ".agent" / "agents"
 
@@ -66,6 +72,13 @@ class SubAgentMgr:
                 tools = {t.strip() for t in raw_tools.split(",") if t.strip()} or None
                 memory = meta.get("memory")
                 model = meta.get("model")
+                # frontmatter 的 permissionMode 字符串在加载时即解析为 PermissionMode；非法值告警并回退 None
+                raw_mode = meta.get("permissionMode")
+                permission_mode = None
+                if raw_mode is not None:
+                    permission_mode = parse_permission_mode(str(raw_mode))
+                    if permission_mode is None:
+                        logger.warning("子智能体 %s 的 permissionMode 非法：%r，已忽略", agent_type, raw_mode)
                 manifest = SubAgentManifest(
                     agent_type=agent_type,
                     description=description,
@@ -73,6 +86,7 @@ class SubAgentMgr:
                     tools=tools,
                     memory=memory,
                     model=model,
+                    permission_mode=permission_mode,
                 )
                 self._documents[agent_type] = SubAgentDocument(manifest=manifest, prompt=prompt.strip())
 
@@ -146,6 +160,7 @@ class SubAgentMgr:
             is_subagent = True,
             memory = document.manifest.memory,
             model = model_value,
+            permission_mode = document.manifest.permission_mode,
         )
 
         hooks_mgr = self.deps.hooks_mgr

@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from src.interfaces.base import UserInterface
     from src.events.bus import EventBus
     from src.mgr.tools_mgr import ToolsMgr
-    from src.mgr.permission_mgr import PermissionManager
+    from src.mgr.permission_mgr import PermissionManager, PermissionMode
     from src.mgr.config_mgr import ConfigManager
     from src.mgr.memory_mgr import MemoryMgr
     from src.mgr.hooks_mgr import HooksMgr
@@ -59,6 +59,8 @@ class Agent:
         uuid: 唯一类型标识。
         agent_type: agent类型
         description: 一句话描述
+        permission_mode: 本 agent 的权限模式；构造时传 None 表示回退到 default_mode，
+            __post_init__ 结束后恒为真正的 PermissionMode。
     """
 
     uuid: UUID = field(init=False)
@@ -70,6 +72,8 @@ class Agent:
     is_subagent: bool = field(default=False)
     memory: str | None = field(default="project")
     model: str | None = field(default=None)
+    _pre_plan_mode: PermissionMode | None = field(init=False, default=None)
+    permission_mode: PermissionMode | None = field(default=None)
     history: list[dict] = field(init=False, default_factory=list)
     _tools_schemas: list[ToolDict] = field(init=False)
     _task_mgr: TaskManager = field(init=False, repr=False)
@@ -84,6 +88,11 @@ class Agent:
 
     def __post_init__(self):
         self.uuid = uuid.uuid4()
+        # 未显式指定权限模式时回退到 permission_mgr.default_mode（缺失则全局 DEFAULT_MODE）
+        if self.permission_mode is None:
+            from src.mgr.permission_mgr import DEFAULT_MODE
+            pm = self.deps.permission_mgr
+            self.permission_mode = pm.default_mode if pm is not None else DEFAULT_MODE
         self.llm = self.deps.llm_mgr.get(self.model)
         self.refresh_tools_schemas()
         compact_cfg = self.deps.config_mgr.get_config("compact")
@@ -122,16 +131,18 @@ class Agent:
         }
 
     def refresh_tools_schemas(self) -> None:
-        """刷新工具 schema 列表。"""
+        """刷新工具 schema 列表（按本 agent 当前权限模式过滤可见性）。"""
         self._tools_schemas = self.deps.tools_mgr.get_schemas(
             self.tools,
             permission_mgr=self.deps.permission_mgr,
+            mode=self.permission_mode,
         )
 
     def set_permission_mode(self, mode) -> bool:
-        """切换权限模式，处理计划模式的特殊进入/退出逻辑。
+        """切换本 agent 的权限模式，处理计划模式的特殊进入/退出逻辑。
 
         统一入口：/mode 命令、Shift+Tab 轮转、prompt_selection 菜单均通过此方法切换。
+        仅主 agent 走此路径；子 agent 模式构造后固定不变。
 
         Args:
             mode: 目标权限模式（PermissionMode 实例）。
@@ -140,16 +151,19 @@ class Agent:
             模式是否发生了变化。
         """
         from src.mgr.permission_mgr import PLAN_MODE
-        permission_mgr = self.deps.permission_mgr
         plan_mgr = self.deps.plan_mgr
 
         if mode is PLAN_MODE and plan_mgr is not None:
-            return plan_mgr.enter_mode(permission_mgr, self._reminder_mgr)
+            return plan_mgr.enter_mode(self, self._reminder_mgr)
 
-        if permission_mgr.mode is PLAN_MODE and plan_mgr is not None:
-            plan_mgr.exit_mode(permission_mgr, self._reminder_mgr)
+        if self.permission_mode is PLAN_MODE and plan_mgr is not None:
+            plan_mgr.exit_mode(self, self._reminder_mgr)
 
-        return permission_mgr.set_mode(mode)
+        if mode is self.permission_mode:
+            return False
+
+        self.permission_mode = mode
+        return True
 
     async def run(self, input: str | None = None) -> RunResult:
         """运行 agent 对话。
@@ -166,7 +180,7 @@ class Agent:
         """
         if input is not None:
             ctx = RunContext(messages=self.history, round_start_idx=len(self.history))
-            turn_instr = self._reminder_mgr.build_turn_start_instructions(self.deps.permission_mgr)
+            turn_instr = self._reminder_mgr.build_turn_start_instructions(self.permission_mode)
             if turn_instr:
                 input = f"{turn_instr}\n\n{input}"
             self.history.append({"role": "user", "content": input})
@@ -280,7 +294,7 @@ class Agent:
                     str(item) for item in hook_result.additional_context
                 )
 
-        turn_instr = self._reminder_mgr.build_turn_start_instructions(self.deps.permission_mgr)
+        turn_instr = self._reminder_mgr.build_turn_start_instructions(self.permission_mode)
         if turn_instr:
             user_input = f"{turn_instr}\n\n{user_input}"
 
@@ -382,10 +396,10 @@ class Agent:
         if saved_mode_value == PLAN_MODE.value:
             pre_plan_value = metadata.get("pre_plan_mode", "")
             pre_plan = parse_permission_mode(pre_plan_value) if pre_plan_value else None
-            self.deps.permission_mgr.mode = pre_plan or DEFAULT_MODE
+            self.permission_mode = pre_plan or DEFAULT_MODE
             plan_mgr = self.deps.plan_mgr
             if plan_mgr is not None:
-                plan_mgr.enter_mode(self.deps.permission_mgr, self._reminder_mgr)
+                plan_mgr.enter_mode(self, self._reminder_mgr)
             mode_info = "，权限模式: plan"
         else:
             mode = parse_permission_mode(saved_mode_value)
@@ -407,7 +421,7 @@ class Agent:
         """处理 /mode 命令：委托给 PermissionModeController。"""
         controller = self.deps.permission_mode_controller
         if controller is not None:
-            await controller.prompt_selection(self)
+            await controller.prompt_selection()
 
     async def _on_check_compact(self, ctx: RunContext) -> AgentState:
         ctx.prompt = self._prompt_mgr.build()
@@ -558,7 +572,7 @@ class Agent:
         return AgentState.DONE
 
     async def _on_post_round(self, ctx: RunContext) -> AgentState:
-        for msg in self._reminder_mgr.collect_post_round_messages(self.deps.permission_mgr):
+        for msg in self._reminder_mgr.collect_post_round_messages(self.permission_mode):
             ctx.messages.append(msg)
 
         if ctx.manual_compact:
@@ -623,11 +637,8 @@ class Agent:
         self.deps.session_mgr.save_history(session_id, self.history)
         if user_input and self.history:
             is_new = self.deps.session_mgr.get_metadata(session_id) is None
-            permission_mgr = self.deps.permission_mgr
-            perm_mode = permission_mgr.mode.value if permission_mgr else ""
-            pre_plan = ""
-            if permission_mgr and permission_mgr._pre_plan_mode is not None:
-                pre_plan = permission_mgr._pre_plan_mode.value
+            perm_mode = self.permission_mode.value
+            pre_plan = self._pre_plan_mode.value if self._pre_plan_mode else ""
             self.deps.session_mgr.save_metadata(
                 session_id,
                 is_new=is_new,

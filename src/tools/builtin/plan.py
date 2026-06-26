@@ -39,26 +39,23 @@ class EnterPlanMode(BaseModel):
         "- 已在计划模式中"
     ),
     permission=ToolPermission(kind="readonly"),
+    subagent=False,
 )
 async def enter_plan_mode(agent: Agent, deps: AgentDeps) -> str:
-    """切换到 PLAN_MODE 并刷新工具可见性。
+    """将当前 agent 切换到 PLAN_MODE 并刷新工具可见性。
 
     Args:
-        agent: 当前 Agent 实例，用于刷新工具 schema。
-        deps: AgentDeps 依赖对象，提供 permission_mgr 和 plan_mgr。
+        agent: 当前 Agent 实例，持有 permission_mode，并用于刷新工具 schema。
+        deps: AgentDeps 依赖对象，提供 plan_mgr。
 
     Returns:
         操作结果描述。
     """
-    permission_mgr = deps.permission_mgr
-    if permission_mgr is None:
-        return "错误：权限管理器不可用"
-
     plan_mgr = deps.plan_mgr
     if plan_mgr is None:
         return "错误：计划管理器不可用"
 
-    if not plan_mgr.enter_mode(permission_mgr, agent._reminder_mgr):
+    if not plan_mgr.enter_mode(agent, agent._reminder_mgr):
         return "已在计划模式中。"
 
     agent.refresh_tools_schemas()
@@ -83,22 +80,22 @@ class ExitPlanMode(BaseModel):
         "- 如果用户返回修改意见，根据意见修改计划后再次提交"
     ),
     permission=ToolPermission(plan_visible=True, kind="readonly"),
+    subagent=False,
 )
 async def exit_plan_mode(file_path: str, agent: Agent, deps: AgentDeps) -> str:
     """校验 file_path 在计划目录下、读取计划内容、让用户选择后续操作。
 
     Args:
         file_path: 计划文件的绝对路径，由 LLM 提供。
-        agent: 当前 Agent 实例，用于刷新工具 schema。
-        deps: AgentDeps 依赖对象，提供 permission_mgr 和 plan_mgr。
+        agent: 当前 Agent 实例，持有 permission_mode，并用于刷新工具 schema。
+        deps: AgentDeps 依赖对象，提供 plan_mgr。
 
     Returns:
         用户选择的操作结果和后续指引。
     """
     from src.mgr.permission_mgr import AUTO_MODE, PLAN_MODE
 
-    permission_mgr = deps.permission_mgr
-    if permission_mgr is None or permission_mgr.mode is not PLAN_MODE:
+    if agent.permission_mode is not PLAN_MODE:
         return "错误：当前不在计划模式中。"
 
     plan_mgr = deps.plan_mgr
@@ -112,16 +109,16 @@ async def exit_plan_mode(file_path: str, agent: Agent, deps: AgentDeps) -> str:
 
     plan_file = Path(file_path)
     if not plan_file.is_file():
-        plan_mgr.exit_mode(permission_mgr, reminder_mgr)
+        plan_mgr.exit_mode(agent, reminder_mgr)
         agent.refresh_tools_schemas()
-        return f"计划文件不存在，已退出计划模式，恢复到 {permission_mgr.mode.value} 模式。"
+        return f"计划文件不存在，已退出计划模式，恢复到 {agent.permission_mode.value} 模式。"
 
     # 阻塞读取卸载到线程，避免占用事件循环（exit_plan_mode 须保持 async，因其还 await 事件总线）。
     plan_content = await asyncio.to_thread(plan_file.read_text, encoding="utf-8")
     if not plan_content.strip():
-        plan_mgr.exit_mode(permission_mgr, reminder_mgr)
+        plan_mgr.exit_mode(agent, reminder_mgr)
         agent.refresh_tools_schemas()
-        return f"计划为空，已退出计划模式，恢复到 {permission_mgr.mode.value} 模式。"
+        return f"计划为空，已退出计划模式，恢复到 {agent.permission_mode.value} 模式。"
 
     await deps.event_bus.request_output(
         f"\n计划文件：\n{file_path}\n\n"
@@ -137,8 +134,8 @@ async def exit_plan_mode(file_path: str, agent: Agent, deps: AgentDeps) -> str:
     choice = answer.strip()
 
     if choice == "1":
-        plan_mgr.exit_mode(permission_mgr, reminder_mgr)
-        permission_mgr.set_mode(AUTO_MODE)
+        plan_mgr.exit_mode(agent, reminder_mgr)
+        agent.set_permission_mode(AUTO_MODE)
         agent.refresh_tools_schemas()
         return (
             f"用户已批准计划，选择自动执行。已切换到 auto 模式。\n\n"
@@ -147,10 +144,10 @@ async def exit_plan_mode(file_path: str, agent: Agent, deps: AgentDeps) -> str:
         )
 
     if choice == "2":
-        plan_mgr.exit_mode(permission_mgr, reminder_mgr)
+        plan_mgr.exit_mode(agent, reminder_mgr)
         agent.refresh_tools_schemas()
         return (
-            f"用户已批准计划，选择手动执行。已恢复到 {permission_mgr.mode.value} 模式。\n\n"
+            f"用户已批准计划，选择手动执行。已恢复到 {agent.permission_mode.value} 模式。\n\n"
             f"计划文件路径：{file_path}\n\n"
             f"## 已批准的计划：\n{plan_content}"
         )
@@ -171,6 +168,7 @@ class PlanWriteFile(BaseModel):
     model=PlanWriteFile,
     description="写入计划文件内容（全量覆盖）。根据计划名自动生成文件路径。仅在计划模式下可用。",
     permission=ToolPermission(plan_visible=True, kind="readonly"),
+    subagent=False,
 )
 def plan_write_file(name: str, content: str, agent: Agent, deps: AgentDeps) -> str:
     """根据计划名生成文件路径并写入内容，同时将计划名同步为会话主题。
@@ -218,6 +216,7 @@ class PlanEditFile(BaseModel):
         "- 删除：end_line + new_text 为空 → 删除 start_line 到 end_line"
     ),
     permission=ToolPermission(plan_visible=True, kind="readonly"),
+    subagent=False,
 )
 def plan_edit_file(
     file_path: str, start_line: int, agent: Agent, deps: AgentDeps,

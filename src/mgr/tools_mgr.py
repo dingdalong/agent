@@ -92,12 +92,14 @@ class ToolsMgr:
         self,
         tool_names: set[str] | list[str] | None = None,
         permission_mgr: Any = None,
+        mode: Any = None,
     ) -> list[ToolDict]:
         """返回 OpenAI function-calling 格式的工具 schema 列表。
 
         Args:
             tool_names: 要返回的工具名集合，None 返回全部。
-            permission_mgr: 权限管理器；提供时按当前模式过滤工具。
+            permission_mgr: 权限管理器；与 mode 同时提供时按该模式过滤工具可见性。
+            mode: 调用方 agent 的权限模式（PermissionMode 实例）。
 
         Returns:
             工具 schema 列表。
@@ -106,8 +108,8 @@ class ToolsMgr:
             tools = list(self._tools.values())
         else:
             tools = [self._tools[name] for name in tool_names if name in self._tools]
-        if permission_mgr is not None:
-            tools = [tool for tool in tools if permission_mgr.is_tool_visible(tool)]
+        if permission_mgr is not None and mode is not None:
+            tools = [tool for tool in tools if permission_mgr.is_tool_visible(tool, mode)]
         tools = sorted(tools, key=_tool_sort_key)
         return [
             {
@@ -277,7 +279,8 @@ class ToolsMgr:
         # 2. 权限检查
         permission_mgr = getattr(deps, "permission_mgr", None) if deps is not None else None
         if permission_mgr is not None:
-            decision, reason = permission_mgr.check(tool_name, arguments)
+            mode = getattr(agent, "permission_mode", None) or permission_mgr.default_mode
+            decision, reason = permission_mgr.check(tool_name, arguments, mode)
 
             hook_has_ask = pre_hook_result is not None and any(
                 d == "ask" for d, _ in pre_hook_result.permission_decisions
