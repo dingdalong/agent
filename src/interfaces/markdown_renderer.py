@@ -24,10 +24,15 @@ class MarkdownStreamRenderer:
         width: int | None = None,
         color_system: str | None = "standard",
         code_theme: str = "monokai",
+        base_style: str = "",
     ) -> None:
+        # base_style：渲染时整体叠加到 markdown 之上的 Rich 样式（如思考流的 "dim" 整体压暗），
+        # 烘焙进返回的 ANSI 字符串本身；空串表示不叠加。烘焙在本类自有的临时 Console 上完成，
+        # 故调用方用 Live 打印结果时无需再传 style=（避免污染 Live 底部状态栏，见 inline_ui._print_ansi）。
         self.width = width
         self.color_system = color_system
         self.code_theme = code_theme
+        self.base_style = base_style
         self._buffer = ""
 
     def append(self, content: str) -> list[str]:
@@ -107,7 +112,8 @@ class MarkdownStreamRenderer:
             width=self._terminal_width(),
             legacy_windows=False,
         )
-        console.print(Markdown(markdown, code_theme=self.code_theme), end="")
+        # 把 base_style 整体叠加到本块（逐片段 Segment.apply_style，彩色片段叠加后保留色相），烘焙进 ANSI。
+        console.print(Markdown(markdown, code_theme=self.code_theme), end="", style=self.base_style or None)
         return output.getvalue()
 
     def _terminal_width(self) -> int:

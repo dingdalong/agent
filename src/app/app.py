@@ -122,8 +122,9 @@ class AgentApp:
             新创建的 Agent 实例。
         """
         self.deps.session_id = str(uuid.uuid4())
+        # "ui" 一并纳入：InlineInterface.reload() 清零会话级 token 统计，由 hasattr(reload) 协议统一发现并调用。
         for attr in ("memory_mgr", "tools_mgr", "permission_mgr",
-                     "config_mgr", "plugin_mgr", "hooks_mgr", "plan_mgr"):
+                     "config_mgr", "plugin_mgr", "hooks_mgr", "plan_mgr", "ui"):
             mgr = getattr(self.deps, attr, None)
             if mgr is not None and hasattr(mgr, "reload"):
                 mgr.reload()

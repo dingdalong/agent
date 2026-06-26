@@ -61,14 +61,29 @@ class AnthropicProvider(LLMProvider):
         self,
         usage: object | None,
     ) -> dict[str, int | None] | None:
+        """把 Anthropic 原生 usage 归一化为统一约定：input_tokens = 提交给模型的全部输入 token。
+
+        Anthropic 的 usage.input_tokens 仅为未命中缓存的新算输入，缓存读取/写入单独列字段；
+        为与 DeepSeek/OpenAI/Ollama 的 prompt_tokens（本就含缓存）口径一致，这里把三者相加作为
+        input_tokens，使上层（状态条等）无需感知 provider 差异即可正确统计总输入与命中率。
+
+        Args:
+            usage: Anthropic SDK 返回的 usage 对象，可能为 None。
+
+        Returns:
+            统一口径的 token 字典；usage 为 None 时返回 None。cache_read/cache_creation 保持原值单列。
+        """
         if usage is None:
             return None
+        raw_input = getattr(usage, "input_tokens", None) or 0
+        cache_read = getattr(usage, "cache_read_input_tokens", None)
+        cache_creation = getattr(usage, "cache_creation_input_tokens", None)
         return {
-            "input_tokens": getattr(usage, "input_tokens", None),
+            "input_tokens": raw_input + (cache_read or 0) + (cache_creation or 0),
             "output_tokens": getattr(usage, "output_tokens", None),
             "total_tokens": getattr(usage, "total_tokens", None),
-            "cache_read_input_tokens": getattr(usage, "cache_read_input_tokens", None),
-            "cache_creation_input_tokens": getattr(usage, "cache_creation_input_tokens", None),
+            "cache_read_input_tokens": cache_read,
+            "cache_creation_input_tokens": cache_creation,
         }
 
     def clear_reasoning_content(self, messages):

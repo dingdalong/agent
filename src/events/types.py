@@ -52,11 +52,11 @@ class ResponseDelta(Event):
 
 @dataclass
 class ThinkingDelta(Event):
-    """思考过程 — 默认可见。"""
+    """思考过程 — 仅 DETAIL 级别投递/渲染（progress 级别下由总线门控丢弃，状态栏「思考中」由 LLMCallStarted 维持）。"""
     content: str = ""
     caller_agent_type: str | None = None
     caller_uuid: str | None = None
-    level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
+    level: EventLevel = field(default=EventLevel.DETAIL, init=False)
     type: Literal["thinking_delta"] = field(default="thinking_delta", init=False)
 
 @dataclass
@@ -94,19 +94,28 @@ class ToolCallCompleted(Event):
 
 @dataclass
 class LLMCallStarted(Event):
-    """LLM 调用开始时的 token 估算信息。"""
+    """LLM 调用开始时的 token 估算信息。
+
+    级别为 PROGRESS：内联状态条在 LLM 调用一开始（首个增量到达前）就需要据此点亮 spinner。
+    """
     model: str = ""
     estimated_input_tokens: int = 0
     message_count: int = 0
     tool_count: int = 0
-    level: EventLevel = field(default=EventLevel.DETAIL, init=False)
+    caller_agent_type: str | None = None  # 发起本次调用的 agent 类型（主 Agent 为 None），供 UI 活动行显示当前 agent
+    caller_uuid: str | None = None  # 发起本次调用的 agent 实例 uuid
+    level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
     type: Literal["llm_call_started"] = field(default="llm_call_started", init=False)
 
 
 @dataclass
 class LLMCallCompleted(Event):
-    """LLM 调用完成后的 token usage 与速度信息。"""
+    """LLM 调用完成后的 token usage 与速度信息。
+
+    级别为 PROGRESS：内联状态条要用 token/缓存命中数据实时更新，必须确保该事件不被级别门控丢弃。
+    """
     model: str = ""
+    # 统一约定：提交给模型的全部输入 token（含缓存读取与写入）。各 provider 在 _extract_token_usage 中归一化到此口径。
     input_tokens: int | None = None
     output_tokens: int | None = None
     total_tokens: int | None = None
@@ -115,7 +124,7 @@ class LLMCallCompleted(Event):
     duration_seconds: float | None = None
     output_tokens_per_second: float | None = None
     total_tokens_per_second: float | None = None
-    level: EventLevel = field(default=EventLevel.DETAIL, init=False)
+    level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
     type: Literal["llm_call_completed"] = field(default="llm_call_completed", init=False)
 
 

@@ -53,7 +53,7 @@ _SUBCOMMAND_PATTERN = re.compile(r"^[a-z][a-z0-9]*(-[a-z0-9]+)*$")
 SHELL_SCRIPT_INTERPRETERS = {"sh", "bash", "zsh", "fish", "dash"}
 SHELL_DISK_ERASE_COMMANDS = {"diskutil"}
 
-# acceptEdits/auto 模式下自动放行的文件系统操作命令（对齐 Claude Code v2.1.173）
+# acceptEdits/auto 模式下自动放行的文件系统操作命令
 ACCEPT_EDITS_COMMANDS: frozenset[str] = frozenset({
     "mkdir", "touch", "rm", "rmdir", "mv", "cp", "sed",
 })

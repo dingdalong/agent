@@ -36,8 +36,6 @@ class UserInterface(ABC):
     """I/O 抽象基类，封装各 interface 共享的事件处理逻辑。"""
 
     def __init__(self) -> None:
-        self._in_thinking = False
-        self._in_response = False
         self._request_interrupt: Callable[[], None] | None = None
         self._system_state_provider: Callable[[], SystemState] | None = None
         self._active_user_request: UserInputRequest | None = None
@@ -121,16 +119,6 @@ class UserInterface(ABC):
         """
         ...
 
-    @abstractmethod
-    async def _write_response_prefix(self, event: ResponseDelta) -> None:
-        """输出回应流前缀。"""
-        ...
-
-    @abstractmethod
-    async def _write_thinking_prefix(self, event: ThinkingDelta) -> None:
-        """输出思考流前缀。"""
-        ...
-
     async def _complete_user_request(
         self,
         request: UserInputRequest | None,
@@ -151,14 +139,10 @@ class UserInterface(ABC):
                 request.fail(exc)
 
     async def _end_thinking_if_needed(self) -> None:
-        if self._in_thinking:
-            await self._write("\n")
-            self._in_thinking = False
+        """收尾思考流（若有未结束的流）。由具体 UI 覆盖实现，默认无操作。"""
 
     async def _end_response_if_needed(self) -> None:
-        if self._in_response:
-            await self._write("\n")
-            self._in_response = False
+        """收尾回应流（若有未结束的流）。由具体 UI 覆盖实现，默认无操作。"""
 
     async def _end_streams_for(self, event: Event) -> None:
         if not isinstance(event, ThinkingDelta):
@@ -219,16 +203,10 @@ class UserInterface(ABC):
                 await self.on_unhandled_event(event)
 
     async def on_response_delta(self, event: ResponseDelta, content: str) -> None:
-        if not self._in_response:
-            await self._write_response_prefix(event)
-            self._in_response = True
-        await self._write(content)
+        """流式回应增量。由具体 UI 覆盖实现渲染，默认无操作。"""
 
     async def on_thinking_delta(self, event: ThinkingDelta, content: str) -> None:
-        if not self._in_thinking:
-            await self._write_thinking_prefix(event)
-            self._in_thinking = True
-        await self._write(content)
+        """流式思考增量。由具体 UI 覆盖实现渲染，默认无操作。"""
 
     async def on_unhandled_event(self, event: Event) -> None:
         pass

@@ -310,7 +310,7 @@ class LLMProvider(ABC):
             max_attempts = max(1, self.max_retries)
             for attempt in range(max_attempts):
                 try:
-                    started_at = await self._emit_llm_call_started(messages, prompt, tools)
+                    started_at = await self._emit_llm_call_started(messages, prompt, tools, caller_agent_type, caller_uuid)
                     response = await self._do_chat(
                         messages,
                         prompt,
@@ -376,7 +376,20 @@ class LLMProvider(ABC):
         messages: list[dict],
         prompt: list[dict] | None,
         tools: list[ToolDict] | None,
+        caller_agent_type: str | None = None,
+        caller_uuid: str | None = None,
     ) -> float:
+        """发出 LLMCallStarted 事件并返回起始时间戳。
+
+        Args:
+            messages: 本次提交的消息列表。
+            prompt: 系统提示词消息列表（可为 None）。
+            tools: 本次可用工具列表（可为 None）。
+            caller_agent_type: 发起本次调用的 agent 类型（主 Agent 为 None），透传给事件供 UI 活动行显示当前 agent。
+            caller_uuid: 发起本次调用的 agent 实例 uuid。
+        Returns:
+            本次调用的起始时间戳（time.time()），供完成事件计算耗时。
+        """
         started_at = time.time()
         if self.event_bus is None:
             return started_at
@@ -389,6 +402,8 @@ class LLMProvider(ABC):
             estimated_input_tokens=self.estimate_tokens(messages, prompt, tools),
             message_count=len(all_messages),
             tool_count=len(tools or []),
+            caller_agent_type=caller_agent_type,
+            caller_uuid=caller_uuid,
         ))
         return started_at
 

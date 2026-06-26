@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from src.interfaces import CLIInterface
+from src.interfaces import InlineInterface
 from src.events import EventBus, EventLevel
 from src.mgr import ConfigManager, HooksMgr, LLMMgr, MemoryMgr, PermissionManager, PlanMgr, PluginMgr, SessionMgr, ToolsMgr
 from src.mgr.paths import global_data_dir, workdir as resolve_workdir
@@ -29,7 +29,7 @@ async def create_app(
 
     config_mgr = ConfigManager(global_dir=global_dir, workdir=work_dir)
     event_bus = EventBus(level=EventLevel.from_str(config_mgr.get_config("events").get("level", "progress")))
-    ui = CLIInterface()
+    ui = InlineInterface()
     tools_mgr = ToolsMgr()
     memory_mgr = MemoryMgr(work_dir)
     plugin_mgr = PluginMgr(workdir=work_dir, global_dir=global_dir)
@@ -45,7 +45,7 @@ async def create_app(
     llm_mgr = LLMMgr(config_mgr=config_mgr, event_bus=event_bus)
     await llm_mgr.load_models()
     # 启动前置校验：默认模型不可用时抛 ModelUnavailableError，由 main.cli 捕获后
-    # 清晰退出（提示而非深层堆栈）。须在 UI 启动前，避免 Textual 接管终端后输出错乱。
+    # 清晰退出（提示而非深层堆栈）。须在 UI 启动前完成。
     llm_mgr.ensure_default_available()
     deps = AgentDeps(
         llm_mgr=llm_mgr,
