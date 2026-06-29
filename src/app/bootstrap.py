@@ -7,7 +7,7 @@ from pathlib import Path
 
 from src.interfaces import InlineInterface, OutputRouter
 from src.events import EventBus, EventLevel
-from src.mgr import ConfigManager, HooksMgr, LLMMgr, MemoryMgr, PermissionManager, PlanMgr, PluginMgr, SessionMgr, ToolsMgr
+from src.mgr import ConfigManager, HooksMgr, LLMMgr, McpMgr, MemoryMgr, PermissionManager, PlanMgr, PluginMgr, SessionMgr, ToolsMgr
 from src.mgr.paths import global_data_dir, workdir as resolve_workdir
 from src.agent import AgentDeps
 from src.agent.states import SLASH_COMMANDS
@@ -38,6 +38,9 @@ async def create_app(
     plugin_mgr = PluginMgr(workdir=work_dir, global_dir=global_dir)
     hooks_mgr = HooksMgr(workdir=work_dir, global_dir=global_dir, plugin_mgr=plugin_mgr)
     plan_mgr = PlanMgr(work_dir)
+    # 须先于 permission_mgr：MCP 工具注册进 tools_mgr 后，其权限元数据才会被 PermissionManager 收录。
+    mcp_mgr = McpMgr(config_mgr=config_mgr, tools_mgr=tools_mgr)
+    await mcp_mgr.start()
     permission_mgr = PermissionManager(
         tools=tools_mgr.list_entries(),
         config_mgr=config_mgr,
@@ -62,6 +65,7 @@ async def create_app(
         plan_mgr=plan_mgr,
         plugin_mgr=plugin_mgr,
         session_mgr=session_mgr,
+        mcp_mgr=mcp_mgr,
         session_context=[],
         workdir=work_dir,
         global_dir=global_dir,

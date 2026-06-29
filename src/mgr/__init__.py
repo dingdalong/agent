@@ -14,5 +14,6 @@ from src.mgr.plan_mgr import PlanMgr
 from src.mgr.plugin_mgr import PluginMgr, PluginInfo, PluginLayer
 from src.mgr.reminder_mgr import ReminderMgr
 from src.mgr.session_mgr import SessionMgr, ResumeResult
+from src.mgr.mcp_mgr import McpMgr
 
-__all__ = ["FileMgr", "CompactMgr", "CompactResult", "TaskManager", "ToolsMgr", "PromptMgr", "SkillMgr", "SubAgentMgr", "PermissionManager", "ConfigManager", "MemoryMgr", "HooksMgr", "LLMMgr", "ModelUnavailableError", "PlanMgr", "PluginMgr", "PluginInfo", "PluginLayer", "ReminderMgr", "SessionMgr", "ResumeResult"]
+__all__ = ["FileMgr", "CompactMgr", "CompactResult", "TaskManager", "ToolsMgr", "PromptMgr", "SkillMgr", "SubAgentMgr", "PermissionManager", "ConfigManager", "MemoryMgr", "HooksMgr", "LLMMgr", "ModelUnavailableError", "PlanMgr", "PluginMgr", "PluginInfo", "PluginLayer", "ReminderMgr", "SessionMgr", "ResumeResult", "McpMgr"]

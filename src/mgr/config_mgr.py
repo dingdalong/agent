@@ -136,6 +136,23 @@ class ConfigManager:
         self._config = config
         return config
 
+    def load_mcp_servers(self) -> dict[str, dict[str, Any]]:
+        """读取并合并两层 mcp_servers.json，返回 {server_name: spec}。
+
+        优先级（低→高）：全局 ~/.agent/mcp_servers.json → 项目 {workdir}/mcp_servers.json。
+        仅读取顶层 mcpServers 字段，同名 server 由项目层覆盖全局层。
+
+        Returns:
+            合并后的 MCP server 配置字典，键为 server 名，值为该 server 的连接配置。
+        """
+        global_servers = _load_json(self.global_dir / "mcp_servers.json").get("mcpServers", {})
+        project_servers = _load_json(self.workdir / ".agent" / "mcp_servers.json").get("mcpServers", {})
+        if not isinstance(global_servers, dict):
+            global_servers = {}
+        if not isinstance(project_servers, dict):
+            project_servers = {}
+        return _deep_merge(global_servers, project_servers)
+
     def load_user_settings(self) -> dict[str, Any]:
         """加载双层 settings.json 并合并 permissions 列表。
 

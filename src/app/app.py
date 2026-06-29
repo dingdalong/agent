@@ -181,7 +181,9 @@ class AgentApp:
         await self.deps.event_bus.join()
 
     async def shutdown(self):
-        pass
+        """断开 MCP server 连接。与 create_app() 中的 mcp_mgr.start() 同处 main 任务。"""
+        if self.deps.mcp_mgr is not None:
+            await self.deps.mcp_mgr.stop()
 
     async def _run_session_start_hooks(self, source: str = "startup") -> None:
         if self.deps.hooks_mgr is None:

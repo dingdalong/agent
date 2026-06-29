@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from src.mgr.plan_mgr import PlanMgr
     from src.mgr.plugin_mgr import PluginMgr
     from src.mgr.session_mgr import SessionMgr
+    from src.mgr.mcp_mgr import McpMgr
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,7 @@ class AgentDeps:
     plan_mgr: PlanMgr | None = None
     plugin_mgr: PluginMgr | None = None
     session_mgr: SessionMgr | None = None
+    mcp_mgr: McpMgr | None = None
     permission_mode_controller: Any = None
     session_context: list[str] = field(default_factory=list)
     session_id: str = ""
