@@ -48,6 +48,9 @@ from src.interfaces.markdown_renderer import MarkdownStreamRenderer
 # braille dots spinner 帧序列。
 _SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
+# 子 agent 转录覆盖面板的最大可见行数（参照 agent 列表 Dimension(max=8)）。
+_TRANSCRIPT_PANEL_ROWS = 12
+
 # StdoutProxy 批量写入间隔（秒）。
 _STDOUT_SLEEP_BETWEEN_WRITES = 0.0
 
@@ -118,6 +121,10 @@ class InlineInterface(UserInterface):
         self._agent_list_inner: Window | None = None  # 列表内部 Window（供 has_focus / layout.focus 使用）
         self._input_window: Window | None = None  # 输入窗口引用（_build_application 中提升为实例属性）
 
+        # ---- 子 agent 转录覆盖面板（半屏、实时跟随）----
+        self._viewing_uuid: str | None = None  # 当前查看转录的子 agent uuid；None 表示未在查看（即面板可见性开关）
+        self._view_scroll: int = 0  # 从底部向上滚动的可视行数；0 表示贴底实时跟随（tail -f）
+
     @property
     def _accepting(self) -> bool:
         """是否处于可输入态（input/permission）：缓冲可编辑、› 醒目、Enter 提交。"""
@@ -186,15 +193,25 @@ class InlineInterface(UserInterface):
     # ---- 常驻 App 构建 ----
 
     def _build_application(self) -> Application[None]:
-        """构建常驻非全屏 Application：活动行（spinner，仅处理态可见）+ 分割线 + 输入框 + 分割线 + 核心状态行 + agent 列表（有子 agent 时）+ 权重填充窗口。
+        """构建常驻非全屏 Application：转录覆盖面板（查看子 agent 时置顶覆盖主对话）+ 活动行（spinner，仅处理态可见）+ 分割线 + 输入框 + 分割线 + 核心状态行 + agent 列表（有子 agent 且未查看时）+ 权重填充窗口。
 
         Returns:
             可 await run_async() 的常驻 Application。
         """
         self._buffer = Buffer(multiline=True, read_only=~self._cond_accepting, document=Document("", 0))
+        # 转录面板可见性条件：查看子 agent 转录时为真，驱动面板显隐并隐藏 spinner / agent 列表。
+        cond_viewing = Condition(lambda: self._viewing_uuid is not None)
+        # 转录覆盖面板：header（1 行）+ 内容（max=_TRANSCRIPT_PANEL_ROWS），仅查看时可见，置于 root 顶部覆盖主对话。
+        transcript_panel = ConditionalContainer(
+            HSplit([
+                Window(FormattedTextControl(self._render_transcript_header), dont_extend_height=True, height=Dimension.exact(1)),
+                Window(FormattedTextControl(self._render_transcript_panel), dont_extend_height=True, height=Dimension(max=_TRANSCRIPT_PANEL_ROWS), wrap_lines=False),
+            ]),
+            filter=cond_viewing,
+        )
         activity_window = ConditionalContainer(
             Window(FormattedTextControl(self._render_activity), dont_extend_height=True, height=Dimension(min=1)),
-            filter=Condition(lambda: self._mode == "processing" and bool(self._activity)),
+            filter=Condition(lambda: self._mode == "processing" and bool(self._activity) and self._viewing_uuid is None),
         )
         self._input_window = Window(
             BufferControl(buffer=self._buffer),
@@ -215,10 +232,11 @@ class InlineInterface(UserInterface):
         )
         self._agent_list_window = ConditionalContainer(
             self._agent_list_inner,
-            filter=Condition(lambda: self._has_sub_agents()),
+            filter=Condition(lambda: self._has_sub_agents() and self._viewing_uuid is None),
         )
         filler_window = Window(height=Dimension(weight=1))  # 吸收余高，使状态块紧贴输入框
         root = HSplit([
+            transcript_panel,
             activity_window,
             self._make_separator_window(),
             self._input_window,
@@ -394,6 +412,68 @@ class InlineInterface(UserInterface):
             self._status_console.print(text, end="")
         return ANSI(capture.get())
 
+    def _viewing_row(self) -> AgentRow | None:
+        """返回当前查看的子 agent 行快照（按 _viewing_uuid 在 rows_provider 中查找）。
+
+        Returns:
+            匹配的 AgentRow；未查看、无数据源或已被裁剪（prune）时返回 None。
+        """
+        if self._viewing_uuid is None or self._rows_provider is None:
+            return None
+        for row in self._rows_provider():
+            if row.uuid == self._viewing_uuid:
+                return row
+        return None
+
+    def _render_transcript_header(self) -> ANSI:
+        """渲染转录面板顶部标题行：「── <agent_type> <uuid8>（运行中/已完成）── <跟随态> · PgUp/PgDn 滚动 · Esc 关闭」。
+
+        跟随态：_view_scroll==0 显示「实时」，否则显示「已上滚 N 行」。
+        agent 已被裁剪（rows 中查不到）时退化显示 uuid8 + 「已结束」。
+
+        Returns:
+            可作为 Window 内容的 ANSI（单行标题）。
+        """
+        uid8 = self._viewing_uuid.split("-")[0] if self._viewing_uuid else ""
+        row = self._viewing_row()
+        if row is not None:
+            label = self._agent_label(row.agent_type, row.uuid)
+            status = "运行中" if row.running else "已完成"
+        else:
+            label = uid8
+            status = "已结束"
+        follow = "实时" if self._view_scroll == 0 else f"已上滚 {self._view_scroll} 行"
+        header = Text()
+        header.append("── ", style="bright_black")
+        header.append(label, style="bold")
+        header.append(f"（{status}）", style="bright_black")
+        header.append(" ──  ", style="bright_black")
+        header.append(follow, style="cyan")
+        header.append("  ·  PgUp/PgDn 滚动 · Esc 关闭", style="bright_black")
+        with self._status_console.capture() as capture:
+            self._status_console.print(header, end="")
+        return ANSI(capture.get())
+
+    def _render_transcript_panel(self) -> ANSI:
+        """渲染转录面板内容：把当前查看 agent 的转录按宽度折行后，切出贴底（或上滚后）的可视段。
+
+        借常驻 App 的 100ms 重绘实现实时跟随（tail -f）：_view_scroll==0 时恒切末段。
+        _view_scroll 在此就地夹取到合法上界，使越界的 PgUp 自然停在顶部。
+
+        Returns:
+            可作为 Window 内容的 ANSI（至多 _TRANSCRIPT_PANEL_ROWS 行）。
+        """
+        if self._transcript_provider is None or self._viewing_uuid is None:
+            return ANSI("")
+        text = self._transcript_provider(self._viewing_uuid)
+        with self._status_console.capture() as capture:
+            self._status_console.print(Text(text), end="")
+        lines = capture.get().split("\n")
+        max_scroll = max(0, len(lines) - _TRANSCRIPT_PANEL_ROWS)
+        self._view_scroll = min(self._view_scroll, max_scroll)  # 就地夹取上界
+        start = max_scroll - self._view_scroll
+        return ANSI("\n".join(lines[start:start + _TRANSCRIPT_PANEL_ROWS]))
+
     def _append_core_status(self, line: Text, elapsed: float) -> None:
         """把核心状态段「<权限模式> (Shift+Tab 切换) · ↑总输入 (缓存命中%) ↓输出 · <耗时>s」原地追加。
 
@@ -522,11 +602,13 @@ class InlineInterface(UserInterface):
         self._current_agent_uuid = agent_uuid
 
     def reload(self) -> None:
-        """/clear 重置会话时清零本会话累计的 token 统计与 agent 列表选中态。"""
+        """/clear 重置会话时清零本会话累计的 token 统计、agent 列表选中态与转录面板查看态。"""
         self._session_in_tokens = 0
         self._session_out_tokens = 0
         self._session_cache_read_tokens = 0
         self._agent_selected_index = 0
+        self._viewing_uuid = None
+        self._view_scroll = 0
         # 列表隐藏自愈：若焦点在 agent 列表，切回输入框
         if (
             self._app_running
@@ -982,8 +1064,9 @@ class InlineInterface(UserInterface):
         - Shift+Tab：切换权限模式并重绘。
         - Ctrl+C / 外部 SIGINT：处理态请求中断；可输入态有文本则清空、空则以 KeyboardInterrupt 解开读取。
         - Ctrl+D：可输入态空缓冲→以 EOFError 解开读取。
-        - 方向键（↓↑）：从输入框进入 agent 列表 / 列表内导航 / 返回输入框。
-        - 列表聚焦时 Enter：打印选中子 agent 转录；Esc：返回输入框。
+        - 方向键（↓↑）：从输入框进入 agent 列表 / 列表内导航 / 返回输入框（查看面板时不进列表）。
+        - 列表聚焦时 Enter：在输入框上方打开选中子 agent 的转录覆盖面板（焦点回输入框）；Esc：返回输入框。
+        - 查看面板时：PgUp/PgDn 上下滚动（暂停/恢复贴底实时跟随）；Esc：关闭面板还原主对话。
 
         Returns:
             供常驻 Application 使用的 KeyBindings。
@@ -997,6 +1080,8 @@ class InlineInterface(UserInterface):
             and self._app is not None
             and self._app.layout.has_focus(self._agent_list_inner)
         )
+        # 转录面板可见性条件：查看子 agent 转录时为真。
+        _cond_viewing = Condition(lambda: self._viewing_uuid is not None)
         # 输入态光标在末行：仅当缓冲区光标在末尾时 down 才能下移进列表
         _cond_cursor_at_end = Condition(
             lambda: self._buffer is not None
@@ -1033,8 +1118,8 @@ class InlineInterface(UserInterface):
 
         # ---- agent 列表方向键导航 ----
 
-        # ↓（eager）：从输入框进入 agent 列表（输入态光标在末行 或 处理态只读）
-        @bindings.add("down", eager=True, filter=_cond_list_visible & ~_cond_list_focused & (self._cond_accepting & _cond_cursor_at_end | ~self._cond_accepting))
+        # ↓（eager）：从输入框进入 agent 列表（输入态光标在末行 或 处理态只读；查看面板时不进列表）
+        @bindings.add("down", eager=True, filter=_cond_list_visible & ~_cond_list_focused & ~_cond_viewing & (self._cond_accepting & _cond_cursor_at_end | ~self._cond_accepting))
         def _(event) -> None:
             if self._agent_list_inner is not None:
                 self._agent_selected_index = 0
@@ -1058,7 +1143,7 @@ class InlineInterface(UserInterface):
             if self._agent_selected_index < max_idx:
                 self._agent_selected_index += 1
 
-        # Enter：列表聚焦时打印选中 agent 转录
+        # Enter：列表聚焦时在输入框上方打开选中子 agent 的转录覆盖面板（焦点回输入框，仍可输入）
         @bindings.add("enter", filter=_cond_list_focused)
         def _(event) -> None:
             if self._rows_provider is None:
@@ -1067,24 +1152,37 @@ class InlineInterface(UserInterface):
             if self._agent_selected_index >= len(rows):
                 return
             row = rows[self._agent_selected_index]
-            if not row.is_main and self._transcript_provider is not None:
-                transcript = self._transcript_provider(row.uuid)
-                if transcript.strip():
-                    uid8 = row.uuid.split("-")[0] if row.uuid else ""
-                    status = "运行中" if row.running else "已完成"
-                    header = Text()
-                    header.append("── ", style="bright_black")
-                    header.append(f"{row.agent_type} {uid8}", style="bold")
-                    header.append(f"（{status}）", style="bright_black")
-                    header.append(" ──", style="bright_black")
-                    self._print_rich(header)
-                    self._print_rich(transcript, end="")
+            if not row.is_main:
+                self._viewing_uuid = row.uuid
+                self._view_scroll = 0
             event.app.layout.focus(self._input_window)
+            event.app.invalidate()
 
         # Esc：列表聚焦时返回输入框
         @bindings.add("escape", filter=_cond_list_focused)
         def _(event) -> None:
             event.app.layout.focus(self._input_window)
+
+        # ---- 转录面板：滚动 / 关闭（输入框聚焦下仍全局响应；用 PgUp/PgDn 以让出 ↑↓ 给输入框）----
+
+        # PgUp：面板上滚（暂停贴底跟随）；越界由 _render_transcript_panel 就地夹取
+        @bindings.add("pageup", filter=_cond_viewing)
+        def _(event) -> None:
+            self._view_scroll += _TRANSCRIPT_PANEL_ROWS - 1
+            event.app.invalidate()
+
+        # PgDn：面板下滚；回到 0 即恢复贴底实时跟随
+        @bindings.add("pagedown", filter=_cond_viewing)
+        def _(event) -> None:
+            self._view_scroll = max(0, self._view_scroll - (_TRANSCRIPT_PANEL_ROWS - 1))
+            event.app.invalidate()
+
+        # Esc：关闭转录面板，主对话原样恢复
+        @bindings.add("escape", filter=_cond_viewing)
+        def _(event) -> None:
+            self._viewing_uuid = None
+            self._view_scroll = 0
+            event.app.invalidate()
 
         return bindings
 
