@@ -7,7 +7,8 @@ from dataclasses import dataclass, field
 
 from src.agent import Agent, AgentDeps
 from src.agent.states import RunResult
-from src.interfaces.permission_mode_controller import PermissionModeController
+from src.interfaces.output_router import OutputRouter
+from src.app.permission_mode_controller import PermissionModeController
 from src.events.types import InterruptRequested
 
 logger = logging.getLogger(__name__)
@@ -18,6 +19,7 @@ class AgentApp:
     """应用主循环，管理 REPL 交互和 Agent 执行。"""
 
     deps: AgentDeps = field(repr=False)
+    output_router: OutputRouter | None = None  # 消费端事件路由器（app 层持有，不入业务依赖容器）
     _work_task: asyncio.Task | None = field(default=None, init=False, repr=False)
     _permission_mode_controller: PermissionModeController | None = field(default=None, init=False, repr=False)
 
@@ -69,8 +71,8 @@ class AgentApp:
             if isinstance(event, InterruptRequested):
                 self._handle_interrupt_requested()
                 continue
-            if self.deps.output_router is not None:
-                await self.deps.output_router.dispatch(event)
+            if self.output_router is not None:
+                await self.output_router.dispatch(event)
             else:
                 await self.deps.ui.on_event(event)
 
@@ -129,13 +131,15 @@ class AgentApp:
             新创建的 Agent 实例。
         """
         self.deps.session_id = str(uuid.uuid4())
-        # "ui" / "output_router" 一并纳入：ui 清零会话级 token 统计，output_router 清空 agent 视图。
+        # "ui" 一并纳入：ui 清零会话级 token 统计。output_router 由 app 层持有，单独 reload 清空 agent 视图。
         for attr in ("memory_mgr", "tools_mgr", "permission_mgr",
                      "config_mgr", "plugin_mgr", "hooks_mgr", "plan_mgr",
-                     "ui", "output_router"):
+                     "ui"):
             mgr = getattr(self.deps, attr, None)
             if mgr is not None and hasattr(mgr, "reload"):
                 mgr.reload()
+        if self.output_router is not None:
+            self.output_router.reload()
         self.deps.session_context.clear()
         self._install_permission_mode_controller()
         self.deps.permission_mode_controller = self._permission_mode_controller
@@ -144,8 +148,8 @@ class AgentApp:
             description="入口",
             deps=self.deps,
         )
-        if self.deps.output_router is not None:
-            self.deps.output_router.set_foreground(str(agent.uuid))
+        if self.output_router is not None:
+            self.output_router.set_foreground(str(agent.uuid))
         if self._permission_mode_controller is not None:
             self._permission_mode_controller.install_shortcut(agent)
             self._permission_mode_controller.notify_state_changed()

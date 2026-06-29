@@ -19,6 +19,7 @@ from src.events.types import (
     PermissionNotice,
     PermissionRequested,
     ResponseDelta,
+    SystemStateChanged,
     ThinkingDelta,
     ToolCallCompleted,
     ToolCallStarted,
@@ -229,6 +230,8 @@ class UserInterface(ABC):
                 await self.on_response_delta(event, content)
             case ThinkingDelta(content=content):
                 await self.on_thinking_delta(event, content)
+            case SystemStateChanged():
+                self.on_system_state_changed()
             case _:
                 await self.on_unhandled_event(event)
 

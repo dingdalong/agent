@@ -75,9 +75,14 @@ class _MarkdownStream:
 class InlineInterface(UserInterface):
     """带底部动态状态条的内联富文本 UI，是本框架唯一的具体 UserInterface 实现。"""
 
-    def __init__(self) -> None:
-        """初始化内联 UI：Rich Console、双流 markdown 渲染器、常驻 App 句柄与底部状态条运行时状态。"""
+    def __init__(self, slash_commands: list[tuple[str, str]] | None = None) -> None:
+        """初始化内联 UI：Rich Console、双流 markdown 渲染器、常驻 App 句柄与底部状态条运行时状态。
+
+        Args:
+            slash_commands: 斜杠命令列表，每项为 (命令名, 描述)，由组装层注入供补全器使用。
+        """
         super().__init__()
+        self._slash_commands: list[tuple[str, str]] = slash_commands or []
         self._permission_mode_toggle_handler: Callable[[], None] | None = None
         # 输出渲染用 Console。
         self._rich_console = self._make_console(None)
@@ -212,7 +217,7 @@ class InlineInterface(UserInterface):
         self._buffer = Buffer(
             multiline=True,
             read_only=~self._cond_accepting,
-            completer=SlashCommandCompleter(),
+            completer=SlashCommandCompleter(self._slash_commands),
             complete_while_typing=True,
             document=Document("", 0),
         )

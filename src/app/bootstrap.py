@@ -10,6 +10,7 @@ from src.events import EventBus, EventLevel
 from src.mgr import ConfigManager, HooksMgr, LLMMgr, MemoryMgr, PermissionManager, PlanMgr, PluginMgr, SessionMgr, ToolsMgr
 from src.mgr.paths import global_data_dir, workdir as resolve_workdir
 from src.agent import AgentDeps
+from src.agent.states import SLASH_COMMANDS
 from src.app.app import AgentApp
 
 logger = logging.getLogger(__name__)
@@ -29,7 +30,7 @@ async def create_app(
 
     config_mgr = ConfigManager(global_dir=global_dir, workdir=work_dir)
     event_bus = EventBus(level=EventLevel.from_str(config_mgr.get_config("events").get("level", "progress")))
-    ui = InlineInterface()
+    ui = InlineInterface(slash_commands=SLASH_COMMANDS)
     output_router = OutputRouter(ui=ui, passthrough=not ui.is_tty)
     ui.set_agent_source(output_router.agent_rows, output_router.transcript_segments)
     tools_mgr = ToolsMgr()
@@ -61,9 +62,8 @@ async def create_app(
         plan_mgr=plan_mgr,
         plugin_mgr=plugin_mgr,
         session_mgr=session_mgr,
-        output_router=output_router,
         session_context=[],
         workdir=work_dir,
         global_dir=global_dir,
     )
-    return AgentApp(deps=deps)
+    return AgentApp(deps=deps, output_router=output_router)

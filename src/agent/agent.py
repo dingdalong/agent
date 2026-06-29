@@ -6,7 +6,7 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any, Callable, TYPE_CHECKING
 from src.tools import ToolDict
-from src.events.types import AgentStateChanged, CompactDelta
+from src.events.types import AgentStateChanged, CompactDelta, SystemStateChanged
 from src.agent.states import AgentState, RunContext, RunResult, parse_command
 from src.events import NoEventSubscribers
 from src.mgr import FileMgr, TaskManager, CompactMgr, CompactResult, PromptMgr, SkillMgr, SubAgentMgr, ReminderMgr
@@ -14,7 +14,6 @@ from src.mgr import FileMgr, TaskManager, CompactMgr, CompactResult, PromptMgr, 
 if TYPE_CHECKING:
     from src.mgr.llm_mgr import LLMMgr
     from src.interfaces.base import UserInterface
-    from src.interfaces.output_router import OutputRouter
     from src.events.bus import EventBus
     from src.mgr.tools_mgr import ToolsMgr
     from src.mgr.permission_mgr import PermissionManager, PermissionMode
@@ -47,7 +46,6 @@ class AgentDeps:
     plugin_mgr: PluginMgr | None = None
     session_mgr: SessionMgr | None = None
     permission_mode_controller: Any = None
-    output_router: OutputRouter | None = None  # 消费端事件路由器
     session_context: list[str] = field(default_factory=list)
     session_id: str = ""
     workdir: Path | None = None
@@ -314,7 +312,7 @@ class Agent:
             await self.deps.event_bus.request_output("已在计划模式中。\n")
             return
         self.refresh_tools_schemas()
-        self.deps.ui.on_system_state_changed()
+        await self.deps.event_bus.emit(SystemStateChanged(timestamp=time.time(), source=self.agent_type))
         await self.deps.event_bus.request_output("已进入计划模式。\n")
 
     async def _handle_resume_command(self, cmd_args: list[str]) -> None:
@@ -373,7 +371,7 @@ class Agent:
             self._reminder_mgr.register(self._task_mgr)
 
         # 恢复权限模式
-        mode_info = self._restore_permission_mode(result.metadata)
+        mode_info = await self._restore_permission_mode(result.metadata)
 
         # 构建并输出恢复摘要
         topic = result.metadata.get("topic", "")
@@ -396,7 +394,7 @@ class Agent:
         )
         self._prompt_mgr.invalidate_cache()
 
-    def _restore_permission_mode(self, metadata: dict) -> str:
+    async def _restore_permission_mode(self, metadata: dict) -> str:
         """从会话元数据恢复权限模式。
 
         处理 plan 模式的特殊恢复（先设 pre_plan_mode，再 enter_mode），
@@ -431,10 +429,7 @@ class Agent:
                 return ""
 
         self.refresh_tools_schemas()
-        if self.deps.permission_mode_controller is not None:
-            self.deps.permission_mode_controller.notify_state_changed()
-        if self.deps.ui is not None:
-            self.deps.ui.on_system_state_changed()
+        await self.deps.event_bus.emit(SystemStateChanged(timestamp=time.time(), source=self.agent_type))
 
         return mode_info
 

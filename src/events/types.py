@@ -207,6 +207,17 @@ class SubagentLifecycle(Event):
     type: Literal["subagent_lifecycle"] = field(default="subagent_lifecycle", init=False)
 
 
+@dataclass
+class SystemStateChanged(Event):
+    """系统状态（如权限模式）已变更 — 通知 UI 重读状态并重绘。
+
+    无 payload：UI 以 pull 模型经 get_system_state() 读取最新状态，本事件仅作重绘信号。
+    级别为 PROGRESS：避免被级别门控丢弃，保证状态栏即时刷新。
+    """
+    level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
+    type: Literal["system_state_changed"] = field(default="system_state_changed", init=False)
+
+
 # 联合类型
 AgentEvent = Union[
     InputRequested, OutputRequested, InterruptRequested,
@@ -214,5 +225,5 @@ AgentEvent = Union[
     CompactDelta, ToolCallCompleted, ToolCallStarted,
     LLMCallCompleted, LLMCallStarted,
     ResponseDelta, ThinkingDelta,
-    AgentStateChanged, SubagentLifecycle,
+    AgentStateChanged, SubagentLifecycle, SystemStateChanged,
 ]
