@@ -323,6 +323,7 @@ class LLMProvider(ABC):
                     await self._emit_llm_call_completed(
                         started_at=started_at,
                         usage=response.token_usage,
+                        caller_uuid=caller_uuid,
                     )
                     return response
                 except Exception as e:
@@ -412,7 +413,16 @@ class LLMProvider(ABC):
         started_at: float | None,
         ended_at: float | None = None,
         usage: dict[str, int | None] | None = None,
+        caller_uuid: str | None = None,
     ) -> None:
+        """发出 LLMCallCompleted 事件。
+
+        Args:
+            started_at: 调用起始时间戳。
+            ended_at: 调用结束时间戳（None 时用当前时间）。
+            usage: token 用量字典。
+            caller_uuid: 发起本次调用的 agent 实例 uuid，供路由器按 agent 累计 token。
+        """
         if self.event_bus is None or started_at is None:
             return
 
@@ -434,6 +444,7 @@ class LLMProvider(ABC):
             duration_seconds=duration,
             output_tokens_per_second=output_tokens / duration if output_tokens is not None and duration > 0 else None,
             total_tokens_per_second=total_tokens / duration if total_tokens is not None and duration > 0 else None,
+            caller_uuid=caller_uuid,
         ))
 
     @abstractmethod

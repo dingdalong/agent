@@ -27,6 +27,10 @@ from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.patch_stdout import StdoutProxy
 from rich.console import Console
 from rich.text import Text
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.interfaces.output_router import AgentRow
 
 from src.events.types import (
     CompactDelta,
@@ -64,7 +68,6 @@ class _MarkdownStream:
         self.renderer = MarkdownStreamRenderer(base_style=base_style)
         self.active = False
 
-
 class InlineInterface(UserInterface):
     """带底部动态状态条的内联富文本 UI，是本框架唯一的具体 UserInterface 实现。"""
 
@@ -81,6 +84,7 @@ class InlineInterface(UserInterface):
 
         # ---- 常驻 App 与终端代理 ----
         self._tty: bool = sys.stdout.isatty()
+        self.is_tty: bool = self._tty  # 公共只读属性，供外部（bootstrap）判断是否可建富 UI
         self._app: Application[None] | None = None  # 常驻 Application（非 TTY 下为 None）
         self._app_task: asyncio.Task | None = None  # 跑 run_async 的后台任务
         self._stdout_proxy: StdoutProxy | None = None  # 接管 stdout/stderr 的代理
@@ -105,6 +109,14 @@ class InlineInterface(UserInterface):
         self._session_cache_read_tokens: int = 0  # 本会话累计缓存命中（读取）输入 token
         self._turn_started_monotonic: float | None = None  # 本回合处理起点（monotonic 秒）
         self._last_elapsed: float = 0.0  # 上一回合最终耗时（秒），供输入态状态行显示
+
+        # ---- agent 列表（方向键导航，仅在有子 agent 时显示）----
+        self._rows_provider: Callable[[], list[AgentRow]] | None = None  # 注入自 OutputRouter.agent_rows
+        self._transcript_provider: Callable[[str], str] | None = None  # 注入自 OutputRouter.render_transcript
+        self._agent_selected_index: int = 0  # 列表聚焦时的选中行索引
+        self._agent_list_window: ConditionalContainer | None = None  # 列表容器（_build_application 中创建）
+        self._agent_list_inner: Window | None = None  # 列表内部 Window（供 has_focus / layout.focus 使用）
+        self._input_window: Window | None = None  # 输入窗口引用（_build_application 中提升为实例属性）
 
     @property
     def _accepting(self) -> bool:
@@ -174,7 +186,7 @@ class InlineInterface(UserInterface):
     # ---- 常驻 App 构建 ----
 
     def _build_application(self) -> Application[None]:
-        """构建常驻非全屏 Application：活动行（spinner，仅处理态可见）+ 分割线 + 输入框 + 分割线 + 核心状态行 + 权重填充窗口。
+        """构建常驻非全屏 Application：活动行（spinner，仅处理态可见）+ 分割线 + 输入框 + 分割线 + 核心状态行 + agent 列表（有子 agent 时）+ 权重填充窗口。
 
         Returns:
             可 await run_async() 的常驻 Application。
@@ -184,7 +196,7 @@ class InlineInterface(UserInterface):
             Window(FormattedTextControl(self._render_activity), dont_extend_height=True, height=Dimension(min=1)),
             filter=Condition(lambda: self._mode == "processing" and bool(self._activity)),
         )
-        input_window = Window(
+        self._input_window = Window(
             BufferControl(buffer=self._buffer),
             get_line_prefix=self._get_line_prefix,
             dont_extend_height=True,
@@ -195,17 +207,28 @@ class InlineInterface(UserInterface):
             dont_extend_height=True,
             height=Dimension(min=1),
         )
+        # agent 列表窗口：仅在有子 agent 时显示，max=8 行封顶
+        self._agent_list_inner = Window(
+            FormattedTextControl(self._render_agent_list, focusable=True),
+            dont_extend_height=True,
+            height=Dimension(max=8),
+        )
+        self._agent_list_window = ConditionalContainer(
+            self._agent_list_inner,
+            filter=Condition(lambda: self._has_sub_agents()),
+        )
         filler_window = Window(height=Dimension(weight=1))  # 吸收余高，使状态块紧贴输入框
         root = HSplit([
             activity_window,
             self._make_separator_window(),
-            input_window,
+            self._input_window,
             self._make_separator_window(),
             core_status_window,
+            self._agent_list_window,
             filler_window,
         ])
         return Application(
-            layout=Layout(root, focused_element=input_window),
+            layout=Layout(root, focused_element=self._input_window),
             key_bindings=self._build_key_bindings(),
             refresh_interval=0.1,
         )
@@ -265,7 +288,7 @@ class InlineInterface(UserInterface):
         return ANSI(capture.get())
 
     def _render_core_status(self) -> ANSI:
-        """构建底部核心状态行的 ANSI：「<权限模式> (Shift+Tab 切换) · ↑总输入 (缓存命中%) ↓输出 · 耗时s [· Ctrl+C 中断]」。
+        """构建底部核心状态行的 ANSI：「<权限模式> (Shift+Tab 切换) · ↑总输入 (缓存命中%) ↓输出 · 耗时s [· Ctrl+C 中断] [· ↓查看 agent]」。
 
         处理态（有活动）显示本回合实时累计耗时并追加「Ctrl+C 中断」提示；
         其余（可输入态、或提交后首个处理事件前的空闲）显示上一回合最终耗时、不带中断提示。
@@ -280,8 +303,95 @@ class InlineInterface(UserInterface):
         if processing:
             status.append("  ·  ", style="bright_black")
             status.append("Ctrl+C 中断", style="bright_black")
+        if self._has_sub_agents():
+            status.append("  ·  ", style="bright_black")
+            status.append("↓查看 agent", style="bright_black")
         with self._status_console.capture() as capture:
             self._status_console.print(status, end="")
+        return ANSI(capture.get())
+
+    def _render_agent_list(self) -> ANSI:
+        """渲染 agent 列表（每 agent 一行），供 agent_list_window 使用。
+
+        主 agent 行置顶，其余子 agent 按插入序。每行格式：
+        <标记> <agent_type> <uuid8> <状态> <token> · <elapsed>s
+        选中行反显（列表聚焦时）。行数 > 8 时按选中项裁出可视窗口段。
+
+        Returns:
+            可作为 Window 内容的 ANSI（多行）。
+        """
+        if self._rows_provider is None:
+            return ANSI("")
+        rows = self._rows_provider()
+        if not rows:
+            return ANSI("")
+
+        # 滑动窗口：行数 > 8 时按选中项裁取可见段
+        max_visible = 8
+        visible_rows = list(rows)
+        start = 0
+        if len(visible_rows) > max_visible:
+            start = max(0, min(self._agent_selected_index - 3, len(visible_rows) - max_visible))
+            # 夹取：确保 select 在 [start, start+max_visible) 内
+            if self._agent_selected_index >= start + max_visible:
+                start = self._agent_selected_index - max_visible + 1
+            elif self._agent_selected_index < start:
+                start = self._agent_selected_index
+            start = max(0, min(start, len(visible_rows) - max_visible))
+            visible_rows = visible_rows[start:start + max_visible]
+
+        # 列表是否已聚焦（选中行反显）
+        focused = (
+            self._app is not None
+            and self._agent_list_inner is not None
+            and self._app.layout.has_focus(self._agent_list_inner)
+        )
+
+        now = time.monotonic()
+        text = Text()
+        for i, row in enumerate(visible_rows):
+            actual_idx = start + i
+            is_selected = focused and actual_idx == self._agent_selected_index
+
+            # elapsed 实时计算
+            if row.ended_monotonic is not None and row.started_monotonic is not None:
+                elapsed = row.ended_monotonic - row.started_monotonic
+            elif row.running and row.started_monotonic is not None:
+                elapsed = now - row.started_monotonic
+            else:
+                elapsed = 0.0
+
+            # token 格式化
+            total_in = row.in_tokens
+            hit_pct = (row.cache_read / total_in * 100) if total_in else 0.0
+            status = "运行中" if row.running else "已完成"
+            uid8 = row.uuid.split("-")[0] if row.uuid else ""
+            marker = "⏺" if row.is_main else "◯"
+
+            # 整行样式：选中时反显
+            style = "reverse" if is_selected else ""
+
+            line = Text()
+            line.append(f"{marker} ", style=style)
+            if row.is_main:
+                # 主 agent 行只显示标记 + 类型（其输出已在滚动区实时可见）
+                line.append(row.agent_type, style=style)
+            else:
+                # 子 agent 行：完整信息
+                line.append(row.agent_type, style=style)
+                line.append(f"{' ' * 2}{uid8:<10}", style=style)
+                line.append(f"{status:<6}", style=style)
+                line.append(f" ↑{self._format_token_count(total_in)}", style=style)
+                line.append(f" ({hit_pct:.0f}%)", style="bright_black")
+                line.append(f" ↓{self._format_token_count(row.out_tokens)}", style=style)
+                line.append(f"  ·  {elapsed:.1f}s", style=style)
+
+            text.append(line)
+            if i < len(visible_rows) - 1:
+                text.append("\n")
+
+        with self._status_console.capture() as capture:
+            self._status_console.print(text, end="")
         return ANSI(capture.get())
 
     def _append_core_status(self, line: Text, elapsed: float) -> None:
@@ -325,6 +435,33 @@ class InlineInterface(UserInterface):
         if count < 1000:
             return str(count)
         return f"{count / 1000:.1f}k"
+
+    def set_agent_source(
+        self,
+        rows_provider: Callable[[], list[AgentRow]],
+        transcript_provider: Callable[[str], str],
+    ) -> None:
+        """注入 agent 列表数据源与转录查询函数（来自 OutputRouter）。
+
+        Args:
+            rows_provider: 返回 agent 行快照列表的无参 callable。
+            transcript_provider: 接受 uuid 返回转录纯文本的 callable。
+        """
+        self._rows_provider = rows_provider
+        self._transcript_provider = transcript_provider
+
+    def _has_sub_agents(self) -> bool:
+        """检查当前是否有子 agent（列表是否应该可见）。
+
+        Returns:
+            True 当 rows_provider 已装配且存在非 main 的行。
+        """
+        if self._rows_provider is None:
+            return False
+        try:
+            return any(not r.is_main and r.running for r in self._rows_provider())
+        except Exception:
+            return False
 
     @staticmethod
     def _elapsed(start: float | None, now: float) -> float:
@@ -385,10 +522,19 @@ class InlineInterface(UserInterface):
         self._current_agent_uuid = agent_uuid
 
     def reload(self) -> None:
-        """/clear 重置会话时清零本会话累计的 token 统计。"""
+        """/clear 重置会话时清零本会话累计的 token 统计与 agent 列表选中态。"""
         self._session_in_tokens = 0
         self._session_out_tokens = 0
         self._session_cache_read_tokens = 0
+        self._agent_selected_index = 0
+        # 列表隐藏自愈：若焦点在 agent 列表，切回输入框
+        if (
+            self._app_running
+            and self._agent_list_inner is not None
+            and self._app is not None
+            and self._app.layout.has_focus(self._agent_list_inner)
+        ):
+            self._app.layout.focus(self._input_window)
 
     def on_system_state_changed(self) -> None:
         """系统状态（如权限模式）变化：重绘状态条以立即反映新模式。"""
@@ -422,6 +568,8 @@ class InlineInterface(UserInterface):
     async def _await_submission(self, mode: str, default: str = "") -> str:
         """进入指定可输入态（input/permission），预填 default，await 由 Enter 键绑定解析的 future。
 
+        若当前焦点在 agent 列表，先抢回输入框（否则按键落到列表而非应答 future → 交互卡死）。
+
         Args:
             mode: 目标交互模式（"input" 或 "permission"），写入 self._mode 驱动只读条件/前缀着色/状态行。
             default: 预填入缓冲的默认文本（权限态传空串）。
@@ -431,6 +579,13 @@ class InlineInterface(UserInterface):
         loop = asyncio.get_running_loop()
         self._input_future = loop.create_future()
         self._mode = mode
+        # 实时夺焦：若当前焦点在 agent 列表，切回输入框确保按键到达应答 future
+        if (
+            self._app is not None
+            and self._agent_list_inner is not None
+            and self._app.layout.has_focus(self._agent_list_inner)
+        ):
+            self._app.layout.focus(self._input_window)
         self._buffer.set_document(Document(default, len(default)), bypass_readonly=True)
         self._app.invalidate()
         try:
@@ -822,25 +977,41 @@ class InlineInterface(UserInterface):
     def _build_key_bindings(self) -> KeyBindings:
         """构建常驻 App 的按键绑定（按交互模式门控）。
 
-        - Enter（仅可输入态）：纯空白忽略，否则解析输入/权限应答（解析 _input_future）。
+        - Enter（仅可输入态且列表未聚焦）：纯空白忽略，否则解析输入/权限应答。
         - Ctrl+J / Shift+Enter：插入换行。
         - Shift+Tab：切换权限模式并重绘。
         - Ctrl+C / 外部 SIGINT：处理态请求中断；可输入态有文本则清空、空则以 KeyboardInterrupt 解开读取。
         - Ctrl+D：可输入态空缓冲→以 EOFError 解开读取。
+        - 方向键（↓↑）：从输入框进入 agent 列表 / 列表内导航 / 返回输入框。
+        - 列表聚焦时 Enter：打印选中子 agent 转录；Esc：返回输入框。
 
         Returns:
             供常驻 Application 使用的 KeyBindings。
         """
         bindings = KeyBindings()
 
-        @bindings.add("enter", filter=self._cond_accepting)
+        # 列表可见性 & 聚焦条件（lazy evaluate at key-press time）
+        _cond_list_visible = Condition(lambda: self._has_sub_agents())
+        _cond_list_focused = Condition(
+            lambda: self._agent_list_inner is not None
+            and self._app is not None
+            and self._app.layout.has_focus(self._agent_list_inner)
+        )
+        # 输入态光标在末行：仅当缓冲区光标在末尾时 down 才能下移进列表
+        _cond_cursor_at_end = Condition(
+            lambda: self._buffer is not None
+            and self._buffer.document.is_cursor_at_the_end
+        )
+
+        # Enter（可输入态且列表未聚焦）：提交输入/权限应答
+        @bindings.add("enter", filter=self._cond_accepting & ~_cond_list_focused)
         def _(event) -> None:
-            # 纯空白输入忽略
             text = event.current_buffer.text
             if not text.strip():
                 return
             self._resolve_input(text)
 
+        # Ctrl+J：插入换行
         @bindings.add("c-j")
         def _(event) -> None:
             event.current_buffer.insert_text("\n")
@@ -848,18 +1019,73 @@ class InlineInterface(UserInterface):
         self._try_add_binding(bindings, "s-enter", lambda event: event.current_buffer.insert_text("\n"))
         self._try_add_binding(bindings, "s-tab", self._handle_permission_mode_toggle)
 
+        # Ctrl+C：中断当前
         @bindings.add("c-c")
         def _(event) -> None:
             self._interrupt_current()
 
         @bindings.add("c-d")
         def _(event) -> None:
-            # 可输入态空缓冲 → 以 EOFError 解开读取
             if self._accepting and not event.current_buffer.text:
                 self._fail_input(EOFError())
 
-        # 外部 kill -INT：经 send_sigint 投递为 <sigint> 键，绑到与 Ctrl+C 同一处理器
         self._try_add_binding(bindings, "<sigint>", lambda event: self._interrupt_current())
+
+        # ---- agent 列表方向键导航 ----
+
+        # ↓（eager）：从输入框进入 agent 列表（输入态光标在末行 或 处理态只读）
+        @bindings.add("down", eager=True, filter=_cond_list_visible & ~_cond_list_focused & (self._cond_accepting & _cond_cursor_at_end | ~self._cond_accepting))
+        def _(event) -> None:
+            if self._agent_list_inner is not None:
+                self._agent_selected_index = 0
+                event.app.layout.focus(self._agent_list_inner)
+
+        # ↑：列表聚焦时上移选中行；到头则返回输入框
+        @bindings.add("up", filter=_cond_list_focused)
+        def _(event) -> None:
+            if self._agent_selected_index > 0:
+                self._agent_selected_index -= 1
+            else:
+                event.app.layout.focus(self._input_window)
+
+        # ↓：列表聚焦时下移选中行
+        @bindings.add("down", filter=_cond_list_focused)
+        def _(event) -> None:
+            if self._rows_provider is None:
+                return
+            rows = self._rows_provider()
+            max_idx = len(rows) - 1
+            if self._agent_selected_index < max_idx:
+                self._agent_selected_index += 1
+
+        # Enter：列表聚焦时打印选中 agent 转录
+        @bindings.add("enter", filter=_cond_list_focused)
+        def _(event) -> None:
+            if self._rows_provider is None:
+                return
+            rows = self._rows_provider()
+            if self._agent_selected_index >= len(rows):
+                return
+            row = rows[self._agent_selected_index]
+            if not row.is_main and self._transcript_provider is not None:
+                transcript = self._transcript_provider(row.uuid)
+                if transcript.strip():
+                    uid8 = row.uuid.split("-")[0] if row.uuid else ""
+                    status = "运行中" if row.running else "已完成"
+                    header = Text()
+                    header.append("── ", style="bright_black")
+                    header.append(f"{row.agent_type} {uid8}", style="bold")
+                    header.append(f"（{status}）", style="bright_black")
+                    header.append(" ──", style="bright_black")
+                    self._print_rich(header)
+                    self._print_rich(transcript, end="")
+            event.app.layout.focus(self._input_window)
+
+        # Esc：列表聚焦时返回输入框
+        @bindings.add("escape", filter=_cond_list_focused)
+        def _(event) -> None:
+            event.app.layout.focus(self._input_window)
+
         return bindings
 
     def _interrupt_current(self) -> None:

@@ -14,6 +14,7 @@ from src.mgr import FileMgr, TaskManager, CompactMgr, CompactResult, PromptMgr, 
 if TYPE_CHECKING:
     from src.mgr.llm_mgr import LLMMgr
     from src.interfaces.base import UserInterface
+    from src.interfaces.output_router import OutputRouter
     from src.events.bus import EventBus
     from src.mgr.tools_mgr import ToolsMgr
     from src.mgr.permission_mgr import PermissionManager, PermissionMode
@@ -46,6 +47,7 @@ class AgentDeps:
     plugin_mgr: PluginMgr | None = None
     session_mgr: SessionMgr | None = None
     permission_mode_controller: Any = None
+    output_router: OutputRouter | None = None  # 消费端事件路由器
     session_context: list[str] = field(default_factory=list)
     session_id: str = ""
     workdir: Path | None = None

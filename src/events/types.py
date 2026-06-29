@@ -124,6 +124,7 @@ class LLMCallCompleted(Event):
     duration_seconds: float | None = None
     output_tokens_per_second: float | None = None
     total_tokens_per_second: float | None = None
+    caller_uuid: str | None = None  # 发起本次调用的 agent 实例 uuid，供路由器按 agent 累计 token
     level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
     type: Literal["llm_call_completed"] = field(default="llm_call_completed", init=False)
 
@@ -183,6 +184,16 @@ class AgentStateChanged(Event):
     type: Literal["agent_state_changed"] = field(default="agent_state_changed", init=False)
 
 
+@dataclass
+class SubagentLifecycle(Event):
+    """子 agent 生命周期事件 — 由 subagent_mgr 在启动/结束时发射，供路由器维护 agent 视图。"""
+    agent_uuid: str = ""
+    agent_type: str = ""
+    phase: Literal["start", "end"] = "start"
+    level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
+    type: Literal["subagent_lifecycle"] = field(default="subagent_lifecycle", init=False)
+
+
 # 联合类型
 AgentEvent = Union[
     InputRequested, OutputRequested, InterruptRequested,
@@ -190,5 +201,5 @@ AgentEvent = Union[
     CompactDelta, ToolCallCompleted, ToolCallStarted,
     LLMCallCompleted, LLMCallStarted,
     ResponseDelta, ThinkingDelta,
-    AgentStateChanged,
+    AgentStateChanged, SubagentLifecycle,
 ]

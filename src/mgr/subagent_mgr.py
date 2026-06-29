@@ -2,10 +2,13 @@ from __future__ import annotations
 from typing import Any, TYPE_CHECKING
 
 import re
+import time
 import logging
 import yaml
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from src.events.types import SubagentLifecycle
 
 if TYPE_CHECKING:
     from src.agent import Agent, AgentDeps
@@ -179,7 +182,20 @@ class SubAgentMgr:
                 **hook_kwargs,
             )
 
+        # 获取 event_bus（用于发射 SubagentLifecycle），异常/取消时 finally 也需引用
+        event_bus = getattr(self.deps, "event_bus", None)
+
         try:
+            # 发射子 agent 生命周期开始事件
+            if event_bus is not None:
+                await event_bus.emit(SubagentLifecycle(
+                    timestamp=time.time(),
+                    source="subagent_mgr",
+                    agent_uuid=str(agent.uuid),
+                    agent_type=agent_type,
+                    phase="start",
+                ))
+
             result = (await agent.run(prompt)).final_text
         except Exception:
             # —— 子智能体异常退出，回滚任务状态 ——
@@ -189,6 +205,16 @@ class SubAgentMgr:
                 except ValueError:
                     pass
             raise
+        finally:
+            # 发射子 agent 生命周期结束事件（异常/取消也发）
+            if event_bus is not None:
+                await event_bus.emit(SubagentLifecycle(
+                    timestamp=time.time(),
+                    source="subagent_mgr",
+                    agent_uuid=str(agent.uuid),
+                    agent_type=agent_type,
+                    phase="end",
+                ))
 
         if fire_hooks:
             stop_result = await hooks_mgr.run_event(

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from src.interfaces import InlineInterface
+from src.interfaces import InlineInterface, OutputRouter
 from src.events import EventBus, EventLevel
 from src.mgr import ConfigManager, HooksMgr, LLMMgr, MemoryMgr, PermissionManager, PlanMgr, PluginMgr, SessionMgr, ToolsMgr
 from src.mgr.paths import global_data_dir, workdir as resolve_workdir
@@ -30,6 +30,8 @@ async def create_app(
     config_mgr = ConfigManager(global_dir=global_dir, workdir=work_dir)
     event_bus = EventBus(level=EventLevel.from_str(config_mgr.get_config("events").get("level", "progress")))
     ui = InlineInterface()
+    output_router = OutputRouter(ui=ui, passthrough=not ui.is_tty)
+    ui.set_agent_source(output_router.agent_rows, output_router.render_transcript)
     tools_mgr = ToolsMgr()
     memory_mgr = MemoryMgr(work_dir)
     plugin_mgr = PluginMgr(workdir=work_dir, global_dir=global_dir)
@@ -59,6 +61,7 @@ async def create_app(
         plan_mgr=plan_mgr,
         plugin_mgr=plugin_mgr,
         session_mgr=session_mgr,
+        output_router=output_router,
         session_context=[],
         workdir=work_dir,
         global_dir=global_dir,
