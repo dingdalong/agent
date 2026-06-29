@@ -1,14 +1,19 @@
-"""插件发现管理器 — 统一扫描全局和项目插件目录，按需分发给子系统。"""
+"""插件发现管理器 — 统一扫描角色、全局和项目插件目录，按需分发给子系统。"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.mgr.role_mgr import RoleMgr
 
 
 class PluginLayer(Enum):
     """插件来源层级。"""
+    ROLE = "role"
     GLOBAL = "global"
     PROJECT = "project"
 
@@ -29,7 +34,7 @@ class PluginInfo:
 
 @dataclass
 class PluginMgr:
-    """插件发现管理器 — 扫描全局和项目两层 plugins/ 目录，发现所有插件。
+    """插件发现管理器 — 扫描角色、全局和项目三层 plugins/ 目录，发现所有插件。
 
     仅负责发现插件目录，不解析插件内部内容（skills、hooks 等），
     由各子系统从 PluginInfo 中自取所需。
@@ -37,17 +42,24 @@ class PluginMgr:
     Attributes:
         workdir: 用户工作目录（项目根目录）。
         global_dir: 全局配置目录（~/.agent/），为 None 时跳过全局层。
+        role_mgr: 角色管理器，为 None 时跳过角色层。
     """
     workdir: Path
     global_dir: Path | None = None
+    role_mgr: RoleMgr | None = None
     _plugins: list[PluginInfo] = field(init=False, default_factory=list)
 
     def __post_init__(self) -> None:
         self._scan()
 
     def _scan(self) -> None:
-        """扫描全局和项目两层插件目录，结果按 全局→项目 排列。"""
+        """扫描角色、全局、项目三层插件目录，结果按 角色→全局→项目 排列。"""
         plugins: list[PluginInfo] = []
+        # 角色插件
+        if self.role_mgr is not None and self.role_mgr.active:
+            pd = self.role_mgr.plugins_dir()
+            if pd is not None:
+                plugins.extend(self._scan_layer(pd, PluginLayer.ROLE))
         if self.global_dir:
             plugins.extend(self._scan_layer(self.global_dir / "plugins", PluginLayer.GLOBAL))
         plugins.extend(self._scan_layer(self.workdir / ".agent" / "plugins", PluginLayer.PROJECT))

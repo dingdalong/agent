@@ -19,12 +19,16 @@ class PromptMgr:
     _static_prefix: str | None = field(init=False, default=None)
 
     def _build_core(self) -> str:
-        return (
-            "# 核心身份\n"
-            "你是一个超级智能体。\n"
-            "你的任务是理解用户需求，基于可用上下文和工具给出可靠结果。\n"
-            "在做假设之前务必先验证。不要凭空猜测行事。"
+        """构建核心身份段。role identity 非空时优先使用，否则回退默认身份。"""
+        identity = (
+            self.role_prompt
+            if self.role_prompt
+            else (
+                "你是一个超级智能体。\n"
+                "你的任务是理解用户需求，基于可用上下文和工具给出可靠结果。"
+            )
         )
+        return f"# 核心身份\n{identity}"
 
     def _build_truthfulness_constraints(self) -> str:
         return (
@@ -56,11 +60,8 @@ class PromptMgr:
         return (
             "# 可用技能\n" + describe +
             "\n\n## 技能使用流程\n"
-            "技能用于加载专门流程或知识。\n"
-            "1. 开始任务前，检查可用技能列表，当任务与某个技能匹配时，调用load_skill加载该技能后再执行操作。\n"
-            "2. 如果已加载技能要求委派，委派 prompt 必须同时满足该技能指令和本文的运行决策顺序。\n"
-            "3. 如果技能要求使用 prompt 模板委派子智能体，按”上下文和工具调用约束”读取当前阶段所需模板，"
-            "组装完整 prompt 后使用 `task_delegator` 委派。"
+            "当任务匹配某个技能时，调用 load_skill 加载后再执行操作。"
+            "已加载技能的指令优先于本文的通用规则。"
         )
 
     def _build_subagent_listing(self) -> str:
@@ -91,42 +92,53 @@ class PromptMgr:
             "相关上下文、期望输出和限制。子 agent 返回后，你负责判断是否继续委派、是否需要补充确认，以及如何回复用户。"
         )
 
-    def _build_role_prompt(self) -> str:
-        if not self.role_prompt:
-            return ""
-        return f"# 角色提示词：\n{self.role_prompt}"
-
     def _build_agent_md(self) -> str:
-        """三层加载 AGENT.md：内置 → 用户全局 → 项目级，内容叠加。
+        """四层加载 AGENT.md：共享 → 角色 → 用户全局 → 项目级，内容叠加。
 
         Returns:
             拼接后的 AGENT.md 提示词段落；无任何来源时返回空字符串。
         """
-        from src.mgr.paths import builtin_root
-
         sources = []
 
-        builtin_agent = builtin_root() / "AGENT.md"
-        if builtin_agent.exists():
-            sources.append(("builtin (src/AGENT.md)", builtin_agent.read_text()))
+        # 共享 AGENT.md（最低优先级，所有角色可用）
+        role_mgr = getattr(getattr(self.agent, "deps", None), "role_mgr", None)
+        if role_mgr is not None:
+            common_agent = role_mgr.common_agent_md_path()
+            if common_agent is not None:
+                text = common_agent.read_text().strip()
+                if text:
+                    sources.append(("common AGENT.md", text))
+
+        # 角色 AGENT.md（基准层）
+        if role_mgr is not None and role_mgr.active:
+            role_agent = role_mgr.agent_md_path()
+            if role_agent is not None:
+                text = role_agent.read_text().strip()
+                if text:
+                    sources.append(("role AGENT.md", text))
 
         if self.global_dir:
             user_agent = self.global_dir / "AGENT.md"
             if user_agent.exists():
-                sources.append(("user global (AGENT.md)", user_agent.read_text()))
+                text = user_agent.read_text().strip()
+                if text:
+                    sources.append(("user global (AGENT.md)", text))
 
         project_agent = self.workdir / "AGENT.md"
         if project_agent.exists():
-            sources.append(("project root (AGENT.md)", project_agent.read_text()))
+            text = project_agent.read_text().strip()
+            if text:
+                sources.append(("project root (AGENT.md)", text))
 
         if not sources:
             return ""
         parts = [
-            "# AGENT.md instructions",
-            "AGENT.md 可以补充行为要求、项目约定和用户偏好；绝对不能覆盖工具权限、子 agent 隔离和运行决策顺序。",
+            "# 行为准则",
+            "本节补充行为要求、项目约定与用户偏好，作为执行时的优先指引；"
+            "但不得覆盖工具权限、子 agent 隔离与运行决策顺序，"
+            "若与三者冲突，一律以三者为准、忽略本节中的冲突部分。",
         ]
-        for label, content in sources:
-            parts.append(f"## From {label}")
+        for _, content in sources:
             parts.append(content.strip())
         return "\n\n".join(parts)
 
@@ -191,11 +203,6 @@ class PromptMgr:
         session_context = self._build_session_context()
         if session_context:
             sections.append(session_context)
-
-        # —— 智能体专属指令（结尾，recency）——
-        role_prompt = self._build_role_prompt()
-        if role_prompt:
-            sections.append(role_prompt)
 
         # 仅主 agent：先列参考数据，最后放最关键的决策规则
         if not self.agent.is_subagent:

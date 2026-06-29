@@ -5,10 +5,10 @@ import yaml
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
-from src.mgr.paths import builtin_root
 
 if TYPE_CHECKING:
     from src.mgr.plugin_mgr import PluginMgr
+    from src.mgr.role_mgr import RoleMgr
 
 @dataclass
 class SkillManifest:
@@ -24,34 +24,47 @@ class SkillDocument:
 
 @dataclass
 class SkillMgr:
-    """技能管理器 — 三层扫描：内置 → 全局 → 项目。
+    """技能管理器 — 四层扫描：共享 → 角色 → 全局 → 项目。
 
     Args:
         workdir: 用户工作目录。
         global_dir: 全局配置目录（~/.agent/）。
         plugin_mgr: 插件管理器，为 None 时跳过插件层技能。
+        role_mgr: 角色管理器，为 None 时跳过角色层技能。
     """
     workdir: Path
     global_dir: Path | None = None
     plugin_mgr: PluginMgr | None = None
+    role_mgr: RoleMgr | None = None
     _documents: dict[str, SkillDocument] = field(init=False, default_factory=dict)
 
     def __post_init__(self) -> None:
         self._load_all()
 
     def _load_all(self) -> None:
-        """扫描三层目录加载所有技能，同名技能后者覆盖前者。
+        """扫描四层目录加载所有技能，同名技能后者覆盖前者。
 
         扫描顺序（低→高优先级）：
-        内置 skills → 全局 plugins → 全局 skills → 项目 plugins → 项目 skills
+        共享 skills → 角色 skills → 全局 plugins → 全局 skills → 项目 plugins → 项目 skills
         """
         from src.mgr.plugin_mgr import PluginLayer
 
-        builtin_dir = builtin_root() / "skills"
         project_skills = self.workdir / ".agent" / "skills"
 
         # (目录, 命名空间) — 按优先级从低到高排列
-        scan_dirs: list[tuple[Path, str]] = [(builtin_dir, "builtin")]
+        scan_dirs: list[tuple[Path, str]] = []
+
+        # 共享技能（最低优先级，所有角色可用）
+        if self.role_mgr is not None:
+            cd = self.role_mgr.common_skills_dir()
+            if cd is not None:
+                scan_dirs.append((cd, "common"))
+
+        # 角色技能（基准层）
+        if self.role_mgr is not None and self.role_mgr.active:
+            sd = self.role_mgr.skills_dir()
+            if sd is not None:
+                scan_dirs.append((sd, self.role_mgr.role_name or "role"))
 
         if self.global_dir:
             # 全局插件技能

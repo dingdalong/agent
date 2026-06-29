@@ -83,4 +83,4 @@ REQUEST_INPUT → CHECK_COMPACT → [COMPACT →] LLM_CALL → PROCESS_RESPONSE
 
 不要为流优化而优化：除非优化明确有效，否则不要优化。
 
-对于没有任何地方使用的方法、字段、定义，需要移除。
+对于没有任何地方使用的方法、字段、定义，以及对应的注释、文档都需要移除。

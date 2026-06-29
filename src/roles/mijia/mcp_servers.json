@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "mijia": {
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@anthropic/mcp-server-mijia"],
+      "env": {
+        "MI_USER_ID": "${MI_USER_ID}",
+        "MI_TOKEN": "${MI_TOKEN}",
+        "MI_REGION": "cn"
+      }
+    }
+  }
+}

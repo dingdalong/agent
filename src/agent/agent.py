@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from src.mgr.plugin_mgr import PluginMgr
     from src.mgr.session_mgr import SessionMgr
     from src.mgr.mcp_mgr import McpMgr
+    from src.mgr.role_mgr import RoleMgr
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,7 @@ class AgentDeps:
     plugin_mgr: PluginMgr | None = None
     session_mgr: SessionMgr | None = None
     mcp_mgr: McpMgr | None = None
+    role_mgr: RoleMgr | None = None
     permission_mode_controller: Any = None
     session_context: list[str] = field(default_factory=list)
     session_id: str = ""
@@ -108,7 +110,7 @@ class Agent:
         )
         workdir = self.deps.workdir
         self._file_mgr = FileMgr(workdir, self.deps)
-        self._skill_mgr = SkillMgr(workdir, global_dir=self.deps.global_dir, plugin_mgr=self.deps.plugin_mgr)
+        self._skill_mgr = SkillMgr(workdir, global_dir=self.deps.global_dir, plugin_mgr=self.deps.plugin_mgr, role_mgr=self.deps.role_mgr)
         self._subagent_mgr = SubAgentMgr(workdir, self.deps, global_dir=self.deps.global_dir)
         self._prompt_mgr = PromptMgr(agent=self, model=self.llm.model, workdir=workdir, global_dir=self.deps.global_dir, role_prompt=self.role_prompt)
         # 主 agent：持久化到磁盘；子 agent：纯内存模式，独立实例。

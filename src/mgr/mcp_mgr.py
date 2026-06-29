@@ -9,6 +9,7 @@ session 的消息流（anyio 流跨任务收发安全）。所有方法只 await
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 from contextlib import AsyncExitStack
@@ -22,6 +23,7 @@ from src.tools.decorator import ToolEntry, ToolPermission
 if TYPE_CHECKING:
     from src.mgr.config_mgr import ConfigManager
     from src.mgr.tools_mgr import ToolsMgr
+    from src.mgr.role_mgr import RoleMgr
 
 logger = logging.getLogger(__name__)
 
@@ -97,11 +99,18 @@ class McpMgr:
     Args:
         config_mgr: 配置管理器，用于读取合并后的 mcp_servers.json。
         tools_mgr: 工具管理器，发现的 MCP 工具注册到此。
+        role_mgr: 角色管理器，为 None 时跳过角色层 MCP 配置。
     """
 
-    def __init__(self, config_mgr: ConfigManager, tools_mgr: ToolsMgr) -> None:
+    def __init__(
+        self,
+        config_mgr: ConfigManager,
+        tools_mgr: ToolsMgr,
+        role_mgr: RoleMgr | None = None,
+    ) -> None:
         self.config_mgr = config_mgr
         self.tools_mgr = tools_mgr
+        self.role_mgr = role_mgr
         self._conns: dict[str, _ServerConn] = {}
         self._tasks: list[asyncio.Task] = []
         self._stop_event: asyncio.Event | None = None
@@ -109,10 +118,24 @@ class McpMgr:
     async def start(self) -> None:
         """读取配置，为每个 MCP server 启动常驻连接任务并等待其就绪。
 
+        三层 MCP 配置合并（低→高）：角色 → global → project。
         单个 server 连接失败仅记日志并跳过，不影响其它 server 与主流程。
         未配置 server 或未安装 mcp 包时整体跳过。
         """
-        servers = self.config_mgr.load_mcp_servers()
+        # 三层合并：role → global → project
+        servers: dict[str, dict[str, Any]] = {}
+        # 角色层
+        if self.role_mgr is not None and self.role_mgr.active:
+            sp = self.role_mgr.mcp_servers_path()
+            if sp is not None:
+                try:
+                    role_data = json.loads(sp.read_text()).get("mcpServers", {})
+                    if isinstance(role_data, dict):
+                        servers.update(role_data)
+                except (json.JSONDecodeError, OSError):
+                    pass
+        # global + project（project 覆盖 global，二者均覆盖角色层同名 key）
+        servers.update(self.config_mgr.load_mcp_servers())
         if not servers:
             return
         try:

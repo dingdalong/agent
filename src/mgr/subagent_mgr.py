@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from src.events.types import SubagentLifecycle
+from src.mgr.permission_mgr import parse_permission_mode
 
 if TYPE_CHECKING:
     from src.agent import Agent, AgentDeps
@@ -33,7 +34,7 @@ class SubAgentDocument:
 
 @dataclass
 class SubAgentMgr:
-    """子智能体管理器 — 三层扫描：内置 → 全局 → 项目，同名覆盖。
+    """子智能体管理器 — 四层扫描：共享 → 角色 → 全局 → 项目，同名覆盖。
 
     Args:
         workdir: 用户工作目录。
@@ -50,21 +51,31 @@ class SubAgentMgr:
         self._load_all()
 
     def _load_all(self) -> None:
-        """扫描三层目录加载子智能体定义，同名后者覆盖前者。
+        """扫描四层目录加载子智能体定义，同名后者覆盖前者。
 
-        扫描顺序（低→高优先级）：内置 → 全局 → 项目。
+        扫描顺序（低→高优先级）：共享 → 角色 → 全局 → 项目。
         """
-        from src.mgr.paths import builtin_root
-        from src.mgr.permission_mgr import parse_permission_mode
-        builtin_dir = builtin_root() / "agent" / "agents"
         project_dir = self.workdir / ".agent" / "agents"
 
-        scan_dirs = [builtin_dir]
-        if self.global_dir:
-            scan_dirs.append(self.global_dir / "agents")
-        scan_dirs.append(project_dir)
+        scan_dirs: list[tuple[Path, str]] = []
 
-        for directory in scan_dirs:
+        # 共享子 agent（最低优先级，所有角色可用）
+        role_mgr = getattr(self.deps, "role_mgr", None)
+        if role_mgr is not None:
+            cd = role_mgr.common_agents_dir()
+            if cd is not None:
+                scan_dirs.append((cd, "common"))
+
+        # 角色子 agent（基准层）
+        if role_mgr is not None and role_mgr.active:
+            sd = role_mgr.agents_dir()
+            if sd is not None:
+                scan_dirs.append((sd, "role"))
+        if self.global_dir:
+            scan_dirs.append((self.global_dir / "agents", "global"))
+        scan_dirs.append((project_dir, "project"))
+
+        for directory, _source in scan_dirs:
             if not directory.exists():
                 continue
             for path in sorted(directory.glob("*.md")):

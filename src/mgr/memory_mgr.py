@@ -54,8 +54,12 @@ class MemoryMgr:
         self._load_all()
 
     def build_prompt(self) -> str:
+        """构建项目记忆提示词段。无记忆时返回空字符串。"""
         entries = list(self.entries.values())
         selected = entries[: self.max_prompt_entries]
+
+        if not selected:
+            return ""
 
         parts = [
             "# 项目记忆",
@@ -70,10 +74,6 @@ class MemoryMgr:
             "只有主题、适用范围或用途明显不同，才创建新的记忆标题。",
             "## 已知记忆（简报）：",
         ]
-
-        if not selected:
-            parts.append("当前没有项目记忆。")
-            return "\n".join(parts)
 
         for memory_type in MEMORY_TYPES:
             group = [entry for entry in selected if entry.type == memory_type]

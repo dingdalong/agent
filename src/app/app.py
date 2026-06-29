@@ -147,6 +147,7 @@ class AgentApp:
             agent_type="总控",
             description="入口",
             deps=self.deps,
+            role_prompt=self.deps.role_mgr.identity if self.deps.role_mgr else None,
         )
         if self.output_router is not None:
             self.output_router.set_foreground(str(agent.uuid))

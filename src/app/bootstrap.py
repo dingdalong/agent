@@ -7,7 +7,7 @@ from pathlib import Path
 
 from src.interfaces import InlineInterface, OutputRouter
 from src.events import EventBus, EventLevel
-from src.mgr import ConfigManager, HooksMgr, LLMMgr, McpMgr, MemoryMgr, PermissionManager, PlanMgr, PluginMgr, SessionMgr, ToolsMgr
+from src.mgr import ConfigManager, HooksMgr, LLMMgr, McpMgr, MemoryMgr, PermissionManager, PlanMgr, PluginMgr, RoleMgr, SessionMgr, ToolsMgr
 from src.mgr.paths import global_data_dir, workdir as resolve_workdir
 from src.agent import AgentDeps
 from src.agent.states import SLASH_COMMANDS
@@ -29,17 +29,18 @@ async def create_app(
     work_dir = resolve_workdir(workdir_override)
 
     config_mgr = ConfigManager(global_dir=global_dir, workdir=work_dir)
+    role_mgr = RoleMgr(config_mgr=config_mgr, workdir=work_dir, global_dir=global_dir)
     event_bus = EventBus(level=EventLevel.from_str(config_mgr.get_config("events").get("level", "progress")))
     ui = InlineInterface(slash_commands=SLASH_COMMANDS)
     output_router = OutputRouter(ui=ui, passthrough=not ui.is_tty)
     ui.set_agent_source(output_router.agent_rows, output_router.transcript_segments)
     tools_mgr = ToolsMgr()
     memory_mgr = MemoryMgr(work_dir)
-    plugin_mgr = PluginMgr(workdir=work_dir, global_dir=global_dir)
+    plugin_mgr = PluginMgr(workdir=work_dir, global_dir=global_dir, role_mgr=role_mgr)
     hooks_mgr = HooksMgr(workdir=work_dir, global_dir=global_dir, plugin_mgr=plugin_mgr)
     plan_mgr = PlanMgr(work_dir)
     # 须先于 permission_mgr：MCP 工具注册进 tools_mgr 后，其权限元数据才会被 PermissionManager 收录。
-    mcp_mgr = McpMgr(config_mgr=config_mgr, tools_mgr=tools_mgr)
+    mcp_mgr = McpMgr(config_mgr=config_mgr, tools_mgr=tools_mgr, role_mgr=role_mgr)
     await mcp_mgr.start()
     permission_mgr = PermissionManager(
         tools=tools_mgr.list_entries(),
@@ -66,6 +67,7 @@ async def create_app(
         plugin_mgr=plugin_mgr,
         session_mgr=session_mgr,
         mcp_mgr=mcp_mgr,
+        role_mgr=role_mgr,
         session_context=[],
         workdir=work_dir,
         global_dir=global_dir,

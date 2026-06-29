@@ -102,6 +102,12 @@ class ConfigManager:
         self._config: dict[str, Any] = self.load_config()
         self._user_settings: dict[str, Any] = self.load_user_settings()
 
+    def reload(self) -> None:
+        """重新加载配置（/clear 时调用）。"""
+        with self._lock:
+            self._config = self.load_config()
+            self._user_settings = self.load_user_settings()
+
     def load_config(self) -> dict[str, Any]:
         """加载三层配置并深度合并，同时加载三层 .env。
 
