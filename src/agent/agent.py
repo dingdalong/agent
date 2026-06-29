@@ -318,15 +318,34 @@ class Agent:
         await self.deps.event_bus.request_output("已进入计划模式。\n")
 
     async def _handle_resume_command(self, cmd_args: list[str]) -> None:
-        """处理 /resume 命令：委托 SessionMgr 解析会话，应用状态变更。
+        """处理 /resume 命令：无参时弹出会话选择菜单，再委托 SessionMgr 解析会话并应用状态变更。
 
         Args:
-            cmd_args: 命令参数列表，可为空（列出会话）、序号或 session_id。
+            cmd_args: 命令参数列表，可为空（弹出选择菜单）、序号或 session_id。
         """
         session_mgr = self.deps.session_mgr
         if session_mgr is None:
             await self.deps.event_bus.request_output("会话管理器未初始化。\n")
             return
+
+        # 无参：弹出方向键选择菜单让用户挑选历史会话，选中后转为以 session_id 解析
+        if not cmd_args:
+            sessions = session_mgr.list_resumable(self.deps.session_id)
+            if not sessions:
+                await self.deps.event_bus.request_output("没有可恢复的历史会话。\n")
+                return
+            options: list[tuple[str, str]] = []
+            for s in sessions:
+                updated = s.get("updated_at", "?")[:19].replace("T", " ")
+                label = f"[{updated}] {s.get('topic') or s.get('workdir', '')}"
+                options.append((s["session_id"], label))
+            try:
+                picked = await self.deps.event_bus.request_choice("\n最近的历史会话", options, 0)
+            except (asyncio.CancelledError, KeyboardInterrupt, NoEventSubscribers):
+                return
+            if not picked:  # Esc 取消，静默
+                return
+            cmd_args = [picked]
 
         from src.mgr.session_mgr import ResumeResult
         result = session_mgr.resolve_resume(

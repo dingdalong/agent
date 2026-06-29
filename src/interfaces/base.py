@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 
 from src.events.types import (
+    ChoiceRequested,
     CompactDelta,
     Event,
     InputRequested,
@@ -119,6 +120,19 @@ class UserInterface(ABC):
         """
         ...
 
+    @abstractmethod
+    async def _read_choice(self, prompt: str, options: list[tuple[str, str]], default_index: int) -> str:
+        """以菜单读取一次选择。
+
+        Args:
+            prompt: 菜单上文提示。
+            options: 选项列表，每项为 (value, label)。
+            default_index: 初始选中项下标。
+        Returns:
+            所选项的 value；空串表示取消。
+        """
+        ...
+
     async def _complete_user_request(
         self,
         request: UserInputRequest | None,
@@ -170,6 +184,19 @@ class UserInterface(ABC):
                         return answer if answer.strip() else ""
 
                     await self._complete_user_request(event, read_input)
+                finally:
+                    if self._active_user_request is event:
+                        self._active_user_request = None
+            case ChoiceRequested(prompt=prompt, options=options, default_index=default_index):
+                # 选择请求允许空答案（取消），不能复用 _complete_user_request 的非空重读循环，故单次读取。
+                self._active_user_request = event
+                try:
+                    answer = await self._read_choice(prompt, options, default_index)
+                    event.complete(answer)
+                except (EOFError, KeyboardInterrupt):
+                    self._request_user_interrupt()
+                except BaseException as exc:
+                    event.fail(exc)
                 finally:
                     if self._active_user_request is event:
                         self._active_user_request = None

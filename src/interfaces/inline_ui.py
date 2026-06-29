@@ -43,6 +43,7 @@ from src.events.types import (
     ToolCallStarted,
 )
 from src.interfaces.base import UserInterface
+from src.interfaces.completer import SlashCommandCompleter
 from src.interfaces.markdown_renderer import MarkdownStreamRenderer
 
 # braille dots spinner 帧序列。
@@ -97,10 +98,15 @@ class InlineInterface(UserInterface):
         self._buffer: Buffer | None = None  # 常驻输入缓冲，_build_application 时创建
         self._input_future: asyncio.Future[str] | None = None  # 输入/权限应答的解析通道
         self._fallback_session: PromptSession[str] | None = None  # 非 TTY 降级读取用的 PromptSession（懒建）
-        # 交互模式：processing / input / permission。
+        # 交互模式：processing（处理态/只读）/ input（可编辑文本输入）/ select（只读选择菜单）。
         self._mode: str = "processing"
-        # 可输入态（input/permission）：缓冲可编辑、› 醒目、Enter 提交。
+        # 可输入态（input）：缓冲可编辑、› 醒目、Enter 提交。
         self._cond_accepting = Condition(lambda: self._accepting)
+
+        # ---- 选择菜单（方向键导航，权限确认 / 任意 ChoiceRequested 共用）----
+        self._select_options: list[tuple[str, str]] | None = None  # 当前菜单选项 (value, label)，None 表示无活跃菜单
+        self._select_index: int = 0  # 当前选中项下标
+        self._select_cancel_value: str = ""  # Esc 取消时返回的 value（权限为 "deny"，通用选择为空串）
 
         # ---- 底部状态条运行时状态 ----
         self._activity: str = ""  # 当前活动文案（思考中/回应中/工具名/压缩上下文）
@@ -127,8 +133,11 @@ class InlineInterface(UserInterface):
 
     @property
     def _accepting(self) -> bool:
-        """是否处于可输入态（input/permission）：缓冲可编辑、› 醒目、Enter 提交。"""
-        return self._mode in ("input", "permission")
+        """是否处于可编辑文本输入态（input）：缓冲可编辑、› 醒目、Enter 提交。
+
+        注：权限/选择改用只读菜单（select 态），不属于可编辑态。
+        """
+        return self._mode == "input"
 
     @property
     def _app_running(self) -> bool:
@@ -198,7 +207,13 @@ class InlineInterface(UserInterface):
         Returns:
             可 await run_async() 的常驻 Application。
         """
-        self._buffer = Buffer(multiline=True, read_only=~self._cond_accepting, document=Document("", 0))
+        self._buffer = Buffer(
+            multiline=True,
+            read_only=~self._cond_accepting,
+            completer=SlashCommandCompleter(),
+            complete_while_typing=True,
+            document=Document("", 0),
+        )
         # 转录面板可见性条件：查看子 agent 转录时为真，驱动面板显隐并隐藏 spinner / agent 列表。
         cond_viewing = Condition(lambda: self._viewing_uuid is not None)
         # 转录覆盖面板：header（1 行）+ 内容（max=_TRANSCRIPT_PANEL_ROWS），仅查看时可见，置于 root 顶部覆盖主对话。
@@ -212,6 +227,16 @@ class InlineInterface(UserInterface):
         activity_window = ConditionalContainer(
             Window(FormattedTextControl(self._render_activity), dont_extend_height=True, height=Dimension(min=1)),
             filter=Condition(lambda: self._mode == "processing" and bool(self._activity) and self._viewing_uuid is None),
+        )
+        # 选择菜单窗口：select 态可见，只画可重绘的选项（上文已先打到 scrollback），置于输入框上方。
+        select_window = ConditionalContainer(
+            Window(FormattedTextControl(self._render_select), dont_extend_height=True, height=Dimension(min=1)),
+            filter=Condition(lambda: self._mode == "select"),
+        )
+        # 斜杠命令补全下拉窗口：缓冲存在补全候选时可见，置于输入框上方。
+        completion_window = ConditionalContainer(
+            Window(FormattedTextControl(self._render_completions), dont_extend_height=True, height=Dimension(max=8)),
+            filter=Condition(lambda: self._buffer is not None and self._buffer.complete_state is not None),
         )
         self._input_window = Window(
             BufferControl(buffer=self._buffer),
@@ -238,6 +263,8 @@ class InlineInterface(UserInterface):
         root = HSplit([
             transcript_panel,
             activity_window,
+            select_window,
+            completion_window,
             self._make_separator_window(),
             self._input_window,
             self._make_separator_window(),
@@ -292,6 +319,55 @@ class InlineInterface(UserInterface):
         status.append(f"{self._active_agent_name()} · {self._activity} ({step_elapsed:.1f}s)", style="cyan")
         with self._status_console.capture() as capture:
             self._status_console.print(status, end="")
+        return ANSI(capture.get())
+
+    def _render_select(self) -> ANSI:
+        """渲染选择菜单选项列表（每选项一行），选中行以 ❯ + 反显标记；供 select_window 使用。
+
+        每行格式：「<marker><序号>. <label>」，序号从 1 起，便于数字键直选。
+
+        Returns:
+            可作为 Window 内容的 ANSI（多行）；无活跃菜单时为空。
+        """
+        if not self._select_options:
+            return ANSI("")
+        text = Text()
+        for i, (_value, label) in enumerate(self._select_options):
+            selected = i == self._select_index
+            line = Text()
+            line.append("❯ " if selected else "  ", style="cyan" if selected else "")
+            line.append(f"{i + 1}. {label}", style="reverse" if selected else "")
+            text.append(line)
+            if i < len(self._select_options) - 1:
+                text.append("\n")
+        with self._status_console.capture() as capture:
+            self._status_console.print(text, end="")
+        return ANSI(capture.get())
+
+    def _render_completions(self) -> ANSI:
+        """渲染斜杠命令补全下拉（每候选一行「<命令>  —  <描述>」），高亮当前选定项；供 completion_window 使用。
+
+        Returns:
+            可作为 Window 内容的 ANSI（多行）；无补全候选时为空。
+        """
+        if self._buffer is None or self._buffer.complete_state is None:
+            return ANSI("")
+        state = self._buffer.complete_state
+        text = Text()
+        completions = state.completions
+        for i, comp in enumerate(completions):
+            selected = i == state.complete_index
+            line = Text()
+            line.append("❯ " if selected else "  ", style="cyan" if selected else "")
+            line.append(comp.display_text, style="reverse" if selected else "")
+            meta = comp.display_meta_text
+            if meta:
+                line.append(f"  —  {meta}", style="reverse" if selected else "bright_black")
+            text.append(line)
+            if i < len(completions) - 1:
+                text.append("\n")
+        with self._status_console.capture() as capture:
+            self._status_console.print(text, end="")
         return ANSI(capture.get())
 
     def _render_separator(self) -> ANSI:
@@ -643,24 +719,43 @@ class InlineInterface(UserInterface):
         self._last_elapsed = self._elapsed(self._turn_started_monotonic, time.monotonic())
         self._render_input_context(prompt)
         try:
-            return await self._await_submission("input", default)
+            text = await self._await_submission(default)
+            self._echo_submitted_input(text)
+            return text
         finally:
             self._reset_turn_status()
 
-    async def _await_submission(self, mode: str, default: str = "") -> str:
-        """进入指定可输入态（input/permission），预填 default，await 由 Enter 键绑定解析的 future。
+    def _echo_submitted_input(self, text: str) -> None:
+        """把刚提交的用户输入回显到滚动区，使其在输入框清空后仍留痕。
+
+        首行加 cyan `›` 前缀（呼应输入框前缀，视觉上像输入"上移"成记录），多行续行以两空格对齐。
+        仅常驻 App（TTY）路径需要——非 TTY 由终端自身回显。
+
+        Args:
+            text: 用户刚提交的非空白文本（可能多行）。
+        """
+        echo = Text()
+        lines = text.split("\n")
+        for i, line in enumerate(lines):
+            echo.append("› " if i == 0 else "  ", style="cyan")
+            echo.append(line)
+            if i < len(lines) - 1:
+                echo.append("\n")
+        self._print_rich(echo)
+
+    async def _await_submission(self, default: str = "") -> str:
+        """进入可编辑文本输入态（input），预填 default，await 由 Enter 键绑定解析的 future。
 
         若当前焦点在 agent 列表，先抢回输入框（否则按键落到列表而非应答 future → 交互卡死）。
 
         Args:
-            mode: 目标交互模式（"input" 或 "permission"），写入 self._mode 驱动只读条件/前缀着色/状态行。
-            default: 预填入缓冲的默认文本（权限态传空串）。
+            default: 预填入缓冲的默认文本。
         Returns:
             用户提交的一行/多行文本（未经校验）。
         """
         loop = asyncio.get_running_loop()
         self._input_future = loop.create_future()
-        self._mode = mode
+        self._mode = "input"
         # 实时夺焦：若当前焦点在 agent 列表，切回输入框确保按键到达应答 future
         if (
             self._app is not None
@@ -674,6 +769,40 @@ class InlineInterface(UserInterface):
             return await self._input_future
         finally:
             self._input_future = None
+            self._enter_processing_idle()
+
+    async def _await_selection(
+        self, options: list[tuple[str, str]], default_index: int, cancel_value: str
+    ) -> str:
+        """进入只读选择菜单（select 态），await 由方向键/数字/Enter/Esc 绑定解析的 future。
+
+        若当前焦点在 agent 列表，先抢回输入框（否则按键落到列表而非应答 future）。
+
+        Args:
+            options: 选项列表，每项为 (value, label)。
+            default_index: 初始选中项下标（夹取到合法范围）。
+            cancel_value: Esc 取消时解析返回的 value。
+        Returns:
+            所选项的 value，或 Esc 取消时的 cancel_value。
+        """
+        loop = asyncio.get_running_loop()
+        self._select_options = options
+        self._select_index = max(0, min(default_index, len(options) - 1)) if options else 0
+        self._select_cancel_value = cancel_value
+        self._mode = "select"
+        self._input_future = loop.create_future()
+        if (
+            self._app is not None
+            and self._agent_list_inner is not None
+            and self._app.layout.has_focus(self._agent_list_inner)
+        ):
+            self._app.layout.focus(self._input_window)
+        self._app.invalidate()
+        try:
+            return await self._input_future
+        finally:
+            self._input_future = None
+            self._select_options = None
             self._enter_processing_idle()
 
     def _enter_processing_idle(self) -> None:
@@ -740,9 +869,9 @@ class InlineInterface(UserInterface):
             self._print_rich(context)
 
     async def _read_permission(self, tool_name: str, detail: str, suggested_rules: list[str] | None = None) -> str:
-        """工具权限确认：打印权限说明块到 App 上方，循环读取一行直到合法 y/s/a/n。
+        """工具权限确认：打印权限说明上文到 App 上方，再以方向键选择菜单读取决策。
 
-        非 TTY 走扁平降级。
+        非 TTY 走扁平降级（打字 y/s/a/n）。
 
         Args:
             tool_name: 工具名。
@@ -753,16 +882,46 @@ class InlineInterface(UserInterface):
         """
         if not self._tty:
             return await self._read_permission_plain(tool_name, detail, suggested_rules)
-        self._print_rich(self._permission_prompt_text(tool_name, detail, suggested_rules), end="")
-        while True:
-            answer = (await self._await_submission("permission")).strip().lower()
-            decision = self._normalize_permission_answer(answer)
-            if decision is not None:
-                return decision
-            self._print_rich("请输入 y、s、a 或 n。", style="red")
+        self._print_rich(self._permission_context_text(tool_name, detail, suggested_rules), end="")
+        return await self._await_selection(self._permission_options(suggested_rules), 0, cancel_value="deny")
 
-    def _permission_prompt_text(self, tool_name: str, detail: str, suggested_rules: list[str] | None) -> Text:
-        """构建权限确认说明块（工具/内容/建议规则/操作提示），供终端态与非 TTY 降级共用。
+    async def _read_choice(self, prompt: str, options: list[tuple[str, str]], default_index: int) -> str:
+        """以方向键选择菜单读取一次选择（通用 ChoiceRequested，如 /mode）。
+
+        非 TTY 走扁平降级（打印编号菜单 + 读数字）。
+
+        Args:
+            prompt: 菜单上文提示。
+            options: 选项列表，每项为 (value, label)。
+            default_index: 初始选中项下标。
+        Returns:
+            所选项的 value；空串表示取消（Esc）。
+        """
+        if not self._tty:
+            return await self._read_choice_plain(prompt, options, default_index)
+        if prompt.strip():
+            self._print_rich(prompt)
+        return await self._await_selection(options, default_index, cancel_value="")
+
+    def _permission_options(self, suggested_rules: list[str] | None) -> list[tuple[str, str]]:
+        """构建权限确认的菜单选项（value, label）。
+
+        Args:
+            suggested_rules: 建议的 allow 规则列表（非空时 session/always 标注「上述规则」）。
+        Returns:
+            选项列表：允许一次 / 会话允许 / 始终允许并保存 / 拒绝。
+        """
+        session_label = "会话允许(上述规则)" if suggested_rules else "本次会话始终允许"
+        always_label = "始终允许并保存(上述规则)" if suggested_rules else "始终允许并保存"
+        return [
+            ("yes", "允许一次"),
+            ("session", session_label),
+            ("always", always_label),
+            ("deny", "拒绝 (esc)"),
+        ]
+
+    def _permission_context_text(self, tool_name: str, detail: str, suggested_rules: list[str] | None) -> Text:
+        """构建权限确认上文（工具/内容/建议规则），供菜单上文与非 TTY 降级共用，不含操作提示。
 
         Args:
             tool_name: 工具名。
@@ -771,8 +930,6 @@ class InlineInterface(UserInterface):
         Returns:
             可经 _print_rich 输出的 Rich Text。
         """
-        session_label = "会话允许(上述规则)" if suggested_rules else "本次会话始终允许"
-        always_label = "始终允许并保存(上述规则)" if suggested_rules else "始终允许并保存"
         prompt_text = Text()
         prompt_text.append("\n")
         prompt_text.append("工具请求权限", style="yellow")
@@ -785,6 +942,21 @@ class InlineInterface(UserInterface):
                 prompt_text.append("  建议规则:\n")
                 for rule_str in suggested_rules:
                     prompt_text.append(f"    - {rule_str}\n")
+        return prompt_text
+
+    def _permission_prompt_text(self, tool_name: str, detail: str, suggested_rules: list[str] | None) -> Text:
+        """构建权限确认说明块（上文 + 打字操作提示），供非 TTY 降级使用。
+
+        Args:
+            tool_name: 工具名。
+            detail: 权限请求详情。
+            suggested_rules: 建议的 allow 规则列表，供展示。
+        Returns:
+            可经 _print_rich 输出的 Rich Text。
+        """
+        session_label = "会话允许(上述规则)" if suggested_rules else "本次会话始终允许"
+        always_label = "始终允许并保存(上述规则)" if suggested_rules else "始终允许并保存"
+        prompt_text = self._permission_context_text(tool_name, detail, suggested_rules)
         prompt_text.append("  输入 y/s/a/n 后按 Enter 确认\n")
         prompt_text.append(f"  [y] 允许一次   [s] {session_label}   [a] {always_label}   [n] 拒绝\n")
         return prompt_text
@@ -843,6 +1015,34 @@ class InlineInterface(UserInterface):
             if decision is not None:
                 return decision
             self._print_rich("请输入 y、s、a 或 n。", style="red")
+
+    async def _read_choice_plain(self, prompt: str, options: list[tuple[str, str]], default_index: int) -> str:
+        """非 TTY 降级选择：打印编号菜单后用 PromptSession 读数字，映射回 value。
+
+        Args:
+            prompt: 菜单上文提示。
+            options: 选项列表，每项为 (value, label)。
+            default_index: 初始选中项下标（降级路径仅用于回车空输入时的默认值）。
+        Returns:
+            所选项的 value；空输入返回默认项 value，无默认时返回空串（取消）。
+        """
+        if prompt.strip():
+            self._print_rich(prompt)
+        menu = Text()
+        for i, (_value, label) in enumerate(options):
+            menu.append(f"  [{i + 1}] {label}\n")
+        self._print_rich(menu, end="")
+        if self._fallback_session is None:
+            self._fallback_session = PromptSession()
+        while True:
+            answer = (await self._fallback_session.prompt_async(f"选择 (1-{len(options)}): ", handle_sigint=True)).strip()
+            if not answer:
+                return options[default_index][0] if 0 <= default_index < len(options) else ""
+            if answer.isdigit():
+                idx = int(answer) - 1
+                if 0 <= idx < len(options):
+                    return options[idx][0]
+            self._print_rich("请输入有效编号。", style="red")
 
     # ---- 输出汇聚点 ----
 
@@ -1059,12 +1259,14 @@ class InlineInterface(UserInterface):
     def _build_key_bindings(self) -> KeyBindings:
         """构建常驻 App 的按键绑定（按交互模式门控）。
 
-        - Enter（仅可输入态且列表未聚焦）：纯空白忽略，否则解析输入/权限应答。
+        - Enter（仅可输入态且列表未聚焦）：补全菜单已选定项时应用补全不提交，否则纯空白忽略、有文本则提交。
         - Ctrl+J / Shift+Enter：插入换行。
         - Shift+Tab：切换权限模式并重绘。
         - Ctrl+C / 外部 SIGINT：处理态请求中断；可输入态有文本则清空、空则以 KeyboardInterrupt 解开读取。
         - Ctrl+D：可输入态空缓冲→以 EOFError 解开读取。
-        - 方向键（↓↑）：从输入框进入 agent 列表 / 列表内导航 / 返回输入框（查看面板时不进列表）。
+        - select 态（选择菜单）：↑↓ 移动选中、1-9 数字直选、Enter 确认、Esc 取消。
+        - 补全态（斜杠命令下拉）：↓/Tab 下一项、↑ 上一项、Esc 关闭。
+        - 方向键（↓↑）：从输入框进入 agent 列表 / 列表内导航 / 返回输入框（查看面板/选择菜单/补全时不进列表）。
         - 列表聚焦时 Enter：在输入框上方打开选中子 agent 的转录覆盖面板（焦点回输入框）；Esc：返回输入框。
         - 查看面板时：PgUp/PgDn 上下滚动（暂停/恢复贴底实时跟随）；Esc：关闭面板还原主对话。
 
@@ -1082,16 +1284,27 @@ class InlineInterface(UserInterface):
         )
         # 转录面板可见性条件：查看子 agent 转录时为真。
         _cond_viewing = Condition(lambda: self._viewing_uuid is not None)
+        # 选择菜单激活条件：select 态时为真。
+        _cond_select = Condition(lambda: self._mode == "select")
+        # 斜杠命令补全激活条件：缓冲存在补全候选时为真。
+        _cond_completing = Condition(lambda: self._buffer is not None and self._buffer.complete_state is not None)
         # 输入态光标在末行：仅当缓冲区光标在末尾时 down 才能下移进列表
         _cond_cursor_at_end = Condition(
             lambda: self._buffer is not None
             and self._buffer.document.is_cursor_at_the_end
         )
 
-        # Enter（可输入态且列表未聚焦）：提交输入/权限应答
+        # Enter（可输入态且列表未聚焦）：补全已选定→应用补全不提交；否则关闭补全菜单并提交非空文本
         @bindings.add("enter", filter=self._cond_accepting & ~_cond_list_focused)
         def _(event) -> None:
-            text = event.current_buffer.text
+            buf = event.current_buffer
+            state = buf.complete_state
+            if state is not None and state.complete_index is not None:
+                buf.apply_completion(state.current_completion)
+                return
+            if state is not None:
+                buf.cancel_completion()
+            text = buf.text
             if not text.strip():
                 return
             self._resolve_input(text)
@@ -1116,10 +1329,61 @@ class InlineInterface(UserInterface):
 
         self._try_add_binding(bindings, "<sigint>", lambda event: self._interrupt_current())
 
+        # ---- select 态：选择菜单导航（eager 抢占只读缓冲的默认光标/编辑绑定）----
+
+        # ↑：上移选中项
+        @bindings.add("up", filter=_cond_select, eager=True)
+        def _(event) -> None:
+            if self._select_index > 0:
+                self._select_index -= 1
+
+        # ↓：下移选中项
+        @bindings.add("down", filter=_cond_select, eager=True)
+        def _(event) -> None:
+            if self._select_options and self._select_index < len(self._select_options) - 1:
+                self._select_index += 1
+
+        # Enter：以当前选中项的 value 解析应答
+        @bindings.add("enter", filter=_cond_select, eager=True)
+        def _(event) -> None:
+            if self._select_options:
+                self._resolve_input(self._select_options[self._select_index][0])
+
+        # Esc：以取消 value 解析应答
+        @bindings.add("escape", filter=_cond_select, eager=True)
+        def _(event) -> None:
+            self._resolve_input(self._select_cancel_value)
+
+        # 1-9：数字直选（在范围内则选中并立即解析）
+        for _digit in range(1, 10):
+            @bindings.add(str(_digit), filter=_cond_select, eager=True)
+            def _(event, idx: int = _digit - 1) -> None:
+                if self._select_options and idx < len(self._select_options):
+                    self._select_index = idx
+                    self._resolve_input(self._select_options[idx][0])
+
+        # ---- 补全态：斜杠命令下拉导航（eager 抢占，避免与 agent 列表 ↓ 冲突）----
+
+        # ↓ / Tab：下一候选
+        @bindings.add("down", filter=_cond_completing, eager=True)
+        @bindings.add("c-i", filter=_cond_completing, eager=True)
+        def _(event) -> None:
+            event.current_buffer.complete_next()
+
+        # ↑：上一候选
+        @bindings.add("up", filter=_cond_completing, eager=True)
+        def _(event) -> None:
+            event.current_buffer.complete_previous()
+
+        # Esc：关闭补全菜单
+        @bindings.add("escape", filter=_cond_completing, eager=True)
+        def _(event) -> None:
+            event.current_buffer.cancel_completion()
+
         # ---- agent 列表方向键导航 ----
 
-        # ↓（eager）：从输入框进入 agent 列表（输入态光标在末行 或 处理态只读；查看面板时不进列表）
-        @bindings.add("down", eager=True, filter=_cond_list_visible & ~_cond_list_focused & ~_cond_viewing & (self._cond_accepting & _cond_cursor_at_end | ~self._cond_accepting))
+        # ↓（eager）：从输入框进入 agent 列表（输入态光标在末行 或 处理态只读；查看面板/选择菜单/补全时不进列表）
+        @bindings.add("down", eager=True, filter=_cond_list_visible & ~_cond_list_focused & ~_cond_viewing & ~_cond_select & ~_cond_completing & (self._cond_accepting & _cond_cursor_at_end | ~self._cond_accepting))
         def _(event) -> None:
             if self._agent_list_inner is not None:
                 self._agent_selected_index = 0
@@ -1177,8 +1441,8 @@ class InlineInterface(UserInterface):
             self._view_scroll = max(0, self._view_scroll - (_TRANSCRIPT_PANEL_ROWS - 1))
             event.app.invalidate()
 
-        # Esc：关闭转录面板，主对话原样恢复
-        @bindings.add("escape", filter=_cond_viewing)
+        # Esc：关闭转录面板，主对话原样恢复（select 态优先归选择菜单处理）
+        @bindings.add("escape", filter=_cond_viewing & ~_cond_select)
         def _(event) -> None:
             self._viewing_uuid = None
             self._view_scroll = 0

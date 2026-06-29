@@ -9,6 +9,7 @@ from typing import AsyncIterator, Literal
 
 from src.events.levels import EventLevel
 from src.events.types import (
+    ChoiceRequested,
     Event,
     InputRequested,
     InterruptRequested,
@@ -86,6 +87,38 @@ class EventBus:
             source=source,
             prompt=prompt,
             default=default,
+            future=future,
+        ))
+        return await future
+
+    async def request_choice(
+        self,
+        prompt: str,
+        options: list[tuple[str, str]],
+        default_index: int = 0,
+        source: str = "ui",
+    ) -> str:
+        """通过事件队列请求 UI 以菜单读取一次选择。
+
+        Args:
+            prompt: 菜单上文提示（打印到 scrollback）。
+            options: 选项列表，每项为 (value, label)；返回所选项的 value。
+            default_index: 初始选中项下标。
+            source: 事件来源标识。
+
+        Returns:
+            用户所选项的 value；空串表示用户取消（Esc）。
+        """
+        if not self._subscribers:
+            raise NoEventSubscribers("choice")
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[str] = loop.create_future()
+        await self.emit(ChoiceRequested(
+            timestamp=time.time(),
+            source=source,
+            prompt=prompt,
+            options=options,
+            default_index=default_index,
             future=future,
         ))
         return await future

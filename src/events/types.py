@@ -174,6 +174,16 @@ class InputRequested(UserInputRequest):
 
 
 @dataclass
+class ChoiceRequested(UserInputRequest):
+    """请求 UI 以菜单读取一次选择，通过 future 返回所选 value（空串表示取消）。"""
+    prompt: str = ""  # 菜单上文（打印到 scrollback 的提示，如「权限模式（当前: default）」）
+    options: list[tuple[str, str]] = field(default_factory=list)  # 选项列表，每项为 (value, label)
+    default_index: int = 0  # 初始选中项下标
+    level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
+    type: Literal["choice_requested"] = field(default="choice_requested", init=False)
+
+
+@dataclass
 class AgentStateChanged(Event):
     """Agent 状态机状态转换。"""
     agent_id: str = ""
@@ -197,7 +207,7 @@ class SubagentLifecycle(Event):
 # 联合类型
 AgentEvent = Union[
     InputRequested, OutputRequested, InterruptRequested,
-    PermissionNotice, PermissionRequested,
+    PermissionNotice, PermissionRequested, ChoiceRequested,
     CompactDelta, ToolCallCompleted, ToolCallStarted,
     LLMCallCompleted, LLMCallStarted,
     ResponseDelta, ThinkingDelta,

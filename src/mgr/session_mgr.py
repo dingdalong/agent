@@ -149,6 +149,18 @@ class SessionMgr:
         sessions.sort(key=lambda s: s.get("updated_at", ""), reverse=True)
         return sessions[:limit]
 
+    def list_resumable(self, current_session_id: str, limit: int = 10) -> list[dict[str, Any]]:
+        """列出可恢复的历史会话（按 updated_at 降序，排除当前会话）。
+
+        Args:
+            current_session_id: 当前会话 ID，从结果中排除。
+            limit: 最多返回的会话数量。
+
+        Returns:
+            排除当前会话后的会话元数据字典列表。
+        """
+        return [s for s in self.list_sessions(limit=limit) if s.get("session_id") != current_session_id]
+
     def load_history(self, session_id: str) -> list[dict[str, Any]]:
         """加载指定会话的完整对话历史。
 
@@ -181,29 +193,18 @@ class SessionMgr:
         Agent 侧只需判断返回类型：str 直接输出，ResumeResult 应用状态变更。
 
         Args:
-            cmd_args: 命令参数列表，可为空（列出会话）、序号或 session_id 前缀。
+            cmd_args: 命令参数列表，序号或 session_id 前缀（无参列表交互已上移到 Agent 的选择菜单）。
             current_session_id: 当前会话 ID，用于从列表中排除。
             current_workdir: 当前工作目录路径字符串，用于校验一致性。
 
         Returns:
-            str: 要显示给用户的文本（会话列表或错误信息）。
+            str: 要显示给用户的错误信息。
             ResumeResult: 成功解析的会话数据，调用方负责应用到 Agent 状态。
         """
-        sessions = self.list_sessions(limit=10)
-        sessions = [s for s in sessions if s.get("session_id") != current_session_id]
+        sessions = self.list_resumable(current_session_id, limit=10)
 
         if not sessions:
             return "没有可恢复的历史会话。\n"
-
-        if not cmd_args:
-            lines = ["最近的历史会话：\n"]
-            for i, s in enumerate(sessions, 1):
-                updated = s.get("updated_at", "?")[:19].replace("T", " ")
-                topic = s.get("topic", "")
-                workdir = s.get("workdir", "")
-                lines.append(f"  {i}. [{updated}] {workdir}\n     {topic}\n")
-            lines.append("输入 /resume <序号> 恢复指定会话。\n")
-            return "\n".join(lines)
 
         # 解析目标会话：先尝试序号，再尝试 session_id 前缀匹配
         target_arg = cmd_args[0]

@@ -4,6 +4,15 @@ from dataclasses import dataclass, field
 from src.llm.base import LLMResponse
 
 
+# 斜杠命令元数据（名称, 描述）的唯一来源：供输入框自动补全展示，与 agent.py 的命令分发保持一致（仅列已实现命令）。
+SLASH_COMMANDS: list[tuple[str, str]] = [
+    ("plan", "进入计划模式"),
+    ("mode", "切换权限模式"),
+    ("clear", "清空会话"),
+    ("resume", "恢复历史会话"),
+]
+
+
 def parse_command(user_input: str) -> tuple[str, list[str]] | None:
     """尝试将用户输入解析为斜杠命令。
 

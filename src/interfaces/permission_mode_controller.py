@@ -14,13 +14,6 @@ from src.mgr.permission_mgr import (
     parse_permission_mode,
 )
 
-_PERMISSION_MODE_MENU = "\n权限模式:\n" + "\n".join(
-    f"  [{index}] {mode.value:<20} - {mode.description}"
-    for index, mode in enumerate(MENU_MODES, start=1)
-) + "\n"
-_PERMISSION_MODE_PROMPT = f"选择 (1-{len(MENU_MODES)} 或模式名): "
-
-
 class PermissionModeController:
     """协调权限模式交互、UI 状态和 agent 工具 schema 刷新。"""
 
@@ -52,25 +45,25 @@ class PermissionModeController:
         )
 
     async def prompt_selection(self) -> bool:
-        """显示权限模式菜单并等待用户选择，作用于已绑定的主 agent。
+        """以方向键选择菜单展示权限模式并等待用户选择，作用于已绑定的主 agent。
 
         Returns:
-            模式是否发生了变化。
+            模式是否发生了变化（Esc 取消或无效选择时为 False）。
         """
-        current = self.agent.permission_mode.value
-        await self.event_bus.request_output(
-            f"{_PERMISSION_MODE_MENU}  当前权限模式: {current}\n"
-        )
+        current = self.agent.permission_mode
+        options = [(mode.value, f"{mode.value} - {mode.description}") for mode in MENU_MODES]
+        default_index = next((i for i, mode in enumerate(MENU_MODES) if mode.value == current.value), 0)
         try:
-            answer = await self.event_bus.request_input(_PERMISSION_MODE_PROMPT)
+            answer = await self.event_bus.request_choice(
+                f"\n权限模式（当前: {current.value}）", options, default_index
+            )
         except (asyncio.CancelledError, KeyboardInterrupt, NoEventSubscribers):
             return False
 
+        if not answer:  # Esc 取消，静默
+            return False
         mode = parse_permission_mode(answer)
         if mode is None:
-            await self.event_bus.request_output(
-                f"无效选择，保持当前权限模式: {current}\n"
-            )
             return False
 
         changed = self.agent.set_permission_mode(mode)
