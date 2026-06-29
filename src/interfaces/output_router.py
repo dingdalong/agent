@@ -22,8 +22,8 @@ from src.events.types import (
 )
 from src.interfaces.base import UserInterface
 
-# 每个 agent 转录的最大行片段数（deque maxlen，append/逐出均为 O(1)）
-_MAX_TRANSCRIPT_LINES = 400
+# 每个 agent 转录的最大分段数（deque maxlen，append/逐出均为 O(1)；连续同类流文本合并进一段）
+_MAX_TRANSCRIPT_SEGMENTS = 400
 # 已完成 agent 视图最多保留数（超出按 ended_monotonic 逐出最旧项）
 _MAX_COMPLETED_VIEWS = 20
 
@@ -43,7 +43,8 @@ class _AgentView:
     cache_read: int = 0
     started_monotonic: float | None = None
     ended_monotonic: float | None = None
-    transcript: deque[str] = field(default_factory=lambda: deque(maxlen=_MAX_TRANSCRIPT_LINES))
+    # 分段转录：每项为 (kind, text)，kind ∈ "response"|"thinking"|"tool"；供 UI 按类型分别渲染。
+    transcript: deque[tuple[str, str]] = field(default_factory=lambda: deque(maxlen=_MAX_TRANSCRIPT_SEGMENTS))
 
 
 @dataclass
@@ -202,20 +203,37 @@ class OutputRouter:
             self._agents[caller_uuid] = view
 
         if isinstance(event, ResponseDelta):
-            view.transcript.append(event.content)
+            self._append_transcript(view, "response", event.content)
         elif isinstance(event, ThinkingDelta):
-            view.transcript.append(event.content)
+            self._append_transcript(view, "thinking", event.content)
         elif isinstance(event, ToolCallStarted):
             detail = event.detail.strip()
             line = f"● {event.tool_name}"
             if detail:
                 line += f" {detail}"
-            view.transcript.append(line + "\n")
+            view.transcript.append(("tool", line + "\n"))
         elif isinstance(event, ToolCallCompleted):
             preview = (event.result_preview or "").strip()
             preview_lines = preview.splitlines()
             first = preview_lines[0] if preview_lines else ("完成" if event.status == "success" else "失败")
-            view.transcript.append(f"  ⎿ {first}  ({event.duration_seconds:.2f}s)\n")
+            view.transcript.append(("tool", f"  ⎿ {first}  ({event.duration_seconds:.2f}s)\n"))
+
+    def _append_transcript(self, view: _AgentView, kind: str, text: str) -> None:
+        """把一段流式文本并入转录：与末段同类则合并进末段，否则新起一段。
+
+        合并保证整块 Markdown 完整（避免跨 delta 把代码围栏/列表拆碎而渲染错乱）。
+
+        Args:
+            view: 目标 agent 视图。
+            kind: 文本类型（"response" 或 "thinking"）。
+            text: 本次增量文本（空则忽略）。
+        """
+        if not text:
+            return
+        if view.transcript and view.transcript[-1][0] == kind:
+            view.transcript[-1] = (kind, view.transcript[-1][1] + text)
+        else:
+            view.transcript.append((kind, text))
 
     # ---- 生命周期 ----
 
@@ -293,19 +311,19 @@ class OutputRouter:
                 ))
         return rows
 
-    def render_transcript(self, uuid: str) -> str:
-        """返回指定 agent 的转录纯文本（只产文本，不碰 rich/markdown）。
+    def transcript_segments(self, uuid: str) -> list[tuple[str, str]]:
+        """返回指定 agent 的转录分段快照（只产数据，不碰 rich/markdown）。
 
         Args:
             uuid: 目标 agent 的 uuid 字符串。
 
         Returns:
-            该 agent 的全部缓冲转录拼接文本。
+            分段列表，每项为 (kind, text)，kind ∈ "response"|"thinking"|"tool"；无该 agent 时为空列表。
         """
         view = self._agents.get(uuid)
         if view is None:
-            return ""
-        return "".join(view.transcript)
+            return []
+        return list(view.transcript)
 
     # ---- 重置 ----
 

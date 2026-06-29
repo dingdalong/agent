@@ -289,7 +289,7 @@ class Agent:
             )
             if hook_result.blocked:
                 reason = hook_result.block_reason or "UserPromptSubmit hook blocked"
-                await self.deps.event_bus.request_output(f"{reason}\n")
+                await self.deps.event_bus.request_output(f"{reason}\n", markdown=True)
                 return AgentState.REQUEST_INPUT
             if hook_result.additional_context:
                 user_input = user_input + "\n\n" + "\n\n".join(

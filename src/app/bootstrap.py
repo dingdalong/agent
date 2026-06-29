@@ -31,7 +31,7 @@ async def create_app(
     event_bus = EventBus(level=EventLevel.from_str(config_mgr.get_config("events").get("level", "progress")))
     ui = InlineInterface()
     output_router = OutputRouter(ui=ui, passthrough=not ui.is_tty)
-    ui.set_agent_source(output_router.agent_rows, output_router.render_transcript)
+    ui.set_agent_source(output_router.agent_rows, output_router.transcript_segments)
     tools_mgr = ToolsMgr()
     memory_mgr = MemoryMgr(work_dir)
     plugin_mgr = PluginMgr(workdir=work_dir, global_dir=global_dir)

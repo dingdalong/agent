@@ -10,6 +10,38 @@ from rich.console import Console
 from rich.markdown import Markdown
 
 
+def render_markdown(
+    md: str,
+    *,
+    width: int | None = None,
+    color_system: str | None = "standard",
+    code_theme: str = "monokai",
+    base_style: str = "",
+) -> str:
+    """一次性把一段 Markdown 渲染为 ANSI 字符串（无流式缓冲）。
+
+    Args:
+        md: 待渲染的 Markdown 源文本。
+        width: 渲染宽度；None 时按终端宽度自动探测。
+        color_system: Rich 色彩系统；None 表示不着色（不产生 ANSI 控制码）。
+        code_theme: 代码块高亮主题。
+        base_style: 整体叠加到正文上的 Rich 样式（如 "dim"），烘焙进返回的 ANSI；空串表示不叠加。
+    Returns:
+        渲染后的 ANSI 字符串（结尾不补换行）。
+    """
+    output = io.StringIO()
+    console = Console(
+        file=output,
+        force_terminal=color_system is not None,
+        color_system=color_system,
+        width=width if width is not None else shutil.get_terminal_size(fallback=(88, 24)).columns,
+        legacy_windows=False,
+    )
+    # 把 base_style 整体叠加到本块（逐片段 Segment.apply_style，彩色片段叠加后保留色相），烘焙进 ANSI。
+    console.print(Markdown(md, code_theme=code_theme), end="", style=base_style or None)
+    return output.getvalue()
+
+
 class MarkdownStreamRenderer:
     """Render completed Markdown blocks without reparsing prior output."""
 
@@ -104,19 +136,10 @@ class MarkdownStreamRenderer:
         return None
 
     def _render_markdown(self, markdown: str) -> str:
-        output = io.StringIO()
-        console = Console(
-            file=output,
-            force_terminal=self.color_system is not None,
+        return render_markdown(
+            markdown,
+            width=self.width,
             color_system=self.color_system,
-            width=self._terminal_width(),
-            legacy_windows=False,
+            code_theme=self.code_theme,
+            base_style=self.base_style,
         )
-        # 把 base_style 整体叠加到本块（逐片段 Segment.apply_style，彩色片段叠加后保留色相），烘焙进 ANSI。
-        console.print(Markdown(markdown, code_theme=self.code_theme), end="", style=self.base_style or None)
-        return output.getvalue()
-
-    def _terminal_width(self) -> int:
-        if self.width is not None:
-            return self.width
-        return shutil.get_terminal_size(fallback=(88, 24)).columns

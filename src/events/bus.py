@@ -61,12 +61,19 @@ class EventBus:
             if sub.accepts(event):
                 sub.queue.put_nowait(event)
 
-    async def request_output(self, content: str, source: str = "ui") -> None:
-        """通过事件队列请求 UI 串行输出。"""
+    async def request_output(self, content: str, source: str = "ui", markdown: bool = False) -> None:
+        """通过事件队列请求 UI 串行输出。
+
+        Args:
+            content: 要输出的文本。
+            source: 事件来源标识。
+            markdown: 为真时 UI 按 Markdown 渲染（用于计划内容、hook 说明等消息型内容）。
+        """
         await self.emit(OutputRequested(
             timestamp=time.time(),
             source=source,
             content=content,
+            markdown=markdown,
         ))
 
     async def request_interrupt(self, source: str = "ui") -> None:
@@ -76,8 +83,19 @@ class EventBus:
             source=source,
         ))
 
-    async def request_input(self, prompt: str, source: str = "ui", default: str = "") -> str:
-        """通过事件队列请求 UI 串行输入。"""
+    async def request_input(
+        self, prompt: str, source: str = "ui", default: str = "", markdown: bool = False
+    ) -> str:
+        """通过事件队列请求 UI 串行输入。
+
+        Args:
+            prompt: 上文提示（末行为输入标签，由输入框前缀代替）。
+            source: 事件来源标识。
+            default: 预填默认值。
+            markdown: 上文提示是否按 Markdown 渲染。
+        Returns:
+            用户提交的文本。
+        """
         if not self._subscribers:
             raise NoEventSubscribers("input")
         loop = asyncio.get_running_loop()
@@ -87,6 +105,7 @@ class EventBus:
             source=source,
             prompt=prompt,
             default=default,
+            markdown=markdown,
             future=future,
         ))
         return await future
@@ -97,6 +116,7 @@ class EventBus:
         options: list[tuple[str, str]],
         default_index: int = 0,
         source: str = "ui",
+        markdown: bool = False,
     ) -> str:
         """通过事件队列请求 UI 以菜单读取一次选择。
 
@@ -105,6 +125,7 @@ class EventBus:
             options: 选项列表，每项为 (value, label)；返回所选项的 value。
             default_index: 初始选中项下标。
             source: 事件来源标识。
+            markdown: 上文提示与选项标签是否按 Markdown 渲染。
 
         Returns:
             用户所选项的 value；空串表示用户取消（Esc）。
@@ -119,6 +140,7 @@ class EventBus:
             prompt=prompt,
             options=options,
             default_index=default_index,
+            markdown=markdown,
             future=future,
         ))
         return await future

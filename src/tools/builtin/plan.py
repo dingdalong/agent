@@ -120,10 +120,9 @@ async def exit_plan_mode(file_path: str, agent: Agent, deps: AgentDeps) -> str:
         agent.refresh_tools_schemas()
         return f"计划为空，已退出计划模式，恢复到 {agent.permission_mode.value} 模式。"
 
-    await deps.event_bus.request_output(
-        f"\n计划文件：\n{file_path}\n\n"
-        f"计划内容：\n{plan_content}\n"
-    )
+    # 表头（路径/标签）为结构化 chrome 走纯文本；计划正文是 LLM 写的 Markdown，单独按 Markdown 渲染。
+    await deps.event_bus.request_output(f"\n计划文件：\n{file_path}\n\n计划内容：\n")
+    await deps.event_bus.request_output(plan_content, markdown=True)
     answer = await deps.event_bus.request_input(
         "选择操作：\n"
         "  [1] 自动执行 — 在当前上下文中自动实施计划\n"

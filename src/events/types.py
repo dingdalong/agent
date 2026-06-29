@@ -133,6 +133,7 @@ class LLMCallCompleted(Event):
 class OutputRequested(Event):
     """请求 UI 串行输出文本。"""
     content: str = ""
+    markdown: bool = False  # 是否按 Markdown 渲染（如计划内容、hook 拦截说明等消息型内容）
     level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
     type: Literal["output_requested"] = field(default="output_requested", init=False)
 
@@ -169,6 +170,7 @@ class InputRequested(UserInputRequest):
     """请求 UI 串行读取用户输入，并通过 future 返回结果。"""
     prompt: str = ""
     default: str = ""
+    markdown: bool = False  # 上文提示是否按 Markdown 渲染（如 ask_user 的问题）
     level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
     type: Literal["input_requested"] = field(default="input_requested", init=False)
 
@@ -179,6 +181,7 @@ class ChoiceRequested(UserInputRequest):
     prompt: str = ""  # 菜单上文（打印到 scrollback 的提示，如「权限模式（当前: default）」）
     options: list[tuple[str, str]] = field(default_factory=list)  # 选项列表，每项为 (value, label)
     default_index: int = 0  # 初始选中项下标
+    markdown: bool = False  # 上文提示与选项标签是否按 Markdown 渲染（如 ask_user）
     level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
     type: Literal["choice_requested"] = field(default="choice_requested", init=False)
 

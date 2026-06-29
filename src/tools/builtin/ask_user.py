@@ -31,7 +31,7 @@ async def ask_user(question: str, options: list[str] | None, deps: AgentDeps) ->
     """
     if options:
         answer = await deps.event_bus.request_choice(
-            f"\n🤖提问: {question}", [(opt, opt) for opt in options], 0
+            f"🤖 **提问**\n\n{question}", [(opt, opt) for opt in options], 0, markdown=True
         )
         return answer or "[用户取消了选择，未作答]"
-    return await deps.event_bus.request_input(f"\n🤖提问: {question}\n你的回答: ")
+    return await deps.event_bus.request_input(f"🤖 **提问**\n\n{question}\n你的回答: ", markdown=True)

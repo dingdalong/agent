@@ -44,7 +44,7 @@ from src.events.types import (
 )
 from src.interfaces.base import UserInterface
 from src.interfaces.completer import SlashCommandCompleter
-from src.interfaces.markdown_renderer import MarkdownStreamRenderer
+from src.interfaces.markdown_renderer import MarkdownStreamRenderer, render_markdown
 
 # braille dots spinner 帧序列。
 _SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
@@ -107,6 +107,7 @@ class InlineInterface(UserInterface):
         self._select_options: list[tuple[str, str]] | None = None  # 当前菜单选项 (value, label)，None 表示无活跃菜单
         self._select_index: int = 0  # 当前选中项下标
         self._select_cancel_value: str = ""  # Esc 取消时返回的 value（权限为 "deny"，通用选择为空串）
+        self._select_markdown: bool = False  # 当前菜单选项标签是否按 Markdown 渲染（仅 ask_user 等开启）
 
         # ---- 底部状态条运行时状态 ----
         self._activity: str = ""  # 当前活动文案（思考中/回应中/工具名/压缩上下文）
@@ -121,7 +122,8 @@ class InlineInterface(UserInterface):
 
         # ---- agent 列表（方向键导航，仅在有子 agent 时显示）----
         self._rows_provider: Callable[[], list[AgentRow]] | None = None  # 注入自 OutputRouter.agent_rows
-        self._transcript_provider: Callable[[str], str] | None = None  # 注入自 OutputRouter.render_transcript
+        self._transcript_provider: Callable[[str], list[tuple[str, str]]] | None = None  # 注入自 OutputRouter.transcript_segments
+        self._transcript_cache: tuple[tuple, list[str]] | None = None  # 转录渲染缓存：(签名, 已渲染行)，签名不变复用
         self._agent_selected_index: int = 0  # 列表聚焦时的选中行索引
         self._agent_list_window: ConditionalContainer | None = None  # 列表容器（_build_application 中创建）
         self._agent_list_inner: Window | None = None  # 列表内部 Window（供 has_focus / layout.focus 使用）
@@ -336,7 +338,10 @@ class InlineInterface(UserInterface):
             selected = i == self._select_index
             line = Text()
             line.append("❯ " if selected else "  ", style="cyan" if selected else "")
-            line.append(f"{i + 1}. {label}", style="reverse" if selected else "")
+            line.append(f"{i + 1}. ")
+            line.append_text(self._markdown_label(label) if self._select_markdown else Text(label))
+            if selected:
+                line.stylize("reverse")  # 整行反显（叠加在标签自带的 Markdown 样式之上）
             text.append(line)
             if i < len(self._select_options) - 1:
                 text.append("\n")
@@ -541,14 +546,41 @@ class InlineInterface(UserInterface):
         """
         if self._transcript_provider is None or self._viewing_uuid is None:
             return ANSI("")
-        text = self._transcript_provider(self._viewing_uuid)
-        with self._status_console.capture() as capture:
-            self._status_console.print(Text(text), end="")
-        lines = capture.get().split("\n")
+        segments = self._transcript_provider(self._viewing_uuid)
+        lines = self._transcript_lines(self._viewing_uuid, segments)
         max_scroll = max(0, len(lines) - _TRANSCRIPT_PANEL_ROWS)
         self._view_scroll = min(self._view_scroll, max_scroll)  # 就地夹取上界
         start = max_scroll - self._view_scroll
         return ANSI("\n".join(lines[start:start + _TRANSCRIPT_PANEL_ROWS]))
+
+    def _transcript_lines(self, uuid: str, segments: list[tuple[str, str]]) -> list[str]:
+        """把转录分段渲染为可滚动的 ANSI 行列表：response/thinking 走 Markdown、tool 走纯文本。
+
+        带缓存：签名 = (uuid, 段数, 各段文本总长, 渲染宽度)；签名不变直接复用已渲染行，
+        仅在转录增长/切换 agent/改宽度时重渲，避免对增长缓冲每帧重复解析 Markdown。
+
+        Args:
+            uuid: 当前查看的 agent uuid（参与缓存签名，切换 agent 即失效）。
+            segments: 转录分段列表，每项为 (kind, text)。
+        Returns:
+            渲染后的 ANSI 文本按 "\\n" 切分的行列表。
+        """
+        signature = (uuid, len(segments), sum(len(text) for _, text in segments), self._render_width)
+        if self._transcript_cache is not None and self._transcript_cache[0] == signature:
+            return self._transcript_cache[1]
+        parts: list[str] = []
+        for kind, text in segments:
+            if kind == "response":
+                parts.append(render_markdown(text, width=self._render_width))
+            elif kind == "thinking":
+                parts.append(render_markdown(text, width=self._render_width, base_style="dim"))
+            else:  # tool：工具调用 chrome 行，纯文本渲染
+                with self._status_console.capture() as capture:
+                    self._status_console.print(Text(text), end="")
+                parts.append(capture.get())
+        lines = "".join(parts).split("\n")
+        self._transcript_cache = (signature, lines)
+        return lines
 
     def _append_core_status(self, line: Text, elapsed: float) -> None:
         """把核心状态段「<权限模式> (Shift+Tab 切换) · ↑总输入 (缓存命中%) ↓输出 · <耗时>s」原地追加。
@@ -595,13 +627,13 @@ class InlineInterface(UserInterface):
     def set_agent_source(
         self,
         rows_provider: Callable[[], list[AgentRow]],
-        transcript_provider: Callable[[str], str],
+        transcript_provider: Callable[[str], list[tuple[str, str]]],
     ) -> None:
         """注入 agent 列表数据源与转录查询函数（来自 OutputRouter）。
 
         Args:
             rows_provider: 返回 agent 行快照列表的无参 callable。
-            transcript_provider: 接受 uuid 返回转录纯文本的 callable。
+            transcript_provider: 接受 uuid 返回转录分段 (kind, text) 列表的 callable。
         """
         self._rows_provider = rows_provider
         self._transcript_provider = transcript_provider
@@ -705,19 +737,20 @@ class InlineInterface(UserInterface):
 
     # ---- 输入 / 权限：解析常驻 App 的内部 future ----
 
-    async def _read_input(self, prompt: str, default: str = "") -> str:
+    async def _read_input(self, prompt: str, default: str = "", markdown: bool = False) -> str:
         """读取用户输入：进入输入态、预填默认值，await 由 Enter 键绑定解析的 future。
 
         Args:
             prompt: 上层请求的提示文本（主循环 "你: "、ask_user 的多行问题等）。
             default: 预填入的默认输入。
+            markdown: 上文提示是否按 Markdown 渲染（如 ask_user 的问题）。
         Returns:
             用户提交的非空白文本。
         """
         if not self._tty:
             return await self._read_input_plain(prompt, default)
         self._last_elapsed = self._elapsed(self._turn_started_monotonic, time.monotonic())
-        self._render_input_context(prompt)
+        self._render_input_context(prompt, markdown)
         try:
             text = await self._await_submission(default)
             self._echo_submitted_input(text)
@@ -772,7 +805,7 @@ class InlineInterface(UserInterface):
             self._enter_processing_idle()
 
     async def _await_selection(
-        self, options: list[tuple[str, str]], default_index: int, cancel_value: str
+        self, options: list[tuple[str, str]], default_index: int, cancel_value: str, markdown: bool = False
     ) -> str:
         """进入只读选择菜单（select 态），await 由方向键/数字/Enter/Esc 绑定解析的 future。
 
@@ -782,6 +815,7 @@ class InlineInterface(UserInterface):
             options: 选项列表，每项为 (value, label)。
             default_index: 初始选中项下标（夹取到合法范围）。
             cancel_value: Esc 取消时解析返回的 value。
+            markdown: 选项标签是否按 Markdown 渲染。
         Returns:
             所选项的 value，或 Esc 取消时的 cancel_value。
         """
@@ -789,6 +823,7 @@ class InlineInterface(UserInterface):
         self._select_options = options
         self._select_index = max(0, min(default_index, len(options) - 1)) if options else 0
         self._select_cancel_value = cancel_value
+        self._select_markdown = markdown
         self._mode = "select"
         self._input_future = loop.create_future()
         if (
@@ -854,7 +889,7 @@ class InlineInterface(UserInterface):
             future.cancel()
         return cancelled
 
-    def _render_input_context(self, prompt: str) -> None:
+    def _render_input_context(self, prompt: str, markdown: bool = False) -> None:
         """把输入提示的「上文」打到 App 上方滚动区（输入框由常驻分割线框住，无需再打印分隔线）。
 
         提示末行（输入标签，如 "你: "）不打印，由输入框的彩色 › 前缀代替（见 _get_line_prefix）；
@@ -862,11 +897,15 @@ class InlineInterface(UserInterface):
 
         Args:
             prompt: 上层请求的原始提示文本。
+            markdown: 上文是否按 Markdown 渲染。
         """
         lines = prompt.splitlines()
         context = "\n".join(lines[:-1]).strip("\n") if len(lines) > 1 else ""
         if context.strip():
-            self._print_rich(context)
+            if markdown:
+                self._print_markdown(context)
+            else:
+                self._print_rich(context)
 
     async def _read_permission(self, tool_name: str, detail: str, suggested_rules: list[str] | None = None) -> str:
         """工具权限确认：打印权限说明上文到 App 上方，再以方向键选择菜单读取决策。
@@ -885,23 +924,29 @@ class InlineInterface(UserInterface):
         self._print_rich(self._permission_context_text(tool_name, detail, suggested_rules), end="")
         return await self._await_selection(self._permission_options(suggested_rules), 0, cancel_value="deny")
 
-    async def _read_choice(self, prompt: str, options: list[tuple[str, str]], default_index: int) -> str:
+    async def _read_choice(
+        self, prompt: str, options: list[tuple[str, str]], default_index: int, markdown: bool = False
+    ) -> str:
         """以方向键选择菜单读取一次选择（通用 ChoiceRequested，如 /mode）。
 
-        非 TTY 走扁平降级（打印编号菜单 + 读数字）。
+        非 TTY 走扁平降级（打印编号菜单 + 读数字，纯文本）。
 
         Args:
             prompt: 菜单上文提示。
             options: 选项列表，每项为 (value, label)。
             default_index: 初始选中项下标。
+            markdown: 上文提示与选项标签是否按 Markdown 渲染。
         Returns:
             所选项的 value；空串表示取消（Esc）。
         """
         if not self._tty:
             return await self._read_choice_plain(prompt, options, default_index)
         if prompt.strip():
-            self._print_rich(prompt)
-        return await self._await_selection(options, default_index, cancel_value="")
+            if markdown:
+                self._print_markdown(prompt)
+            else:
+                self._print_rich(prompt)
+        return await self._await_selection(options, default_index, cancel_value="", markdown=markdown)
 
     def _permission_options(self, suggested_rules: list[str] | None) -> list[tuple[str, str]]:
         """构建权限确认的菜单选项（value, label）。
@@ -1071,9 +1116,47 @@ class InlineInterface(UserInterface):
             self._rich_console.print(renderable, end=end)
         self._print_ansi(capture.get())
 
-    async def _write(self, message: str) -> None:
-        """输出纯文本，按终端宽度自动换行（经 _print_rich，不额外补换行）。"""
-        self._print_rich(message, end="")
+    def _print_markdown(self, md: str) -> None:
+        """把一段 Markdown 渲染为 ANSI 后输出到 scrollback（块级，支持多行/标题/列表）。
+
+        仅 TTY 使用；非 TTY 由调用方走纯文本降级，避免 ANSI 落入管道。
+
+        Args:
+            md: 待渲染的 Markdown 源文本。
+        """
+        self._print_ansi(render_markdown(md, width=self._render_width))
+
+    def _markdown_label(self, md: str) -> Text:
+        """把一段 Markdown 渲染为单行 Rich Text（用于选择菜单的选项标签）。
+
+        块级换行折叠为空格以保持单行，并去掉 Markdown 把段落填充到整宽产生的尾部空白
+        （否则选中行 reverse 会铺满整宽）；内联样式（加粗/行内码等）经 Text.from_ansi 保留，
+        便于与 ❯/序号前缀及选中行 reverse 高亮组合。
+
+        Args:
+            md: 待渲染的选项标签 Markdown 源文本。
+        Returns:
+            携带内联样式、去尾部填充的单行 Rich Text。
+        """
+        rendered = Text.from_ansi(render_markdown(md, width=self._render_width))
+        rows: list[Text] = []
+        for row in rendered.split("\n"):
+            row.rstrip()  # 原地去尾部填充空白（Text.rstrip 就地修改）
+            if row.plain:
+                rows.append(row)
+        return Text(" ").join(rows)
+
+    async def _write(self, message: str, markdown: bool = False) -> None:
+        """输出文本到 scrollback（不额外补换行）。
+
+        Args:
+            message: 要输出的文本。
+            markdown: 为真且处于 TTY 时按 Markdown 渲染，否则按纯文本（经 _print_rich）。
+        """
+        if markdown and self._tty:
+            self._print_markdown(message)
+        else:
+            self._print_rich(message, end="")
 
     # ---- 双流 markdown 渲染（回应 / 思考）----
 

@@ -100,13 +100,13 @@ class UserInterface(ABC):
         pass
 
     @abstractmethod
-    async def _write(self, message: str) -> None:
-        """输出文本。"""
+    async def _write(self, message: str, markdown: bool = False) -> None:
+        """输出文本（markdown 为真时按 Markdown 渲染）。"""
         ...
 
     @abstractmethod
-    async def _read_input(self, prompt: str, default: str = "") -> str:
-        """读取用户输入。"""
+    async def _read_input(self, prompt: str, default: str = "", markdown: bool = False) -> str:
+        """读取用户输入（markdown 为真时上文提示按 Markdown 渲染）。"""
         ...
 
     @abstractmethod
@@ -121,13 +121,16 @@ class UserInterface(ABC):
         ...
 
     @abstractmethod
-    async def _read_choice(self, prompt: str, options: list[tuple[str, str]], default_index: int) -> str:
+    async def _read_choice(
+        self, prompt: str, options: list[tuple[str, str]], default_index: int, markdown: bool = False
+    ) -> str:
         """以菜单读取一次选择。
 
         Args:
             prompt: 菜单上文提示。
             options: 选项列表，每项为 (value, label)。
             default_index: 初始选中项下标。
+            markdown: 上文提示与选项标签是否按 Markdown 渲染。
         Returns:
             所选项的 value；空串表示取消。
         """
@@ -168,9 +171,9 @@ class UserInterface(ABC):
         await self._end_streams_for(event)
 
         match event:
-            case OutputRequested(content=content):
-                await self._write(content)
-            case InputRequested(prompt=prompt, default=default):
+            case OutputRequested(content=content, markdown=markdown):
+                await self._write(content, markdown=markdown)
+            case InputRequested(prompt=prompt, default=default, markdown=markdown):
                 self._active_user_request = event
                 try:
                     next_prompt = prompt
@@ -178,7 +181,7 @@ class UserInterface(ABC):
 
                     async def read_input() -> str:
                         nonlocal next_prompt, next_default
-                        answer = await self._read_input(next_prompt, next_default)
+                        answer = await self._read_input(next_prompt, next_default, markdown)
                         next_prompt = ""
                         next_default = ""
                         return answer if answer.strip() else ""
@@ -187,11 +190,11 @@ class UserInterface(ABC):
                 finally:
                     if self._active_user_request is event:
                         self._active_user_request = None
-            case ChoiceRequested(prompt=prompt, options=options, default_index=default_index):
+            case ChoiceRequested(prompt=prompt, options=options, default_index=default_index, markdown=markdown):
                 # 选择请求允许空答案（取消），不能复用 _complete_user_request 的非空重读循环，故单次读取。
                 self._active_user_request = event
                 try:
-                    answer = await self._read_choice(prompt, options, default_index)
+                    answer = await self._read_choice(prompt, options, default_index, markdown)
                     event.complete(answer)
                 except (EOFError, KeyboardInterrupt):
                     self._request_user_interrupt()
