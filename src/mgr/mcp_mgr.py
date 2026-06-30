@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import re
+import subprocess
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from typing import Any, TYPE_CHECKING
@@ -273,7 +274,10 @@ class McpMgr:
                 # 默认环境（含 PATH）叠加用户声明的 env，避免子进程丢失 PATH 导致启动失败。
                 env={**get_default_environment(), **(spec.get("env") or {})},
             )
-            read, write = await stack.enter_async_context(stdio_client(params))
+            # 将 server 子进程的 stderr 导向 DEVNULL，避免日志输出到控制台
+            read, write = await stack.enter_async_context(
+                stdio_client(params, errlog=subprocess.DEVNULL)
+            )
         elif transport in ("http", "streamable-http", "streamable_http"):
             from mcp.client.streamable_http import streamablehttp_client
             read, write, _ = await stack.enter_async_context(
