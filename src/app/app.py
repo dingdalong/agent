@@ -143,15 +143,13 @@ class AgentApp:
         self.deps.session_context.clear()
         self._install_permission_mode_controller()
         self.deps.permission_mode_controller = self._permission_mode_controller
-        agent = Agent(
-            agent_type="总控",
-            description="入口",
+        agent = Agent.from_manifest(
+            manifest=self.deps.role_mgr.manifest if self.deps.role_mgr else None,
             deps=self.deps,
-            role_prompt=self.deps.role_mgr.identity if self.deps.role_mgr else None,
-            enable_thinking=self.deps.role_mgr.enable_thinking if self.deps.role_mgr else True,
+            is_subagent=False,
         )
         if self.output_router is not None:
-            self.output_router.set_foreground(str(agent.uuid))
+            self.output_router.set_foreground(str(agent.uuid), agent.agent_type)
         if self._permission_mode_controller is not None:
             self._permission_mode_controller.install_shortcut(agent)
             self._permission_mode_controller.notify_state_changed()

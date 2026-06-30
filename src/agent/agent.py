@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from src.mgr.plugin_mgr import PluginMgr
     from src.mgr.session_mgr import SessionMgr
     from src.mgr.mcp_mgr import McpMgr
-    from src.mgr.role_mgr import RoleMgr
+    from src.mgr.role_mgr import RoleMgr, AgentManifest
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +134,57 @@ class Agent:
             AgentState.SUMMARIZE_EXIT:   self._on_summarize_exit,
             AgentState.CONTEXT_OVERFLOW: self._on_context_overflow,
         }
+
+    @classmethod
+    def from_manifest(
+        cls,
+        manifest: AgentManifest | None,
+        deps: AgentDeps,
+        *,
+        is_subagent: bool = False,
+        **overrides: Any,
+    ) -> Agent:
+        """从 AgentManifest 创建 Agent 实例。
+
+        将 manifest 的每个字段映射到 Agent 构造参数。
+        manifest 为 None 时创建最小 Agent（回退用途）。
+        **overrides 允许调用方覆盖任意字段。
+
+        Args:
+            manifest: 解析后的 manifest，或 None。
+            deps: 外部依赖。
+            is_subagent: 是否为子 agent。
+            **overrides: 需覆盖的 Agent 字段。
+
+        Returns:
+            Agent 实例。
+        """
+        if manifest is None:
+            return cls(
+                agent_type="agent",
+                description="",
+                deps=deps,
+                role_prompt=None,
+                is_subagent=is_subagent,
+            )
+        kwargs: dict[str, Any] = dict(
+            agent_type=manifest.agent_type,
+            description=manifest.description,
+            deps=deps,
+            role_prompt=manifest.prompt,
+            tools=manifest.tools,
+            is_subagent=is_subagent,
+            memory=manifest.memory,
+            model=manifest.model,
+            permission_mode=manifest.permission_mode,
+            enable_thinking=(
+                manifest.enable_thinking
+                if manifest.enable_thinking is not None
+                else True
+            ),
+        )
+        kwargs.update(overrides)
+        return cls(**kwargs)
 
     def refresh_tools_schemas(self) -> None:
         """刷新工具 schema 列表（按本 agent 当前权限模式过滤可见性）。"""

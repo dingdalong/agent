@@ -21,7 +21,7 @@ def builtin_root() -> Path:
 def common_role_dir() -> Path:
     """返回共享角色资源目录（src/roles/common/）。
 
-    该目录不是可激活的角色（无 role.yaml），存放所有角色共享的
+    该目录不是可激活的角色（无 role.md），存放所有角色共享的
     agents、skills、AGENT.md 等资产。在加载优先级中处于最低层。
 
     Returns:

@@ -87,16 +87,17 @@ class OutputRouter:
 
     # ---- 前台管理 ----
 
-    def set_foreground(self, uuid: str) -> None:
+    def set_foreground(self, uuid: str, agent_type: str = "agent") -> None:
         """登记根 agent uuid，建主 _AgentView(is_main=True)。
 
         在 _reset_session 创建 agent 后调用，仅主 agent 有此身份。
 
         Args:
             uuid: 根 agent 的 uuid 字符串。
+            agent_type: agent 类型标识。
         """
         self._foreground_uuid = uuid
-        self._agents[uuid] = _AgentView(agent_type="总控", is_main=True)
+        self._agents[uuid] = _AgentView(agent_type=agent_type, is_main=True)
 
     # ---- 事件分发 ----
 

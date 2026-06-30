@@ -2,14 +2,17 @@
 
 三层发现（低→高）：内置 src/roles/ → 全局 ~/.agent/roles/ → 项目 .agent/roles/。
 激活角色由 config.yaml 的 role: 键指定，缺省回退 coding。
+角色定义文件为 role.md（YAML frontmatter + body），与子 agent 的 *.md 同格式。
+提供 frontmatter 解析与字段提取工具函数（共用）。
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import yaml
 
@@ -17,11 +20,141 @@ from src.mgr.paths import builtin_root, common_role_dir
 
 if TYPE_CHECKING:
     from src.mgr.config_mgr import ConfigManager
+    from src.mgr.permission_mgr import PermissionMode
 
 logger = logging.getLogger(__name__)
 
 # 缺省角色名 — 当 config 未指定或指定的角色不存在时回退到此角色。
 _DEFAULT_ROLE = "coding"
+
+
+# ── frontmatter 解析（RoleMgr / SubAgentMgr 共用）────────────────────
+
+
+def parse_frontmatter(text: str) -> tuple[dict, str]:
+    """从 .md 文本中分离 YAML frontmatter 和 body。
+
+    Args:
+        text: .md 文件全文。
+
+    Returns:
+        (frontmatter_dict, body_text)。无 frontmatter 时 dict 为空，body 为全文。
+    """
+    match = re.match(r"^---\s*\n(.*?)\n---\s*\n(.*)", text, re.DOTALL)
+    if not match:
+        return {}, text
+    meta = yaml.safe_load(match.group(1)) or {}
+    return meta, match.group(2)
+
+
+def extract_manifest(
+    meta: dict,
+    path: Path,
+    *,
+    prompt: str = "",
+    id_field: str = "agent_type",
+    default_id: str = "",
+    default_description: str = "没有说明内容",
+) -> AgentManifest:
+    """从 frontmatter dict + prompt body 构造 AgentManifest。
+
+    差异点通过参数注入消除：
+    - prompt: markdown body（parse_frontmatter 返回的第二项）
+    - id_field: 标识字段名（SubAgentMgr 用 "agent_type"，RoleMgr 用 "agent_type" 固定为 "main"）
+    - default_id: 标识字段缺省值（SubAgentMgr 用 path.stem，RoleMgr 用 path.name）
+    - default_description: 描述缺省值
+
+    Args:
+        meta: frontmatter 解析后的 dict。
+        path: 定义文件路径（用于日志）。
+        prompt: markdown body 文本。
+        id_field: 用作标识的字段名。
+        default_id: 标识字段缺失时的回退值。
+        default_description: 描述缺失时的回退值。
+
+    Returns:
+        AgentManifest 实例。
+    """
+    from src.mgr.permission_mgr import parse_permission_mode
+
+    # 标识
+    identifier = meta.get(id_field)
+    if not isinstance(identifier, str) or not identifier.strip():
+        identifier = default_id
+
+    # 描述
+    description = meta.get("description", default_description)
+    if not isinstance(description, str):
+        description = default_description
+
+    # 工具白名单：逗号分割，空 → None（全部工具可用）
+    raw_tools = meta.get("tools", "")
+    tools: set[str] | None = None
+    if raw_tools and isinstance(raw_tools, str):
+        parsed = {t.strip() for t in raw_tools.split(",") if t.strip()}
+        if parsed:
+            tools = parsed
+
+    # 模型
+    model: str | None = None
+    raw_model = meta.get("model")
+    if isinstance(raw_model, str) and raw_model.strip():
+        model = raw_model.strip()
+
+    # 权限模式
+    permission_mode = None
+    raw_mode = meta.get("permissionMode")
+    if raw_mode is not None:
+        permission_mode = parse_permission_mode(str(raw_mode))
+        if permission_mode is None:
+            logger.warning(
+                "%s 的 permissionMode 非法：%r，已忽略",
+                path, raw_mode,
+            )
+
+    # 思考模式：仅 bool 有效，非 bool 静默忽略
+    enable_thinking: bool | None = None
+    raw_thinking = meta.get("thinking")
+    if isinstance(raw_thinking, bool):
+        enable_thinking = raw_thinking
+
+    # 记忆范围
+    memory: str | None = None
+    raw_memory = meta.get("memory")
+    if isinstance(raw_memory, str) and raw_memory.strip():
+        memory = raw_memory.strip()
+
+    return AgentManifest(
+        agent_type=identifier,
+        description=description,
+        path=path,
+        prompt=prompt.strip() or None,
+        tools=tools,
+        model=model,
+        permission_mode=permission_mode,
+        enable_thinking=enable_thinking,
+        memory=memory,
+    )
+
+
+@dataclass
+class AgentManifest:
+    """从 role.md / agents/*.md 解析出的完整定义。
+
+    包含 frontmatter 字段 + markdown body（prompt）。
+    agent_type — 角色固定为 ``"main"``；子 agent 取自 agents/*.md 的 YAML key ``agent_type``。
+    与 Agent.agent_type 一致。
+    """
+
+    agent_type: str
+    description: str
+    path: Path
+    prompt: str | None = None
+    tools: set[str] | None = None
+    memory: str | None = None
+    model: str | None = None
+    permission_mode: PermissionMode | None = None
+    enable_thinking: bool | None = None
 
 
 @dataclass
@@ -39,7 +172,7 @@ class RoleMgr:
     global_dir: Path | None = None
 
     _role_path: Path | None = field(init=False, default=None)
-    _role_config: dict[str, Any] = field(init=False, default_factory=dict)
+    _manifest: AgentManifest | None = field(init=False, default=None)
     _all_roles: dict[str, Path] = field(init=False, default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -64,36 +197,17 @@ class RoleMgr:
             for path in sorted(directory.iterdir()):
                 if not path.is_dir():
                     continue
-                role_yaml = path / "role.yaml"
-                if not role_yaml.exists():
+                if path.name == "common":
                     continue
-                name = self._read_role_name(role_yaml) or path.name
-                self._all_roles[name] = path
-
-    @staticmethod
-    def _read_role_name(path: Path) -> str | None:
-        """从 role.yaml 中仅提取 name 字段，不完整解析。
-
-        Args:
-            path: role.yaml 文件路径。
-
-        Returns:
-            name 字段值，解析失败或缺失时返回 None。
-        """
-        try:
-            data = yaml.safe_load(path.read_text())
-            if isinstance(data, dict):
-                name = data.get("name")
-                if isinstance(name, str) and name:
-                    return name
-        except yaml.YAMLError:
-            pass
-        return None
+                role_md = path / "role.md"
+                if not role_md.exists():
+                    continue
+                self._all_roles[path.name] = path
 
     # —— 解析 ————————————————————————————————————————————————————————
 
     def _resolve(self) -> None:
-        """从配置读取角色名，定位角色目录并解析 role.yaml。
+        """从配置读取角色名，定位角色目录并解析 role.md。
 
         若配置不存在或无值 → 回退 _DEFAULT_ROLE。
         若指定角色在 _all_roles 中不存在 → warning + 回退。
@@ -123,70 +237,47 @@ class RoleMgr:
         if path is None:
             logger.warning("默认角色 '%s' 也未找到，无角色激活。", _DEFAULT_ROLE)
             self._role_path = None
-            self._role_config = {}
+            self._manifest = None
             return
 
         self._role_path = path
-        self._role_config = self._parse_role_yaml(path / "role.yaml")
+        role_md_path = path / "role.md"
+        if role_md_path.exists():
+            try:
+                meta, prompt = parse_frontmatter(role_md_path.read_text())
+            except Exception as exc:
+                logger.warning("角色定义 %s 解析失败：%s", role_md_path, exc)
+                meta, prompt = {}, ""
+            self._manifest = extract_manifest(
+                meta, role_md_path,
+                prompt=prompt,
+                id_field="agent_type",
+                default_id="main",
+                default_description="",
+            )
+        else:
+            self._manifest = None
+
         logger.info("激活角色：%s（%s）", self.role_name, path)
-
-    @staticmethod
-    def _parse_role_yaml(path: Path) -> dict[str, Any]:
-        """解析 role.yaml 返回 dict，文件不存在或格式错误返回空 dict。
-
-        Args:
-            path: role.yaml 文件路径。
-
-        Returns:
-            解析后的配置 dict。
-        """
-        if not path.exists():
-            return {}
-        try:
-            data = yaml.safe_load(path.read_text())
-            return data if isinstance(data, dict) else {}
-        except yaml.YAMLError as exc:
-            logger.warning("角色配置 %s 解析失败：%s", path, exc)
-            return {}
 
     # —— 查询 ————————————————————————————————————————————————————————
 
     @property
     def active(self) -> bool:
         """是否有已激活的角色。"""
-        return self._role_path is not None
+        return self._manifest is not None
+
+    @property
+    def manifest(self) -> AgentManifest | None:
+        """当前角色的 AgentManifest。"""
+        return self._manifest
 
     @property
     def role_name(self) -> str | None:
-        """当前角色名。"""
-        if not self._role_path:
-            return None
-        name = self._role_config.get("name")
-        if isinstance(name, str) and name:
-            return name
-        return self._role_path.name
-
-    @property
-    def identity(self) -> str | None:
-        """主 agent 人设文本。空字符串 → None（回退通用身份）。"""
-        val = self._role_config.get("identity")
-        if isinstance(val, str) and val.strip():
-            return val.strip()
+        """当前角色名（即角色文件夹名）。"""
+        if self._role_path is not None:
+            return self._role_path.name
         return None
-
-    @property
-    def description(self) -> str:
-        """角色的一行描述。"""
-        val = self._role_config.get("description")
-        return str(val) if val else ""
-
-    @property
-    def enable_thinking(self) -> bool:
-        """角色是否启用思考模式。role.yaml 中 thinking 字段，缺省 True。"""
-        val = self._role_config.get("thinking")
-        if isinstance(val, bool):
-            return val
-        return True
 
     # —— 资产路径（无角色时返回 None）——————————————————————————————————
 

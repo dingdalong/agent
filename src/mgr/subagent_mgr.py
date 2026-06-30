@@ -1,37 +1,19 @@
 from __future__ import annotations
 from typing import Any, TYPE_CHECKING
 
-import re
 import time
 import logging
-import yaml
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from src.events.types import SubagentLifecycle
-from src.mgr.permission_mgr import parse_permission_mode
+from src.mgr.role_mgr import parse_frontmatter, extract_manifest, AgentManifest
 
 if TYPE_CHECKING:
     from src.agent import Agent, AgentDeps
-    from src.mgr.permission_mgr import PermissionMode
 
 logger = logging.getLogger(__name__)
 
-@dataclass
-class SubAgentManifest:
-    agent_type: str
-    description: str
-    path: Path
-    tools: set[str] | None = None
-    memory: str | None = None
-    model: str | None = None
-    permission_mode: PermissionMode | None = None
-    enable_thinking: bool | None = None
-
-@dataclass
-class SubAgentDocument:
-    manifest: SubAgentManifest
-    prompt: str
 
 @dataclass
 class SubAgentMgr:
@@ -46,7 +28,7 @@ class SubAgentMgr:
     deps: AgentDeps = field(repr=False)
     global_dir: Path | None = None
 
-    _documents: dict[str, SubAgentDocument] = field(init=False, default_factory=dict)
+    _documents: dict[str, AgentManifest] = field(init=False, default_factory=dict)
 
     def __post_init__(self):
         self._load_all()
@@ -80,47 +62,15 @@ class SubAgentMgr:
             if not directory.exists():
                 continue
             for path in sorted(directory.glob("*.md")):
-                meta, prompt = self._parse_frontmatter(path.read_text())
-                agent_type = meta.get("agent_type", path.stem)
-                description = meta.get("description", "没有说明内容")
-                raw_tools = meta.get("tools", "")
-                tools = {t.strip() for t in raw_tools.split(",") if t.strip()} or None
-                memory = meta.get("memory")
-                model = meta.get("model")
-                raw_thinking = meta.get("thinking")
-                enable_thinking = raw_thinking if isinstance(raw_thinking, bool) else None
-                # frontmatter 的 permissionMode 字符串在加载时即解析为 PermissionMode；非法值告警并回退 None
-                raw_mode = meta.get("permissionMode")
-                permission_mode = None
-                if raw_mode is not None:
-                    permission_mode = parse_permission_mode(str(raw_mode))
-                    if permission_mode is None:
-                        logger.warning("子智能体 %s 的 permissionMode 非法：%r，已忽略", agent_type, raw_mode)
-                manifest = SubAgentManifest(
-                    agent_type=agent_type,
-                    description=description,
-                    path=path,
-                    tools=tools,
-                    memory=memory,
-                    model=model,
-                    permission_mode=permission_mode,
-                    enable_thinking=enable_thinking,
-                )
-                self._documents[agent_type] = SubAgentDocument(manifest=manifest, prompt=prompt.strip())
-
-    def _parse_frontmatter(self, text: str) -> tuple[dict, str]:
-        match = re.match(r"^---\s*\n(.*?)\n---\s*\n(.*)", text, re.DOTALL)
-        if not match:
-            return {}, text
-        meta = yaml.safe_load(match.group(1)) or {}
-        return meta, match.group(2)
+                meta, prompt = parse_frontmatter(path.read_text())
+                manifest = extract_manifest(meta, path, prompt=prompt)
+                self._documents[manifest.agent_type] = manifest
 
     def describe(self) -> str | None:
         if not self._documents:
             return
         lines = []
-        for agent_type in sorted(self._documents):
-            manifest = self._documents[agent_type].manifest
+        for manifest in self._documents.values():
             lines.append(f"- {manifest.agent_type}: {manifest.description}")
         return "\n".join(lines)
 
@@ -147,8 +97,8 @@ class SubAgentMgr:
         Returns:
             子智能体的执行结果文本，或错误信息。
         """
-        document = self._documents.get(agent_type)
-        if not document:
+        manifest = self._documents.get(agent_type)
+        if not manifest:
             known = ", ".join(sorted(self._documents)) or "(none)"
             return f"错误: 不存在的子智能体：'{agent_type}'。可用子智能体列表：{known}"
 
@@ -161,30 +111,26 @@ class SubAgentMgr:
                 pass
 
         # 解析子 agent 的最终工具集（自动注入 subagent=True、排除 subagent=False）
-        tools = self.deps.tools_mgr.resolve_subagent_tools(document.manifest.tools)
+        tools = self.deps.tools_mgr.resolve_subagent_tools(manifest.tools)
 
         # 解析模型：inherit 表示继承父 agent 已解析的真实模型 ID
-        model_value = document.manifest.model
+        model_value = manifest.model
         if model_value == "inherit" and parent_agent is not None:
             model_value = parent_agent.llm.model
 
         # 思考模式：显式设置则用设置值，否则继承父 agent
-        enable_thinking = document.manifest.enable_thinking
+        enable_thinking = manifest.enable_thinking
         if enable_thinking is None:
             enable_thinking = getattr(parent_agent, "enable_thinking", True)
 
         from src.agent import Agent
-        agent = Agent(
-            agent_type = agent_type,
-            description = document.manifest.description,
-            role_prompt = document.prompt or None,
-            deps = self.deps,
-            tools = tools,
-            is_subagent = True,
-            memory = document.manifest.memory,
-            model = model_value,
-            permission_mode = document.manifest.permission_mode,
-            enable_thinking = enable_thinking,
+        agent = Agent.from_manifest(
+            manifest=manifest,
+            deps=self.deps,
+            is_subagent=True,
+            tools=tools,
+            model=model_value,
+            enable_thinking=enable_thinking,
         )
 
         hooks_mgr = self.deps.hooks_mgr
