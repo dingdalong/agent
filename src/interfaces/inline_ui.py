@@ -912,22 +912,29 @@ class InlineInterface(UserInterface):
             else:
                 self._print_rich(context)
 
-    async def _read_permission(self, tool_name: str, detail: str, suggested_rules: list[str] | None = None) -> str:
+    async def _read_permission(
+        self,
+        tool_name: str,
+        detail: str,
+        suggested_rules: list[str] | None = None,
+        mcp_server_rule: str | None = None,
+    ) -> str:
         """工具权限确认：打印权限说明上文到 App 上方，再以方向键选择菜单读取决策。
 
-        非 TTY 走扁平降级（打字 y/s/a/n）。
+        非 TTY 走扁平降级（打字 y/s/a/n，MCP 工具另加 ss/aa）。
 
         Args:
             tool_name: 工具名。
             detail: 权限请求详情。
             suggested_rules: 建议的 allow 规则列表，供展示。
+            mcp_server_rule: MCP 工具的 server 级通配规则；非空时增加"信任整个 server"两项。
         Returns:
-            "yes" / "session" / "always" / "deny"。
+            "yes" / "session" / "always" / "session_server" / "always_server" / "deny"。
         """
         if not self._tty:
-            return await self._read_permission_plain(tool_name, detail, suggested_rules)
+            return await self._read_permission_plain(tool_name, detail, suggested_rules, mcp_server_rule)
         self._print_rich(self._permission_context_text(tool_name, detail, suggested_rules), end="")
-        return await self._await_selection(self._permission_options(suggested_rules), 0, cancel_value="deny")
+        return await self._await_selection(self._permission_options(suggested_rules, mcp_server_rule), 0, cancel_value="deny")
 
     async def _read_choice(
         self, prompt: str, options: list[tuple[str, str]], default_index: int, markdown: bool = False
@@ -953,22 +960,27 @@ class InlineInterface(UserInterface):
                 self._print_rich(prompt)
         return await self._await_selection(options, default_index, cancel_value="", markdown=markdown)
 
-    def _permission_options(self, suggested_rules: list[str] | None) -> list[tuple[str, str]]:
+    def _permission_options(self, suggested_rules: list[str] | None, mcp_server_rule: str | None = None) -> list[tuple[str, str]]:
         """构建权限确认的菜单选项（value, label）。
 
         Args:
             suggested_rules: 建议的 allow 规则列表（非空时 session/always 标注「上述规则」）。
+            mcp_server_rule: MCP 工具的 server 级通配规则；非空时追加"信任整个 server"两项。
         Returns:
-            选项列表：允许一次 / 会话允许 / 始终允许并保存 / 拒绝。
+            选项列表：允许一次 / 会话允许 / 始终允许并保存 /（MCP）会话信任整 server / 始终信任整 server / 拒绝。
         """
         session_label = "会话允许(上述规则)" if suggested_rules else "本次会话始终允许"
         always_label = "始终允许并保存(上述规则)" if suggested_rules else "始终允许并保存"
-        return [
+        options = [
             ("yes", "允许一次"),
             ("session", session_label),
             ("always", always_label),
-            ("deny", "拒绝 (esc)"),
         ]
+        if mcp_server_rule:
+            options.append(("session_server", f"会话信任整个 server({mcp_server_rule})"))
+            options.append(("always_server", f"始终信任整个 server 并保存({mcp_server_rule})"))
+        options.append(("deny", "拒绝 (esc)"))
+        return options
 
     def _permission_context_text(self, tool_name: str, detail: str, suggested_rules: list[str] | None) -> Text:
         """构建权限确认上文（工具/内容/建议规则），供菜单上文与非 TTY 降级共用，不含操作提示。
@@ -994,33 +1006,44 @@ class InlineInterface(UserInterface):
                     prompt_text.append(f"    - {rule_str}\n")
         return prompt_text
 
-    def _permission_prompt_text(self, tool_name: str, detail: str, suggested_rules: list[str] | None) -> Text:
+    def _permission_prompt_text(self, tool_name: str, detail: str, suggested_rules: list[str] | None, mcp_server_rule: str | None = None) -> Text:
         """构建权限确认说明块（上文 + 打字操作提示），供非 TTY 降级使用。
 
         Args:
             tool_name: 工具名。
             detail: 权限请求详情。
             suggested_rules: 建议的 allow 规则列表，供展示。
+            mcp_server_rule: MCP 工具的 server 级通配规则；非空时追加 ss/aa 信任整 server 提示。
         Returns:
             可经 _print_rich 输出的 Rich Text。
         """
         session_label = "会话允许(上述规则)" if suggested_rules else "本次会话始终允许"
         always_label = "始终允许并保存(上述规则)" if suggested_rules else "始终允许并保存"
         prompt_text = self._permission_context_text(tool_name, detail, suggested_rules)
-        prompt_text.append("  输入 y/s/a/n 后按 Enter 确认\n")
+        if mcp_server_rule:
+            prompt_text.append("  输入 y/s/a/ss/aa/n 后按 Enter 确认\n")
+        else:
+            prompt_text.append("  输入 y/s/a/n 后按 Enter 确认\n")
         prompt_text.append(f"  [y] 允许一次   [s] {session_label}   [a] {always_label}   [n] 拒绝\n")
+        if mcp_server_rule:
+            prompt_text.append(f"  [ss] 会话信任整个 server({mcp_server_rule})   [aa] 始终信任整个 server 并保存\n")
         return prompt_text
 
-    def _normalize_permission_answer(self, answer: str) -> str | None:
+    def _normalize_permission_answer(self, answer: str, mcp_server_rule: str | None = None) -> str | None:
         """把用户输入归一化为权限决策；非法返回 None。
 
         Args:
             answer: 已 strip/lower 的用户输入。
+            mcp_server_rule: MCP 工具的 server 级通配规则；非空时接受 ss/aa 信任整 server。
         Returns:
-            "yes"/"session"/"always"/"deny"，非法时 None。
+            "yes"/"session"/"always"/"session_server"/"always_server"/"deny"，非法时 None。
         """
         if answer in {"y", "yes"}:
             return "yes"
+        if mcp_server_rule and answer in {"ss", "session_server"}:
+            return "session_server"
+        if mcp_server_rule and answer in {"aa", "always_server"}:
+            return "always_server"
         if answer in {"s", "session"}:
             return "session"
         if answer in {"a", "always"}:
@@ -1046,25 +1069,27 @@ class InlineInterface(UserInterface):
             prompt, default=default, multiline=True, prompt_continuation="... ", handle_sigint=True
         )
 
-    async def _read_permission_plain(self, tool_name: str, detail: str, suggested_rules: list[str] | None) -> str:
-        """非 TTY 降级权限确认：打印说明块后用 PromptSession 循环读取 y/s/a/n。
+    async def _read_permission_plain(self, tool_name: str, detail: str, suggested_rules: list[str] | None, mcp_server_rule: str | None = None) -> str:
+        """非 TTY 降级权限确认：打印说明块后用 PromptSession 循环读取 y/s/a/n（MCP 工具另加 ss/aa）。
 
         Args:
             tool_name: 工具名。
             detail: 权限请求详情。
             suggested_rules: 建议的 allow 规则列表，供展示。
+            mcp_server_rule: MCP 工具的 server 级通配规则；非空时接受 ss/aa 信任整 server。
         Returns:
-            "yes" / "session" / "always" / "deny"。
+            "yes" / "session" / "always" / "session_server" / "always_server" / "deny"。
         """
-        self._print_rich(self._permission_prompt_text(tool_name, detail, suggested_rules), end="")
+        self._print_rich(self._permission_prompt_text(tool_name, detail, suggested_rules, mcp_server_rule), end="")
         if self._fallback_session is None:
             self._fallback_session = PromptSession()
+        hint = "请输入 y、s、a、ss、aa 或 n。" if mcp_server_rule else "请输入 y、s、a 或 n。"
         while True:
             answer = (await self._fallback_session.prompt_async("选择: ", handle_sigint=True)).strip().lower()
-            decision = self._normalize_permission_answer(answer)
+            decision = self._normalize_permission_answer(answer, mcp_server_rule)
             if decision is not None:
                 return decision
-            self._print_rich("请输入 y、s、a 或 n。", style="red")
+            self._print_rich(hint, style="red")
 
     async def _read_choice_plain(self, prompt: str, options: list[tuple[str, str]], default_index: int) -> str:
         """非 TTY 降级选择：打印编号菜单后用 PromptSession 读数字，映射回 value。

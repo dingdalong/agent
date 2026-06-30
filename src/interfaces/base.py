@@ -111,13 +111,20 @@ class UserInterface(ABC):
         ...
 
     @abstractmethod
-    async def _read_permission(self, tool_name: str, detail: str, suggested_rules: list[str] | None = None) -> str:
+    async def _read_permission(
+        self,
+        tool_name: str,
+        detail: str,
+        suggested_rules: list[str] | None = None,
+        mcp_server_rule: str | None = None,
+    ) -> str:
         """读取权限确认结果。
 
         Args:
             tool_name: 工具名。
             detail: 权限请求详情。
             suggested_rules: 建议的 allow 规则列表，供 UI 展示。
+            mcp_server_rule: MCP 工具的 server 级通配规则（mcp__<server>__*）；非空时提供"信任整个 server"选项。
         """
         ...
 
@@ -206,12 +213,12 @@ class UserInterface(ABC):
                         self._active_user_request = None
             case PermissionNotice():
                 await self.on_permission_notice(event)
-            case PermissionRequested(tool_name=tool_name, detail=detail, suggested_rules=suggested_rules):
+            case PermissionRequested(tool_name=tool_name, detail=detail, suggested_rules=suggested_rules, mcp_server_rule=mcp_server_rule):
                 self._active_user_request = event
                 try:
                     await self._complete_user_request(
                         event,
-                        lambda: self._read_permission(tool_name, detail, suggested_rules),
+                        lambda: self._read_permission(tool_name, detail, suggested_rules, mcp_server_rule),
                     )
                 finally:
                     if self._active_user_request is event:

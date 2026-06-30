@@ -114,11 +114,16 @@ class McpMgr:
         self._conns: dict[str, _ServerConn] = {}
         self._tasks: list[asyncio.Task] = []
         self._stop_event: asyncio.Event | None = None
+        # 各 server 在 mcp_servers.json 中声明的只读权限块（server 名 → {allow/deny/ask: [...]}），
+        # 由 PermissionManager 拉取并适配为最低优先级权限规则层。start() 按生效 server 集填充。
+        self._server_permissions: dict[str, dict[str, Any]] = {}
 
     async def start(self) -> None:
         """读取配置，为每个 MCP server 启动常驻连接任务并等待其就绪。
 
         三层 MCP 配置合并（低→高）：角色 → global → project。
+        合并并过滤后，抽取各 server 的 permissions 块存入 self._server_permissions，
+        供 PermissionManager 拉取适配为最低优先级权限规则层。
         单个 server 连接失败仅记日志并跳过，不影响其它 server 与主流程。
         未配置 server 或未安装 mcp 包时整体跳过。
         """
@@ -136,6 +141,15 @@ class McpMgr:
                     pass
         # global + project（project 覆盖 global，二者均覆盖角色层同名 key）
         servers.update(self.config_mgr.load_mcp_servers())
+        # server 级开关：settings.json 的 mcp.enabledServers（非空则白名单）与 mcp.disabledServers（始终剔除）
+        servers = self._apply_server_policy(servers)
+        # 抽取生效 server 的只读 permissions 块（在早返回前完成：即便 mcp 包缺失或连接失败，
+        # 其 deny 规则仍登记，方向偏安全）。
+        self._server_permissions = {
+            name: spec["permissions"]
+            for name, spec in servers.items()
+            if isinstance(spec.get("permissions"), dict)
+        }
         if not servers:
             return
         try:
@@ -157,6 +171,45 @@ class McpMgr:
             "已连接 %d/%d 个 MCP server，注册 %d 个工具",
             len(self._conns), len(servers), tool_count,
         )
+
+    def _apply_server_policy(self, servers: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        """按 settings.json 的 mcp 策略过滤待连接的 server 集合。
+
+        策略来自合并后的 settings.json 的 mcp 段：
+        - enabledServers：非空时作为白名单，只保留其中的 server。
+        - disabledServers：始终从结果中剔除。
+        被跳过的 server 记一条日志。
+
+        Args:
+            servers: 三层合并后的 server 配置（server 名 → 连接配置）。
+
+        Returns:
+            过滤后的 server 配置。
+        """
+        policy = self.config_mgr.get_user_setting("mcp")
+        if not isinstance(policy, dict):
+            return servers
+        enabled = set(policy.get("enabledServers") or [])
+        disabled = set(policy.get("disabledServers") or [])
+        if not enabled and not disabled:
+            return servers
+        kept = {
+            name: spec
+            for name, spec in servers.items()
+            if (not enabled or name in enabled) and name not in disabled
+        }
+        skipped = [name for name in servers if name not in kept]
+        if skipped:
+            logger.info("按 mcp 策略跳过 %d 个 server：%s", len(skipped), ", ".join(skipped))
+        return kept
+
+    def server_permissions(self) -> dict[str, dict[str, Any]]:
+        """返回各生效 server 在 mcp_servers.json 中声明的 permissions 块。
+
+        Returns:
+            server 名 → 该 server 的权限块（含 allow/deny/ask 列表），未声明的 server 不在其中。
+        """
+        return self._server_permissions
 
     async def stop(self) -> None:
         """通知所有 server 任务退出并等待其清退连接，超时则强制取消。"""
@@ -255,6 +308,7 @@ class McpMgr:
         permission = ToolPermission(
             kind="readonly" if read_only else None,
             tips=f"MCP {server}: {mcp_tool.name}",
+            mcp_server=server,
         )
         upstream_name = mcp_tool.name
 

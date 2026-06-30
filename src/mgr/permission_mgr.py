@@ -3,7 +3,11 @@
 评估顺序：
 1. deny 规则 → 2. ask 规则 → 3. check_permissions（工具安全逻辑，bypass_immune 立即返回，
 非 bypass_immune 记录后穿透）→ 4. allow 规则（含 session_allow）→ 4.5. 处理穿透的 tool ask
-（按模式分流）→ 5. bypass 模式 → 6. 模式默认策略。
+（按模式分流）→ 4.7. mcp_servers.json 声明的 server 级规则（最低优先级层，仅 settings.json
+静默时生效，含 deny→ask→allow）→ 5. bypass 模式 → 6. 模式默认策略。
+
+settings.json 规则（Step 1-4）与 mcp_servers.json 规则（Step 4.7）共用同一 PermissionRule
+表示与匹配引擎，仅优先级不同：settings 层先于 mcp 层评估，故 settings 的 allow 能覆盖 mcp 的 deny。
 """
 
 from __future__ import annotations
@@ -145,7 +149,7 @@ def parse_permission_mode(text: str) -> PermissionMode | None:
 
 # ── 规则 ──────────────────────────────────────────────────────────────
 
-_RULE_PATTERN = re.compile(r"^(\w+)(?:\((.+)\))?$")
+_RULE_PATTERN = re.compile(r"^([\w*?-]+)(?:\((.+)\))?$")
 
 PermissionDecision = tuple[Literal["allow", "deny", "ask", "auto_allow"], str]
 
@@ -160,7 +164,7 @@ class PermissionRule:
     - wildcard：通配符匹配，含 '*' 或 '?'（如 'npm *'），走 fnmatch
 
     Attributes:
-        tool: 工具名，如 "shell"。配置中的 "*" 通配符在加载时已展开为具体工具名。
+        tool: 工具名，如 "shell"。可含 "*"/"?" 通配符（如 "mcp__github__*"），由 _get_rules 在调用期 fnmatch 匹配。
         specifier: 匹配模式字符串。"*" 表示匹配该工具的所有调用。
         permission: "allow"、"deny" 或 "ask"。
     """
@@ -247,7 +251,7 @@ def parse_rule(text: str, permission: Literal["allow", "deny", "ask"]) -> Permis
 
 # ── PermissionManager ─────────────────────────────────────────────────
 
-# 规则字典类型：key 为 tool 名（含 "*" 通配符），value 为该工具的规则列表。
+# 规则字典类型：key 为 tool 名（可含 "*"/"?" 通配符，由 _get_rules 调用期 fnmatch 匹配），value 为该工具的规则列表。
 RulesDict = dict[str, list[PermissionRule]]
 
 class PermissionManager:
@@ -262,19 +266,26 @@ class PermissionManager:
         tools: Iterable[ToolEntry] | None = None,
         workdir: str = "",
         trusted_dirs: tuple[str, ...] = (),
+        mcp_mgr: Any = None,
     ):
         self.default_mode: PermissionMode = DEFAULT_MODE
         self.deny_rules: RulesDict = {}
         self.ask_rules: RulesDict = {}
         self.allow_rules: RulesDict = {}
         self.session_allow: RulesDict = {}
+        # mcp_servers.json 声明的 server 级规则（最低优先级层，仅 settings.json 静默时生效）
+        self.mcp_deny_rules: RulesDict = {}
+        self.mcp_ask_rules: RulesDict = {}
+        self.mcp_allow_rules: RulesDict = {}
         self.config_mgr = config_mgr
+        self._mcp_mgr = mcp_mgr
         self._workdir = workdir
         self._trusted_dirs = trusted_dirs
         self._check_permissions_fns: dict[str, Callable[[dict[str, Any], PermissionContext], PermissionCheckResult]] = {}
         self._tool_tips: dict[str, str] = {}
         self._tool_kinds: dict[str, str | None] = {}
         self._specifier_args: dict[str, str] = {}
+        self._mcp_servers: dict[str, str] = {}  # MCP 工具名 → 所属 server 名
 
         self._load_tool_metadata(tools or [])
         self._load_config()
@@ -295,6 +306,8 @@ class PermissionManager:
                 self._check_permissions_fns[tool.name] = tool.permission.check_permissions
             if tool.permission.specifier_arg is not None:
                 self._specifier_args[tool.name] = tool.permission.specifier_arg
+            if tool.permission.mcp_server is not None:
+                self._mcp_servers[tool.name] = tool.permission.mcp_server
 
     def _load_config(self) -> None:
         """从配置文件加载权限规则和默认模式。"""
@@ -313,6 +326,37 @@ class PermissionManager:
         self._parse_rules(permissions.get("deny", []), "deny", self.deny_rules)
         self._parse_rules(permissions.get("ask", []), "ask", self.ask_rules)
         self._parse_rules(permissions.get("allow", []), "allow", self.allow_rules)
+        self._load_mcp_server_rules()
+
+    def _load_mcp_server_rules(self) -> None:
+        """从 mcp_servers.json 各 server 的 permissions 块加载最低优先级权限规则。
+
+        每个条目是相对该 server 的上游工具名通配（如 "get_*"、"*"），展开为
+        mcp__<server>__<entry> 规则；以 "mcp__" 开头的条目按完整工具模式原样使用（逃生口）。
+        server 段套用与工具注册一致的名称清洗（_safe_tool_name），保证规则前缀对齐注册名；
+        entry 不清洗以保留其中的 "*"/"?" 通配。某 server 声明了权限却无对应已注册工具时告警。
+        """
+        if self._mcp_mgr is None:
+            return
+        from src.mgr.mcp_mgr import _safe_tool_name
+
+        known_servers = set(self._mcp_servers.values())
+        for server, perms in self._mcp_mgr.server_permissions().items():
+            if not isinstance(perms, dict):
+                continue
+            if server not in known_servers:
+                logger.warning("mcp_servers.json 中 server '%s' 声明了 permissions，但未发现其已注册工具", server)
+            safe_prefix = _safe_tool_name(f"mcp__{server}__")
+            for permission, target in (
+                ("deny", self.mcp_deny_rules),
+                ("ask", self.mcp_ask_rules),
+                ("allow", self.mcp_allow_rules),
+            ):
+                for entry in perms.get(permission, []):
+                    if not isinstance(entry, str):
+                        continue
+                    tool = entry if entry.startswith("mcp__") else f"{safe_prefix}{entry}"
+                    self._add_rule(target, PermissionRule(tool=tool, specifier="*", permission=permission))
 
     @staticmethod
     def _add_rule(rules: RulesDict, rule: PermissionRule) -> None:
@@ -374,20 +418,30 @@ class PermissionManager:
         self.deny_rules.clear()
         self.ask_rules.clear()
         self.allow_rules.clear()
+        self.mcp_deny_rules.clear()
+        self.mcp_ask_rules.clear()
+        self.mcp_allow_rules.clear()
         self._load_config()
 
     @staticmethod
     def _get_rules(rules: RulesDict, tool_name: str) -> list[PermissionRule]:
-        """获取匹配指定工具名的规则。
+        """获取匹配指定工具名的规则（精确键 + 通配符键）。
+
+        先取精确键命中的规则，再扫描含 '*'/'?' 的工具名键做 fnmatch 匹配，
+        使 'mcp__server__*' 这类按 server 通配的规则生效。精确键结果在前以稳定优先级。
 
         Args:
-            rules: 按工具名索引的规则字典。
+            rules: 按工具名索引的规则字典（key 可含 '*'/'?' 通配符）。
             tool_name: 被调用的工具名。
 
         Returns:
             该工具的规则列表，无匹配时返回空列表。
         """
-        return rules.get(tool_name, [])
+        matched = list(rules.get(tool_name, []))
+        for key, entries in rules.items():
+            if ("*" in key or "?" in key) and fnmatch(tool_name, key):
+                matched.extend(entries)
+        return matched
 
     def check(self, tool_name: str, tool_input: dict[str, Any], mode: PermissionMode) -> PermissionDecision:
         """权限检查核心流程。
@@ -402,9 +456,11 @@ class PermissionManager:
            - allow → allow
         4. allow 规则（含 session_allow）→ allow
         4.5. 处理 Step 3 记录的非 bypass_immune ask：
-             - BYPASS/AUTO → 穿透到 Step 5/6
+             - BYPASS/AUTO → 穿透到 Step 4.7/5/6
              - DONT_ASK → deny（从不弹窗）
              - 其他模式 → ask
+        4.7. mcp_servers.json 的 server 级规则（最低优先级层）：deny → ask → allow，
+             仅 settings.json 静默时到达；置于 bypass 前故 BYPASS 模式下其 deny/ask 仍生效。
         5. bypass 模式 → auto_allow
         6. 模式默认策略（按 kind 判断）
 
@@ -482,6 +538,18 @@ class PermissionManager:
                 return "deny", f"dontAsk 模式拒绝：{tool_ask_reason}"
             if mode is not BYPASS_MODE:
                 return "ask", tool_ask_reason
+
+        # Step 4.7: mcp_servers.json 声明的 server 级规则（最低优先级层，仅 settings.json 静默时到达）。
+        # 置于 bypass 之前，使 BYPASS 模式下 mcp 的 deny/ask 仍生效（对齐 bypass「deny 和 ask 规则仍生效」契约）。
+        for rule in self._get_rules(self.mcp_deny_rules, tool_name):
+            if rule.matches_specifier(specifier_value):
+                return "deny", f"被 mcp_servers.json deny 规则阻止：{rule}"
+        for rule in self._get_rules(self.mcp_ask_rules, tool_name):
+            if rule.matches_specifier(specifier_value):
+                return "ask", f"被 mcp_servers.json ask 规则要求确认：{rule}"
+        for rule in self._get_rules(self.mcp_allow_rules, tool_name):
+            if rule.matches_specifier(specifier_value):
+                return "allow", f"匹配 mcp_servers.json allow 规则：{rule}"
 
         # Step 5: bypass 模式
         if mode is BYPASS_MODE:
@@ -582,10 +650,18 @@ class PermissionManager:
             rules_to_apply = [self._build_session_rule(tool_name, tool_input)]
         suggested_rules = [str(r) for r in rules_to_apply if r.specifier != "*"]
 
+        # MCP 工具：提供"信任整个 server"的 server 级通配规则（mcp__<server>__*）
+        server = self._mcp_servers.get(tool_name)
+        mcp_server_rule = (
+            PermissionRule(tool=f"mcp__{server}__*", specifier="*", permission="allow")
+            if server else None
+        )
+
         answer = await deps.event_bus.request_permission(
             tool_name=tool_name,
             detail=detail,
             suggested_rules=suggested_rules,
+            mcp_server_rule=str(mcp_server_rule) if mcp_server_rule else None,
         )
         normalized = answer.strip().lower()
         if normalized == "session":
@@ -597,6 +673,13 @@ class PermissionManager:
                 self._add_rule(self.session_allow, rule)
                 self._persist_allow_rule(rule)
             return "allow", "用户始终允许（已保存）"
+        if normalized == "session_server" and mcp_server_rule is not None:
+            self._add_rule(self.session_allow, mcp_server_rule)
+            return "allow", f"用户在当前会话中信任整个 server：{server}"
+        if normalized == "always_server" and mcp_server_rule is not None:
+            self._add_rule(self.session_allow, mcp_server_rule)
+            self._persist_allow_rule(mcp_server_rule)
+            return "allow", f"用户始终信任整个 server（已保存）：{server}"
         if normalized in {"y", "yes"}:
             return "allow", "用户已允许"
         return "deny", "用户拒绝了权限请求"

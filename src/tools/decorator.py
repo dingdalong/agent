@@ -32,12 +32,14 @@ class ToolPermission:
         check_permissions: 工具自身安全逻辑检查函数，接收 (tool_input, ctx) 返回 PermissionCheckResult。
             仅处理工具特有的安全逻辑（如 shell 危险命令检测、file 敏感路径检查），
             不负责规则匹配——规则匹配由 check() 根据 specifier_arg 统一处理。None 表示无特殊检查。
+        mcp_server: 该工具所属的 MCP server 名（仅 MCP 工具非空），用于 ask 弹窗提供"信任整个 server"选项。
     """
     kind: Literal["readonly", "edit"] | None = None
     plan_visible: bool = False
     specifier_arg: str | None = None
     tips: str | None = None
     check_permissions: Callable[[dict[str, Any], PermissionContext], PermissionCheckResult] | None = None
+    mcp_server: str | None = None
 
 
 @dataclass

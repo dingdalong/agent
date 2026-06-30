@@ -40,6 +40,21 @@ REQUEST_INPUT → CHECK_COMPACT → [COMPACT →] LLM_CALL → PROCESS_RESPONSE
 
 3 层合并，后者覆盖前者：内置 `src/config.yaml` → 全局 `~/.agent/config.yaml` → 项目 `.agent/config.yaml`。环境变量通过 `.env` 文件加载（全局 `~/.agent/.env`、项目 `.agent/.env`）。
 
+`settings.json`（全局 `~/.agent/` + 项目 `.agent/` 两层合并，`allow`/`deny` 列表去重并集，其余键项目覆盖全局）承载权限与 MCP 策略：
+
+- `permissions.{allow,deny,ask}`：规则文本形如 `工具名` 或 `工具名(specifier)`，`specifier` 走 fnmatch；**工具名段也支持 `*`/`?` 通配**，故可写 `mcp__<server>__*` 一次性 allow/deny/ask 整个 MCP server，或 `mcp__github__get_*` 按前缀放行（`deny` 优先于 `allow`）。
+- `permissions.defaultMode`：入口主 agent 的默认权限模式。
+- `mcp.enabledServers`（非空时作白名单）/ `mcp.disabledServers`（始终剔除）：在 `mcp_mgr.start()` 连接前过滤 server，被禁用的 server 不连接、其工具不注册、不进 LLM schema。与上面的 `deny` 规则正交——`deny` 仍连接并仅在调用时拒绝，`disabledServers` 是连接前的硬开关。
+
+MCP server 连接配置在独立的 `mcp_servers.json`（角色 `src/roles/<role>/` → 全局 `~/.agent/` → 项目 `.agent/` 三层合并），格式见 `src/mgr/mcp_mgr.py`。
+
+每个 server 配置可带一个**只读**的 `permissions` 块就近声明该 server 的权限（`{"allow": [...], "deny": [...], "ask": [...]}`）：
+
+- 条目是相对该 server 的**上游工具名通配**（如 `get_*`、`create_issue`、`*` 通配全部），加载时 server 段经 `_safe_tool_name` 清洗后展开为 `mcp__<server>__<entry>` 规则；以 `mcp__` 开头的条目按完整工具模式原样使用（逃生口）。规则与 `settings.json` 共用同一 `PermissionRule` 表示与匹配引擎，不存在第二套格式。
+- **分层覆盖**：`mcp_servers.json` 是最低优先级层。评估顺序 `settings(deny→ask→allow/session_allow) → 工具自检 → mcp(deny→ask→allow) → bypass → 模式默认`——某次调用上 `settings.json` 只要有规则命中即由它决定，否则才落到 `mcp_servers.json`，故 `settings.json` 的 `allow` 能覆盖 `mcp_servers.json` 的 `deny`（含"信任整个 server"写入 `session_allow` 的 `mcp__<server>__*`）。置于 bypass 前，BYPASS 模式下 mcp 的 `deny`/`ask` 仍生效。
+- **只读**：框架永不写回 `mcp_servers.json`；`resolve_ask` 的 "always / 信任整个 server" 持久化只落 `settings.json`。
+- 由 `McpMgr.start()` 在三层合并 + server 过滤后抽取，`PermissionManager` 在 `_load_config()` 拉取。**编辑该块需重启生效**（McpMgr 无 `reload`，`/clear` 不重连 server，故不刷新；`settings.json` 的权限编辑则随 `/clear` 重载）。
+
 ## 关键模式
 
 **工具注册** — 使用 `@tool` 装饰器（`src/tools/decorator.py`）+ Pydantic 参数模型，自动注册到全局 `_registry`。工具实现在 `src/tools/builtin/`。新增工具时须确认是否需要自动注入给子智能体（见 `subagent_mgr._AUTO_INJECT_TOOLS`）。
@@ -51,7 +66,7 @@ REQUEST_INPUT → CHECK_COMPACT → [COMPACT →] LLM_CALL → PROCESS_RESPONSE
 
 **子智能体** — 定义为 `src/agent/agents/*.md`，带 YAML frontmatter 声明 `agent_type`、`tools`、`model`、`memory`、`permissionMode` 等。主 Agent 通过 `task_delegator` 工具调度子智能体，每个子智能体是共享 `AgentDeps` 的完整 `Agent` 实例。
 
-**权限模式按 agent 独立** — 可变的权限模式 (`permission_mode`) 与 plan 模式状态 (`_pre_plan_mode`) 持有在每个 `Agent` 实例上，`PermissionManager` 只保留全局共享的规则、`session_allow` 和不可变的 `default_mode`（来自 config `defaultMode`）。`check()` / `is_tool_visible()` / `get_schemas()` 均接收 agent 的 `mode` 参数。语义：用户的模式设置（`/mode`、Shift+Tab、`/plan`、`/resume` 恢复）只作用于入口主 agent（总控）；每个子 agent 在构造时从自身 frontmatter 的 `permissionMode` 取一次值（缺省回退到 `default_mode`），整个生命周期固定不变——子 agent 无 plan 能力、四个 plan 工具标记 `subagent=False` 从子 agent 强制排除，故并发子 agent 互不干扰。
+**权限模式按 agent 独立** — 可变的权限模式 (`permission_mode`) 与 plan 模式状态 (`_pre_plan_mode`) 持有在每个 `Agent` 实例上，`PermissionManager` 只保留全局共享的规则、`session_allow` 和不可变的 `default_mode`（来自 config `defaultMode`）。`check()` / `is_tool_visible()` / `get_schemas()` 均接收 agent 的 `mode` 参数。语义：用户的模式设置（`/mode`、Shift+Tab、`/plan`、`/resume` 恢复）只作用于入口主 agent（总控）；每个子 agent 在构造时从自身 frontmatter 的 `permissionMode` 取一次值（缺省回退到 `default_mode`），整个生命周期固定不变——子 agent 无 plan 能力、四个 plan 工具标记 `subagent=False` 从子 agent 强制排除，故并发子 agent 互不干扰。MCP 工具触发 ask 弹窗时，除"本工具"会话/保存外，额外提供"信任整个 server"两项（写入 `mcp__<server>__*` 规则），server 名经 `ToolPermission.mcp_server` 透传（见 `permission_mgr.resolve_ask`）。
 
 **技能系统** — 5 层加载 `SKILL.md` 文件，通过 `load_skill` 工具按需注入系统提示词。
 
@@ -84,3 +99,5 @@ REQUEST_INPUT → CHECK_COMPACT → [COMPACT →] LLM_CALL → PROCESS_RESPONSE
 不要为流优化而优化：除非优化明确有效，否则不要优化。
 
 对于没有任何地方使用的方法、字段、定义，以及对应的注释、文档都需要移除。
+
+修bug的时候，一定要先复现，找到根本原因，再处理。

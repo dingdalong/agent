@@ -167,6 +167,7 @@ class EventBus:
         detail: str,
         source: str = "permission",
         suggested_rules: list[str] | None = None,
+        mcp_server_rule: str | None = None,
     ) -> str:
         """通过事件队列请求 UI 读取工具权限确认。
 
@@ -175,9 +176,10 @@ class EventBus:
             detail: 权限请求的详细说明。
             source: 事件来源标识。
             suggested_rules: 建议的 allow 规则列表，供 UI 展示给用户。
+            mcp_server_rule: MCP 工具的 server 级通配规则（mcp__<server>__*）；非空时 UI 提供"信任整个 server"选项。
 
         Returns:
-            用户的确认结果（yes/session/always/deny）。
+            用户的确认结果（yes/session/always/session_server/always_server/deny）。
         """
         if not self._subscribers:
             raise NoEventSubscribers("permission")
@@ -189,6 +191,7 @@ class EventBus:
             tool_name=tool_name,
             detail=detail,
             suggested_rules=suggested_rules or [],
+            mcp_server_rule=mcp_server_rule,
             future=future,
         ))
         return await future

@@ -161,6 +161,7 @@ class PermissionRequested(UserInputRequest):
     tool_name: str = ""
     detail: str = ""
     suggested_rules: list[str] = field(default_factory=list)
+    mcp_server_rule: str | None = None  # MCP 工具的 server 级通配规则（mcp__<server>__*），供"信任整个 server"选项使用
     level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
     type: Literal["permission_requested"] = field(default="permission_requested", init=False)
 
