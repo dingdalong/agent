@@ -154,7 +154,7 @@ class McpMgr:
         if not servers:
             return
         try:
-            import mcp  # noqa: F401  懒导入：缺包时跳过 MCP 接入，保证应用仍可运行。
+            __import__("mcp")  # 懒导入：缺包时跳过 MCP 接入，保证应用仍可运行。
         except ImportError:
             logger.warning("未安装 mcp 包，跳过 MCP server 接入（uv add mcp）")
             return
@@ -278,15 +278,13 @@ class McpMgr:
             read, write = await stack.enter_async_context(
                 stdio_client(params, errlog=subprocess.DEVNULL)
             )
-        elif transport in ("http", "streamable-http", "streamable_http"):
-            from mcp.client.streamable_http import streamablehttp_client
+        elif transport in ("http", "streamable-http", "streamable_http", "sse"):
+            from mcp.client.streamable_http import streamable_http_client
+            import httpx
+            http_client = httpx.AsyncClient(headers=spec.get("headers"))
+            await stack.enter_async_context(http_client)
             read, write, _ = await stack.enter_async_context(
-                streamablehttp_client(spec["url"], headers=spec.get("headers"))
-            )
-        elif transport == "sse":
-            from mcp.client.sse import sse_client
-            read, write = await stack.enter_async_context(
-                sse_client(spec["url"], headers=spec.get("headers"))
+                streamable_http_client(spec["url"], http_client=http_client)
             )
         else:
             raise ValueError(f"不支持的 MCP transport: {transport}")
