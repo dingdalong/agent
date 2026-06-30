@@ -162,7 +162,10 @@ class CompactMgr:
             "下面是未压缩近期原文，仅用于判断哪些待压缩历史信息仍需保留：\n"
             f"<recent_raw_messages_reference>\n{recent_conversation}\n</recent_raw_messages_reference>"
         )
-        response = await self.llm.chat(messages=[{"role": "user", "content": prompt}])
+        response = await self.llm.chat(
+            messages=[{"role": "user", "content": prompt}],
+            enable_thinking=False,
+        )
         return response.content
 
     def build_compacted_context_prefix(

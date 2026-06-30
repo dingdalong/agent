@@ -148,6 +148,7 @@ class AgentApp:
             description="入口",
             deps=self.deps,
             role_prompt=self.deps.role_mgr.identity if self.deps.role_mgr else None,
+            enable_thinking=self.deps.role_mgr.enable_thinking if self.deps.role_mgr else True,
         )
         if self.output_router is not None:
             self.output_router.set_foreground(str(agent.uuid))

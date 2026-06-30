@@ -84,6 +84,7 @@ class OllamaProvider(LLMProvider):
         tool_choice: str | dict | None = None,
         caller_agent_type: str | None = None,
         caller_uuid: str | None = None,
+        enable_thinking: bool = True,
     ) -> LLMResponse:
         kwargs: dict = {
             "model": self.model,
@@ -96,14 +97,21 @@ class OllamaProvider(LLMProvider):
             kwargs["tools"] = tools
             kwargs["tool_choice"] = tool_choice or "auto"
 
-        if self.reasoning_effort and self.reasoning_effort.lower() != "none":
-            kwargs["reasoning_effort"] = self.reasoning_effort
+        if enable_thinking:
+            if self.reasoning_effort and self.reasoning_effort.lower() != "none":
+                kwargs["reasoning_effort"] = self.reasoning_effort
 
-        if self.preserve_thinking:
+            if self.preserve_thinking:
+                kwargs["extra_body"] = {
+                    "chat_template_kwargs": {
+                        "enable_thinking": True,
+                        "preserve_thinking": True
+                    }
+                }
+        else:
             kwargs["extra_body"] = {
                 "chat_template_kwargs": {
-                    "enable_thinking": True,
-                    "preserve_thinking": True
+                    "enable_thinking": False,
                 }
             }
 

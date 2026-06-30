@@ -76,6 +76,7 @@ class Agent:
     is_subagent: bool = field(default=False)
     memory: str | None = field(default="project")
     model: str | None = field(default=None)
+    enable_thinking: bool = field(default=True)
     _pre_plan_mode: PermissionMode | None = field(init=False, default=None)
     permission_mode: PermissionMode | None = field(default=None)
     history: list[dict] = field(init=False, default_factory=list)
@@ -475,6 +476,7 @@ class Agent:
                 tools=self._tools_schemas,
                 caller_agent_type=self.agent_type,
                 caller_uuid=str(self.uuid),
+                enable_thinking=self.enable_thinking,
             )
         except Exception as exc:
             if self.llm.is_context_too_long_error(exc):
@@ -621,6 +623,7 @@ class Agent:
                 tools=[],
                 caller_agent_type=self.agent_type,
                 caller_uuid=str(self.uuid),
+                enable_thinking=False,
             )
         except Exception as exc:
             if self.llm.is_context_too_long_error(exc):

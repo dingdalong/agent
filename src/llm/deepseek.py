@@ -97,18 +97,23 @@ class DeepSeekProvider(LLMProvider):
         tool_choice: str | dict | None = None,
         caller_agent_type: str | None = None,
         caller_uuid: str | None = None,
+        enable_thinking: bool = True,
     ) -> LLMResponse:
-        response = await self._client.chat.completions.create(
-            model=self.model,
-            messages=prompt + messages if prompt is not None else messages,
-            tools=tools,
-            stream=True,
-            stream_options={"include_usage": True},
-            temperature=temperature,
-            tool_choice=tool_choice or ("auto" if tools else None),
-            reasoning_effort=self.reasoning_effort,
-            extra_body={"thinking": {"type": "enabled"}}
-        )
+        kwargs: dict = {
+            "model": self.model,
+            "messages": prompt + messages if prompt is not None else messages,
+            "tools": tools,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+            "temperature": temperature,
+            "tool_choice": tool_choice or ("auto" if tools else None),
+        }
+        if enable_thinking:
+            kwargs["reasoning_effort"] = self.reasoning_effort
+            kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
+        else:
+            kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+        response = await self._client.chat.completions.create(**kwargs)
         return await self._parse_stream(
             response,
             caller_agent_type,

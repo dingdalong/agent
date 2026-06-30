@@ -26,6 +26,7 @@ class SubAgentManifest:
     memory: str | None = None
     model: str | None = None
     permission_mode: PermissionMode | None = None
+    enable_thinking: bool | None = None
 
 @dataclass
 class SubAgentDocument:
@@ -86,6 +87,8 @@ class SubAgentMgr:
                 tools = {t.strip() for t in raw_tools.split(",") if t.strip()} or None
                 memory = meta.get("memory")
                 model = meta.get("model")
+                raw_thinking = meta.get("thinking")
+                enable_thinking = raw_thinking if isinstance(raw_thinking, bool) else None
                 # frontmatter 的 permissionMode 字符串在加载时即解析为 PermissionMode；非法值告警并回退 None
                 raw_mode = meta.get("permissionMode")
                 permission_mode = None
@@ -101,6 +104,7 @@ class SubAgentMgr:
                     memory=memory,
                     model=model,
                     permission_mode=permission_mode,
+                    enable_thinking=enable_thinking,
                 )
                 self._documents[agent_type] = SubAgentDocument(manifest=manifest, prompt=prompt.strip())
 
@@ -164,6 +168,11 @@ class SubAgentMgr:
         if model_value == "inherit" and parent_agent is not None:
             model_value = parent_agent.llm.model
 
+        # 思考模式：显式设置则用设置值，否则继承父 agent
+        enable_thinking = document.manifest.enable_thinking
+        if enable_thinking is None:
+            enable_thinking = getattr(parent_agent, "enable_thinking", True)
+
         from src.agent import Agent
         agent = Agent(
             agent_type = agent_type,
@@ -175,6 +184,7 @@ class SubAgentMgr:
             memory = document.manifest.memory,
             model = model_value,
             permission_mode = document.manifest.permission_mode,
+            enable_thinking = enable_thinking,
         )
 
         hooks_mgr = self.deps.hooks_mgr

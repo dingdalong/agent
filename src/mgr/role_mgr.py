@@ -180,6 +180,14 @@ class RoleMgr:
         val = self._role_config.get("description")
         return str(val) if val else ""
 
+    @property
+    def enable_thinking(self) -> bool:
+        """角色是否启用思考模式。role.yaml 中 thinking 字段，缺省 True。"""
+        val = self._role_config.get("thinking")
+        if isinstance(val, bool):
+            return val
+        return True
+
     # —— 资产路径（无角色时返回 None）——————————————————————————————————
 
     def _make_path(self, sub: str) -> Path | None:

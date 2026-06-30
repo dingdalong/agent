@@ -255,6 +255,7 @@ class AnthropicProvider(LLMProvider):
         tool_choice: str | dict | None = None,
         caller_agent_type: str | None = None,
         caller_uuid: str | None = None,
+        enable_thinking: bool = True,
     ) -> LLMResponse:
         system, claude_messages = self._convert_messages(messages, prompt)
         claude_tools = self._convert_tools(tools)
@@ -263,11 +264,14 @@ class AnthropicProvider(LLMProvider):
             "model": self.model,
             "max_tokens": 16000,
             "messages": claude_messages,
-            "thinking": {"type": "adaptive"},
         }
 
-        effort = self._map_effort(self.reasoning_effort)
-        kwargs["output_config"] = {"effort": effort}
+        if enable_thinking:
+            kwargs["thinking"] = {"type": "adaptive"}
+            effort = self._map_effort(self.reasoning_effort)
+            kwargs["output_config"] = {"effort": effort}
+        else:
+            kwargs["thinking"] = {"type": "disabled"}
 
         if system:
             kwargs["system"] = system

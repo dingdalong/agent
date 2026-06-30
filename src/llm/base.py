@@ -305,6 +305,7 @@ class LLMProvider(ABC):
         tool_choice: str | dict | None = None,
         caller_agent_type: str | None = None,
         caller_uuid: str | None = None,
+        enable_thinking: bool = True,
     ) -> LLMResponse:
         async with self._semaphore:
             max_attempts = max(1, self.max_retries)
@@ -319,6 +320,7 @@ class LLMProvider(ABC):
                         tool_choice,
                         caller_agent_type,
                         caller_uuid,
+                        enable_thinking,
                     )
                     await self._emit_llm_call_completed(
                         started_at=started_at,
@@ -457,4 +459,5 @@ class LLMProvider(ABC):
         tool_choice: str | dict | None = None,
         caller_agent_type: str | None = None,
         caller_uuid: str | None = None,
+        enable_thinking: bool = True,
     ) -> LLMResponse: ...

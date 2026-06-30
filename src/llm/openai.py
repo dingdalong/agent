@@ -133,6 +133,7 @@ class OpenAIProvider(LLMProvider):
         tool_choice: str | dict | None = None,
         caller_agent_type: str | None = None,
         caller_uuid: str | None = None,
+        enable_thinking: bool = True,
     ) -> LLMResponse:
         instructions, input_items = self._convert_to_input(messages, prompt)
         converted_tools = self._convert_tools(tools)
@@ -142,11 +143,12 @@ class OpenAIProvider(LLMProvider):
             "input": input_items,
             "stream": True,
             "temperature": temperature,
-            "reasoning": {
+        }
+        if enable_thinking:
+            kwargs["reasoning"] = {
                 "effort": self.reasoning_effort,
                 "summary": "auto",
-            },
-        }
+            }
         if instructions:
             kwargs["instructions"] = instructions
         if converted_tools:
