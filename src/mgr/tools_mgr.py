@@ -64,6 +64,24 @@ class ToolsMgr:
         """返回所有已注册的工具列表。"""
         return sorted(self._tools.values(), key=_tool_sort_key)
 
+    def all_tool_names(self) -> set[str]:
+        """返回所有已注册工具名的集合。"""
+        return set(self._tools.keys())
+
+    def excluded_tool_names(self, enabled: set[str]) -> set[str]:
+        """返回因所属 feature 未启用而应被排除的工具名集合。
+
+        扫描工具注册表，任何声明了 feature 且该 feature 不在 enabled 中的工具均被排除；
+        无 feature 归属的工具恒不排除。
+
+        Args:
+            enabled: 当前 agent 启用的 feature 名集合。
+
+        Returns:
+            应排除的工具名集合。
+        """
+        return {e.name for e in self._tools.values() if e.feature and e.feature not in enabled}
+
     def resolve_subagent_tools(self, tool_names: set[str] | None) -> set[str]:
         """解析子 agent 的最终工具集。
 

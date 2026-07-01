@@ -124,6 +124,15 @@ def extract_manifest(
     if isinstance(raw_memory, str) and raw_memory.strip():
         memory = raw_memory.strip()
 
+    # 可插拔 feature 集：YAML 列表 → set（空列表 → 空 set，全部禁用）；
+    # 无该键 → None（未声明，继承/默认全开）；非列表 → 告警忽略。
+    features: set[str] | None = None
+    raw_features = meta.get("features")
+    if isinstance(raw_features, list):
+        features = {str(f).strip() for f in raw_features if str(f).strip()}
+    elif raw_features is not None:
+        logger.warning("%s 的 features 应为列表，实际为 %r，已忽略", path, raw_features)
+
     return AgentManifest(
         agent_type=identifier,
         description=description,
@@ -134,6 +143,7 @@ def extract_manifest(
         permission_mode=permission_mode,
         enable_thinking=enable_thinking,
         memory=memory,
+        features=features,
     )
 
 
@@ -155,6 +165,7 @@ class AgentManifest:
     model: str | None = None
     permission_mode: PermissionMode | None = None
     enable_thinking: bool | None = None
+    features: set[str] | None = None
 
 
 @dataclass

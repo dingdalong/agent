@@ -40,6 +40,7 @@ class EnterPlanMode(BaseModel):
     ),
     permission=ToolPermission(kind="readonly"),
     subagent=False,
+    feature="plan",
 )
 async def enter_plan_mode(agent: Agent, deps: AgentDeps) -> str:
     """将当前 agent 切换到 PLAN_MODE 并刷新工具可见性。
@@ -81,6 +82,7 @@ class ExitPlanMode(BaseModel):
     ),
     permission=ToolPermission(plan_visible=True, kind="readonly"),
     subagent=False,
+    feature="plan",
 )
 async def exit_plan_mode(file_path: str, agent: Agent, deps: AgentDeps) -> str:
     """校验 file_path 在计划目录下、读取计划内容、让用户选择后续操作。
@@ -168,6 +170,7 @@ class PlanWriteFile(BaseModel):
     description="写入计划文件内容（全量覆盖）。根据计划名自动生成文件路径。仅在计划模式下可用。",
     permission=ToolPermission(plan_visible=True, kind="readonly"),
     subagent=False,
+    feature="plan",
 )
 def plan_write_file(name: str, content: str, agent: Agent, deps: AgentDeps) -> str:
     """根据计划名生成文件路径并写入内容，同时将计划名同步为会话主题。
@@ -216,6 +219,7 @@ class PlanEditFile(BaseModel):
     ),
     permission=ToolPermission(plan_visible=True, kind="readonly"),
     subagent=False,
+    feature="plan",
 )
 def plan_edit_file(
     file_path: str, start_line: int, agent: Agent, deps: AgentDeps,

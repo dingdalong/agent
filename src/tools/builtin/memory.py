@@ -35,6 +35,7 @@ def _memory_mgr(deps: Any) -> Any:
         "不要创建近似重复记忆。"
     ),
     permission=ToolPermission(kind="readonly"),
+    feature="memory",
 )
 async def save_memory(
     title: str,
@@ -60,6 +61,7 @@ async def save_memory(
     model=ReadMemory,
     description="读取一条项目记忆的完整内容。",
     permission=ToolPermission(kind="readonly"),
+    feature="memory",
 )
 async def read_memory(title: str, deps: Any) -> str:
     memory_mgr = _memory_mgr(deps)

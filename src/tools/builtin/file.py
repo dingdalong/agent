@@ -155,7 +155,7 @@ class ListDirectory(BaseModel):
     max_depth: Optional[int] = Field(3, description="递归列出子目录的最大深度，默认为3。")
 
 @tool(model=ListDirectory, description="列出目录结构，显示文件和子目录的树形结构。",
-      permission=ToolPermission(kind="readonly", specifier_arg="path", tips="列出目录：{path}", check_permissions=check_file_read_permissions))
+      permission=ToolPermission(kind="readonly", specifier_arg="path", tips="列出目录：{path}", check_permissions=check_file_read_permissions), feature="file")
 def list_directory(path: str | None, agent: Agent, max_depth: int = 3) -> str:
     return agent._file_mgr.list_directory(
         path or str(agent._file_mgr.workdir),
@@ -167,7 +167,7 @@ class FindFiles(BaseModel):
     path: Optional[str] = Field(None, description="查找起点目录绝对路径，不提供时默认为工作目录。")
 
 @tool(model=FindFiles, description="查找文件或目录，支持glob。",
-      permission=ToolPermission(kind="readonly", specifier_arg="path", tips="在 {path} 中查找：{pattern}", check_permissions=check_file_read_permissions))
+      permission=ToolPermission(kind="readonly", specifier_arg="path", tips="在 {path} 中查找：{pattern}", check_permissions=check_file_read_permissions), feature="file")
 def find_files(pattern: str, agent: Agent, path: str | None = None) -> str:
     return agent._file_mgr.find_files(pattern, path=path or str(agent._file_mgr.workdir))
 
@@ -176,7 +176,7 @@ class SearchFiles(BaseModel):
     path: Optional[str] = Field(None, description="目录或文件的绝对路径。当为目录时，搜索目录中所有文件内容，包括子目录中的文件。不提供时默认为工作目录。不支持 glob。")
 
 @tool(model=SearchFiles, description="搜索文本内容，返回匹配文件、行号和匹配行。",
-      permission=ToolPermission(kind="readonly", specifier_arg="path", tips="搜索文本：{query}", check_permissions=check_file_read_permissions))
+      permission=ToolPermission(kind="readonly", specifier_arg="path", tips="搜索文本：{query}", check_permissions=check_file_read_permissions), feature="file")
 def search_files(query: str, agent: Agent, path: str | None = None) -> str:
     return agent._file_mgr.search_files(query, path=path or str(agent._file_mgr.workdir))
 
@@ -184,7 +184,7 @@ class GetFileInfo(BaseModel):
     path: str = Field(..., description="要查询的文件或目录的绝对路径。")
 
 @tool(model=GetFileInfo, description="获取文件或目录的详细元数据，包括大小、行数、时间、权限等。",
-      permission=ToolPermission(kind="readonly", specifier_arg="path", tips="查看文件信息：{path}", check_permissions=check_file_read_permissions))
+      permission=ToolPermission(kind="readonly", specifier_arg="path", tips="查看文件信息：{path}", check_permissions=check_file_read_permissions), feature="file")
 def get_file_info(path: str, agent: Agent) -> str:
     return agent._file_mgr.get_file_info(path)
 
@@ -194,7 +194,7 @@ class ReadFile(BaseModel):
     end_line: Optional[int] = Field(None, description="结束行号，包含该行；未提供时读取到文件末尾。")
 
 @tool(model=ReadFile, description="读取文件内容并附带行号，可指定行数范围。",
-      permission=ToolPermission(kind="readonly", specifier_arg="path", tips="读取文件：{path}", check_permissions=check_file_read_permissions))
+      permission=ToolPermission(kind="readonly", specifier_arg="path", tips="读取文件：{path}", check_permissions=check_file_read_permissions), feature="file")
 def read_file(path: str, agent: Agent,
               start_line: int | None = None,
               end_line: int | None = None) -> str:
@@ -204,7 +204,7 @@ class CreateDirectory(BaseModel):
     path: str = Field(..., description="要创建的目录的绝对路径，支持多级目录。")
 
 @tool(model=CreateDirectory, description="创建新目录。",
-      permission=ToolPermission(kind="edit", specifier_arg="path", tips="创建目录：{path}", check_permissions=check_file_edit_permissions))
+      permission=ToolPermission(kind="edit", specifier_arg="path", tips="创建目录：{path}", check_permissions=check_file_edit_permissions), feature="file")
 def create_directory(path: str, agent: Agent) -> str:
     return agent._file_mgr.create_directory(path)
 
@@ -213,7 +213,7 @@ class MoveFile(BaseModel):
     destination: str = Field(..., description="目标绝对路径。若目标是已有目录，则移入该目录内。")
 
 @tool(model=MoveFile, description="移动或重命名文件/目录。",
-      permission=ToolPermission(kind="edit", specifier_arg="source", tips="移动或重命名：{source} -> {destination}", check_permissions=check_file_move_permissions))
+      permission=ToolPermission(kind="edit", specifier_arg="source", tips="移动或重命名：{source} -> {destination}", check_permissions=check_file_move_permissions), feature="file")
 def move_file(source: str, destination: str, agent: Agent) -> str:
     return agent._file_mgr.move_file(source, destination)
 
@@ -225,7 +225,7 @@ class WriteFile(BaseModel):
     total_chunks: Optional[int] = Field(None, description="总分块数，与 chunk_index 配合使用。")
 
 @tool(model=WriteFile, description="新建、覆盖写入或追加完整文件内容，支持分块写入大文件。不用精确编辑文件内容",
-      permission=ToolPermission(kind="edit", specifier_arg="path", tips="写入文件：{path}", check_permissions=check_file_edit_permissions))
+      permission=ToolPermission(kind="edit", specifier_arg="path", tips="写入文件：{path}", check_permissions=check_file_edit_permissions), feature="file")
 def write_file(path: str, content: str, agent: Agent,
                append: bool = False,
                chunk_index: int | None = None,
@@ -239,7 +239,7 @@ class EditFileLines(BaseModel):
     end_line: Optional[int] = Field(None, description="结束行号（包含该行）。传值时为替换/删除的范围终点；不传时为插入模式。")
 
 @tool(model=EditFileLines, description="按行号编辑文件：替换行范围(new_text+end_line)、插入(new_text，不传end_line)、删除(end_line，new_text为空)。",
-      permission=ToolPermission(kind="edit", specifier_arg="file_path", tips="编辑文件行：{file_path}，行号：{start_line}", check_permissions=check_file_edit_permissions))
+      permission=ToolPermission(kind="edit", specifier_arg="file_path", tips="编辑文件行：{file_path}，行号：{start_line}", check_permissions=check_file_edit_permissions), feature="file")
 def edit_file_lines(file_path: str, start_line: int, agent: Agent,
                     new_text: str = "", end_line: int | None = None) -> str:
     """按行号编辑文件，支持替换、插入和删除三种模式。"""
@@ -251,7 +251,7 @@ class ReplaceAllInFile(BaseModel):
     new_text: str = Field(..., description="替换后的新文本。")
 
 @tool(model=ReplaceAllInFile, description="全局替换文件中所有匹配的文本。适合重命名变量、更新路径等批量替换场景。",
-      permission=ToolPermission(kind="edit", specifier_arg="file_path", tips="全局替换文件文本：{file_path}", check_permissions=check_file_edit_permissions))
+      permission=ToolPermission(kind="edit", specifier_arg="file_path", tips="全局替换文件文本：{file_path}", check_permissions=check_file_edit_permissions), feature="file")
 def replace_all_in_file(file_path: str, old_text: str, new_text: str,
                         agent: Agent) -> str:
     """替换文件中所有匹配的文本。"""

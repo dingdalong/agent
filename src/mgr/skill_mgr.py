@@ -137,6 +137,18 @@ class SkillMgr:
             lines.append(f"- [{manifest.name}]: {manifest.description}")
         return "\n".join(lines)
 
+    def prompt_section(self) -> str:
+        """返回技能列表提示词段（含使用流程），无技能时返回空串。"""
+        describe = self.describe()
+        if not describe:
+            return ""
+        return (
+            "# 可用技能\n" + describe +
+            "\n\n## 技能使用流程\n"
+            "当任务匹配某个技能时，调用 load_skill 加载后再执行操作。"
+            "已加载技能的指令优先于本文的通用规则。"
+        )
+
     def check_skill(self, name: str) -> bool:
         return name in self._documents
 

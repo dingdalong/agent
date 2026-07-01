@@ -30,68 +30,6 @@ class PromptMgr:
         )
         return f"# 核心身份\n{identity}"
 
-    def _build_truthfulness_constraints(self) -> str:
-        return (
-            "# 真实性和参数约束\n"
-            "所有推理、行动和输出只能来自用户输入、已读取上下文、工具返回结果或系统提示中的明确事实。\n"
-            "不得为了推进流程而编造任何事实、参数、上下文、结论或用户意图。\n"
-            "未知信息必须标为未知或未提供；不要把推测写成事实。\n"
-            "缺失信息会影响下一步能否可靠执行时，先向用户提问；"
-            "不影响执行时，将缺失信息作为限制或不确定点明确传递。"
-        )
-
-    def _build_context_and_tool_constraints(self) -> str:
-        return (
-            "# 上下文和工具调用约束\n"
-            "1. 已读取的文件、计划、模板和工具结果，在当前上下文仍可见且未被修改时必须复用；"
-            "不要为确认、重新理解或满足流程措辞重复读取。\n"
-            "2. 每次工具调用必须服务当前下一步；不要为“准备后续使用”“顺便看看”或未来阶段预取信息。\n"
-            "3. 多阶段流程只获取当前阶段立即需要的信息；后续阶段的信息等进入该阶段后再获取。\n"
-            "4. 只有工具返回内容被截断、需要未读取范围、文件可能已修改，或当前上下文缺少完成下一步所需的具体内容时，"
-            "才允许重新读取；重读前先说明缺失信息或原因。\n"
-            "5. 当同一轮需要调用多个工具且它们之间没有数据依赖时，在同一轮回复中发起所有调用，"
-            "框架会自动并行执行；只有后一个调用依赖前一个调用结果时，才分轮串行调用。"
-        )
-
-    def _build_skill_listing(self) -> str:
-        describe = self.agent._skill_mgr.describe()
-        if not describe:
-            return ""
-        return (
-            "# 可用技能\n" + describe +
-            "\n\n## 技能使用流程\n"
-            "当任务匹配某个技能时，调用 load_skill 加载后再执行操作。"
-            "已加载技能的指令优先于本文的通用规则。"
-        )
-
-    def _build_subagent_listing(self) -> str:
-        describe = self.agent._subagent_mgr.describe()
-        if not describe:
-            return ""
-        return "# 可用子智能体\n" + describe
-
-    def _build_controller_decision_order(self) -> str:
-        describe = self.agent._subagent_mgr.describe()
-        if not describe:
-            return ""
-        return (
-            "# 运行决策顺序\n"
-            "你是总控 agent，核心职责是理解用户目标、拆分任务、委派子 agent、整合结果并向用户交付。\n"
-            "按以下顺序处理每个用户请求：\n"
-            "1. 先判断用户需求是否足够明确；如果关键信息缺失，先向用户提问。\n"
-            "2. 根据可用子智能体列表判断谁适合承担任务。只要某个子 agent 的职责描述匹配任务的一部分，"
-            "并且该部分可以被清晰交代为独立子任务，就必须先调用 `task_delegator` 委托合适的子 agent 完成；"
-            "不要默认自己直接调用业务工具。\n"
-            "3. 没有合适的子 agent、子 agent 结果不足且只需少量补充验证，或正在做最终整合和回复时，才直接调用其他工具。\n"
-            "4. 子 agent 返回后，判断是否需要继续委派、补充确认或直接整合回复。\n\n"
-            "跳过委派是例外，不是自由权衡项。只有明确命中上面第 1 或第 3 条，"
-            "才能跳过 `task_delegator`。不要基于便利性、已有上下文或主观效率判断跳过委派；"
-            "匹配子 agent 时，先委派，再整合。\n\n"
-            "不要把策略绑定到某一种固定任务类型；是否委派只取决于子 agent 的职责描述和当前任务边界。\n"
-            "委派时不要把用户原始需求原封不动转交。请给子 agent 一个边界清楚的小任务 prompt，说明目标、"
-            "相关上下文、期望输出和限制。子 agent 返回后，你负责判断是否继续委派、是否需要补充确认，以及如何回复用户。"
-        )
-
     def _build_agent_md(self) -> str:
         """四层加载 AGENT.md：共享 → 角色 → 用户全局 → 项目级，内容叠加。
 
@@ -135,8 +73,8 @@ class PromptMgr:
         parts = [
             "# 行为准则",
             "本节补充行为要求、项目约定与用户偏好，作为执行时的优先指引；"
-            "但不得覆盖工具权限、子 agent 隔离与运行决策顺序，"
-            "若与三者冲突，一律以三者为准、忽略本节中的冲突部分。",
+            "但不得覆盖工具权限与子 agent 隔离，"
+            "若与两者冲突，一律以两者为准、忽略本节中的冲突部分。",
         ]
         for _, content in sources:
             parts.append(content.strip())
@@ -167,34 +105,27 @@ class PromptMgr:
     def _build_static_prefix(self) -> str:
         """组装 system prompt 的静态部分。
 
-        段顺序经过设计：
-        - 通用行为规则在开头（primacy），参考/上下文材料在中间，
-          智能体专属关键指令在结尾（recency）。
-        - 共享段集中在前部，分歧段推到尾部，以最大化 prompt cache 前缀命中。
-        新增段时须判断是否适用于子智能体：
-        - 仅主 agent 使用的段放入 is_subagent 守卫内。
-        - 通用段放在守卫外。
+        段顺序：核心身份（primacy）→ 行为准则（AGENT.md 四层）→ 运行环境
+        → 任务管理指导 → 记忆上下文 → 会话上下文 → 子智能体/技能列表（recency，仅主 agent）。
+        各可插拔段仅在对应 Manager 存在（feature 已启用）时加入，内容随 Manager 走：
+        PromptMgr 负责顺序，Manager 负责内容。
         """
         sections = []
 
-        # —— 通用行为规则（开头，primacy）——
         sections.append(self._build_core())
-        sections.append(self._build_truthfulness_constraints())
-        sections.append(self._build_context_and_tool_constraints())
 
-        # —— 任务管理指导 ——
-        task_mgr = getattr(self.agent, "_task_mgr", None)
-        if task_mgr is not None:
-            task_guidance = task_mgr.describe(self.agent.is_subagent)
-            if task_guidance:
-                sections.append(task_guidance)
-
-        # —— 共享参考/上下文材料（中间）——
         agent_md = self._build_agent_md()
         if agent_md:
             sections.append(agent_md)
 
         sections.append(self._build_environment())
+
+        # —— 任务管理指导（task feature）——
+        task_mgr = getattr(self.agent, "_task_mgr", None)
+        if task_mgr is not None:
+            task_guidance = task_mgr.describe(self.agent.is_subagent)
+            if task_guidance:
+                sections.append(task_guidance)
 
         memory_context = self._build_memory_context()
         if memory_context:
@@ -204,17 +135,18 @@ class PromptMgr:
         if session_context:
             sections.append(session_context)
 
-        # 仅主 agent：先列参考数据，最后放最关键的决策规则
+        # 仅主 agent：先列参考数据，最后放最关键的可委派资源（recency）
         if not self.agent.is_subagent:
-            subagents = self._build_subagent_listing()
-            if subagents:
-                sections.append(subagents)
-            skills = self._build_skill_listing()
-            if skills:
-                sections.append(skills)
-            decision_order = self._build_controller_decision_order()
-            if decision_order:
-                sections.append(decision_order)
+            subagent_mgr = getattr(self.agent, "_subagent_mgr", None)
+            if subagent_mgr is not None:
+                subagents = subagent_mgr.prompt_section()
+                if subagents:
+                    sections.append(subagents)
+            skill_mgr = getattr(self.agent, "_skill_mgr", None)
+            if skill_mgr is not None:
+                skills = skill_mgr.prompt_section()
+                if skills:
+                    sections.append(skills)
 
         return "\n\n".join(s for s in sections if s)
 

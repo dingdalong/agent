@@ -7,7 +7,7 @@ from pathlib import Path
 
 from src.interfaces import InlineInterface, OutputRouter
 from src.events import EventBus, EventLevel
-from src.mgr import ConfigManager, HooksMgr, LLMMgr, McpMgr, MemoryMgr, PermissionManager, PlanMgr, PluginMgr, RoleMgr, SessionMgr, ToolsMgr
+from src.mgr import ConfigManager, HooksMgr, LLMMgr, McpMgr, MemoryMgr, PermissionManager, PlanMgr, PluginMgr, RoleMgr, SessionMgr, ToolsMgr, resolve_features
 from src.mgr.paths import global_data_dir, workdir as resolve_workdir
 from src.agent import AgentDeps
 from src.agent.states import SLASH_COMMANDS
@@ -35,10 +35,12 @@ async def create_app(
     output_router = OutputRouter(ui=ui, passthrough=not ui.is_tty)
     ui.set_agent_source(output_router.agent_rows, output_router.transcript_segments)
     tools_mgr = ToolsMgr()
-    memory_mgr = MemoryMgr(work_dir)
+    # 按激活角色的 feature 集门控 deps 层可插拔 Manager；未启用则注入 None，其工具从 schema 排除。
+    feats = resolve_features(role_mgr.manifest.features if role_mgr.manifest else None)
+    memory_mgr = MemoryMgr(work_dir) if "memory" in feats else None
     plugin_mgr = PluginMgr(workdir=work_dir, global_dir=global_dir, role_mgr=role_mgr)
     hooks_mgr = HooksMgr(workdir=work_dir, global_dir=global_dir, plugin_mgr=plugin_mgr)
-    plan_mgr = PlanMgr(work_dir)
+    plan_mgr = PlanMgr(work_dir) if "plan" in feats else None
     # 须先于 permission_mgr：MCP 工具注册进 tools_mgr 后，其权限元数据才会被 PermissionManager 收录。
     mcp_mgr = McpMgr(config_mgr=config_mgr, tools_mgr=tools_mgr, role_mgr=role_mgr)
     await mcp_mgr.start()

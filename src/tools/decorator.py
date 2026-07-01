@@ -56,6 +56,8 @@ class ToolEntry:
         raw_output: 是否跳过结果分页截断。
         subagent: 子 agent 可见性控制。True=自动注入（即使 agent 定义未列出）；
                   False=强制排除（即使 agent 定义为全量）；None=按 agent 的 tools 集合决定。
+        feature: 所属可插拔 feature 名（如 "task"、"file"）。None 表示无归属、恒可用；
+                 非 None 时，仅当该 feature 被角色启用才注入，否则从 schema 排除并在调用时拒绝。
     """
     name: str
     func: Callable
@@ -65,6 +67,7 @@ class ToolEntry:
     permission: ToolPermission | None = None
     raw_output: bool = False
     subagent: bool | None = None
+    feature: str | None = None
 
     async def __call__(self, context: Dict[str, Any], **kwds: Any) -> Any:
         """验证参数并执行工具函数。
@@ -133,6 +136,7 @@ def tool(
     permission: ToolPermission | None = None,
     raw_output: bool = False,
     subagent: bool | None = None,
+    feature: str | None = None,
 ) -> Callable:
     """工具注册装饰器。
 
@@ -143,6 +147,7 @@ def tool(
         permission: 权限元数据。
         raw_output: 是否跳过结果分页。
         subagent: 子 agent 可见性。True=自动注入；False=强制排除；None=按 agent 定义决定。
+        feature: 所属可插拔 feature 名。None 表示无归属、恒可用；非 None 时随该 feature 的启用与否注入或排除。
 
     Returns:
         装饰后的原函数。
@@ -170,6 +175,7 @@ def tool(
             permission=permission,
             raw_output=raw_output,
             subagent=subagent,
+            feature=feature,
         )
         _registry.append(entry)
         return func

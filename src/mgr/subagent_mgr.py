@@ -74,6 +74,13 @@ class SubAgentMgr:
             lines.append(f"- {manifest.agent_type}: {manifest.description}")
         return "\n".join(lines)
 
+    def prompt_section(self) -> str:
+        """返回子智能体列表提示词段，无子智能体时返回空串。"""
+        describe = self.describe()
+        if not describe:
+            return ""
+        return "# 可用子智能体\n" + describe
+
     async def task_delegator(
         self,
         agent_type: str,
@@ -123,6 +130,11 @@ class SubAgentMgr:
         if enable_thinking is None:
             enable_thinking = getattr(parent_agent, "enable_thinking", True)
 
+        # feature 集：子 agent 自身 manifest 声明则用其值，否则继承父 agent 已解析的 feature 集
+        features = manifest.features
+        if features is None:
+            features = getattr(parent_agent, "features", None)
+
         from src.agent import Agent
         agent = Agent.from_manifest(
             manifest=manifest,
@@ -131,6 +143,7 @@ class SubAgentMgr:
             tools=tools,
             model=model_value,
             enable_thinking=enable_thinking,
+            features=features,
         )
 
         hooks_mgr = self.deps.hooks_mgr

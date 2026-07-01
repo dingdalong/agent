@@ -16,5 +16,6 @@ from src.mgr.reminder_mgr import ReminderMgr
 from src.mgr.session_mgr import SessionMgr, ResumeResult
 from src.mgr.mcp_mgr import McpMgr
 from src.mgr.role_mgr import RoleMgr
+from src.mgr.features import ALL_FEATURES, resolve_features
 
-__all__ = ["FileMgr", "CompactMgr", "CompactResult", "TaskManager", "ToolsMgr", "PromptMgr", "SkillMgr", "SubAgentMgr", "PermissionManager", "ConfigManager", "MemoryMgr", "HooksMgr", "LLMMgr", "ModelUnavailableError", "PlanMgr", "PluginMgr", "PluginInfo", "PluginLayer", "ReminderMgr", "SessionMgr", "ResumeResult", "McpMgr", "RoleMgr"]
+__all__ = ["FileMgr", "CompactMgr", "CompactResult", "TaskManager", "ToolsMgr", "PromptMgr", "SkillMgr", "SubAgentMgr", "PermissionManager", "ConfigManager", "MemoryMgr", "HooksMgr", "LLMMgr", "ModelUnavailableError", "PlanMgr", "PluginMgr", "PluginInfo", "PluginLayer", "ReminderMgr", "SessionMgr", "ResumeResult", "McpMgr", "RoleMgr", "ALL_FEATURES", "resolve_features"]

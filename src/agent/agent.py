@@ -94,15 +94,17 @@ class Agent:
     memory: str | None = field(default=None)
     model: str | None = field(default=None)
     enable_thinking: bool = field(default=True)
+    features: set[str] | None = field(default=None)
     _pre_plan_mode: PermissionMode | None = field(init=False, default=None)
     permission_mode: PermissionMode | None = field(default=None)
     history: list[dict] = field(init=False, default_factory=list)
     _tools_schemas: list[ToolDict] = field(init=False)
-    _task_mgr: TaskManager = field(init=False, repr=False)
+    _excluded_tools: set[str] = field(init=False, default_factory=set)
+    _task_mgr: TaskManager | None = field(init=False, repr=False)
     _compact_mgr: CompactMgr = field(init=False, repr=False)
-    _file_mgr: FileMgr = field(init=False, repr=False)
-    _skill_mgr: SkillMgr = field(init=False, repr=False)
-    _subagent_mgr: SubAgentMgr = field(init=False, repr=False)
+    _file_mgr: FileMgr | None = field(init=False, repr=False)
+    _skill_mgr: SkillMgr | None = field(init=False, repr=False)
+    _subagent_mgr: SubAgentMgr | None = field(init=False, repr=False)
     _prompt_mgr: PromptMgr = field(init=False, repr=False)
     _reminder_mgr: ReminderMgr = field(init=False, repr=False)
     _pending_input: str = field(init=False, default="")
@@ -116,6 +118,10 @@ class Agent:
             pm = self.deps.permission_mgr
             self.permission_mode = pm.default_mode if pm is not None else DEFAULT_MODE
         self.llm = self.deps.llm_mgr.get(self.model)
+        # 解析本 agent 启用的 feature 集，据此过滤工具、按需创建各可插拔 Manager
+        from src.mgr import resolve_features
+        self.features = resolve_features(self.features)
+        self._excluded_tools = self.deps.tools_mgr.excluded_tool_names(self.features)
         self.refresh_tools_schemas()
         compact_cfg = self.deps.config_mgr.get_config("compact")
         context_limit = self.llm.context_limit
@@ -127,17 +133,28 @@ class Agent:
             recent_messages_token_limit=int(context_limit * compact_cfg.get("keep_recent_messages_token_rate", 0.25)),
         )
         workdir = self.deps.workdir
-        self._file_mgr = FileMgr(workdir, self.deps)
-        self._skill_mgr = SkillMgr(workdir, global_dir=self.deps.global_dir, plugin_mgr=self.deps.plugin_mgr, role_mgr=self.deps.role_mgr)
-        self._subagent_mgr = SubAgentMgr(workdir, self.deps, global_dir=self.deps.global_dir)
+        # 可插拔 Manager：仅启用对应 feature 时创建，否则为 None（其工具已从 schema 排除）
+        self._file_mgr = FileMgr(workdir, self.deps) if "file" in self.features else None
+        self._skill_mgr = (
+            SkillMgr(workdir, global_dir=self.deps.global_dir, plugin_mgr=self.deps.plugin_mgr, role_mgr=self.deps.role_mgr)
+            if "skill" in self.features else None
+        )
+        self._subagent_mgr = (
+            SubAgentMgr(workdir, self.deps, global_dir=self.deps.global_dir)
+            if "subagent" in self.features else None
+        )
         self._prompt_mgr = PromptMgr(agent=self, model=self.llm.model, workdir=workdir, global_dir=self.deps.global_dir, role_prompt=self.role_prompt)
         # 主 agent：持久化到磁盘；子 agent：纯内存模式，独立实例。
-        tasks_dir = None
-        if not self.is_subagent and self.deps.global_dir and self.deps.session_id:
-            tasks_dir = self.deps.global_dir / "tasks" / self.deps.session_id
-        self._task_mgr = TaskManager(tasks_dir=tasks_dir)
+        if "task" in self.features:
+            tasks_dir = None
+            if not self.is_subagent and self.deps.global_dir and self.deps.session_id:
+                tasks_dir = self.deps.global_dir / "tasks" / self.deps.session_id
+            self._task_mgr = TaskManager(tasks_dir=tasks_dir)
+        else:
+            self._task_mgr = None
         self._reminder_mgr = ReminderMgr()
-        self._reminder_mgr.register(self._task_mgr)
+        if self._task_mgr is not None:
+            self._reminder_mgr.register(self._task_mgr)
         self._handlers = {
             AgentState.REQUEST_INPUT:    self._on_request_input,
             AgentState.CHECK_COMPACT:    self._on_check_compact,
@@ -200,14 +217,17 @@ class Agent:
                 if manifest.enable_thinking is not None
                 else True
             ),
+            features=manifest.features,
         )
         kwargs.update(overrides)
         return cls(**kwargs)
 
     def refresh_tools_schemas(self) -> None:
-        """刷新工具 schema 列表（按本 agent 当前权限模式过滤可见性）。"""
+        """刷新工具 schema 列表（减去被禁用 feature 的工具，再按当前权限模式过滤可见性）。"""
+        names = self.tools if self.tools is not None else self.deps.tools_mgr.all_tool_names()
+        names = names - self._excluded_tools
         self._tools_schemas = self.deps.tools_mgr.get_schemas(
-            self.tools,
+            names,
             permission_mgr=self.deps.permission_mgr,
             mode=self.permission_mode,
         )
@@ -436,8 +456,8 @@ class Agent:
         self.history.extend(result.messages)
         self.deps.session_id = result.session_id
 
-        # 重建 TaskManager 指向恢复会话的 tasks 目录
-        if self.deps.global_dir:
+        # 重建 TaskManager 指向恢复会话的 tasks 目录（仅在启用 task feature 时）
+        if self.deps.global_dir and "task" in self.features:
             tasks_dir = self.deps.global_dir / "tasks" / result.session_id
             from src.mgr import TaskManager
             self._task_mgr = TaskManager(tasks_dir=tasks_dir)
@@ -451,7 +471,7 @@ class Agent:
         topic = result.metadata.get("topic", "")
         msg_count = len(result.messages)
         task_info = ""
-        if self._task_mgr.has_open_items():
+        if self._task_mgr is not None and self._task_mgr.has_open_items():
             task_list = self._task_mgr.list_tasks()
             open_count = sum(1 for t in task_list["tasks"] if t["status"] != "completed")
             task_info = f"，{open_count} 个未完成任务"
@@ -607,6 +627,9 @@ class Agent:
             """
             tool_name = tc["name"]
             tool_call_id = tc["id"]
+
+            if tool_name in self._excluded_tools:
+                return tool_call_id, f"错误：工具 '{tool_name}' 在当前角色下不可用", None
 
             if self.tools is not None and tool_name not in self.tools:
                 return tool_call_id, f"错误：未知工具 '{tool_name}'", None

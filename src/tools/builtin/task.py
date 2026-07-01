@@ -28,6 +28,7 @@ class TaskCreateModel(BaseModel):
     description="创建新任务（状态为 pending）。",
     permission=ToolPermission(kind="readonly"),
     subagent=True,
+    feature="task",
 )
 async def task_create(
     subject: str,
@@ -76,6 +77,7 @@ class TaskUpdateModel(BaseModel):
     description="更新任务字段。",
     permission=ToolPermission(kind="readonly"),
     subagent=True,
+    feature="task",
 )
 async def task_update(
     task_id: str,
@@ -135,6 +137,7 @@ class TaskListModel(BaseModel):
     description="列出所有任务的摘要，包含 ID、标题、状态、未完成的依赖。",
     permission=ToolPermission(kind="readonly"),
     subagent=True,
+    feature="task",
 )
 async def task_list(agent: Agent) -> str:
     """返回任务列表 JSON。
@@ -161,6 +164,7 @@ class TaskGetModel(BaseModel):
     description="查看任务的完整详情，包含描述、依赖关系。",
     permission=ToolPermission(kind="readonly"),
     subagent=True,
+    feature="task",
 )
 async def task_get(task_id: str, agent: Agent) -> str:
     """返回任务完整详情 JSON。

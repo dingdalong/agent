@@ -38,4 +38,4 @@ compact:
 role: coding
 
 events:
-  level: progress   # progress | detail | trace
+  level: detail   # progress | detail | trace
