@@ -278,13 +278,18 @@ class McpMgr:
             read, write = await stack.enter_async_context(
                 stdio_client(params, errlog=subprocess.DEVNULL)
             )
-        elif transport in ("http", "streamable-http", "streamable_http", "sse"):
+        elif transport in ("http", "streamable-http", "streamable_http"):
             from mcp.client.streamable_http import streamable_http_client
             import httpx
             http_client = httpx.AsyncClient(headers=spec.get("headers"))
             await stack.enter_async_context(http_client)
             read, write, _ = await stack.enter_async_context(
                 streamable_http_client(spec["url"], http_client=http_client)
+            )
+        elif transport == "sse":
+            from mcp.client.sse import sse_client
+            read, write = await stack.enter_async_context(
+                sse_client(spec["url"], headers=spec.get("headers"))
             )
         else:
             raise ValueError(f"不支持的 MCP transport: {transport}")

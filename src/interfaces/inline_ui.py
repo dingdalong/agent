@@ -116,7 +116,7 @@ class InlineInterface(UserInterface):
 
         # ---- 底部状态条运行时状态 ----
         self._activity: str = ""  # 当前活动文案（思考中/回应中/工具名/压缩上下文）
-        self._current_agent_type: str | None = None  # 当前正在工作的 agent 类型（主 Agent 为 None）
+        self._current_agent_type: str | None = None  # 当前正在工作的 agent 类型（主 Agent 为其 agent_type；回合起始 reset 后短暂为 None）
         self._current_agent_uuid: str | None = None  # 当前正在工作的 agent 实例 uuid
         self._activity_started_monotonic: float | None = None  # 本步骤（当前活动）处理起点（monotonic 秒）
         self._session_in_tokens: int = 0  # 本会话累计提交给模型的输入 token（含缓存读取/写入）
@@ -697,10 +697,11 @@ class InlineInterface(UserInterface):
         self._current_agent_uuid = None
 
     def _active_agent_name(self) -> str:
-        """返回活动行要显示的当前 agent 名：子智能体显示其 agent_type，主 Agent（类型为空）回退「助手」。
+        """返回活动行要显示的当前 agent 名：主 agent 与子 agent 均显示其 agent_type；
+        agent_type 为空时（回合起始 reset 后的短暂空窗）回退「助手」。
 
         Returns:
-            agent 显示名，如「coder」「explore」或「助手」。
+            agent 显示名，如「main」「coder」「explore」或「助手」。
         """
         return self._agent_label(self._current_agent_type, self._current_agent_uuid) or "助手"
 
@@ -708,8 +709,8 @@ class InlineInterface(UserInterface):
         """记录当前正在工作的 agent，供活动行显示。
 
         Args:
-            agent_type: 事件携带的 agent 类型（主 Agent 为 None）。
-            agent_uuid: 事件携带的 agent 实例 uuid（主 Agent 为 None）。
+            agent_type: 事件携带的 agent 类型（主 agent 为其 agent_type，如「main」）。
+            agent_uuid: 事件携带的 agent 实例 uuid。
         """
         self._current_agent_type = agent_type
         self._current_agent_uuid = agent_uuid
@@ -1276,7 +1277,7 @@ class InlineInterface(UserInterface):
         agent_type 为空时返回空串；agent_uuid 取第一个「-」前的 8 位，缺失时只返回 agent_type。
 
         Args:
-            agent_type: agent 类型（主 Agent 为「总控」，子智能体为各自类型；None 表示无身份）。
+            agent_type: agent 类型（主 agent 为其 agent_type，如「main」；子智能体为各自类型；None/空表示无身份）。
             agent_uuid: agent 实例 uuid 字符串（None 表示无）。
 
         Returns:

@@ -1,5 +1,4 @@
 ---
-name: coding
 description: 通用编程助手 — 编写、调试、审查代码
 thinking: true
 ---

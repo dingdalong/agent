@@ -28,6 +28,23 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+def _resolve_memory_scope(manifest_memory: str | None, is_subagent: bool) -> str | None:
+    """解析 agent 的记忆范围。
+
+    Args:
+        manifest_memory: manifest 中声明的记忆范围，未声明为 None。
+        is_subagent: 是否为子 agent。
+
+    Returns:
+        记忆范围字符串；manifest 显式声明则用其值，未声明时按类型取默认——
+        主 agent → "project"（加载项目记忆），子 agent → None（不加载）。
+    """
+    if manifest_memory is not None:
+        return manifest_memory
+    return None if is_subagent else "project"
+
+
 @dataclass
 class AgentDeps:
     """外部依赖（进程级全局对象）。
@@ -74,7 +91,7 @@ class Agent:
     role_prompt: str | None = field(default=None)
     tools: set[str] | None = field(default=None)
     is_subagent: bool = field(default=False)
-    memory: str | None = field(default="project")
+    memory: str | None = field(default=None)
     model: str | None = field(default=None)
     enable_thinking: bool = field(default=True)
     _pre_plan_mode: PermissionMode | None = field(init=False, default=None)
@@ -166,6 +183,7 @@ class Agent:
                 deps=deps,
                 role_prompt=None,
                 is_subagent=is_subagent,
+                memory=_resolve_memory_scope(None, is_subagent),
             )
         kwargs: dict[str, Any] = dict(
             agent_type=manifest.agent_type,
@@ -174,7 +192,7 @@ class Agent:
             role_prompt=manifest.prompt,
             tools=manifest.tools,
             is_subagent=is_subagent,
-            memory=manifest.memory,
+            memory=_resolve_memory_scope(manifest.memory, is_subagent),
             model=manifest.model,
             permission_mode=manifest.permission_mode,
             enable_thinking=(

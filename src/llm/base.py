@@ -388,7 +388,7 @@ class LLMProvider(ABC):
             messages: 本次提交的消息列表。
             prompt: 系统提示词消息列表（可为 None）。
             tools: 本次可用工具列表（可为 None）。
-            caller_agent_type: 发起本次调用的 agent 类型（主 Agent 为 None），透传给事件供 UI 活动行显示当前 agent。
+            caller_agent_type: 发起本次调用的 agent 类型（主 agent 为其 agent_type，如「main」），透传给事件供 UI 活动行显示当前 agent。
             caller_uuid: 发起本次调用的 agent 实例 uuid。
         Returns:
             本次调用的起始时间戳（time.time()），供完成事件计算耗时。

@@ -70,7 +70,7 @@ class SubAgentMgr:
         if not self._documents:
             return
         lines = []
-        for manifest in self._documents.values():
+        for manifest in sorted(self._documents.values(), key=lambda m: m.agent_type):
             lines.append(f"- {manifest.agent_type}: {manifest.description}")
         return "\n".join(lines)
 
