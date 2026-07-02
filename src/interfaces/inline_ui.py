@@ -250,6 +250,7 @@ class InlineInterface(UserInterface):
             get_line_prefix=self._get_line_prefix,
             dont_extend_height=True,
             height=Dimension(min=1),
+            wrap_lines=True,
         )
         core_status_window = Window(
             FormattedTextControl(self._render_core_status),
@@ -298,7 +299,7 @@ class InlineInterface(UserInterface):
         )
 
     def _get_line_prefix(self, lineno: int, wrap_count: int):
-        """输入框行前缀：首行用彩色 ›（可输入态醒目、处理态压暗），续行/折行用 "... "。
+        """输入框行前缀：仅首行用彩色 ›（可输入态醒目、处理态压暗）；续行与自动折行均无前缀、顶格。
 
         Args:
             lineno: 行号（0 为首行）。
@@ -308,7 +309,7 @@ class InlineInterface(UserInterface):
         """
         if lineno == 0 and wrap_count == 0:
             return _PREFIX_ACTIVE if self._accepting else _PREFIX_DIM
-        return [("", "... ")]
+        return []
 
     def _render_activity(self) -> ANSI:
         """构建活动行「spinner + 当前 agent · 活动 (本步耗时)」的 ANSI；仅处理态且有活动时由其窗口显示。
