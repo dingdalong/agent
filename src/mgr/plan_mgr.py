@@ -18,6 +18,9 @@ logger = logging.getLogger(__name__)
 # 距离上次注入多少轮后自动补充简短提醒
 _REMINDER_INTERVAL = 5
 
+# 计划工作流技能键（builtin 命名空间；角色可用同名技能覆盖共享层实现）
+_PLAN_SKILL_KEY = "builtin:plan-workflow"
+
 # 计划文件相对于 workdir 的子路径
 PLANS_SUBDIR = os.path.join(".agent", "plans")
 
@@ -192,7 +195,7 @@ class PlanMgr:
         if self._full_instructions_sent:
             return (
                 "当前处于计划模式。仅允许只读操作和 plan 文件工具。"
-                "按照已加载的计划工作流执行。如果尚未加载，调用 load_skill('common:plan-workflow')。"
+                f"按照已加载的计划工作流执行。如果尚未加载，调用 load_skill('{_PLAN_SKILL_KEY}')。"
                 "每轮回复只能以 ask_user（澄清）或 exit_plan_mode（提交审核）结束。"
             )
 
@@ -205,7 +208,7 @@ class PlanMgr:
             "- 禁止执行会修改系统状态的 shell 命令\n"
             "- 允许使用只读工具（读取文件、搜索、浏览等）进行探索\n\n"
             "## 下一步\n"
-            "调用 load_skill('common:plan-workflow') 加载计划工作流，然后严格按照其指令执行。\n"
+            f"调用 load_skill('{_PLAN_SKILL_KEY}') 加载计划工作流，然后严格按照其指令执行。\n"
         )
 
         if self._has_exited_plan:

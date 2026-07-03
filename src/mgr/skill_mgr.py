@@ -10,6 +10,9 @@ if TYPE_CHECKING:
     from src.mgr.plugin_mgr import PluginMgr
     from src.mgr.role_mgr import RoleMgr
 
+# 随角色加载的内置技能命名空间：共享技能与角色技能共用，角色同名技能覆盖共享技能
+_BUILTIN_NS = "builtin"
+
 @dataclass
 class SkillManifest:
     name: str
@@ -46,6 +49,7 @@ class SkillMgr:
 
         扫描顺序（低→高优先级）：
         共享 skills → 角色 skills → 全局 plugins → 全局 skills → 项目 plugins → 项目 skills
+        共享技能与角色技能同属 builtin 命名空间，角色同名技能覆盖共享技能。
         """
         from src.mgr.plugin_mgr import PluginLayer
 
@@ -54,17 +58,17 @@ class SkillMgr:
         # (目录, 命名空间) — 按优先级从低到高排列
         scan_dirs: list[tuple[Path, str]] = []
 
-        # 共享技能（最低优先级，所有角色可用）
+        # 共享技能（builtin，最低优先级，所有角色可用）
         if self.role_mgr is not None:
             cd = self.role_mgr.common_skills_dir()
             if cd is not None:
-                scan_dirs.append((cd, "common"))
+                scan_dirs.append((cd, _BUILTIN_NS))
 
-        # 角色技能（基准层）
+        # 角色技能（builtin，覆盖共享层同名技能）
         if self.role_mgr is not None and self.role_mgr.active:
             sd = self.role_mgr.skills_dir()
             if sd is not None:
-                scan_dirs.append((sd, self.role_mgr.role_name or "role"))
+                scan_dirs.append((sd, _BUILTIN_NS))
 
         if self.global_dir:
             # 全局插件技能
@@ -92,7 +96,7 @@ class SkillMgr:
 
         Args:
             path: SKILL.md 文件路径。
-            namespace: 命名空间前缀（如 builtin、user、插件名）。
+            namespace: 命名空间前缀（如 builtin、user、插件名）。共享技能与角色技能均为 builtin。
         """
         meta, body = self._parse_frontmatter(path.read_text())
         skill_name = meta.get("name", path.parent.name)
