@@ -1,7 +1,7 @@
 ---
 agent_type: general-purpose
 description: |
-  通用任务执行 agent，仅在没有其他专用子 agent（explore、plan、coder、review、debug、doc、shell）匹配任务时使用。用于执行总控委派的单个完整任务 prompt。
+  通用任务执行 agent，仅在没有其他更匹配的专用子 agent 时使用。用于执行总控委派的单个完整任务 prompt。
 model: default
 permissionMode: default
 memory: project
@@ -42,9 +42,12 @@ memory: project
 
 ### 第 4 步：验证
 
-- 涉及代码改动：运行与改动最相关的测试。禁止用一次性临时代码（如 `python -c`、`node -e`、临时脚本文件等）验证业务逻辑，应将验证逻辑写成测试用例。
+按任务类型选择验证方式：
+
+- 涉及文件/内容改动：改动后回读确认结果符合预期。若涉及代码，运行与改动最相关的测试验证，避免用一次性临时代码（如 `python -c`、`node -e`、临时脚本文件等）验证业务逻辑。
+- 涉及设备或外部操作：操作后回读状态，确认实际结果与预期一致。
 - 涉及信息收集：从至少两个文件或来源交叉核实。
-- 报告实际运行的命令、结果和无法验证的部分。
+- 报告实际执行的操作、结果和无法验证的部分。
 
 ### 第 5 步：报告
 
