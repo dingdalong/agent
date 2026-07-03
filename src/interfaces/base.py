@@ -12,6 +12,8 @@ from src.events.types import (
     ChoiceRequested,
     CompactDelta,
     Event,
+    FormQuestion,
+    FormRequested,
     InputRequested,
     LLMCallCompleted,
     LLMCallStarted,
@@ -144,6 +146,21 @@ class UserInterface(ABC):
         """
         ...
 
+    @abstractmethod
+    async def _read_form(
+        self, prompt: str, questions: list[FormQuestion], markdown: bool = False
+    ) -> str:
+        """以单屏表单读取多个问题的作答（对应 ask_user 多问题）。
+
+        Args:
+            prompt: 表单上文提示。
+            questions: 问题列表，每项带可选 (value, label) 选项（无则自由文本）。
+            markdown: 上文提示与问题/选项标签是否按 Markdown 渲染。
+        Returns:
+            JSON 编码的 {"answers": [...], "discussion": "..."} 对象串；空串表示取消。
+        """
+        ...
+
     async def _complete_user_request(
         self,
         request: UserInputRequest | None,
@@ -203,6 +220,19 @@ class UserInterface(ABC):
                 self._active_user_request = event
                 try:
                     answer = await self._read_choice(prompt, options, default_index, markdown)
+                    event.complete(answer)
+                except (EOFError, KeyboardInterrupt):
+                    self._request_user_interrupt()
+                except BaseException as exc:
+                    event.fail(exc)
+                finally:
+                    if self._active_user_request is event:
+                        self._active_user_request = None
+            case FormRequested(prompt=prompt, questions=questions, markdown=markdown):
+                # 表单允许空答案（Esc 取消），与 ChoiceRequested 同样单次读取、不走非空重读循环。
+                self._active_user_request = event
+                try:
+                    answer = await self._read_form(prompt, questions, markdown)
                     event.complete(answer)
                 except (EOFError, KeyboardInterrupt):
                     self._request_user_interrupt()

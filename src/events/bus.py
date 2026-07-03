@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from dataclasses import dataclass, field
 from typing import AsyncIterator, Literal
@@ -11,6 +12,8 @@ from src.events.levels import EventLevel
 from src.events.types import (
     ChoiceRequested,
     Event,
+    FormQuestion,
+    FormRequested,
     InputRequested,
     InterruptRequested,
     OutputRequested,
@@ -144,6 +147,46 @@ class EventBus:
             future=future,
         ))
         return await future
+
+    async def request_form(
+        self,
+        questions: list[FormQuestion],
+        prompt: str = "",
+        source: str = "ui",
+        markdown: bool = False,
+    ) -> tuple[list[str], str]:
+        """通过事件队列请求 UI 以单屏表单读取多个问题的作答与讨论。
+
+        作答与讨论由 UI 侧 JSON 编码进单个 Future[str] 返回，此处再解码，
+        复用既有 future 契约，无需拓宽泛型。
+
+        Args:
+            questions: 问题列表；每个问题带可选 (value, label) 选项列表（无则自由文本）。
+            prompt: 表单上文提示（打印到 scrollback）。
+            source: 事件来源标识。
+            markdown: 上文提示与问题/选项标签是否按 Markdown 渲染。
+
+        Returns:
+            (answers, discussion)：answers 为与 questions 顺序对齐的答案列表，discussion 为讨论栏文本；
+            用户取消（Esc）时返回 ([], "")。
+        """
+        if not self._subscribers:
+            raise NoEventSubscribers("form")
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[str] = loop.create_future()
+        await self.emit(FormRequested(
+            timestamp=time.time(),
+            source=source,
+            prompt=prompt,
+            questions=questions,
+            markdown=markdown,
+            future=future,
+        ))
+        raw = await future
+        if not raw:
+            return [], ""
+        payload = json.loads(raw)
+        return list(payload.get("answers", [])), str(payload.get("discussion", ""))
 
     async def notify_permission(
         self,

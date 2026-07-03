@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from src.events.types import (
     CompactDelta,
     Event,
+    FormRequested,
     InputRequested,
     LLMCallCompleted,
     OutputRequested,
@@ -120,7 +121,7 @@ class OutputRouter:
             return
 
         # 控制面事件始终实时
-        if isinstance(event, (InputRequested, PermissionRequested, PermissionNotice, OutputRequested)):
+        if isinstance(event, (InputRequested, PermissionRequested, PermissionNotice, OutputRequested, FormRequested)):
             await self.ui.on_event(event)
             return
 

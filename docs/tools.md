@@ -156,7 +156,7 @@ else:
 | `plan_edit_file` | `file_path:str`, `start_line:int`, `new_text:str=""`, `end_line:int\|None=None` | False | readonly（`plan_visible=True`） | plan | 按行号增量编辑计划文件。普通 def。 |
 | `load_skill` | `name:str` | False | readonly | skill | 将指定技能全文加载进当前上下文。 |
 | `calculator` | `expression:str` | - | readonly | - | AST 安全求值数学表达式。 |
-| `ask_user` | `question:str`, `options:list[str]\|None=None` | False | readonly | - | 向用户提问（有 options 走方向键菜单，否则自由文本）。 |
+| `ask_user` | `questions:list[Question]`（`Question`=`question:str`+`header:str`+`options:list[Option]\|None=None`+`multi_select:bool=False`，1–3 项；`Option`=`label:str`+`description:str=""`） | False | readonly | - | 向用户提问，一次至多 3 个各自独立的问题。用户在单屏标签页向导内作答：←→ 切标签（顶部标签栏各题前带答题状态 ☑/☐、显示 header 简介、末尾恒有「提交」标签）、↑↓ 移动答案行、空格勾选多选项、数字直选、每题末尾恒有自定义输入行、Enter 确认并推进；选项的 description 以浅色副行展示在该选项下方供参考；底部常驻讨论栏（Tab 切入）随答案回传为「讨论：…」。 |
 | `read_tool_result` | `tool_call_id:str`, `page:int=2` | True | readonly | - | 读取分页工具结果的后续页。`raw_output=True`。 |
 | `compact` | `focus:str` | True | readonly | - | 触发对话历史压缩（信号工具，返回固定提示）。 |
 
