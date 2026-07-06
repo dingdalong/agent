@@ -411,7 +411,7 @@ MCP 连接配置格式、per-server 权限分层见 [mcp-and-hooks.md](mcp-and-h
 
 **单一职责**：工作区文件/目录的读写、编辑、查找与搜索。**全部公共方法为普通 `def`（阻塞型）**——内部做同步文件 I/O，卸载到线程由 `@tool` 装饰器统一处理（见 CLAUDE.md 异步/阻塞契约）。仅做路径解析，不做访问控制（访问控制在权限层）。
 
-**消费的配置或文件**：`workdir` 下的文件；`search_files` 尊重 `{workdir}/.gitignore`（`_load_gitignore_spec`），结果上限 100 处匹配。
+**消费的配置或文件**：`workdir` 下的文件；`grep`/`glob` 通过 `rg`（ripgrep）子进程实现，二进制随 `ripgrep` 包（wheel）安装到环境 `bin` 目录、无需主机预装（缺失时回退 PATH 中的 `rg`），原生遵守 `.gitignore`、排除隐藏文件，`grep` 输出超过 200 行截断。
 
 **公共方法**：
 
@@ -426,8 +426,8 @@ MCP 连接配置格式、per-server 权限分层见 [mcp-and-hooks.md](mcp-and-h
 | `list_directory` | `path`, `max_depth` | `str` | 树状列目录 |
 | `create_directory` | `path` | `str` | 创建目录（含父级） |
 | `move_file` | `source`, `destination` | `str` | 移动/重命名 |
-| `find_files` | `pattern`, `path` | `str` | glob 查找（无 `/` 自动加 `**/`） |
-| `search_files` | `query`, `path` | `str` | 按字面不区分大小写搜索文本行（尊重 .gitignore，上限 100） |
+| `glob` | `pattern`, `path` | `str` | rg 按 glob 查找文件（遵守 .gitignore，不含目录） |
+| `grep` | `pattern`, `path` | `str` | rg 正则搜索文件内容，返回文件、行号、匹配行 |
 
 **feature 门控**：`file`（未启用时 `Agent` 中为 `None`）。 **reload**：无（无状态）。
 

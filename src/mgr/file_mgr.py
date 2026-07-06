@@ -3,13 +3,37 @@ from typing import TYPE_CHECKING
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from functools import lru_cache
+from importlib import metadata
 from pathlib import Path
-import re
-
-import pathspec
+import shutil
+import subprocess
+import sys
 
 if TYPE_CHECKING:
     from src.agent import AgentDeps
+
+
+@lru_cache(maxsize=1)
+def _resolve_rg() -> str | None:
+    """定位 ripgrep 可执行文件：优先随 ripgrep 包安装到环境 bin 目录的二进制，回退到 PATH。
+
+    Returns:
+        rg 可执行文件的绝对路径；随包二进制与 PATH 均未命中时返回 None。
+    """
+    exe = "rg.exe" if sys.platform == "win32" else "rg"
+    # 优先使用 ripgrep 包随 wheel 装入环境 bin 目录的二进制（不依赖主机预装 rg）
+    try:
+        dist = metadata.distribution("ripgrep")
+        for f in dist.files or []:
+            if f.name == exe:
+                path = Path(dist.locate_file(f)).resolve()
+                if path.exists():
+                    return str(path)
+    except metadata.PackageNotFoundError:
+        pass
+    # 回退到主机 PATH 中已安装的 rg
+    return shutil.which(exe)
 
 @dataclass
 class FileMgr:
@@ -387,15 +411,47 @@ class FileMgr:
         except Exception as exc:
             return f"Error: {exc}"
 
-    def find_files(self, pattern: str, path: str = ".") -> str:
-        """按 glob 模式查找文件/目录。
+    def grep(self, pattern: str, path: str = ".") -> str:
+        """用 ripgrep 按正则搜索文件内容，返回匹配的文件、行号与行文本。
 
         Args:
-            pattern: glob 模式；不含 "/" 时自动加 **/ 前缀以递归搜索子目录。
-            path: 搜索起始目录。
+            pattern: ripgrep 正则表达式，默认区分大小写。
+            path: 搜索起始路径（目录或文件）。
 
         Returns:
-            匹配结果文本，或错误描述字符串。
+            每行为 "路径:行号:行文本" 的匹配结果，无命中或出错时返回相应提示。
+        """
+        try:
+            search_root = self.safe_path(path)
+            if not search_root.exists():
+                return f"Error: 路径不存在: {path}"
+
+            code, out, err = self._run_rg(
+                ["--line-number", "--color=never", "--", pattern, str(search_root)]
+            )
+            if code == 1:
+                return f'未找到匹配: "{pattern}"'
+            if code >= 2:
+                return f"Error: {err.strip() or 'rg 执行失败'}"
+
+            lines = out.splitlines()
+            max_lines = 200
+            if len(lines) > max_lines:
+                lines = lines[:max_lines]
+                lines.append("... 结果已截断，请缩小 path 或细化 pattern")
+            return "\n".join(lines)
+        except Exception as exc:
+            return f"Error: {exc}"
+
+    def glob(self, pattern: str, path: str = ".") -> str:
+        """用 ripgrep 按 glob 模式查找文件（遵守 .gitignore，排除隐藏文件，不含目录）。
+
+        Args:
+            pattern: 文件名/路径 glob，如 "*.py"、"**/config*.yaml"，默认递归匹配。
+            path: 查找起始目录。
+
+        Returns:
+            匹配文件的相对路径列表，无命中或出错时返回相应提示。
         """
         try:
             search_root = self.safe_path(path)
@@ -404,150 +460,40 @@ class FileMgr:
             if not search_root.is_dir():
                 return f"Error: 不是目录: {path}"
 
-            # pattern 不含 "/" 时，加 **/ 前缀以支持递归搜索子目录
-            if "/" not in pattern:
-                pattern = f"**/{pattern}"
-            matches = sorted(search_root.glob(pattern))
+            code, out, err = self._run_rg(
+                ["--files", "--color=never", "-g", pattern, str(search_root)]
+            )
+            if code >= 2:
+                return f"Error: {err.strip() or 'rg 执行失败'}"
 
-            rel_root = self._display_path(search_root)
-            lines = [
-                f"匹配模式: {pattern}",
-                f"搜索路径: {rel_root}/",
-                f"找到 {len(matches)} 个文件:",
-            ]
-            for m in matches:
-                rel = self._display_path(m)
-                if m.is_dir():
-                    lines.append(f"  [DIR]  {rel}/")
-                else:
-                    size = self._format_size(m.stat().st_size)
-                    lines.append(f"  [FILE] {rel} ({size})")
-
-            return "\n".join(lines)
+            rels = [self._display_path(Path(f)) for f in out.splitlines()]
+            if not rels:
+                return f"未找到匹配文件: {pattern}"
+            header = f"找到 {len(rels)} 个文件:"
+            max_lines = 200
+            if len(rels) > max_lines:
+                body = "\n".join(rels[:max_lines])
+                return f"{header}\n{body}\n... 结果已截断（超过 {max_lines} 个），请缩小 path 或细化 pattern"
+            return header + "\n" + "\n".join(rels)
         except Exception as exc:
             return f"Error: {exc}"
 
-    def search_files(self, query: str, path: str = ".") -> str:
-        """在目录下搜索包含 query 的文本行。
+    def _run_rg(self, rg_args: list[str]) -> tuple[int, str, str]:
+        """执行 ripgrep 子进程，使用随包安装的 rg（回退到 PATH 中的 rg）。
 
         Args:
-            query: 要搜索的文本（不区分大小写，按字面匹配）。
-            path: 搜索起始路径（文件或目录）。
+            rg_args: 传给 rg 的参数列表（不含 "rg" 本身）。
 
         Returns:
-            分组的匹配结果文本，或错误描述字符串。
+            (returncode, stdout, stderr)；rg 缺失或超时时归为 returncode 2。
         """
+        rg = _resolve_rg()
+        if rg is None:
+            return 2, "", "未找到 rg（ripgrep），请确认 ripgrep 依赖已安装"
         try:
-            if not query:
-                return "Error: query 不能为空"
-            search_root = self.safe_path(path)
-            if not search_root.exists():
-                return f"Error: 路径不存在: {path}"
-
-            matcher = re.compile(re.escape(query), re.IGNORECASE)
-            ignore_spec = self._load_gitignore_spec()
-            max_matches = 100
-            grouped: dict[str, list[tuple[int, str]]] = {}
-            file_count = 0
-            match_count = 0
-            truncated = False
-
-            for file_path in self._iter_search_files(search_root, ignore_spec):
-                try:
-                    text = file_path.read_text()
-                except (UnicodeDecodeError, OSError):
-                    continue
-
-                lines = text.splitlines()
-                rendered: dict[int, str] = {}
-                file_matches = 0
-                for index, line in enumerate(lines, 1):
-                    matches = list(matcher.finditer(line))
-                    if not matches:
-                        continue
-
-                    remaining = max_matches - match_count
-                    if remaining <= 0:
-                        truncated = True
-                        break
-
-                    accepted = min(len(matches), remaining)
-                    match_count += accepted
-                    file_matches += accepted
-                    rendered[index] = line
-                    if len(matches) > accepted:
-                        truncated = True
-                        break
-
-                if file_matches:
-                    rel = self._display_path(file_path)
-                    grouped[rel] = [
-                        (line_no, line)
-                        for line_no, line in sorted(rendered.items())
-                    ]
-                    file_count += 1
-                if truncated:
-                    break
-
-            rel_root = self._display_path(search_root)
-            if rel_root == ".":
-                display_root = "."
-            elif search_root.is_dir():
-                display_root = f"{rel_root}/"
-            else:
-                display_root = rel_root
-
-            lines = [
-                f'搜索: "{query}"',
-                f"搜索路径: {display_root}",
-                f"找到 {file_count} 个文件, {match_count} 处匹配",
-            ]
-            lines.append("")
-
-            for rel, hits in grouped.items():
-                lines.append(rel)
-                for line_no, line in hits:
-                    lines.append(f"> {line_no:>4} | {line}")
-                lines.append("")
-
-            if truncated:
-                lines.append(f"结果已截断: 已显示 {max_matches} 处匹配，请缩小 path 或 query。")
-
-            return "\n".join(lines).rstrip()
-        except Exception as exc:
-            return f"Error: {exc}"
-
-    def _iter_search_files(self,
-                           search_root: Path,
-                           ignore_spec: pathspec.PathSpec | None):
-        """遍历搜索根目录下的所有文件，跳过 .gitignore 匹配的文件。
-
-        工作区外的文件不受 .gitignore 规则限制。
-
-        Args:
-            search_root: 搜索起始路径（文件或目录）。
-            ignore_spec: .gitignore 匹配规则，None 表示无 .gitignore。
-
-        Yields:
-            匹配条件的文件 Path 对象。
-        """
-        candidates = [search_root] if search_root.is_file() else sorted(search_root.rglob("*"))
-        for file_path in candidates:
-            if not file_path.is_file():
-                continue
-            if ignore_spec is not None and file_path.is_relative_to(self.workdir):
-                rel_posix = file_path.relative_to(self.workdir).as_posix()
-                if ignore_spec.match_file(rel_posix):
-                    continue
-            yield file_path
-
-    def _load_gitignore_spec(self) -> pathspec.PathSpec | None:
-        gitignore = self.workdir / ".gitignore"
-        if not gitignore.is_file():
-            return None
-
-        try:
-            lines = gitignore.read_text().splitlines()
-        except OSError:
-            return None
-        return pathspec.PathSpec.from_lines("gitignore", lines)
+            proc = subprocess.run(
+                [rg, *rg_args], capture_output=True, text=True, timeout=30
+            )
+            return proc.returncode, proc.stdout, proc.stderr
+        except subprocess.TimeoutExpired:
+            return 2, "", "rg 执行超时"

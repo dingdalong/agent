@@ -2,7 +2,7 @@
 agent_type: plan
 description: |
   规划专家子智能体。探索相关资料、分析影响面、设计行动方案。当任务涉及多处改动、方案决策或需要先评估影响再动手时，总控 agent 应委派给它。
-tools: list_directory, find_files, search_files, get_file_info, read_file
+tools: list_directory, glob, grep, get_file_info, read_file
 model: best
 permissionMode: dontAsk
 memory: project

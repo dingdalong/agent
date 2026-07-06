@@ -3,7 +3,7 @@ agent_type: home-status
 description: |
   只读查询家中智能设备状态、属性和列表。不执行任何控制操作。
   当主 agent 需要了解当前设备状态、房间布局或设备能力时委派给它。
-tools: list_directory, find_files, search_files, get_file_info, read_file
+tools: list_directory, glob, grep, get_file_info, read_file
 model: default
 permissionMode: dontAsk
 memory: project

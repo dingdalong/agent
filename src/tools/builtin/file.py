@@ -162,23 +162,23 @@ def list_directory(path: str | None, agent: Agent, max_depth: int = 3) -> str:
         max_depth=max_depth,
     )
 
-class FindFiles(BaseModel):
-    pattern: str = Field(..., description="文件名或目录 glob，只匹配路径，如 '*.py'、'**/config*.yaml'")
+class Glob(BaseModel):
+    pattern: str = Field(..., description="文件名/路径 glob，默认递归匹配，如 '*.py'、'**/config*.yaml'。只匹配路径，不读取内容。")
     path: Optional[str] = Field(None, description="查找起点目录绝对路径，不提供时默认为工作目录。")
 
-@tool(model=FindFiles, description="查找文件或目录，支持glob。",
+@tool(model=Glob, description="用 ripgrep 按 glob 查找文件，遵守 .gitignore、排除隐藏文件，只返回文件（不含目录）。",
       permission=ToolPermission(kind="readonly", specifier_arg="path", tips="在 {path} 中查找：{pattern}", check_permissions=check_file_read_permissions), feature="file")
-def find_files(pattern: str, agent: Agent, path: str | None = None) -> str:
-    return agent._file_mgr.find_files(pattern, path=path or str(agent._file_mgr.workdir))
+def glob(pattern: str, agent: Agent, path: str | None = None) -> str:
+    return agent._file_mgr.glob(pattern, path=path or str(agent._file_mgr.workdir))
 
-class SearchFiles(BaseModel):
-    query: str = Field(..., description="要查找的普通文本，不区分大小写；不是 glob，也不是正则。")
-    path: Optional[str] = Field(None, description="目录或文件的绝对路径。当为目录时，搜索目录中所有文件内容，包括子目录中的文件。不提供时默认为工作目录。不支持 glob。")
+class Grep(BaseModel):
+    pattern: str = Field(..., description="ripgrep 正则表达式，默认区分大小写；搜字面符号 . ( [ * 等需转义。不是 glob。")
+    path: Optional[str] = Field(None, description="目录或文件的绝对路径。为目录时递归搜索其中所有文件内容。不提供时默认为工作目录。不支持 glob。")
 
-@tool(model=SearchFiles, description="搜索文本内容，返回匹配文件、行号和匹配行。",
-      permission=ToolPermission(kind="readonly", specifier_arg="path", tips="搜索文本：{query}", check_permissions=check_file_read_permissions), feature="file")
-def search_files(query: str, agent: Agent, path: str | None = None) -> str:
-    return agent._file_mgr.search_files(query, path=path or str(agent._file_mgr.workdir))
+@tool(model=Grep, description="用 ripgrep 正则搜索文件内容，返回匹配的文件、行号和匹配行，遵守 .gitignore。",
+      permission=ToolPermission(kind="readonly", specifier_arg="path", tips="搜索内容：{pattern}", check_permissions=check_file_read_permissions), feature="file")
+def grep(pattern: str, agent: Agent, path: str | None = None) -> str:
+    return agent._file_mgr.grep(pattern, path=path or str(agent._file_mgr.workdir))
 
 class GetFileInfo(BaseModel):
     path: str = Field(..., description="要查询的文件或目录的绝对路径。")

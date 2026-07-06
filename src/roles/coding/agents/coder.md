@@ -2,7 +2,7 @@
 agent_type: coder
 description: |
   专用于编写、修改源码和测试代码并验证改动的实现子任务 agent。当任务需要新增功能、修复 bug、重构代码、编写或更新测试，且主 agent 已经明确了目标、涉及文件和约束条件时，总控 agent 应该委派给它。它不负责探索、规划或审查，只接收边界清晰的实现任务并交付代码改动。
-tools: list_directory, find_files, search_files, get_file_info, read_file, write_file, edit_file_lines, replace_all_in_file, shell
+tools: list_directory, glob, grep, get_file_info, read_file, write_file, edit_file_lines, replace_all_in_file, shell
 model: best
 permissionMode: default
 memory: project
@@ -38,7 +38,7 @@ memory: project
 ### 第 1 步：阅读理解
 
 - 读取任务 prompt 中指定的所有文件，理解现有代码结构、命名规范和测试风格。
-- 用 `search_files` 查找将修改的函数和类的所有调用方，记录调用关系。
+- 用 `grep` 查找将修改的函数和类的所有调用方，记录调用关系。
 - 复用现有工具函数、基类和模式，避免重复实现。
 
 ### 第 2 步：规划改动

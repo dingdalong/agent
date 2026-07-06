@@ -127,7 +127,7 @@
 | `home-status` | 只读检索* | `default` | `dontAsk` | 只读查询设备状态/布局/能力 |
 | `scene-automation` | 只读检索* | `default` | `default` | 创建/编辑/删除/执行场景与自动化 |
 
-> \* mijia 各 agent frontmatter 声明的 `tools` 均为内置只读检索工具集；实际的米家设备操作能力来自角色的 `mcp_servers.json` 注入的 MCP 工具（见 [mcp-and-hooks.md](mcp-and-hooks.md)），这些工具不在 frontmatter 白名单内时会经 `resolve_subagent_tools` 的 subagent 注入规则处理。"只读检索"指 `list_directory, find_files, search_files, get_file_info, read_file`。
+> \* mijia 各 agent frontmatter 声明的 `tools` 均为内置只读检索工具集；实际的米家设备操作能力来自角色的 `mcp_servers.json` 注入的 MCP 工具（见 [mcp-and-hooks.md](mcp-and-hooks.md)），这些工具不在 frontmatter 白名单内时会经 `resolve_subagent_tools` 的 subagent 注入规则处理。"只读检索"指 `list_directory, glob, grep, get_file_info, read_file`。
 
 ## 技能系统（Skills）
 

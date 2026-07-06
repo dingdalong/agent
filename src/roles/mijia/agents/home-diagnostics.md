@@ -3,7 +3,7 @@ agent_type: home-diagnostics
 description: |
   诊断智能家居系统中的问题：设备离线、响应慢、场景执行失败、自动化不触发等。
   只读分析，不执行修复操作。诊断结论反馈给主 agent，由主 agent 决定后续动作。
-tools: list_directory, find_files, search_files, get_file_info, read_file
+tools: list_directory, glob, grep, get_file_info, read_file
 model: default
 permissionMode: dontAsk
 memory: project

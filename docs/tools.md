@@ -131,8 +131,8 @@ else:
 | 工具名 | 参数（名:类型=默认） | subagent | kind | feature | 作用 |
 |---|---|---|---|---|---|
 | `list_directory` | `path:str\|None=None`, `max_depth:int=3` | - | readonly | file | 列出目录树形结构。 |
-| `find_files` | `pattern:str`, `path:str\|None=None` | - | readonly | file | 按 glob 查找文件/目录。 |
-| `search_files` | `query:str`, `path:str\|None=None` | - | readonly | file | 搜索文本内容，返回文件、行号、匹配行。 |
+| `glob` | `pattern:str`, `path:str\|None=None` | - | readonly | file | rg 按 glob 查找文件（遵守 .gitignore，不含目录）。 |
+| `grep` | `pattern:str`, `path:str\|None=None` | - | readonly | file | rg 正则搜索文件内容，返回文件、行号、匹配行。 |
 | `get_file_info` | `path:str` | - | readonly | file | 获取文件/目录元数据（大小、行数、时间、权限）。 |
 | `read_file` | `path:str`, `start_line:int\|None=None`, `end_line:int\|None=None` | - | readonly | file | 读取文件内容并附行号，可限定行范围。 |
 | `create_directory` | `path:str` | - | edit | file | 创建目录（支持多级）。 |
@@ -162,7 +162,7 @@ else:
 
 说明：
 
-- 四个 file 只读工具（`list_directory`/`find_files`/`search_files`/`get_file_info`/`read_file`）用 `check_permissions=check_file_read_permissions`（工作目录外路径 ask）；五个 file 编辑工具用 `check_file_edit_permissions`（敏感路径 ask，`bypass_immune=True`），`move_file` 用 `check_file_move_permissions`（源与目标都查）。它们都声明 `specifier_arg`（`path` 或 `file_path` / `source`）。
+- 五个 file 只读工具（`list_directory`/`glob`/`grep`/`get_file_info`/`read_file`）用 `check_permissions=check_file_read_permissions`（工作目录外路径 ask）；五个 file 编辑工具用 `check_file_edit_permissions`（敏感路径 ask，`bypass_immune=True`），`move_file` 用 `check_file_move_permissions`（源与目标都查）。它们都声明 `specifier_arg`（`path` 或 `file_path` / `source`）。
 - `task_*` 虽为写任务列表的操作，但 `kind` 标为 `readonly`（不触碰文件系统/外部状态），且 `subagent=True` 自动注入到子 agent。
 - `read_tool_result` 与 `compact` 标 `subagent=True`；`read_tool_result` 额外 `raw_output=True`（其内容本身就是分页结果，不再二次分页）。
 - `MemoryType` 为 `save_memory` 的枚举参数类型，定义在 `src/mgr/memory_mgr.py`（见 [managers.md](managers.md) 的 MemoryMgr）。

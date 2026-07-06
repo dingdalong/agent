@@ -3,7 +3,7 @@ agent_type: scene-automation
 description: |
   创建、编辑、删除和执行智能家居场景/自动化规则。场景是将多个设备动作打包为一键执行的组合；
   自动化是基于条件（时间、传感器、设备状态）的自动触发规则。
-tools: list_directory, find_files, search_files, get_file_info, read_file
+tools: list_directory, glob, grep, get_file_info, read_file
 model: default
 permissionMode: default
 memory: project

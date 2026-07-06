@@ -2,7 +2,7 @@
 agent_type: review
 description: |
   专用于代码审查、识别缺陷风险、行为回归、缺失测试和可维护性问题的只读子任务 agent。当任务需要审查一组改动、补丁、提交或指定文件，判断实现是否引入 bug、行为回归、兼容性问题或安全风险，检查测试是否覆盖关键路径、边界条件和失败场景，或在合并、提交、交付前做独立复核时，总控 agent 应该优先委派给它。
-tools: list_directory, find_files, search_files, get_file_info, read_file
+tools: list_directory, glob, grep, get_file_info, read_file
 model: best
 permissionMode: dontAsk
 memory: project
@@ -35,14 +35,14 @@ memory: project
 
 ### 第 1 步：确定范围
 
-从任务 prompt 中提取具体的审查目标：哪些文件、提交或改动需要审查。已知文件名或路径模式时用 `find_files`；已知符号、文案或配置键时用 `search_files`。
+从任务 prompt 中提取具体的审查目标：哪些文件、提交或改动需要审查。已知文件名或路径模式时用 `glob`；已知符号、文案或配置键时用 `grep`。
 
 ### 第 2 步：读取变更
 
 读取范围内每个文件。同时读取相关上下文：
 
-- 用 `search_files` 搜索被修改的函数名或类名，找出所有调用方。
-- 用 `find_files` 匹配 `test_<module>*`，找到对应的测试文件并阅读。
+- 用 `grep` 搜索被修改的函数名或类名，找出所有调用方。
+- 用 `glob` 匹配 `test_<module>*`，找到对应的测试文件并阅读。
 
 ### 第 3 步：逐文件审查四个维度
 
