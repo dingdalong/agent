@@ -176,6 +176,13 @@ class InlineInterface(UserInterface):
         self._form_discussion: str = ""  # 底部讨论栏文本（全局，随作答一并回传）
         self._form_markdown: bool = False  # 问题/选项标签是否按 Markdown 渲染
 
+        # ---- 选项 + 输入行（choice_input 态，exit_plan_mode 等共用；输入行即常驻输入框）----
+        self._choice_input_options: list[tuple[str, str]] | None = None  # 当前选项列表 (value, label)，None 表示无活跃菜单
+        self._choice_input_descriptions: list[str] | None = None  # 与 options 对齐的选项浅色说明副行；None 表示无
+        self._choice_input_placeholder: str = ""  # 输入行为空时的浅字占位文案
+        self._choice_input_index: int = 0  # 当前光标行下标（0..选项数-1 为选项行，==选项数 为输入行）
+        self._choice_input_markdown: bool = False  # 上文提示与选项标签是否按 Markdown 渲染
+
         # ---- 底部状态条运行时状态 ----
         self._activity: str = ""  # 当前活动文案（思考中/回应中/工具名/压缩上下文）
         self._current_agent_type: str | None = None  # 当前正在工作的 agent 类型（主 Agent 为其 agent_type；回合起始 reset 后短暂为 None）
@@ -307,6 +314,11 @@ class InlineInterface(UserInterface):
             Window(FormattedTextControl(self._render_form), dont_extend_height=True, height=Dimension(min=1)),
             filter=Condition(lambda: self._mode == "form"),
         )
+        # 选项+输入窗口：choice_input 态可见，画选项区与操作提示（输入行由下方常驻输入框承载），置于输入框上方。
+        choice_input_window = ConditionalContainer(
+            Window(FormattedTextControl(self._render_choice_input), dont_extend_height=True, height=Dimension(min=1)),
+            filter=Condition(lambda: self._mode == "choice_input"),
+        )
         # 斜杠命令补全下拉窗口：缓冲存在补全候选时可见，置于输入框上方。
         completion_window = ConditionalContainer(
             Window(FormattedTextControl(self._render_completions), dont_extend_height=True, height=Dimension(max=8)),
@@ -315,13 +327,13 @@ class InlineInterface(UserInterface):
         self._input_window = Window(
             BufferControl(
                 buffer=self._buffer,
-                input_processors=[_PlaceholderProcessor(self._form_placeholder)],
+                input_processors=[_PlaceholderProcessor(self._buffer_placeholder)],
             ),
             get_line_prefix=self._get_line_prefix,
             dont_extend_height=True,
             height=Dimension(min=1),
             wrap_lines=True,
-            always_hide_cursor=Condition(self._form_answering),  # 表单答题区隐藏输入栏时兜底隐藏真实光标（光标改由自定义行内联绘制）
+            always_hide_cursor=Condition(self._hide_real_cursor),  # 表单答题区光标内联绘制、choice_input 光标在选项行时，兜底隐藏输入框真实光标
         )
         # 表单答题区底部提示：输入栏隐藏时占其位，暗色提示按 Tab 唤出讨论输入栏。
         form_footer_window = ConditionalContainer(
@@ -350,6 +362,7 @@ class InlineInterface(UserInterface):
             activity_window,
             select_window,
             form_window,
+            choice_input_window,
             completion_window,
             self._make_separator_window(),  # 顶分割线：恒显
             ConditionalContainer(self._input_window, filter=Condition(self._input_bar_visible)),  # 输入栏：表单答题区隐藏
@@ -435,6 +448,54 @@ class InlineInterface(UserInterface):
         with self._status_console.capture() as capture:
             self._status_console.print(text, end="")
         return ANSI(capture.get())
+
+    def _render_choice_input(self) -> ANSI:
+        """渲染 choice_input 菜单的选项区与操作提示（输入行由下方常驻输入框承载，不在此渲染）。
+
+        逐选项一行「<marker><序号>. <label>」，光标落在某选项行时该行 ❯ 前缀 + 整行反显；可带浅色说明副行。
+        光标在输入行时所有选项行均无 ❯（改由下方输入框醒目前缀提示）。末行操作提示随光标位置给出可用按键。
+
+        Returns:
+            可作为 Window 内容的 ANSI（多行）；无活跃菜单时为空。
+        """
+        if not self._choice_input_options:
+            return ANSI("")
+        descs = self._choice_input_descriptions or []
+        on_input = self._choice_input_on_input_row()
+        text = Text()
+        for i, (_value, label) in enumerate(self._choice_input_options):
+            selected = (not on_input) and i == self._choice_input_index
+            line = Text()
+            line.append("❯ " if selected else "  ", style="cyan" if selected else "")
+            line.append(f"{i + 1}. ")
+            line.append_text(self._markdown_label(label) if self._choice_input_markdown else Text(label))
+            if selected:
+                line.stylize("reverse")
+            text.append_text(line)
+            text.append("\n")
+            desc = descs[i].strip() if i < len(descs) else ""
+            if desc:  # 选项参考说明：浅色缩进副行，不参与光标反显
+                sub = self._markdown_label(desc) if self._choice_input_markdown else Text(desc)
+                sub.stylize("bright_black")
+                text.append("     ")
+                text.append_text(sub)
+                text.append("\n")
+        text.append_text(self._render_choice_input_hint(on_input))
+        with self._status_console.capture() as capture:
+            self._status_console.print(text, end="")
+        return ANSI(capture.get())
+
+    def _render_choice_input_hint(self, on_input_row: bool) -> Text:
+        """渲染 choice_input 底部操作提示行，按光标是否在输入行给出可用按键。
+
+        Args:
+            on_input_row: 光标是否落在末行输入行。
+        Returns:
+            操作提示 Text（单行，浅色）。
+        """
+        if on_input_row:
+            return Text("↑↓ 选择行 · Enter 提交输入 · Esc 取消", style="bright_black")
+        return Text("↑↓ 选择行 · Enter/数字 选项 · Esc 取消", style="bright_black")
 
     def _render_form(self) -> ANSI:
         """渲染单屏标签页表单：顶部标签栏 + 聚焦标签内容 + 操作提示，供 form_window 使用。
@@ -1130,7 +1191,8 @@ class InlineInterface(UserInterface):
             self._enter_processing_idle()
 
     def _buffer_editable(self) -> bool:
-        """输入缓冲当前是否可编辑：input 态恒可编辑；form 态讨论区或答题区光标落在自定义输入行时可编辑；其余只读。
+        """输入缓冲当前是否可编辑：input 态恒可编辑；form 态讨论区或答题区光标落在自定义输入行时可编辑；
+        choice_input 态光标落在输入行时可编辑；其余只读。
 
         Returns:
             缓冲是否可编辑。
@@ -1141,19 +1203,24 @@ class InlineInterface(UserInterface):
             if self._form_zone == "discuss":
                 return True
             return self._form_cursor_on_custom()
+        if self._mode == "choice_input":
+            return self._choice_input_on_input_row()
         return False
 
-    def _form_placeholder(self) -> str:
-        """底部输入框缓冲为空时的浅字占位文案；非 form 态返回空串（不占位）。
+    def _buffer_placeholder(self) -> str:
+        """底部输入框缓冲为空时的浅字占位文案；不需占位的态返回空串。
 
         Returns:
-            占位文案：答题区落在自定义行为「输入自定义回答…」，否则为「讨论这几个问题…」。
+            form 态答题区自定义行为「输入自定义回答…」、其余 form 态为「讨论这几个问题…」；
+            choice_input 态为调用方给定的 input_placeholder；其它态为空串。
         """
-        if self._mode != "form":
-            return ""
-        if self._form_zone == "answer" and self._form_cursor_on_custom():
-            return "输入自定义回答…"
-        return "讨论这几个问题…"
+        if self._mode == "form":
+            if self._form_zone == "answer" and self._form_cursor_on_custom():
+                return "输入自定义回答…"
+            return "讨论这几个问题…"
+        if self._mode == "choice_input":
+            return self._choice_input_placeholder
+        return ""
 
     def _current_form_question(self) -> FormQuestion | None:
         """返回当前聚焦的表单问题；无活跃表单、聚焦「提交」标签或下标越界时返回 None。
@@ -1223,10 +1290,33 @@ class InlineInterface(UserInterface):
     def _input_bar_visible(self) -> bool:
         """底部输入栏当前是否可见：除表单答题区外均可见（表单答题区隐藏输入栏，改由内联自定义行与底部提示承载）。
 
+        choice_input 态输入栏恒可见——它即该菜单的输入行。
+
         Returns:
             输入栏应显示时为 True。
         """
         return not self._form_answering()
+
+    def _choice_input_on_input_row(self) -> bool:
+        """choice_input 态光标当前是否落在末行输入行（非 choice_input 态或无活跃菜单时恒 False）。
+
+        Returns:
+            光标在输入行（下标 == 选项数）时为 True。
+        """
+        if self._choice_input_options is None:
+            return False
+        return self._choice_input_index >= len(self._choice_input_options)
+
+    def _hide_real_cursor(self) -> bool:
+        """是否隐藏输入框真实光标：表单答题区（光标改由自定义行内联绘制）、
+        或 choice_input 光标停在选项行（输入行未激活、输入框只读）时隐藏。
+
+        Returns:
+            应隐藏真实光标时为 True。
+        """
+        if self._form_answering():
+            return True
+        return self._mode == "choice_input" and not self._choice_input_on_input_row()
 
     async def _await_form(self, questions: list[FormQuestion], markdown: bool) -> str:
         """进入单屏表单态（form），await 由表单键位（Enter 提交 / Esc 取消）解析的 future。
@@ -1410,6 +1500,95 @@ class InlineInterface(UserInterface):
         """取消表单：以空串解析 future（上层 request_form 据此返回 ([], "") 表示取消）。"""
         self._resolve_input("")
 
+    async def _await_choice_input(
+        self,
+        options: list[tuple[str, str]],
+        descriptions: list[str] | None,
+        input_placeholder: str,
+        default_index: int,
+        markdown: bool,
+    ) -> str:
+        """进入 choice_input 态，await 由 choice_input 键位（选项/输入行 Enter、数字、Esc）解析的 future。
+
+        初始化选项/说明/占位/光标行与 Markdown 标志并清空输入缓冲；若焦点在 agent 列表先抢回输入框
+        （否则按键落到列表而非应答 future）。
+
+        Args:
+            options: 选项列表，每项为 (value, label)。
+            descriptions: 与 options 对齐的选项浅色说明副行；None 表示无。
+            input_placeholder: 输入行为空时的浅字占位文案。
+            default_index: 初始选中项下标（夹取到选项范围）。
+            markdown: 上文提示与选项标签是否按 Markdown 渲染。
+        Returns:
+            JSON 编码的 {"choice": ..., "text": ...} 对象串；Esc 取消时为空串。
+        """
+        loop = asyncio.get_running_loop()
+        self._choice_input_options = options
+        self._choice_input_descriptions = descriptions
+        self._choice_input_placeholder = input_placeholder
+        self._choice_input_index = max(0, min(default_index, len(options) - 1)) if options else 0
+        self._choice_input_markdown = markdown
+        self._mode = "choice_input"
+        self._input_future = loop.create_future()
+        if (
+            self._app is not None
+            and self._agent_list_inner is not None
+            and self._app.layout.has_focus(self._agent_list_inner)
+        ):
+            self._app.layout.focus(self._input_window)
+        self._buffer.set_document(Document("", 0), bypass_readonly=True)
+        self._app.invalidate()
+        try:
+            return await self._input_future
+        finally:
+            self._input_future = None
+            self._choice_input_options = None
+            self._enter_processing_idle()
+
+    def _move_choice_input_row(self, delta: int) -> None:
+        """在选项行与输入行之间移动光标（0..选项数），到边界夹取、不循环。
+
+        跨越输入行会改变缓冲可编辑性与真实光标显隐，重绘由常驻 App 刷新完成。
+
+        Args:
+            delta: 移动步长（+1 下一行、-1 上一行）。
+        """
+        if not self._choice_input_options:
+            return
+        last = len(self._choice_input_options)  # 输入行下标 == 选项数
+        self._choice_input_index = max(0, min(self._choice_input_index + delta, last))
+
+    def _submit_choice_input_option(self) -> None:
+        """以当前光标所在选项的 value 解析 choice_input future（text 为空）；光标不在选项行时无操作。"""
+        if not self._choice_input_options or self._choice_input_on_input_row():
+            return
+        value = self._choice_input_options[self._choice_input_index][0]
+        self._resolve_input(json.dumps({"choice": value, "text": ""}))
+
+    def _submit_choice_input_text(self) -> None:
+        """以输入行文本解析 choice_input future（choice 为空）；文本为空白则不提交（留在输入行）。"""
+        if self._buffer is None:
+            return
+        text = self._buffer.text.strip()
+        if not text:
+            return
+        self._resolve_input(json.dumps({"choice": "", "text": text}))
+
+    def _choice_input_number(self, index: int) -> None:
+        """数字键直选第 index 选项并立即提交（choice=该项 value、text 为空）；越界忽略。
+
+        Args:
+            index: 选项下标（0 基）。
+        """
+        if not self._choice_input_options or not (0 <= index < len(self._choice_input_options)):
+            return
+        value = self._choice_input_options[index][0]
+        self._resolve_input(json.dumps({"choice": value, "text": ""}))
+
+    def _cancel_choice_input(self) -> None:
+        """取消 choice_input：以空串解析 future（上层 request_choice_input 据此返回 ("", "") 表示取消）。"""
+        self._resolve_input("")
+
     def _enter_processing_idle(self) -> None:
         """回到处理态：清空输入缓冲、置处理模式并重绘（输入/权限读取结束后调用）。"""
         self._mode = "processing"
@@ -1547,6 +1726,38 @@ class InlineInterface(UserInterface):
             else:
                 self._print_rich(prompt)
         return await self._await_form(questions, markdown)
+
+    async def _read_choice_input(
+        self,
+        prompt: str,
+        options: list[tuple[str, str]],
+        descriptions: list[str] | None,
+        input_placeholder: str,
+        default_index: int,
+        markdown: bool = False,
+    ) -> str:
+        """以「选项列表 + 输入行」读取一次作答（choice_input，如 exit_plan_mode）。
+
+        非 TTY 走扁平降级（编号菜单 + 读一行：合法编号返回该项，否则整行作输入文本）。
+
+        Args:
+            prompt: 菜单上文提示。
+            options: 选项列表，每项为 (value, label)。
+            descriptions: 与 options 对齐的选项浅色说明副行；None 表示无。
+            input_placeholder: 输入行为空时的浅字占位文案。
+            default_index: 初始选中项下标。
+            markdown: 上文提示与选项标签是否按 Markdown 渲染。
+        Returns:
+            JSON 编码的 {"choice": ..., "text": ...} 对象串；空串表示取消。
+        """
+        if not self._tty:
+            return await self._read_choice_input_plain(prompt, options, descriptions, input_placeholder, default_index)
+        if prompt.strip():
+            if markdown:
+                self._print_markdown(prompt)
+            else:
+                self._print_rich(prompt)
+        return await self._await_choice_input(options, descriptions, input_placeholder, default_index, markdown)
 
     def _permission_options(self, suggested_rules: list[str] | None, mcp_server_rule: str | None = None) -> list[tuple[str, str]]:
         """构建权限确认的菜单选项（value, label）。
@@ -1722,6 +1933,45 @@ class InlineInterface(UserInterface):
                 if 0 <= idx < len(options):
                     return options[idx][0]
             self._print_rich("请输入有效编号。", style="red")
+
+    async def _read_choice_input_plain(
+        self,
+        prompt: str,
+        options: list[tuple[str, str]],
+        descriptions: list[str] | None,
+        input_placeholder: str,
+        default_index: int,
+    ) -> str:
+        """非 TTY 降级 choice_input：打印编号菜单后读一行；纯合法编号返回该项 choice，
+        否则整行作输入 text；空输入返回默认项 choice、无默认项则取消。
+
+        Args:
+            prompt: 菜单上文提示。
+            options: 选项列表，每项为 (value, label)。
+            descriptions: 与 options 对齐的选项参考说明，逐项以浅色副行展示（None 或空串表示无）。
+            input_placeholder: 输入行占位文案（并入读取提示）。
+            default_index: 空输入时回退的默认项下标。
+        Returns:
+            JSON 编码的 {"choice": ..., "text": ...} 对象串；无有效输入且无默认项时为空串（取消）。
+        """
+        if prompt.strip():
+            self._print_rich(prompt)
+        self._print_rich(self._plain_choice_menu(options, descriptions), end="")
+        if self._fallback_session is None:
+            self._fallback_session = PromptSession()
+        hint = input_placeholder.strip() or "输入回答"
+        answer = (await self._fallback_session.prompt_async(
+            f"选择编号 1-{len(options)} 或直接{hint}: ", handle_sigint=True
+        )).strip()
+        if not answer:
+            if 0 <= default_index < len(options):
+                return json.dumps({"choice": options[default_index][0], "text": ""})
+            return ""
+        if answer.isdigit():
+            idx = int(answer) - 1
+            if 0 <= idx < len(options):
+                return json.dumps({"choice": options[idx][0], "text": ""})
+        return json.dumps({"choice": "", "text": answer})
 
     async def _read_form_plain(self, prompt: str, questions: list[FormQuestion]) -> str:
         """非 TTY 降级表单：打印上文后逐题采集（多选读编号集、单选读编号、自由文本读整行），末尾收讨论，JSON 编码返回。
@@ -2064,6 +2314,10 @@ class InlineInterface(UserInterface):
         _cond_form_single_opt = Condition(lambda: self._mode == "form" and self._form_zone == "answer" and self._form_focused_single() and not self._form_cursor_on_custom())  # 答题区单选题且光标在选项行（Enter 选中，就地不推进）
         _cond_form_confirm = Condition(lambda: self._mode == "form" and self._form_zone == "answer" and not self._form_on_submit_tab() and not (self._form_focused_single() and not self._form_cursor_on_custom()))  # 答题区问题标签且非单选选项行（Enter 确认推进：多选题/自由文本题/单选自定义行）
         _cond_form_discuss = Condition(lambda: self._mode == "form" and self._form_zone == "discuss")  # 底部讨论栏
+        # choice_input 激活条件：choice_input 态为真。派生条件按光标是否在输入行细分，供各键位专用。
+        _cond_choice_input = Condition(lambda: self._mode == "choice_input")
+        _cond_choice_input_opt = Condition(lambda: self._mode == "choice_input" and not self._choice_input_on_input_row())  # 光标在选项行（数字/Enter 直选）
+        _cond_choice_input_row = Condition(lambda: self._mode == "choice_input" and self._choice_input_on_input_row())  # 光标在输入行（Enter 提交输入）
         # 斜杠命令补全激活条件：缓冲存在补全候选时为真。
         _cond_completing = Condition(lambda: self._buffer is not None and self._buffer.complete_state is not None)
         # 输入态光标在末行：仅当缓冲区光标在末尾时 down 才能下移进列表
@@ -2201,6 +2455,41 @@ class InlineInterface(UserInterface):
         def _(event) -> None:
             self._cancel_form()
 
+        # ---- choice_input 态：选项 + 输入行导航（eager 抢占只读缓冲的默认绑定与 agent 列表 ↓）----
+        # 选项行：↑↓ 在选项/输入行间移动、Enter/数字 直选并提交；
+        # 输入行：缓冲可编辑，字符键交默认自插入，Enter 提交非空输入、↑ 回到选项行。
+
+        # ↑：上移一行（选项行/输入行间）
+        @bindings.add("up", filter=_cond_choice_input, eager=True)
+        def _(event) -> None:
+            self._move_choice_input_row(-1)
+
+        # ↓：下移一行
+        @bindings.add("down", filter=_cond_choice_input, eager=True)
+        def _(event) -> None:
+            self._move_choice_input_row(1)
+
+        # Enter：光标在选项行→提交该项 value
+        @bindings.add("enter", filter=_cond_choice_input_opt, eager=True)
+        def _(event) -> None:
+            self._submit_choice_input_option()
+
+        # Enter：光标在输入行→提交非空输入文本
+        @bindings.add("enter", filter=_cond_choice_input_row, eager=True)
+        def _(event) -> None:
+            self._submit_choice_input_text()
+
+        # 1-9：光标在选项行时数字直选并提交（输入行时不拦截，交默认自插入）
+        for _digit in range(1, 10):
+            @bindings.add(str(_digit), filter=_cond_choice_input_opt, eager=True)
+            def _(event, idx: int = _digit - 1) -> None:
+                self._choice_input_number(idx)
+
+        # Esc：取消
+        @bindings.add("escape", filter=_cond_choice_input, eager=True)
+        def _(event) -> None:
+            self._cancel_choice_input()
+
         # ---- 补全态：斜杠命令下拉导航（eager 抢占，避免与 agent 列表 ↓ 冲突）----
 
         # ↓ / Tab：下一候选
@@ -2221,8 +2510,8 @@ class InlineInterface(UserInterface):
 
         # ---- agent 列表方向键导航 ----
 
-        # ↓（eager）：从输入框进入 agent 列表（输入态光标在末行 或 处理态只读；查看面板/选择菜单/补全时不进列表）
-        @bindings.add("down", eager=True, filter=_cond_list_visible & ~_cond_list_focused & ~_cond_viewing & ~_cond_select & ~_cond_form & ~_cond_completing & (self._cond_accepting & _cond_cursor_at_end | ~self._cond_accepting))
+        # ↓（eager）：从输入框进入 agent 列表（输入态光标在末行 或 处理态只读；查看面板/选择菜单/表单/choice_input/补全时不进列表）
+        @bindings.add("down", eager=True, filter=_cond_list_visible & ~_cond_list_focused & ~_cond_viewing & ~_cond_select & ~_cond_form & ~_cond_choice_input & ~_cond_completing & (self._cond_accepting & _cond_cursor_at_end | ~self._cond_accepting))
         def _(event) -> None:
             if self._agent_list_inner is not None:
                 self._agent_selected_index = 0

@@ -125,16 +125,20 @@ async def exit_plan_mode(file_path: str, agent: Agent, deps: AgentDeps) -> str:
     # 表头（路径/标签）为结构化 chrome 走纯文本；计划正文是 LLM 写的 Markdown，单独按 Markdown 渲染。
     await deps.event_bus.request_output(f"\n计划文件：\n{file_path}\n\n计划内容：\n")
     await deps.event_bus.request_output(plan_content, markdown=True)
-    answer = await deps.event_bus.request_input(
-        "选择操作：\n"
-        "  [1] 自动执行 — 在当前上下文中自动实施计划\n"
-        "  [2] 手动执行 — 退出计划模式，自行实施\n"
-        "  或直接输入修改意见\n"
-        "请选择: "
-    )
-    choice = answer.strip()
 
-    if choice == "1":
+    # choice_input 语义：选项行提交→choice=该项 value（auto/manual）、feedback 为空；
+    # 输入行提交→choice 为空、feedback=修改意见；Esc 取消→两者皆空。三者互斥、以光标所在行为准。
+    choice, feedback = await deps.event_bus.request_choice_input(
+        prompt="计划审核",
+        options=[("auto", "自动执行"), ("manual", "手动执行")],
+        descriptions=["在当前上下文中自动实施计划", "退出计划模式，自行实施"],
+        input_placeholder="输入修改意见…",
+        default_index=0,
+        markdown=False,
+    )
+    feedback = feedback.strip()
+
+    if choice == "auto":
         plan_mgr.exit_mode(agent, reminder_mgr)
         agent.set_permission_mode(AUTO_MODE)
         agent.refresh_tools_schemas()
@@ -144,7 +148,7 @@ async def exit_plan_mode(file_path: str, agent: Agent, deps: AgentDeps) -> str:
             f"## 已批准的计划：\n{plan_content}"
         )
 
-    if choice == "2":
+    if choice == "manual":
         plan_mgr.exit_mode(agent, reminder_mgr)
         agent.refresh_tools_schemas()
         return (
@@ -153,7 +157,11 @@ async def exit_plan_mode(file_path: str, agent: Agent, deps: AgentDeps) -> str:
             f"## 已批准的计划：\n{plan_content}"
         )
 
-    return f"用户对计划的修改意见：{choice}\n请根据以上意见与用户进一步沟通需求。"
+    if feedback:  # 输入行提交修改意见：计划模式保持不变
+        return f"用户对计划的修改意见：{feedback}\n请根据以上意见与用户进一步沟通需求。"
+
+    # choice 与 feedback 皆空：用户按 Esc 取消，不退出计划模式
+    return "用户取消了操作，仍处于计划模式。可继续完善计划或再次提交。"
 
 
 # ── plan 专用文件工具 ───────────────────────────────────────────────

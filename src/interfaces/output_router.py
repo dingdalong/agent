@@ -19,6 +19,7 @@ from src.events.types import (
     ToolCallStarted,
 )
 from src.events.menu import (
+    ChoiceInputMenu,
     ChoiceMenu,
     FormMenu,
     InputMenu,
@@ -124,7 +125,7 @@ class OutputRouter:
             return
 
         # 控制面事件始终实时（全部菜单事件 + 权限通知 + 输出请求）
-        if isinstance(event, (InputMenu, ChoiceMenu, FormMenu, PermissionMenu, PermissionNotice, OutputRequested)):
+        if isinstance(event, (InputMenu, ChoiceMenu, ChoiceInputMenu, FormMenu, PermissionMenu, PermissionNotice, OutputRequested)):
             await self.ui.on_event(event)
             return
 

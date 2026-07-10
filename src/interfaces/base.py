@@ -22,6 +22,7 @@ from src.events.types import (
     ToolCallStarted,
 )
 from src.events.menu import (
+    ChoiceInputMenu,
     ChoiceMenu,
     FormMenu,
     FormQuestion,
@@ -163,6 +164,30 @@ class UserInterface(ABC):
         """
         ...
 
+    @abstractmethod
+    async def _read_choice_input(
+        self,
+        prompt: str,
+        options: list[tuple[str, str]],
+        descriptions: list[str] | None,
+        input_placeholder: str,
+        default_index: int,
+        markdown: bool = False,
+    ) -> str:
+        """以「选项列表 + 一行可编辑输入」读取一次作答。
+
+        Args:
+            prompt: 菜单上文提示。
+            options: 选项列表，每项为 (value, label)。
+            descriptions: 与 options 等长对齐的选项浅色说明副行；None 表示无。
+            input_placeholder: 输入行为空时的浅字占位文案。
+            default_index: 初始选中项下标。
+            markdown: 上文提示与选项标签是否按 Markdown 渲染。
+        Returns:
+            JSON 编码的 {"choice": "<value|''>", "text": "<typed|''>"} 对象串；空串表示取消。
+        """
+        ...
+
     async def _complete_user_request(
         self,
         request: MenuRequest | None,
@@ -235,6 +260,22 @@ class UserInterface(ABC):
                 self._active_user_request = event
                 try:
                     answer = await self._read_form(prompt, questions, markdown)
+                    event.complete(answer)
+                except (EOFError, KeyboardInterrupt):
+                    self._request_user_interrupt()
+                except BaseException as exc:
+                    event.fail(exc)
+                finally:
+                    if self._active_user_request is event:
+                        self._active_user_request = None
+            case ChoiceInputMenu(prompt=prompt, options=options, descriptions=descriptions,
+                                 input_placeholder=input_placeholder, default_index=default_index, markdown=markdown):
+                # 选项+输入允许空答案（Esc 取消），与 ChoiceMenu 同样单次读取、不走非空重读循环。
+                self._active_user_request = event
+                try:
+                    answer = await self._read_choice_input(
+                        prompt, options, descriptions, input_placeholder, default_index, markdown
+                    )
                     event.complete(answer)
                 except (EOFError, KeyboardInterrupt):
                     self._request_user_interrupt()

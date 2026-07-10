@@ -165,3 +165,38 @@ class FormMenu(MenuRequest):
     markdown: bool = False  # 上文提示与问题/选项标签是否按 Markdown 渲染
     level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
     type: Literal["form_menu"] = field(default="form_menu", init=False)
+
+
+@dataclass
+class ChoiceInputMenu(MenuRequest):
+    """请求 UI 以「选项列表 + 一行可编辑输入」读取一次作答，通过 future 返回 JSON
+    {"choice": "<value|''>", "text": "<typed|''>"} 串（空串表示取消）。
+
+    TUI 呈现（_mode="choice_input" → _render_choice_input）——上文为调用方 prompt（打印到
+    scrollback）；选项行（❯ 序号. 标签，可带浅色说明副行）与操作提示画在分割线上方的
+    choice_input_window，而「输入行」即分割线下方那条常驻输入框（› 前缀），并非窗口内的内联行。
+    下图为示意，实际渲染以 inline_ui.py 的 _render_choice_input 为准，可能随其改动而滞后：
+
+        计划审核
+        ❯ 1. 自动执行
+             在当前上下文中自动实施计划
+          2. 手动执行
+             退出计划模式，自行实施
+        ↑↓ 选择行 · Enter/数字 选项 · Esc 取消
+        ──────────────────────────────
+        › ▮
+        ──────────────────────────────
+
+    ↑↓ 在「各选项行 + 末尾输入行」间移动光标：停在选项行时该行 ❯ 反显，Enter/数字 → 提交该项
+    value；光标下移到输入行时选项均无 ❯、输入框转为可编辑，Enter 且非空 → 提交输入文本，空则不提交；
+    Esc → 取消。选项与输入互斥、以光标所在行为准。
+    返回值：JSON {"choice": "所选 value 或空", "text": "输入文本或空"}，取消为空串。
+    """
+    prompt: str = ""  # 菜单上文（打印到 scrollback 的提示）
+    options: list[tuple[str, str]] = field(default_factory=list)  # 选项列表，每项为 (value, label)
+    descriptions: list[str] | None = None  # 与 options 等长对齐的选项浅色说明副行；None 表示无
+    input_placeholder: str = ""  # 输入行为空时的浅字占位文案
+    default_index: int = 0  # 初始选中项下标
+    markdown: bool = False  # 上文提示与选项标签是否按 Markdown 渲染
+    level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
+    type: Literal["choice_input_menu"] = field(default="choice_input_menu", init=False)

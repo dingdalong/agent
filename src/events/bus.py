@@ -16,6 +16,7 @@ from src.events.types import (
     PermissionNotice,
 )
 from src.events.menu import (
+    ChoiceInputMenu,
     ChoiceMenu,
     FormMenu,
     FormQuestion,
@@ -196,6 +197,52 @@ class EventBus:
             return [], ""
         payload = json.loads(raw)
         return list(payload.get("answers", [])), str(payload.get("discussion", ""))
+
+    async def request_choice_input(
+        self,
+        prompt: str,
+        options: list[tuple[str, str]],
+        descriptions: list[str] | None = None,
+        input_placeholder: str = "",
+        default_index: int = 0,
+        source: str = "ui",
+        markdown: bool = False,
+    ) -> tuple[str, str]:
+        """通过事件队列请求 UI 以「选项列表 + 一行可编辑输入」读取一次作答。
+
+        作答由 UI 侧 JSON 编码进单个 Future[str] 返回，此处再解码为 (choice, text)，
+        复用既有 future 契约，无需拓宽泛型。
+
+        Args:
+            prompt: 菜单上文提示（打印到 scrollback）。
+            options: 选项列表，每项为 (value, label)。
+            descriptions: 与 options 等长对齐的选项浅色说明副行；None 表示无。
+            input_placeholder: 输入行为空时的浅字占位文案。
+            default_index: 初始选中项下标。
+            source: 事件来源标识。
+            markdown: 上文提示与选项标签是否按 Markdown 渲染。
+
+        Returns:
+            (choice, text)：选项行提交时 choice=所选 value、text=""；输入行提交时 choice=""、
+            text=输入文本；用户取消（Esc）时返回 ("", "")。
+        """
+        raw = await self._request(
+            ChoiceInputMenu(
+                timestamp=time.time(),
+                source=source,
+                prompt=prompt,
+                options=options,
+                descriptions=descriptions,
+                input_placeholder=input_placeholder,
+                default_index=default_index,
+                markdown=markdown,
+            ),
+            "choice_input",
+        )
+        if not raw:
+            return "", ""
+        payload = json.loads(raw)
+        return str(payload.get("choice", "")), str(payload.get("text", ""))
 
     async def notify_permission(
         self,
