@@ -37,7 +37,6 @@ if TYPE_CHECKING:
 
 from src.events.types import (
     CompactDelta,
-    FormQuestion,
     LLMCallCompleted,
     LLMCallStarted,
     PermissionNotice,
@@ -46,6 +45,7 @@ from src.events.types import (
     ToolCallCompleted,
     ToolCallStarted,
 )
+from src.events.menu import FormQuestion
 from src.interfaces.base import UserInterface
 from src.interfaces.completer import SlashCommandCompleter
 from src.interfaces.markdown_renderer import MarkdownStreamRenderer, render_markdown
@@ -160,7 +160,7 @@ class InlineInterface(UserInterface):
         # 缓冲可编辑条件：input 态恒可编辑；form 态仅聚焦自由文本题时可编辑；其余只读。
         self._cond_buffer_editable = Condition(self._buffer_editable)
 
-        # ---- 选择菜单（方向键导航，权限确认 / 任意 ChoiceRequested 共用）----
+        # ---- 选择菜单（方向键导航，权限确认 / 任意 ChoiceMenu 共用）----
         self._select_options: list[tuple[str, str]] | None = None  # 当前菜单选项 (value, label)，None 表示无活跃菜单
         self._select_index: int = 0  # 当前选中项下标
         self._select_cancel_value: str = ""  # Esc 取消时返回的 value（权限为 "deny"，通用选择为空串）
@@ -1504,7 +1504,7 @@ class InlineInterface(UserInterface):
     async def _read_choice(
         self, prompt: str, options: list[tuple[str, str]], default_index: int, markdown: bool = False
     ) -> str:
-        """以方向键选择菜单读取一次选择（通用 ChoiceRequested，如 /mode）。
+        """以方向键选择菜单读取一次选择（通用 ChoiceMenu，如 /mode）。
 
         非 TTY 走扁平降级（打印编号菜单 + 读数字，纯文本）。
 

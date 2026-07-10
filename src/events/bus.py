@@ -10,15 +10,18 @@ from typing import AsyncIterator, Literal
 
 from src.events.levels import EventLevel
 from src.events.types import (
-    ChoiceRequested,
     Event,
-    FormQuestion,
-    FormRequested,
-    InputRequested,
     InterruptRequested,
     OutputRequested,
     PermissionNotice,
-    PermissionRequested,
+)
+from src.events.menu import (
+    ChoiceMenu,
+    FormMenu,
+    FormQuestion,
+    InputMenu,
+    MenuRequest,
+    PermissionMenu,
 )
 
 _SENTINEL = object()
@@ -86,6 +89,21 @@ class EventBus:
             source=source,
         ))
 
+    async def _request(self, event: MenuRequest, kind: str) -> str:
+        """构造并发起一次需 UI 阻塞作答的菜单请求，等待 future 回传结果。
+
+        Args:
+            event: 待发布的 MenuRequest 子类实例；载荷字段由调用方填好，future 由本方法附加。
+            kind: 无订阅者时 NoEventSubscribers 的类别标识（如 "input"/"choice"/"form"/"permission"）。
+        Returns:
+            UI 经 future 回传的字符串结果。
+        """
+        if not self._subscribers:
+            raise NoEventSubscribers(kind)
+        event.future = asyncio.get_running_loop().create_future()
+        await self.emit(event)
+        return await event.future
+
     async def request_input(
         self, prompt: str, source: str = "ui", default: str = "", markdown: bool = False
     ) -> str:
@@ -99,19 +117,16 @@ class EventBus:
         Returns:
             用户提交的文本。
         """
-        if not self._subscribers:
-            raise NoEventSubscribers("input")
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[str] = loop.create_future()
-        await self.emit(InputRequested(
-            timestamp=time.time(),
-            source=source,
-            prompt=prompt,
-            default=default,
-            markdown=markdown,
-            future=future,
-        ))
-        return await future
+        return await self._request(
+            InputMenu(
+                timestamp=time.time(),
+                source=source,
+                prompt=prompt,
+                default=default,
+                markdown=markdown,
+            ),
+            "input",
+        )
 
     async def request_choice(
         self,
@@ -133,20 +148,17 @@ class EventBus:
         Returns:
             用户所选项的 value；空串表示用户取消（Esc）。
         """
-        if not self._subscribers:
-            raise NoEventSubscribers("choice")
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[str] = loop.create_future()
-        await self.emit(ChoiceRequested(
-            timestamp=time.time(),
-            source=source,
-            prompt=prompt,
-            options=options,
-            default_index=default_index,
-            markdown=markdown,
-            future=future,
-        ))
-        return await future
+        return await self._request(
+            ChoiceMenu(
+                timestamp=time.time(),
+                source=source,
+                prompt=prompt,
+                options=options,
+                default_index=default_index,
+                markdown=markdown,
+            ),
+            "choice",
+        )
 
     async def request_form(
         self,
@@ -170,19 +182,16 @@ class EventBus:
             (answers, discussion)：answers 为与 questions 顺序对齐的答案列表，discussion 为讨论栏文本；
             用户取消（Esc）时返回 ([], "")。
         """
-        if not self._subscribers:
-            raise NoEventSubscribers("form")
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[str] = loop.create_future()
-        await self.emit(FormRequested(
-            timestamp=time.time(),
-            source=source,
-            prompt=prompt,
-            questions=questions,
-            markdown=markdown,
-            future=future,
-        ))
-        raw = await future
+        raw = await self._request(
+            FormMenu(
+                timestamp=time.time(),
+                source=source,
+                prompt=prompt,
+                questions=questions,
+                markdown=markdown,
+            ),
+            "form",
+        )
         if not raw:
             return [], ""
         payload = json.loads(raw)
@@ -224,20 +233,17 @@ class EventBus:
         Returns:
             用户的确认结果（yes/session/always/session_server/always_server/deny）。
         """
-        if not self._subscribers:
-            raise NoEventSubscribers("permission")
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[str] = loop.create_future()
-        await self.emit(PermissionRequested(
-            timestamp=time.time(),
-            source=source,
-            tool_name=tool_name,
-            detail=detail,
-            suggested_rules=suggested_rules or [],
-            mcp_server_rule=mcp_server_rule,
-            future=future,
-        ))
-        return await future
+        return await self._request(
+            PermissionMenu(
+                timestamp=time.time(),
+                source=source,
+                tool_name=tool_name,
+                detail=detail,
+                suggested_rules=suggested_rules or [],
+                mcp_server_rule=mcp_server_rule,
+            ),
+            "permission",
+        )
 
     async def subscribe(
         self,

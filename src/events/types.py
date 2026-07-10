@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass, field
-from typing import Literal, Union
+from typing import Literal
 
 from src.events.levels import EventLevel
 
@@ -19,23 +18,8 @@ class Event:
     type: str = ""
 
 
-@dataclass
-class UserInputRequest(Event):
-    """需要 UI 通过 future 返回用户输入的事件基类。"""
-
-    future: asyncio.Future[str] | None = None
-
-    def complete(self, value: str) -> None:
-        if self.future is not None and not self.future.done():
-            self.future.set_result(value)
-
-    def cancel(self) -> None:
-        if self.future is not None and not self.future.done():
-            self.future.cancel()
-
-    def fail(self, exc: BaseException) -> None:
-        if self.future is not None and not self.future.done():
-            self.future.set_exception(exc)
+# 交互式菜单事件（PermissionMenu/InputMenu/ChoiceMenu/FormMenu 及基类 MenuRequest、
+# 载荷 FormQuestion）见 src/events/menu.py；统一从 src.events 包出口导入。
 
 
 # --- PROGRESS 级别 ---
@@ -156,66 +140,6 @@ class PermissionNotice(Event):
 
 
 @dataclass
-class PermissionRequested(UserInputRequest):
-    """请求 UI 读取工具权限确认，并通过 future 返回结果。"""
-    tool_name: str = ""
-    detail: str = ""
-    suggested_rules: list[str] = field(default_factory=list)
-    mcp_server_rule: str | None = None  # MCP 工具的 server 级通配规则（mcp__<server>__*），供"信任整个 server"选项使用
-    level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
-    type: Literal["permission_requested"] = field(default="permission_requested", init=False)
-
-
-@dataclass
-class InputRequested(UserInputRequest):
-    """请求 UI 串行读取用户输入，并通过 future 返回结果。"""
-    prompt: str = ""
-    default: str = ""
-    markdown: bool = False  # 上文提示是否按 Markdown 渲染（如 ask_user 的问题）
-    level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
-    type: Literal["input_requested"] = field(default="input_requested", init=False)
-
-
-@dataclass
-class ChoiceRequested(UserInputRequest):
-    """请求 UI 以菜单读取一次选择，通过 future 返回所选 value（空串表示取消）。"""
-    prompt: str = ""  # 菜单上文（打印到 scrollback 的提示，如「权限模式（当前: default）」）
-    options: list[tuple[str, str]] = field(default_factory=list)  # 选项列表，每项为 (value, label)
-    default_index: int = 0  # 初始选中项下标
-    markdown: bool = False  # 上文提示与选项标签是否按 Markdown 渲染（如 ask_user）
-    level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
-    type: Literal["choice_requested"] = field(default="choice_requested", init=False)
-
-
-@dataclass
-class FormQuestion:
-    """单屏表单中的单个问题（纯数据，非 Event）。
-
-    Attributes:
-        question: 问题文本。
-        options: (value, label) 选项列表；非空时该题为选项菜单，None 时仅自由文本输入。
-        multi_select: 有 options 时是否允许勾选多项（True 为多选，False 为单选）。
-        header: 顶部标签栏用的简短标签（概括该题主旨），为空时标签栏回退显示「问题N」。
-        descriptions: 与 options 等长对齐的选项参考说明，逐项为该选项下方展示的浅色说明（空串表示无说明）；None 表示无任何说明。
-    """
-    question: str
-    options: list[tuple[str, str]] | None = None
-    multi_select: bool = False
-    header: str = ""
-    descriptions: list[str] | None = None
-
-
-@dataclass
-class FormRequested(UserInputRequest):
-    """请求 UI 以单屏表单读取多个问题的作答，通过 future 返回 JSON 编码的答案列表（空串表示取消）。"""
-    prompt: str = ""  # 表单上文提示（打印到 scrollback，如「🤖 提问」）
-    questions: list[FormQuestion] = field(default_factory=list)  # 问题列表，顺序即作答顺序
-    markdown: bool = False  # 上文提示与问题/选项标签是否按 Markdown 渲染
-    level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
-    type: Literal["form_requested"] = field(default="form_requested", init=False)
-
-
-@dataclass
 class AgentStateChanged(Event):
     """Agent 状态机状态转换。"""
     agent_id: str = ""
@@ -245,14 +169,3 @@ class SystemStateChanged(Event):
     """
     level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
     type: Literal["system_state_changed"] = field(default="system_state_changed", init=False)
-
-
-# 联合类型
-AgentEvent = Union[
-    InputRequested, OutputRequested, InterruptRequested,
-    PermissionNotice, PermissionRequested, ChoiceRequested, FormRequested,
-    CompactDelta, ToolCallCompleted, ToolCallStarted,
-    LLMCallCompleted, LLMCallStarted,
-    ResponseDelta, ThinkingDelta,
-    AgentStateChanged, SubagentLifecycle, SystemStateChanged,
-]

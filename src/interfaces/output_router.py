@@ -9,17 +9,20 @@ from dataclasses import dataclass, field
 from src.events.types import (
     CompactDelta,
     Event,
-    FormRequested,
-    InputRequested,
     LLMCallCompleted,
     OutputRequested,
     PermissionNotice,
-    PermissionRequested,
     ResponseDelta,
     SubagentLifecycle,
     ThinkingDelta,
     ToolCallCompleted,
     ToolCallStarted,
+)
+from src.events.menu import (
+    ChoiceMenu,
+    FormMenu,
+    InputMenu,
+    PermissionMenu,
 )
 from src.interfaces.base import UserInterface
 
@@ -69,7 +72,7 @@ class OutputRouter:
     在 _consume_events 与 ui.on_event 之间插入：
     - 主（前台）agent 事件实时转发到 UI 渲染
     - 子 agent 的流/工具事件按 agent 进缓冲转录，不交叉
-    - 控制面事件（输入/权限）始终实时转发
+    - 控制面事件（全部菜单事件 + 权限通知/输出请求）始终实时转发
     - SubagentLifecycle 自消费，维护 _agents 视图
     - 非 TTY 透传模式：全部实时转发、不缓存、无列表
     """
@@ -106,7 +109,7 @@ class OutputRouter:
         """按决策表分发事件。
 
         - 透传模式：全部实时转发（SubagentLifecycle 除外，直接丢弃）
-        - 控制面（输入/权限/输出请求）：始终实时
+        - 控制面（全部菜单事件 + 权限通知/输出请求）：始终实时
         - LLMCallCompleted：先按 agent 累计 token，再转发（保持 UI 会话累计）
         - SubagentLifecycle：自消费，维护 _agents 视图
         - CompactDelta：始终实时
@@ -120,8 +123,8 @@ class OutputRouter:
                 await self.ui.on_event(event)
             return
 
-        # 控制面事件始终实时
-        if isinstance(event, (InputRequested, PermissionRequested, PermissionNotice, OutputRequested, FormRequested)):
+        # 控制面事件始终实时（全部菜单事件 + 权限通知 + 输出请求）
+        if isinstance(event, (InputMenu, ChoiceMenu, FormMenu, PermissionMenu, PermissionNotice, OutputRequested)):
             await self.ui.on_event(event)
             return
 

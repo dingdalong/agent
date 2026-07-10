@@ -9,23 +9,25 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 
 from src.events.types import (
-    ChoiceRequested,
     CompactDelta,
     Event,
-    FormQuestion,
-    FormRequested,
-    InputRequested,
     LLMCallCompleted,
     LLMCallStarted,
     OutputRequested,
     PermissionNotice,
-    PermissionRequested,
     ResponseDelta,
     SystemStateChanged,
     ThinkingDelta,
     ToolCallCompleted,
     ToolCallStarted,
-    UserInputRequest,
+)
+from src.events.menu import (
+    ChoiceMenu,
+    FormMenu,
+    FormQuestion,
+    InputMenu,
+    MenuRequest,
+    PermissionMenu,
 )
 
 
@@ -42,7 +44,7 @@ class UserInterface(ABC):
     def __init__(self) -> None:
         self._request_interrupt: Callable[[], None] | None = None
         self._system_state_provider: Callable[[], SystemState] | None = None
-        self._active_user_request: UserInputRequest | None = None
+        self._active_user_request: MenuRequest | None = None
 
     @contextmanager
     def watch_interrupt(self, request_interrupt: Callable[[], None]):
@@ -163,7 +165,7 @@ class UserInterface(ABC):
 
     async def _complete_user_request(
         self,
-        request: UserInputRequest | None,
+        request: MenuRequest | None,
         reader,
     ) -> None:
         try:
@@ -198,7 +200,7 @@ class UserInterface(ABC):
         match event:
             case OutputRequested(content=content, markdown=markdown):
                 await self._write(content, markdown=markdown)
-            case InputRequested(prompt=prompt, default=default, markdown=markdown):
+            case InputMenu(prompt=prompt, default=default, markdown=markdown):
                 self._active_user_request = event
                 try:
                     next_prompt = prompt
@@ -215,7 +217,7 @@ class UserInterface(ABC):
                 finally:
                     if self._active_user_request is event:
                         self._active_user_request = None
-            case ChoiceRequested(prompt=prompt, options=options, default_index=default_index, markdown=markdown):
+            case ChoiceMenu(prompt=prompt, options=options, default_index=default_index, markdown=markdown):
                 # 选择请求允许空答案（取消），不能复用 _complete_user_request 的非空重读循环，故单次读取。
                 self._active_user_request = event
                 try:
@@ -228,8 +230,8 @@ class UserInterface(ABC):
                 finally:
                     if self._active_user_request is event:
                         self._active_user_request = None
-            case FormRequested(prompt=prompt, questions=questions, markdown=markdown):
-                # 表单允许空答案（Esc 取消），与 ChoiceRequested 同样单次读取、不走非空重读循环。
+            case FormMenu(prompt=prompt, questions=questions, markdown=markdown):
+                # 表单允许空答案（Esc 取消），与 ChoiceMenu 同样单次读取、不走非空重读循环。
                 self._active_user_request = event
                 try:
                     answer = await self._read_form(prompt, questions, markdown)
@@ -243,7 +245,7 @@ class UserInterface(ABC):
                         self._active_user_request = None
             case PermissionNotice():
                 await self.on_permission_notice(event)
-            case PermissionRequested(tool_name=tool_name, detail=detail, suggested_rules=suggested_rules, mcp_server_rule=mcp_server_rule):
+            case PermissionMenu(tool_name=tool_name, detail=detail, suggested_rules=suggested_rules, mcp_server_rule=mcp_server_rule):
                 self._active_user_request = event
                 try:
                     await self._complete_user_request(

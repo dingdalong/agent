@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
-from src.events.types import FormQuestion
+from src.events.menu import FormQuestion
 from src.tools.decorator import ToolPermission, tool
 
 if TYPE_CHECKING:
