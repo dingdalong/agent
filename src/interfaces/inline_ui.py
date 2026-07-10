@@ -372,11 +372,13 @@ class InlineInterface(UserInterface):
             self._agent_list_window,
             filler_window,
         ])
-        return Application(
+        app = Application(
             layout=Layout(root, focused_element=self._input_window),
             key_bindings=self._build_key_bindings(),
             refresh_interval=0.1,
         )
+        app.ttimeoutlen = 0.05  # 孤立 Esc 的转义冲刷等待：默认 0.5s→50ms，消除按 Esc 的体感延迟
+        return app
 
     def _make_separator_window(self) -> Window:
         """构造一行占满终端宽度的暗色分割线窗口，用于框住输入框（其上、下各放一条）。
@@ -2551,7 +2553,7 @@ class InlineInterface(UserInterface):
             event.app.invalidate()
 
         # Esc：列表聚焦时返回输入框
-        @bindings.add("escape", filter=_cond_list_focused)
+        @bindings.add("escape", filter=_cond_list_focused, eager=True)
         def _(event) -> None:
             event.app.layout.focus(self._input_window)
 
@@ -2570,7 +2572,7 @@ class InlineInterface(UserInterface):
             event.app.invalidate()
 
         # Esc：关闭转录面板，主对话原样恢复（select 态优先归选择菜单处理）
-        @bindings.add("escape", filter=_cond_viewing & ~_cond_select)
+        @bindings.add("escape", filter=_cond_viewing & ~_cond_select, eager=True)
         def _(event) -> None:
             self._viewing_uuid = None
             self._view_scroll = 0
