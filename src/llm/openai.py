@@ -44,15 +44,28 @@ class OpenAIProvider(LLMProvider):
         self,
         usage: object | None,
     ) -> dict[str, int | None] | None:
+        """把 Responses API 的 usage 归一化为统一 token 字典。
+
+        Responses API 的 usage.input_tokens 本就含缓存读取部分（与 DeepSeek/Ollama 的
+        prompt_tokens 口径一致），故直接用作 input_tokens。命中缓存的读取量在
+        usage.input_tokens_details.cached_tokens；该 SDK 的 InputTokensDetails 不含缓存写入
+        字段，cache_creation_input_tokens 恒为 None。
+
+        Args:
+            usage: OpenAI SDK 返回的 ResponseUsage 对象，可能为 None。
+
+        Returns:
+            统一口径的 token 字典；usage 为 None 时返回 None。
+        """
         if usage is None:
             return None
-        input_token_details = getattr(usage, "input_token_details", None)
+        input_tokens_details = getattr(usage, "input_tokens_details", None)
         return {
             "input_tokens": getattr(usage, "input_tokens", None),
             "output_tokens": getattr(usage, "output_tokens", None),
             "total_tokens": getattr(usage, "total_tokens", None),
-            "cache_read_input_tokens": getattr(input_token_details, "cached_tokens", None),
-            "cache_creation_input_tokens": getattr(input_token_details, "cache_creation_tokens", None),
+            "cache_read_input_tokens": getattr(input_tokens_details, "cached_tokens", None),
+            "cache_creation_input_tokens": None,
         }
 
     def _normalize_assistant_extra(self, msg: dict, norm_msg: dict, role: str) -> None:
@@ -61,8 +74,20 @@ class OpenAIProvider(LLMProvider):
 
     def _convert_to_input(
         self, messages: list[dict], prompt: list[dict] | None
-    ) -> tuple[str | None, list[dict]]:
-        """将 Chat Completions 格式的消息转换为 Responses API input 格式。"""
+    ) -> list[dict]:
+        """将 Chat Completions 格式的消息转换为 Responses API input 项列表。
+
+        系统/开发者提示词不写入 instructions 字段，而是合并为首条 developer 消息置于
+        input 首位——GPT-5 系列在 Responses API 上不缓存 instructions 里的系统提示词，
+        改走 input 首条 developer 消息才能进入可缓存前缀。
+
+        Args:
+            messages: Chat Completions 格式的对话消息列表。
+            prompt: 系统提示词消息列表（可为 None），拼在 messages 之前一并转换。
+
+        Returns:
+            Responses API 的 input 项列表；首条为承载系统提示词的 developer 消息（若有）。
+        """
         instructions_parts: list[str] = []
         input_items: list[dict] = []
 
@@ -106,8 +131,10 @@ class OpenAIProvider(LLMProvider):
                     "output": msg.get("content", ""),
                 })
 
-        instructions = "\n\n".join(instructions_parts) if instructions_parts else None
-        return instructions, input_items
+        instructions = "\n\n".join(instructions_parts)
+        if instructions:
+            input_items.insert(0, {"role": "developer", "content": instructions})
+        return input_items
 
     def _convert_tools(self, tools: list[ToolDict] | None) -> list[dict] | None:
         """将 Chat Completions 工具格式转换为 Responses API 格式。"""
@@ -135,7 +162,7 @@ class OpenAIProvider(LLMProvider):
         caller_uuid: str | None = None,
         enable_thinking: bool = True,
     ) -> LLMResponse:
-        instructions, input_items = self._convert_to_input(messages, prompt)
+        input_items = self._convert_to_input(messages, prompt)
         converted_tools = self._convert_tools(tools)
 
         kwargs: dict = {
@@ -143,14 +170,15 @@ class OpenAIProvider(LLMProvider):
             "input": input_items,
             "stream": True,
             "temperature": temperature,
+            # 跨重启稳定的路由键：同模型 + 同 agent 类型 → 同键，使稳定的系统提示词前缀
+            # 在 TTL 内可跨会话/重启复用（不含每进程随机的 uuid）。GPT-5.6+ 需此键才能可靠命中。
+            "prompt_cache_key": f"{self.model}:{caller_agent_type}" if caller_agent_type else self.model,
         }
         if enable_thinking:
             kwargs["reasoning"] = {
                 "effort": self.reasoning_effort,
                 "summary": "auto",
             }
-        if instructions:
-            kwargs["instructions"] = instructions
         if converted_tools:
             kwargs["tools"] = converted_tools
             kwargs["tool_choice"] = tool_choice or "auto"

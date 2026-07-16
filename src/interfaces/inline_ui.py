@@ -960,7 +960,7 @@ class InlineInterface(UserInterface):
         total_in = self._session_in_tokens
         hit_pct = (self._session_cache_read_tokens / total_in * 100) if total_in else 0.0
         line.append(f"↑{self._format_token_count(total_in)}")
-        line.append(f" ({hit_pct:.0f}%)", style="bright_black")
+        line.append(f" ({hit_pct:.1f}%)", style="bright_black")
         line.append(f" ↓{self._format_token_count(self._session_out_tokens)}")
 
     def _format_token_count(self, count: int) -> str:

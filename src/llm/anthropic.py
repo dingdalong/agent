@@ -205,6 +205,42 @@ class AnthropicProvider(LLMProvider):
         system = "\n\n".join(system_parts) if system_parts else None
         return system, merged
 
+    def _system_blocks(self, system: str) -> list[dict]:
+        """把系统提示词包成带缓存断点的单个文本块。
+
+        Anthropic 缓存排序为 tools → system → messages，system 断点即缓存 tools+system
+        整个稳定前缀。
+
+        Args:
+            system: 合并后的系统提示词文本。
+
+        Returns:
+            含单个 text 块的列表，该块带 ephemeral cache_control 断点。
+        """
+        return [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
+
+    def _apply_cache_control(self, messages: list[dict]) -> None:
+        """给消息列表最后一条消息的末个内容块打上缓存断点（就地修改）。
+
+        随对话增长逐轮增量缓存对话前缀：本轮在末块写断点，上一轮的断点即成为读命中。
+        content 为字符串时先包成单个 text 块；末块可为 text/tool_use/tool_result 任一类型。
+
+        Args:
+            messages: 已转换为 Claude 格式的消息列表（就地修改其末条）。
+
+        Returns:
+            无（就地修改 messages）。
+        """
+        if not messages:
+            return
+        last = messages[-1]
+        content = last.get("content")
+        if isinstance(content, str):
+            content = [{"type": "text", "text": content}]
+            last["content"] = content
+        if isinstance(content, list) and content:
+            content[-1] = {**content[-1], "cache_control": {"type": "ephemeral"}}
+
     def _merge_messages(self, messages: list[dict]) -> list[dict]:
         """合并连续的同角色消息（Claude API 要求严格交替 user/assistant）。"""
         if not messages:
@@ -259,6 +295,7 @@ class AnthropicProvider(LLMProvider):
     ) -> LLMResponse:
         system, claude_messages = self._convert_messages(messages, prompt)
         claude_tools = self._convert_tools(tools)
+        self._apply_cache_control(claude_messages)
 
         kwargs: dict = {
             "model": self.model,
@@ -274,7 +311,7 @@ class AnthropicProvider(LLMProvider):
             kwargs["thinking"] = {"type": "disabled"}
 
         if system:
-            kwargs["system"] = system
+            kwargs["system"] = self._system_blocks(system)
         if claude_tools:
             kwargs["tools"] = claude_tools
             kwargs["tool_choice"] = self._convert_tool_choice(
