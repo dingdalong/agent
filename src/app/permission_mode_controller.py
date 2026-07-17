@@ -30,9 +30,11 @@ class PermissionModeController:
         self.install_state_provider()
 
     def install_state_provider(self) -> None:
-        """向 UI 注册权限模式状态提供函数。
+        """向 UI 注册系统状态提供函数（pull 模型）。
 
-        状态条显示主 agent 的当前模式；agent 尚未绑定时回退到 default_mode。
+        状态条显示主 agent 的当前权限模式与上下文占用；agent 尚未绑定时权限模式回退到
+        default_mode、上下文占用为 0。闭包只持有主 agent 引用，故上下文占用天然只反映
+        主对话，不被子 agent 调用污染。
         """
         self.ui.set_system_state_provider(
             lambda: SystemState(
@@ -40,7 +42,13 @@ class PermissionModeController:
                     self.agent.permission_mode.value
                     if self.agent is not None
                     else self.permission_mgr.default_mode.value
-                )
+                ),
+                context_used_tokens=(
+                    self.agent.last_input_tokens if self.agent is not None else 0
+                ),
+                context_limit=(
+                    self.agent.llm.context_limit if self.agent is not None else 0
+                ),
             )
         )
 

@@ -112,6 +112,9 @@ class Agent:
 
     def __post_init__(self):
         self.uuid = uuid.uuid4()
+        # 最近一次 LLM 调用提交给模型的输入 token（含缓存读/写），取自 LLM 返回 usage，即当前上下文占用量。
+        # 作为实例字段，/clear 新建 Agent 时天然从 0 起。
+        self.last_input_tokens: int = 0
         # 未显式指定权限模式时回退到 permission_mgr.default_mode（缺失则全局 DEFAULT_MODE）
         if self.permission_mode is None:
             from src.mgr.permission_mgr import DEFAULT_MODE
@@ -575,6 +578,11 @@ class Agent:
             if self.llm.is_context_too_long_error(exc):
                 return AgentState.CONTEXT_OVERFLOW
             raise
+        # 记录本次调用的准确输入 token 作为当前上下文占用量；缺字段时保留上一次值不清零。
+        if ctx.response.token_usage:
+            used = ctx.response.token_usage.get("input_tokens")
+            if used is not None:
+                self.last_input_tokens = used
         return AgentState.PROCESS_RESPONSE
 
     async def _on_process_response(self, ctx: RunContext) -> AgentState:

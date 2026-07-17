@@ -38,6 +38,8 @@ class SystemState:
     """UI 可查询的系统状态。"""
 
     permission_mode: str = "default"
+    context_used_tokens: int = 0  # 主 agent 最近一次 LLM 调用提交的输入 token（含缓存），即当前上下文占用量
+    context_limit: int = 0  # 主 agent 模型的上下文窗口上限；为 0 表示未知（仅显示占用 token，不算百分比）
 
 
 class UserInterface(ABC):

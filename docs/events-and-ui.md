@@ -66,7 +66,7 @@
 - **流收尾**：任何非 `ThinkingDelta`/`ResponseDelta` 事件到达前，先收尾未结束的思考流/回应流（`_end_streams_for`），保证输出不交叉。
 - **交互事件**（`InputRequested`/`ChoiceRequested`/`PermissionRequested`）：记为 `_active_user_request`，经 `_complete_user_request` 读取并回填 `future`；中断时 `cancel_active_input()` 取消。
 - **展示事件**：转发到可覆盖的 `on_*` 钩子（`on_response_delta`、`on_thinking_delta`、`on_tool_call_started/completed`、`on_llm_call_started/completed`、`on_compact_delta`、`on_permission_notice`），基类默认无操作，由具体 UI 实现渲染。
-- **系统状态**：`SystemStateChanged` → `on_system_state_changed()`；UI 经 `get_system_state()`（pull 模型，返回 `SystemState(permission_mode)`）读取最新状态。
+- **系统状态**：`SystemStateChanged` → `on_system_state_changed()`；UI 经 `get_system_state()`（pull 模型，返回 `SystemState(permission_mode, context_used_tokens, context_limit)`）读取最新状态。状态提供函数由 `PermissionModeController.install_state_provider` 注册，闭包只持有主 agent 引用：`context_used_tokens` 取主 agent 的 `last_input_tokens`（最近一次 LLM 调用返回 usage 中提交给模型的输入 token，含缓存，即当前上下文占用量），`context_limit` 取 `agent.llm.context_limit`；子 agent 是独立实例，不污染该显示。
 
 子类须实现四个抽象方法：`_write`、`_read_input`、`_read_permission`、`_read_choice`。
 
@@ -76,7 +76,7 @@
 
 ### 状态栏与布局
 
-底部常驻区域按需渲染（`_render_*` 系列）：活动行（当前 agent + spinner + 计时）、核心状态（权限模式、token 累计）、子 agent 列表、转录覆盖面板、选择菜单、斜杠命令补全下拉、分隔线。
+底部常驻区域按需渲染（`_render_*` 系列）：活动行（当前 agent + spinner + 计时）、核心状态、子 agent 列表、转录覆盖面板、选择菜单、斜杠命令补全下拉、分隔线。核心状态行（`_append_core_status`）依次为：权限模式、token 段（本会话累计 `↑总输入 (缓存命中%) ↓输出`，`_append_token_segment`）、上下文占用段（`上下文 XXk(N%)`，`_append_context_segment`，XXk = 当前上下文占用 token，N% = XXk / `context_limit`，百分比 ≥90% 红、≥80% 黄预警临近自动压缩；`context_limit` 为 0 时无法算百分比，仅显示「上下文 XXk」不着色）、耗时。
 
 ### 三种交互模式与按键
 

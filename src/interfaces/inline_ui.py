@@ -1034,19 +1034,46 @@ class InlineInterface(UserInterface):
             return str(arguments)
 
     def _append_core_status(self, line: Text, elapsed: float) -> None:
-        """把核心状态段「<权限模式> (Shift+Tab 切换) · ↑总输入 (缓存命中%) ↓输出 · <耗时>s」原地追加。
+        """把核心状态段「<权限模式> (Shift+Tab 切换) · ↑总输入 (缓存命中%) ↓输出 · 上下文 XXk(N%) · <耗时>s」原地追加。
 
         Args:
             line: 目标 Rich Text，原地追加内容。
             elapsed: 要显示的耗时秒数。处理态传本回合实时累计耗时，可输入态传上一回合的最终耗时。
         """
-        line.append(self.get_system_state().permission_mode)
+        state = self.get_system_state()
+        line.append(state.permission_mode)
         if self._permission_mode_toggle_handler is not None:
             line.append(" (Shift+Tab 切换)", style="bright_black")
         line.append("  ·  ", style="bright_black")
         self._append_token_segment(line)
         line.append("  ·  ", style="bright_black")
+        self._append_context_segment(line, state.context_used_tokens, state.context_limit)
+        line.append("  ·  ", style="bright_black")
         line.append(f"{elapsed:.1f}s")
+
+    def _append_context_segment(self, line: Text, used: int, limit: int) -> None:
+        """把「上下文 XXk(N%)」当前上下文占用段原地追加到给定 Text。
+
+        XXk = 主 agent 最近一次 LLM 调用提交的输入 token（含缓存），即当前上下文占用量；
+        N% = XXk / 上下文窗口上限，按阈值着色以预警临近自动压缩（默认 0.8）：≥90% 红、≥80% 黄、否则暗灰。
+        窗口上限未知（limit <= 0）时无法计算百分比，仅显示「上下文 XXk」，不着色。
+
+        Args:
+            line: 目标 Rich Text，原地追加内容。
+            used: 当前上下文占用的输入 token 数。
+            limit: 上下文窗口上限；<= 0 表示未知。
+        """
+        line.append(f"上下文 {self._format_token_count(used)}")
+        if limit <= 0:
+            return
+        pct = used / limit * 100
+        if pct >= 90:
+            pct_style = "red"
+        elif pct >= 80:
+            pct_style = "yellow"
+        else:
+            pct_style = "bright_black"
+        line.append(f"({pct:.0f}%)", style=pct_style)
 
     def _append_token_segment(self, line: Text) -> None:
         """把「↑总输入 (缓存命中百分比) ↓输出」token 段原地追加到给定 Text。
