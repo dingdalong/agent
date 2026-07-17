@@ -39,10 +39,20 @@ class AgentApp:
                     continue
                 if result.exit_requested:
                     break
-                if result.command is not None and result.command[0] == "clear":
-                    agent = await self._reset_session(source="clear")
-                    await self.deps.event_bus.request_output("上下文已清理，所有组件已重载。\n")
-                    continue
+                if result.command is not None:
+                    cmd_name = result.command[0]
+                    if cmd_name == "clear":
+                        agent = await self._reset_session(source="clear")
+                        await self.deps.event_bus.request_output("上下文已清理，所有组件已重载。\n")
+                        continue
+                    if cmd_name == "agents":
+                        # 复用同一 agent（不 reset）：仅输出子 agent 摘要，会话历史保留
+                        if self.output_router is not None:
+                            summary = self.output_router.format_subagent_summary()
+                        else:
+                            summary = "子 agent 视图不可用。"
+                        await self.deps.event_bus.request_output(summary + "\n")
+                        continue
         finally:
             if self.deps.hooks_mgr is not None:
                 try:

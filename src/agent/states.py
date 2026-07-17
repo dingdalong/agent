@@ -10,6 +10,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("mode", "切换权限模式"),
     ("clear", "清空会话"),
     ("resume", "恢复历史会话"),
+    ("agents", "查看本会话子 agent"),
 ]
 
 
@@ -76,11 +77,11 @@ class RunResult:
     """Agent.run() 的返回值。
 
     /plan 和 /mode 在 agent 内部处理，不会出现在 command 中。
-    仅 /clear 会通过 command 字段传递给 app 层。
+    /clear 与 /agents 会通过 command 字段上抛给 app 层处理。
 
     Attributes:
         final_text: LLM 最终输出文本。
-        command: 需要 app 层处理的斜杠命令（仅 /clear），无命令时为 None。
+        command: 需要 app 层处理的斜杠命令（/clear 或 /agents），无命令时为 None。
         exit_requested: 用户是否请求退出（输入 exit/quit 或输入被取消）。
         user_input: 用户原始输入文本。
     """

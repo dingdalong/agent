@@ -364,6 +364,10 @@ class Agent:
             if cmd_name == "clear":
                 ctx.command = cmd
                 return AgentState.DONE
+            if cmd_name == "agents":
+                # 子 agent 视图归 app 层 OutputRouter 持有，上抛 app 层渲染摘要
+                ctx.command = cmd
+                return AgentState.DONE
             if cmd_name == "resume":
                 await self._handle_resume_command(cmd_args)
                 return AgentState.REQUEST_INPUT

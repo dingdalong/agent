@@ -10,6 +10,7 @@ from src.events.types import (
     CompactDelta,
     Event,
     LLMCallCompleted,
+    LLMCallStarted,
     OutputRequested,
     PermissionNotice,
     ResponseDelta,
@@ -29,8 +30,8 @@ from src.interfaces.base import UserInterface
 
 # 每个 agent 转录的最大分段数（deque maxlen，append/逐出均为 O(1)；连续同类流文本合并进一段）
 _MAX_TRANSCRIPT_SEGMENTS = 400
-# 已完成 agent 视图最多保留数（超出按 ended_monotonic 逐出最旧项）
-_MAX_COMPLETED_VIEWS = 20
+# 历史子 agent 视图最多保留数（已从实时展示区移除、供 /agents 回看；超出按 ended_monotonic 逐出最旧项）
+_MAX_HISTORY_VIEWS = 50
 
 
 @dataclass
@@ -75,6 +76,7 @@ class OutputRouter:
     - 子 agent 的流/工具事件按 agent 进缓冲转录，不交叉
     - 控制面事件（全部菜单事件 + 权限通知/输出请求）始终实时转发
     - SubagentLifecycle 自消费，维护 _agents 视图
+    - 前台 LLMCallStarted 落在轮边界：先把本轮已完成子 agent 从 _agents 移入 _history，再转发
     - 非 TTY 透传模式：全部实时转发、不缓存、无列表
     """
 
@@ -88,7 +90,10 @@ class OutputRouter:
         self.ui = ui
         self.passthrough = passthrough
         self._foreground_uuid: str | None = None
+        # 实时展示集：主 agent + 当前轮尚在运行/刚完成的子 agent；每轮边界冲刷已完成项。
         self._agents: dict[str, _AgentView] = {}
+        # 历史集：已从实时展示区移除的已完成子 agent，供 /agents 回看，/clear 时清空。
+        self._history: dict[str, _AgentView] = {}
 
     # ---- 前台管理 ----
 
@@ -113,6 +118,7 @@ class OutputRouter:
         - 控制面（全部菜单事件 + 权限通知/输出请求）：始终实时
         - LLMCallCompleted：先按 agent 累计 token，再转发（保持 UI 会话累计）
         - SubagentLifecycle：自消费，维护 _agents 视图
+        - 前台 LLMCallStarted：落在轮边界，先冲刷本轮已完成子 agent 入 _history，再转发点亮 spinner
         - CompactDelta：始终实时
         - 流/工具事件：前台实时，后台进缓冲
 
@@ -142,6 +148,13 @@ class OutputRouter:
 
         # CompactDelta：始终实时（仅一行 [compact]，无正文交叉）
         if isinstance(event, CompactDelta):
+            await self.ui.on_event(event)
+            return
+
+        # 前台 LLMCallStarted：处于轮边界（子 agent 在父工具调用内同步跑完），
+        # 先把本轮已完成子 agent 从实时展示区移入历史，再转发（UI 据此点亮 spinner）。
+        if isinstance(event, LLMCallStarted) and getattr(event, "caller_uuid", None) == self._foreground_uuid:
+            self.flush_completed_subagents()
             await self.ui.on_event(event)
             return
 
@@ -181,7 +194,7 @@ class OutputRouter:
         caller_uuid = getattr(event, "caller_uuid", None)
         if caller_uuid is None:
             return
-        view = self._agents.get(caller_uuid)
+        view = self._find_view(caller_uuid)
         if view is None:
             return
         view.in_tokens += event.input_tokens or 0
@@ -201,7 +214,7 @@ class OutputRouter:
         caller_uuid: str | None = getattr(event, "caller_uuid", None)
         if caller_uuid is None:
             return
-        view = self._agents.get(caller_uuid)
+        view = self._find_view(caller_uuid)
         if view is None:
             # 防御性建项：正常情况下 SubagentLifecycle start 先于流事件到达
             agent_type = getattr(event, "caller_agent_type", None) or "?"
@@ -247,7 +260,7 @@ class OutputRouter:
         """处理 SubagentLifecycle：建/销 agent 视图。
 
         start: 建项、记起点 monotonic
-        end: 置 running=False、记终点 monotonic，保留转录供回看
+        end: 置 running=False、记终点 monotonic，保留转录供回看（本轮结束再由 flush 移入历史）
 
         Args:
             event: 子 agent 生命周期事件。
@@ -264,24 +277,35 @@ class OutputRouter:
             if view is not None:
                 view.running = False
                 view.ended_monotonic = time.monotonic()
-            self._prune_completed()
 
-    def _prune_completed(self) -> None:
-        """裁剪已完成的 agent 视图，至多保留最近 _MAX_COMPLETED_VIEWS 个。
+    def flush_completed_subagents(self) -> None:
+        """把实时展示集中已完成的子 agent 移入历史集（轮边界调用）。
 
-        运行中视图恒保留；仅按 ended_monotonic 逐出最旧的已完成项。
+        主 agent 与仍运行中的子 agent 保留在 _agents；已完成子 agent 迁入 _history，
+        随后对 _history 按 ended_monotonic 逐出最旧项至 _MAX_HISTORY_VIEWS。
         """
-        completed = [
-            (uid, v) for uid, v in self._agents.items()
-            if not v.is_main and not v.running and v.ended_monotonic is not None
-        ]
-        if len(completed) <= _MAX_COMPLETED_VIEWS:
+        for uid in list(self._agents.keys()):
+            view = self._agents[uid]
+            if not view.is_main and not view.running:
+                self._history[uid] = view
+                del self._agents[uid]
+        if len(self._history) <= _MAX_HISTORY_VIEWS:
             return
-        # 按 ended_monotonic 升序，移除最旧的
-        completed.sort(key=lambda x: x[1].ended_monotonic)  # type: ignore[arg-type]
-        to_remove = completed[:len(completed) - _MAX_COMPLETED_VIEWS]
-        for uid, _ in to_remove:
-            del self._agents[uid]
+        # 按 ended_monotonic 升序逐出最旧的（None 视为最旧）
+        ordered = sorted(self._history.items(), key=lambda x: x[1].ended_monotonic or 0.0)
+        for uid, _ in ordered[:len(self._history) - _MAX_HISTORY_VIEWS]:
+            del self._history[uid]
+
+    def _find_view(self, uuid: str) -> _AgentView | None:
+        """按 uuid 查找 agent 视图：先查实时集，再查历史集。
+
+        Args:
+            uuid: 目标 agent 的 uuid 字符串。
+
+        Returns:
+            匹配的 _AgentView，均无则 None。
+        """
+        return self._agents.get(uuid) or self._history.get(uuid)
 
     # ---- UI 数据接口 ----
 
@@ -326,13 +350,54 @@ class OutputRouter:
         Returns:
             分段列表，每项为 (kind, text)，kind ∈ "response"|"thinking"|"tool"；无该 agent 时为空列表。
         """
-        view = self._agents.get(uuid)
+        view = self._find_view(uuid)
         if view is None:
             return []
         return list(view.transcript)
 
+    def format_subagent_summary(self) -> str:
+        """生成本会话所有子 agent 的文本摘要列表（供 /agents 命令一次性输出）。
+
+        合并历史集（已完成，先）与实时集中存活的子 agent（运行中，后），排除主 agent，
+        每行格式：`◯ <agent_type>  <uid8>  <运行中|已完成>  ↑<in>(<hit>%) ↓<out> · <elapsed>s`。
+        无任何子 agent 时返回提示句。
+
+        Returns:
+            多行文本摘要；空会话返回「本会话尚未启动任何子 agent。」。
+        """
+        def fmt_tok(count: int) -> str:
+            """把 token 数格式化为紧凑字符串（≥1000 显示为 k）。"""
+            if count < 1000:
+                return str(count)
+            return f"{count / 1000:.1f}k"
+
+        # 历史（已完成）在前、实时存活子 agent 在后；均排除主 agent
+        ordered: list[tuple[str, _AgentView]] = list(self._history.items())
+        ordered += [(uid, v) for uid, v in self._agents.items() if not v.is_main]
+        if not ordered:
+            return "本会话尚未启动任何子 agent。"
+
+        now = time.monotonic()
+        lines = [f"本会话子 agent（{len(ordered)}）:"]
+        for uid, view in ordered:
+            if view.ended_monotonic is not None and view.started_monotonic is not None:
+                elapsed = view.ended_monotonic - view.started_monotonic
+            elif view.running and view.started_monotonic is not None:
+                elapsed = now - view.started_monotonic
+            else:
+                elapsed = 0.0
+            hit_pct = (view.cache_read / view.in_tokens * 100) if view.in_tokens else 0.0
+            status = "运行中" if view.running else "已完成"
+            uid8 = uid.split("-")[0] if uid else ""
+            lines.append(
+                f"◯ {view.agent_type}  {uid8}  {status}  "
+                f"↑{fmt_tok(view.in_tokens)}({hit_pct:.0f}%) ↓{fmt_tok(view.out_tokens)} · {elapsed:.1f}s"
+            )
+        return "\n".join(lines)
+
     # ---- 重置 ----
 
     def reload(self) -> None:
-        """/clear 时清空所有 agent 视图。"""
+        """/clear 时清空所有 agent 视图（实时集与历史集）。"""
         self._agents.clear()
+        self._history.clear()
