@@ -53,7 +53,10 @@ from src.interfaces.markdown_renderer import MarkdownStreamRenderer, render_mark
 # braille dots spinner 帧序列。
 _SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
-# 子 agent 转录覆盖面板的最大可见行数（参照 agent 列表 Dimension(max=8)）。
+# 状态栏 agent 列表最多同时显示的 agent 行数（不含上下滚动指示行）。
+_AGENT_LIST_MAX_ROWS = 8
+
+# 子 agent 转录覆盖面板的最大可见行数（参照 agent 列表 _AGENT_LIST_MAX_ROWS）。
 _TRANSCRIPT_PANEL_ROWS = 12
 
 # StdoutProxy 批量写入间隔（秒）。
@@ -351,11 +354,11 @@ class InlineInterface(UserInterface):
             dont_extend_height=True,
             height=Dimension(min=1),
         )
-        # agent 列表窗口：仅在有子 agent 时显示，max=8 行封顶
+        # agent 列表窗口：仅在有子 agent 时显示，封顶 = agent 行 + 上/下各一行滚动指示
         self._agent_list_inner = Window(
             FormattedTextControl(self._render_agent_list, focusable=True),
             dont_extend_height=True,
-            height=Dimension(max=8),
+            height=Dimension(max=_AGENT_LIST_MAX_ROWS + 2),
         )
         self._agent_list_window = ConditionalContainer(
             self._agent_list_inner,
@@ -771,7 +774,8 @@ class InlineInterface(UserInterface):
 
         主 agent 行置顶，其余子 agent 按插入序。每行格式：
         <标记> <agent_type> <uuid8> <状态> <token> · <elapsed>s
-        选中行反显（列表聚焦时）。行数 > 8 时按选中项裁出可视窗口段。
+        选中行反显（列表聚焦时）。行数 > _AGENT_LIST_MAX_ROWS 时按选中项裁出可视窗口段，
+        并在上/下方按需补一行「↑/↓ 还有 N 个」滚动指示（聚焦与否都显示）。
 
         Returns:
             可作为 Window 内容的 ANSI（多行）。
@@ -782,8 +786,8 @@ class InlineInterface(UserInterface):
         if not rows:
             return ANSI("")
 
-        # 滑动窗口：行数 > 8 时按选中项裁取可见段
-        max_visible = 8
+        # 滑动窗口：行数 > _AGENT_LIST_MAX_ROWS 时按选中项裁取可见段
+        max_visible = _AGENT_LIST_MAX_ROWS
         visible_rows = list(rows)
         start = 0
         if len(visible_rows) > max_visible:
@@ -796,6 +800,10 @@ class InlineInterface(UserInterface):
             start = max(0, min(start, len(visible_rows) - max_visible))
             visible_rows = visible_rows[start:start + max_visible]
 
+        # 被裁掉的上/下方 agent 数（未裁剪时均为 0）
+        hidden_above = start
+        hidden_below = len(rows) - (start + len(visible_rows))
+
         # 列表是否已聚焦（选中行反显）
         focused = (
             self._app is not None
@@ -804,7 +812,11 @@ class InlineInterface(UserInterface):
         )
 
         now = time.monotonic()
-        text = Text()
+        lines: list[Text] = []
+        if hidden_above > 0:
+            up = Text()
+            up.append(f"  ↑ 还有 {hidden_above} 个", style="cyan")
+            lines.append(up)
         for i, row in enumerate(visible_rows):
             actual_idx = start + i
             is_selected = focused and actual_idx == self._agent_selected_index
@@ -842,8 +854,17 @@ class InlineInterface(UserInterface):
                 line.append(f" ↓{self._format_token_count(row.out_tokens)}", style=style)
                 line.append(f"  ·  {elapsed:.1f}s", style=style)
 
-            text.append(line)
-            if i < len(visible_rows) - 1:
+            lines.append(line)
+
+        if hidden_below > 0:
+            dn = Text()
+            dn.append(f"  ↓ 还有 {hidden_below} 个", style="cyan")
+            lines.append(dn)
+
+        text = Text()
+        for j, ln in enumerate(lines):
+            text.append(ln)
+            if j < len(lines) - 1:
                 text.append("\n")
 
         with self._status_console.capture() as capture:
