@@ -23,6 +23,7 @@ from src.events.menu import (
     InputMenu,
     MenuRequest,
     PermissionMenu,
+    TranscriptView,
 )
 
 _SENTINEL = object()
@@ -243,6 +244,27 @@ class EventBus:
             return "", ""
         payload = json.loads(raw)
         return str(payload.get("choice", "")), str(payload.get("text", ""))
+
+    async def request_transcript_view(self, uuid: str, label: str, source: str = "ui") -> str:
+        """通过事件队列请求 UI 以只读分页面板查看某子 agent 的完整原始消息记录。
+
+        Args:
+            uuid: 目标子 agent 的 uuid 字符串。
+            label: 面板标题用的一行摘要。
+            source: 事件来源标识。
+
+        Returns:
+            恒为空串（只读查看；用户 Esc 关闭）。
+        """
+        return await self._request(
+            TranscriptView(
+                timestamp=time.time(),
+                source=source,
+                uuid=uuid,
+                label=label,
+            ),
+            "transcript",
+        )
 
     async def notify_permission(
         self,

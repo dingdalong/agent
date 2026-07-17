@@ -33,7 +33,7 @@ async def create_app(
     event_bus = EventBus(level=EventLevel.from_str(config_mgr.get_config("events").get("level", "progress")))
     ui = InlineInterface(slash_commands=SLASH_COMMANDS)
     output_router = OutputRouter(ui=ui, passthrough=not ui.is_tty)
-    ui.set_agent_source(output_router.agent_rows, output_router.transcript_segments)
+    ui.set_agent_source(output_router.agent_rows, output_router.transcript_segments, output_router.transcript_messages)
     tools_mgr = ToolsMgr()
     # 按激活角色的 feature 集门控 deps 层可插拔 Manager；未启用则注入 None，其工具从 schema 排除。
     feats = resolve_features(role_mgr.manifest.features if role_mgr.manifest else None)

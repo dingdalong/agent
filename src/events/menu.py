@@ -168,6 +168,34 @@ class FormMenu(MenuRequest):
 
 
 @dataclass
+class TranscriptView(MenuRequest):
+    """请求 UI 以只读分页面板查看某子 agent 的完整原始消息记录，通过 future 回传结果（恒 ""）。
+
+    由 /agents 浏览器在用户选中某子 agent 后发起。TUI 呈现（复用半屏转录覆盖面板 _render_transcript_panel /
+    _render_transcript_header）：面板按「是否已有完整原始记录」选源——已完成 agent 渲染其原始消息
+    （user/assistant/thinking/工具调用完整参数/工具完整返回），PgUp/PgDn 滚动，Esc 返回列表。下图为示意，
+    实际渲染以 inline_ui.py 的 _render_transcript_panel / _message_lines 为准，可能随其改动而滞后
+    （标题即选中项的 label，已含状态与 token）：
+
+        ── ◯ code  a1b2  已完成  ↑1.2k(80%) ↓340 · 5s ──  实时  ·  PgUp/PgDn 滚动 · Esc 返回列表
+        ▶ 用户
+        <初始任务提示…>
+        ● 助手
+        <正文…>
+          ⚙ read_file
+          { "path": "..." }
+          ⚙ 结果 (…)
+        <工具返回原文…>
+
+    这是只读查看而非作答菜单：无选项、无输入；Esc 经 _resolve_input("") 解开 future，返回 ""。
+    """
+    uuid: str = ""  # 目标子 agent 的 uuid 字符串
+    label: str = ""  # 面板标题用的一行摘要（来自 OutputRouter.subagent_choices）
+    level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
+    type: Literal["transcript_view"] = field(default="transcript_view", init=False)
+
+
+@dataclass
 class ChoiceInputMenu(MenuRequest):
     """请求 UI 以「选项列表 + 一行可编辑输入」读取一次作答，通过 future 返回 JSON
     {"choice": "<value|''>", "text": "<typed|''>"} 串（空串表示取消）。

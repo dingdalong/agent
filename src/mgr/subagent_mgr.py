@@ -186,7 +186,8 @@ class SubAgentMgr:
                     pass
             raise
         finally:
-            # 发射子 agent 生命周期结束事件（异常/取消也发）
+            # 发射子 agent 生命周期结束事件（异常/取消也发）；携完整原始消息记录供 /agents 回看。
+            # list(...) 浅拷贝快照：结束后 history 内各 dict 不再被改写。异常/取消路径捕获到当时的部分 history。
             if event_bus is not None:
                 await event_bus.emit(SubagentLifecycle(
                     timestamp=time.time(),
@@ -194,6 +195,7 @@ class SubAgentMgr:
                     agent_uuid=str(agent.uuid),
                     agent_type=agent_type,
                     phase="end",
+                    messages=list(agent.history),
                 ))
 
         if fire_hooks:

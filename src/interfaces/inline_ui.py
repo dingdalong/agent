@@ -197,7 +197,9 @@ class InlineInterface(UserInterface):
         # ---- agent 列表（方向键导航，仅在有子 agent 时显示）----
         self._rows_provider: Callable[[], list[AgentRow]] | None = None  # 注入自 OutputRouter.agent_rows
         self._transcript_provider: Callable[[str], list[tuple[str, str]]] | None = None  # 注入自 OutputRouter.transcript_segments
+        self._messages_provider: Callable[[str], list[dict]] | None = None  # 注入自 OutputRouter.transcript_messages（原始消息）
         self._transcript_cache: tuple[tuple, list[str]] | None = None  # 转录渲染缓存：(签名, 已渲染行)，签名不变复用
+        self._message_cache: tuple[tuple, list[str]] | None = None  # 原始消息渲染缓存：(签名, 已渲染行)，签名不变复用
         self._agent_selected_index: int = 0  # 列表聚焦时的选中行索引
         self._agent_list_window: ConditionalContainer | None = None  # 列表容器（_build_application 中创建）
         self._agent_list_inner: Window | None = None  # 列表内部 Window（供 has_focus / layout.focus 使用）
@@ -206,6 +208,10 @@ class InlineInterface(UserInterface):
         # ---- 子 agent 转录覆盖面板（半屏、实时跟随）----
         self._viewing_uuid: str | None = None  # 当前查看转录的子 agent uuid；None 表示未在查看（即面板可见性开关）
         self._view_scroll: int = 0  # 从底部向上滚动的可视行数；0 表示贴底实时跟随（tail -f）
+        # 查看态区分：False=实时非模态查看（列表 Enter 打开，渲染 transcript 分段，Esc 就地清）；
+        # True=/agents 调起的模态查看（渲染原始 history 消息，阻塞在 _input_future，Esc 解开 future 返回列表）。
+        self._viewing_invoked: bool = False
+        self._viewing_label: str = ""  # 调起态面板标题用的一行摘要（来自 OutputRouter.subagent_choices）
 
     @property
     def _accepting(self) -> bool:
@@ -858,47 +864,65 @@ class InlineInterface(UserInterface):
         return None
 
     def _render_transcript_header(self) -> ANSI:
-        """渲染转录面板顶部标题行：「── <agent_type> <uuid8>（运行中/已完成）── <跟随态> · PgUp/PgDn 滚动 · Esc 关闭」。
+        """渲染转录面板顶部标题行：「── <标题>（状态）── <跟随态> · PgUp/PgDn 滚动 · <退出提示>」。
 
+        两态：
+        - 实时态（列表 Enter 打开）：标题取实时行 label，状态运行中/已完成（rows 中查不到则退化 uuid8 + 已结束），退出提示「Esc 关闭」。
+        - 调起态（/agents 打开，_viewing_invoked）：标题取 _viewing_label（已含状态与 token，故 status 留空不再重复），退出提示「Esc 返回列表」。
         跟随态：_view_scroll==0 显示「实时」，否则显示「已上滚 N 行」。
-        agent 已被裁剪（rows 中查不到）时退化显示 uuid8 + 「已结束」。
 
         Returns:
             可作为 Window 内容的 ANSI（单行标题）。
         """
-        uid8 = self._viewing_uuid.split("-")[0] if self._viewing_uuid else ""
-        row = self._viewing_row()
-        if row is not None:
-            label = self._agent_label(row.agent_type, row.uuid)
-            status = "运行中" if row.running else "已完成"
+        if self._viewing_invoked:
+            label = self._viewing_label
+            status = ""  # _viewing_label 已含「已完成 ↑tok ↓tok」等状态，避免重复
+            exit_hint = "Esc 返回列表"
         else:
-            label = uid8
-            status = "已结束"
+            uid8 = self._viewing_uuid.split("-")[0] if self._viewing_uuid else ""
+            row = self._viewing_row()
+            if row is not None:
+                label = self._agent_label(row.agent_type, row.uuid)
+                status = "运行中" if row.running else "已完成"
+            else:
+                label = uid8
+                status = "已结束"
+            exit_hint = "Esc 关闭"
         follow = "实时" if self._view_scroll == 0 else f"已上滚 {self._view_scroll} 行"
         header = Text()
         header.append("── ", style="bright_black")
         header.append(label, style="bold")
-        header.append(f"（{status}）", style="bright_black")
+        if status:
+            header.append(f"（{status}）", style="bright_black")
         header.append(" ──  ", style="bright_black")
         header.append(follow, style="cyan")
-        header.append("  ·  PgUp/PgDn 滚动 · Esc 关闭", style="bright_black")
+        header.append(f"  ·  PgUp/PgDn 滚动 · {exit_hint}", style="bright_black")
         with self._status_console.capture() as capture:
             self._status_console.print(header, end="")
         return ANSI(capture.get())
 
     def _render_transcript_panel(self) -> ANSI:
-        """渲染转录面板内容：把当前查看 agent 的转录按宽度折行后，切出贴底（或上滚后）的可视段。
+        """渲染转录面板内容：把当前查看 agent 的内容按宽度折行后，切出贴底（或上滚后）的可视段。
 
-        借常驻 App 的 100ms 重绘实现实时跟随（tail -f）：_view_scroll==0 时恒切末段。
-        _view_scroll 在此就地夹取到合法上界，使越界的 PgUp 自然停在顶部。
+        数据源按「是否已有完整原始记录」决定，与调起方式（实时列表 / `/agents`）无关：
+        - 已完成（messages_provider 返回非空）→ 渲染完整原始消息（_message_lines）；
+        - 运行中（尚无原始快照）→ 渲染实时增量分段（_transcript_lines），借 100ms 重绘实现 tail -f。
+        故实时查看一个运行中的子 agent，待其完成后面板会就地升级为完整原始记录。
+        _view_scroll==0 时恒切末段；_view_scroll 在此就地夹取到合法上界，使越界的 PgUp 自然停在顶部。
 
         Returns:
             可作为 Window 内容的 ANSI（至多 _TRANSCRIPT_PANEL_ROWS 行）。
         """
-        if self._transcript_provider is None or self._viewing_uuid is None:
+        if self._viewing_uuid is None:
             return ANSI("")
-        segments = self._transcript_provider(self._viewing_uuid)
-        lines = self._transcript_lines(self._viewing_uuid, segments)
+        uuid = self._viewing_uuid
+        messages = self._messages_provider(uuid) if self._messages_provider is not None else []
+        if messages:  # 已完成：完整原始消息
+            lines = self._message_lines(uuid, messages)
+        elif self._transcript_provider is not None:  # 运行中：实时增量分段
+            lines = self._transcript_lines(uuid, self._transcript_provider(uuid))
+        else:
+            return ANSI("")
         max_scroll = max(0, len(lines) - _TRANSCRIPT_PANEL_ROWS)
         self._view_scroll = min(self._view_scroll, max_scroll)  # 就地夹取上界
         start = max_scroll - self._view_scroll
@@ -932,6 +956,82 @@ class InlineInterface(UserInterface):
         lines = "".join(parts).split("\n")
         self._transcript_cache = (signature, lines)
         return lines
+
+    def _message_lines(self, uuid: str, messages: list[dict]) -> list[str]:
+        """把某子 agent 的完整原始消息（Agent.history）渲染为可滚动的 ANSI 行列表（已完成 agent 查看用）。
+
+        逐条按 role 完整渲染、不截断：user→「▶ 用户」+原文；assistant→「● 助手」+思考(dim)+正文+
+        每个工具调用「⚙ <工具名>」+美化 JSON 参数；tool→「⚙ 结果 (<tool_call_id 末段>)」+返回原文。
+        带缓存：签名 = (uuid, 消息条数, 内容总长, 渲染宽度)；签名不变直接复用，避免每帧重渲大 history。
+
+        Args:
+            uuid: 目标子 agent 的 uuid（参与缓存签名，切换 agent 即失效）。
+            messages: 该 agent 的完整原始消息列表（调用方已保证非空）。
+        Returns:
+            渲染后的 ANSI 文本按 "\\n" 切分的行列表。
+        """
+        content_len = sum(len(str(m.get("content") or "")) for m in messages)
+        signature = (uuid, len(messages), content_len, self._render_width)
+        if self._message_cache is not None and self._message_cache[0] == signature:
+            return self._message_cache[1]
+        text = Text()
+        for msg in messages:
+            self._append_message(text, msg)
+        with self._status_console.capture() as capture:
+            self._status_console.print(text, end="")
+        lines = capture.get().split("\n")
+        self._message_cache = (signature, lines)
+        return lines
+
+    def _append_message(self, text: Text, msg: dict) -> None:
+        """把单条原始消息 dict 按 role 完整追加到给定 Rich Text（供 _message_lines 逐条调用）。
+
+        Args:
+            text: 目标 Rich Text，原地追加渲染内容。
+            msg: 单条消息 dict（OpenAI 归一化 schema：role/content/tool_calls/reasoning* 等）。
+        """
+        role = msg.get("role", "")
+        if role == "user":
+            text.append("\n▶ 用户\n", style="bold cyan")
+            text.append(str(msg.get("content") or ""))
+            text.append("\n")
+        elif role == "assistant":
+            text.append("\n● 助手\n", style="bold green")
+            thinking = msg.get("reasoning_content") or msg.get("reasoning")
+            if thinking:
+                text.append(str(thinking), style="dim")
+                text.append("\n")
+            content = msg.get("content")
+            if content:
+                text.append(str(content))
+                text.append("\n")
+            for call in msg.get("tool_calls") or []:
+                fn = call.get("function", {})
+                text.append(f"  ⚙ {fn.get('name', '')}\n", style="yellow")
+                text.append(self._format_tool_arguments(fn.get("arguments", "")))
+                text.append("\n")
+        elif role == "tool":
+            tail = str(msg.get("tool_call_id") or "").split("-")[0]
+            text.append(f"\n  ⚙ 结果 ({tail})\n", style="bright_black")
+            text.append(str(msg.get("content") or ""))
+            text.append("\n")
+        else:  # 未知 role：原样标注，保证不丢信息
+            text.append(f"\n[{role}]\n", style="bright_black")
+            text.append(str(msg.get("content") or ""))
+            text.append("\n")
+
+    def _format_tool_arguments(self, arguments: str) -> str:
+        """把工具调用的 arguments（JSON 串）美化为缩进文本；解析失败回退原串。
+
+        Args:
+            arguments: assistant 消息里工具调用的 function.arguments 原始字符串。
+        Returns:
+            美化后的多行 JSON 文本，或原始串（非合法 JSON 时）。
+        """
+        try:
+            return json.dumps(json.loads(arguments), ensure_ascii=False, indent=2)
+        except (json.JSONDecodeError, TypeError):
+            return str(arguments)
 
     def _append_core_status(self, line: Text, elapsed: float) -> None:
         """把核心状态段「<权限模式> (Shift+Tab 切换) · ↑总输入 (缓存命中%) ↓输出 · <耗时>s」原地追加。
@@ -979,15 +1079,18 @@ class InlineInterface(UserInterface):
         self,
         rows_provider: Callable[[], list[AgentRow]],
         transcript_provider: Callable[[str], list[tuple[str, str]]],
+        messages_provider: Callable[[str], list[dict]] | None = None,
     ) -> None:
-        """注入 agent 列表数据源与转录查询函数（来自 OutputRouter）。
+        """注入 agent 列表数据源、实时转录查询函数与原始消息查询函数（来自 OutputRouter）。
 
         Args:
             rows_provider: 返回 agent 行快照列表的无参 callable。
-            transcript_provider: 接受 uuid 返回转录分段 (kind, text) 列表的 callable。
+            transcript_provider: 接受 uuid 返回转录分段 (kind, text) 列表的 callable（实时查看用）。
+            messages_provider: 接受 uuid 返回完整原始消息 dict 列表的 callable（/agents 调起查看用）。
         """
         self._rows_provider = rows_provider
         self._transcript_provider = transcript_provider
+        self._messages_provider = messages_provider
 
     def _has_sub_agents(self) -> bool:
         """检查当前是否有子 agent（列表是否应该可见）。
@@ -1190,6 +1293,42 @@ class InlineInterface(UserInterface):
         finally:
             self._input_future = None
             self._select_options = None
+            self._enter_processing_idle()
+
+    async def _await_transcript_view(self, uuid: str, label: str) -> str:
+        """进入 /agents 调起的模态原始消息查看：显示半屏面板，await 由 PgUp/PgDn/Esc 绑定驱动的 future。
+
+        与实时查看（列表 Enter 打开）区别：置 _viewing_invoked=True 使面板渲染原始 history 消息，
+        Esc 经 _resolve_input("") 解开本 future（而非就地清面板），令 request_transcript_view 返回、
+        app 循环回到列表。仿 _await_selection：若焦点在 agent 列表先抢回输入框。
+
+        Args:
+            uuid: 目标子 agent 的 uuid 字符串。
+            label: 面板标题用的一行摘要。
+        Returns:
+            恒为空串（只读查看）。
+        """
+        loop = asyncio.get_running_loop()
+        self._viewing_uuid = uuid
+        self._viewing_invoked = True
+        self._viewing_label = label
+        self._view_scroll = 0
+        self._input_future = loop.create_future()
+        if (
+            self._app is not None
+            and self._agent_list_inner is not None
+            and self._app.layout.has_focus(self._agent_list_inner)
+        ):
+            self._app.layout.focus(self._input_window)
+        self._app.invalidate()
+        try:
+            return await self._input_future
+        finally:
+            self._input_future = None
+            self._viewing_uuid = None
+            self._viewing_invoked = False
+            self._viewing_label = ""
+            self._view_scroll = 0
             self._enter_processing_idle()
 
     def _buffer_editable(self) -> bool:
@@ -1705,6 +1844,22 @@ class InlineInterface(UserInterface):
             else:
                 self._print_rich(prompt)
         return await self._await_selection(options, default_index, cancel_value="", markdown=markdown)
+
+    async def _read_transcript_view(self, uuid: str, label: str) -> str:
+        """查看某子 agent 的完整原始消息记录（/agents 调起）。
+
+        TTY 走半屏模态面板（_await_transcript_view）；非 TTY 为 no-op —— app 循环在非 TTY 下改用
+        format_subagent_summary 文本回退、不会调起本读取，故此分支仅为满足抽象契约的稳健兜底。
+
+        Args:
+            uuid: 目标子 agent 的 uuid 字符串。
+            label: 面板标题用的一行摘要。
+        Returns:
+            恒为空串（只读查看）。
+        """
+        if not self._tty:
+            return ""
+        return await self._await_transcript_view(uuid, label)
 
     async def _read_form(self, prompt: str, questions: list[FormQuestion], markdown: bool = False) -> str:
         """以单屏表单读取多个问题的作答（ask_user 多问题）。
@@ -2571,12 +2726,17 @@ class InlineInterface(UserInterface):
             self._view_scroll = max(0, self._view_scroll - (_TRANSCRIPT_PANEL_ROWS - 1))
             event.app.invalidate()
 
-        # Esc：关闭转录面板，主对话原样恢复（select 态优先归选择菜单处理）
+        # Esc：关闭转录面板（select 态优先归选择菜单处理）
+        # - 调起态（/agents）：解开 request_transcript_view 的 future，令 app 循环回到列表（收尾由 _await_transcript_view finally 做）
+        # - 实时态（列表 Enter）：就地清面板，主对话原样恢复
         @bindings.add("escape", filter=_cond_viewing & ~_cond_select, eager=True)
         def _(event) -> None:
-            self._viewing_uuid = None
-            self._view_scroll = 0
-            event.app.invalidate()
+            if self._viewing_invoked:
+                self._resolve_input("")
+            else:
+                self._viewing_uuid = None
+                self._view_scroll = 0
+                event.app.invalidate()
 
         return bindings
 

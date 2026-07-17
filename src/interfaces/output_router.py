@@ -25,6 +25,7 @@ from src.events.menu import (
     FormMenu,
     InputMenu,
     PermissionMenu,
+    TranscriptView,
 )
 from src.interfaces.base import UserInterface
 
@@ -32,6 +33,19 @@ from src.interfaces.base import UserInterface
 _MAX_TRANSCRIPT_SEGMENTS = 400
 # 历史子 agent 视图最多保留数（已从实时展示区移除、供 /agents 回看；超出按 ended_monotonic 逐出最旧项）
 _MAX_HISTORY_VIEWS = 50
+
+
+def _fmt_tok(count: int) -> str:
+    """把 token 数格式化为紧凑字符串（≥1000 显示为 k）。
+
+    Args:
+        count: token 数。
+    Returns:
+        紧凑字符串（如 "512"、"1.3k"）。
+    """
+    if count < 1000:
+        return str(count)
+    return f"{count / 1000:.1f}k"
 
 
 @dataclass
@@ -49,8 +63,12 @@ class _AgentView:
     cache_read: int = 0
     started_monotonic: float | None = None
     ended_monotonic: float | None = None
-    # 分段转录：每项为 (kind, text)，kind ∈ "response"|"thinking"|"tool"；供 UI 按类型分别渲染。
+    # 分段转录：每项为 (kind, text)，kind ∈ "response"|"thinking"|"tool"；供 UI 运行中实时渲染。
+    # 仅运行中有意义——子 agent 结束后 messages（完整原始记录）就位并接管查看，转录随即被清空释放。
     transcript: deque[tuple[str, str]] = field(default_factory=lambda: deque(maxlen=_MAX_TRANSCRIPT_SEGMENTS))
+    # 完整原始消息记录：子 agent 结束时由 SubagentLifecycle(phase="end") 携入（Agent.history 快照）；
+    # 就位后同时供实时列表查看与 /agents 回看（完整参数/结果，不截断）。运行中/主 agent 为 None。
+    messages: list[dict] | None = None
 
 
 @dataclass
@@ -131,7 +149,7 @@ class OutputRouter:
             return
 
         # 控制面事件始终实时（全部菜单事件 + 权限通知 + 输出请求）
-        if isinstance(event, (InputMenu, ChoiceMenu, ChoiceInputMenu, FormMenu, PermissionMenu, PermissionNotice, OutputRequested)):
+        if isinstance(event, (InputMenu, ChoiceMenu, ChoiceInputMenu, FormMenu, PermissionMenu, TranscriptView, PermissionNotice, OutputRequested)):
             await self.ui.on_event(event)
             return
 
@@ -260,7 +278,8 @@ class OutputRouter:
         """处理 SubagentLifecycle：建/销 agent 视图。
 
         start: 建项、记起点 monotonic
-        end: 置 running=False、记终点 monotonic，保留转录供回看（本轮结束再由 flush 移入历史）
+        end: 置 running=False、记终点 monotonic，存完整原始消息并清空实时预览转录（查看改渲原始消息）；
+             本轮结束再由 flush 移入历史。
 
         Args:
             event: 子 agent 生命周期事件。
@@ -277,6 +296,9 @@ class OutputRouter:
             if view is not None:
                 view.running = False
                 view.ended_monotonic = time.monotonic()
+                view.messages = event.messages
+                if event.messages:  # 完整原始记录就位后查看改渲它，实时预览转录不再被读取——清空释放冗余内存
+                    view.transcript.clear()
 
     def flush_completed_subagents(self) -> None:
         """把实时展示集中已完成的子 agent 移入历史集（轮边界调用）。
@@ -355,45 +377,78 @@ class OutputRouter:
             return []
         return list(view.transcript)
 
-    def format_subagent_summary(self) -> str:
-        """生成本会话所有子 agent 的文本摘要列表（供 /agents 命令一次性输出）。
+    def _ordered_subagents(self) -> list[tuple[str, _AgentView]]:
+        """返回本会话所有子 agent 视图（排除主 agent），历史（已完成）在前、实时存活在后。
 
-        合并历史集（已完成，先）与实时集中存活的子 agent（运行中，后），排除主 agent，
-        每行格式：`◯ <agent_type>  <uid8>  <运行中|已完成>  ↑<in>(<hit>%) ↓<out> · <elapsed>s`。
+        Returns:
+            (uuid, _AgentView) 列表，供文本摘要与选择菜单共用。
+        """
+        ordered: list[tuple[str, _AgentView]] = list(self._history.items())
+        ordered += [(uid, v) for uid, v in self._agents.items() if not v.is_main]
+        return ordered
+
+    def _format_view_line(self, uid: str, view: _AgentView) -> str:
+        """把单个子 agent 视图格式化为一行摘要（供文本摘要与选择菜单标签共用）。
+
+        格式：`◯ <agent_type>  <uid8>  <运行中|已完成>  ↑<in>(<hit>%) ↓<out> · <elapsed>s`。
+
+        Args:
+            uid: 子 agent uuid 字符串。
+            view: 对应的 _AgentView。
+        Returns:
+            单行摘要文本。
+        """
+        if view.ended_monotonic is not None and view.started_monotonic is not None:
+            elapsed = view.ended_monotonic - view.started_monotonic
+        elif view.running and view.started_monotonic is not None:
+            elapsed = time.monotonic() - view.started_monotonic
+        else:
+            elapsed = 0.0
+        hit_pct = (view.cache_read / view.in_tokens * 100) if view.in_tokens else 0.0
+        status = "运行中" if view.running else "已完成"
+        uid8 = uid.split("-")[0] if uid else ""
+        return (
+            f"◯ {view.agent_type}  {uid8}  {status}  "
+            f"↑{_fmt_tok(view.in_tokens)}({hit_pct:.0f}%) ↓{_fmt_tok(view.out_tokens)} · {elapsed:.1f}s"
+        )
+
+    def format_subagent_summary(self) -> str:
+        """生成本会话所有子 agent 的文本摘要列表（供非 TTY 回退一次性输出）。
+
+        合并历史集（已完成，先）与实时集中存活的子 agent（运行中，后），排除主 agent。
         无任何子 agent 时返回提示句。
 
         Returns:
             多行文本摘要；空会话返回「本会话尚未启动任何子 agent。」。
         """
-        def fmt_tok(count: int) -> str:
-            """把 token 数格式化为紧凑字符串（≥1000 显示为 k）。"""
-            if count < 1000:
-                return str(count)
-            return f"{count / 1000:.1f}k"
-
-        # 历史（已完成）在前、实时存活子 agent 在后；均排除主 agent
-        ordered: list[tuple[str, _AgentView]] = list(self._history.items())
-        ordered += [(uid, v) for uid, v in self._agents.items() if not v.is_main]
+        ordered = self._ordered_subagents()
         if not ordered:
             return "本会话尚未启动任何子 agent。"
-
-        now = time.monotonic()
         lines = [f"本会话子 agent（{len(ordered)}）:"]
-        for uid, view in ordered:
-            if view.ended_monotonic is not None and view.started_monotonic is not None:
-                elapsed = view.ended_monotonic - view.started_monotonic
-            elif view.running and view.started_monotonic is not None:
-                elapsed = now - view.started_monotonic
-            else:
-                elapsed = 0.0
-            hit_pct = (view.cache_read / view.in_tokens * 100) if view.in_tokens else 0.0
-            status = "运行中" if view.running else "已完成"
-            uid8 = uid.split("-")[0] if uid else ""
-            lines.append(
-                f"◯ {view.agent_type}  {uid8}  {status}  "
-                f"↑{fmt_tok(view.in_tokens)}({hit_pct:.0f}%) ↓{fmt_tok(view.out_tokens)} · {elapsed:.1f}s"
-            )
+        lines += [self._format_view_line(uid, view) for uid, view in ordered]
         return "\n".join(lines)
+
+    def subagent_choices(self) -> list[tuple[str, str]]:
+        """返回子 agent 选择项列表（供 /agents 交互选择菜单）。
+
+        Returns:
+            (uuid, 单行摘要标签) 列表；顺序同 format_subagent_summary（历史在前、实时存活在后）；
+            无子 agent 时为空列表。
+        """
+        return [(uid, self._format_view_line(uid, view)) for uid, view in self._ordered_subagents()]
+
+    def transcript_messages(self, uuid: str) -> list[dict]:
+        """返回指定 agent 的完整原始消息记录（供 /agents 回看原始消息）。
+
+        Args:
+            uuid: 目标 agent 的 uuid 字符串。
+        Returns:
+            原始消息 dict 列表（Agent.history 快照）；无该 agent 或未捕获时为空列表。
+        """
+        view = self._find_view(uuid)
+        if view is None or view.messages is None:
+            return []
+        return list(view.messages)
 
     # ---- 重置 ----
 

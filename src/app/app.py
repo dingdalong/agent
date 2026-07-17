@@ -9,6 +9,7 @@ from src.agent import Agent, AgentDeps
 from src.agent.states import RunResult
 from src.interfaces.output_router import OutputRouter
 from src.app.permission_mode_controller import PermissionModeController
+from src.events import NoEventSubscribers
 from src.events.types import InterruptRequested
 
 logger = logging.getLogger(__name__)
@@ -46,12 +47,8 @@ class AgentApp:
                         await self.deps.event_bus.request_output("上下文已清理，所有组件已重载。\n")
                         continue
                     if cmd_name == "agents":
-                        # 复用同一 agent（不 reset）：仅输出子 agent 摘要，会话历史保留
-                        if self.output_router is not None:
-                            summary = self.output_router.format_subagent_summary()
-                        else:
-                            summary = "子 agent 视图不可用。"
-                        await self.deps.event_bus.request_output(summary + "\n")
+                        # 复用同一 agent（不 reset）：弹出可选列表并回看子 agent 完整消息记录，会话历史保留
+                        await self._browse_subagents()
                         continue
         finally:
             if self.deps.hooks_mgr is not None:
@@ -70,6 +67,39 @@ class AgentApp:
                 consumer_task.cancel()
                 await asyncio.gather(consumer_task, return_exceptions=True)
             await self.deps.ui.stop()
+
+    async def _browse_subagents(self) -> None:
+        """处理 /agents 命令：弹出可方向键选择的子 agent 列表，选中后以只读面板回看其完整原始消息记录。
+
+        循环：每轮重取列表（运行中的子 agent 可能已完成）→ request_choice 选择 → 选中则
+        request_transcript_view 打开面板 → Esc 返回列表 → 直至列表 Esc 取消退出。非 TTY 环境
+        无富交互面板，退回打印纯文本摘要。
+        """
+        router = self.output_router
+        if router is None:
+            await self.deps.event_bus.request_output("子 agent 视图不可用。\n")
+            return
+        if not self.deps.ui.is_tty:
+            await self.deps.event_bus.request_output(router.format_subagent_summary() + "\n")
+            return
+        while True:
+            choices = router.subagent_choices()
+            if not choices:
+                await self.deps.event_bus.request_output("暂无子 agent 记录。\n")
+                return
+            try:
+                picked = await self.deps.event_bus.request_choice(
+                    "\n子 agent 历史（选择查看完整消息记录）", choices, 0
+                )
+            except (asyncio.CancelledError, KeyboardInterrupt, NoEventSubscribers):
+                return
+            if not picked:  # Esc 取消，退出浏览
+                return
+            label = next((lbl for uid, lbl in choices if uid == picked), picked)
+            try:
+                await self.deps.event_bus.request_transcript_view(picked, label)
+            except (asyncio.CancelledError, KeyboardInterrupt, NoEventSubscribers):
+                return
 
     async def _consume_events(self) -> None:
         """消费事件总线上的事件并通过 OutputRouter 分发。

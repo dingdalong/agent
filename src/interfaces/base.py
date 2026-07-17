@@ -29,6 +29,7 @@ from src.events.menu import (
     InputMenu,
     MenuRequest,
     PermissionMenu,
+    TranscriptView,
 )
 
 
@@ -188,6 +189,18 @@ class UserInterface(ABC):
         """
         ...
 
+    @abstractmethod
+    async def _read_transcript_view(self, uuid: str, label: str) -> str:
+        """以只读分页面板查看某子 agent 的完整原始消息记录。
+
+        Args:
+            uuid: 目标子 agent 的 uuid 字符串。
+            label: 面板标题用的一行摘要。
+        Returns:
+            恒为空串（只读查看；用户 Esc 关闭）。
+        """
+        ...
+
     async def _complete_user_request(
         self,
         request: MenuRequest | None,
@@ -276,6 +289,19 @@ class UserInterface(ABC):
                     answer = await self._read_choice_input(
                         prompt, options, descriptions, input_placeholder, default_index, markdown
                     )
+                    event.complete(answer)
+                except (EOFError, KeyboardInterrupt):
+                    self._request_user_interrupt()
+                except BaseException as exc:
+                    event.fail(exc)
+                finally:
+                    if self._active_user_request is event:
+                        self._active_user_request = None
+            case TranscriptView(uuid=uuid, label=label):
+                # 只读查看，恒回传 ""（Esc 关闭）；与 ChoiceMenu 同样单次读取、不走非空重读循环。
+                self._active_user_request = event
+                try:
+                    answer = await self._read_transcript_view(uuid, label)
                     event.complete(answer)
                 except (EOFError, KeyboardInterrupt):
                     self._request_user_interrupt()

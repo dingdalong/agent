@@ -152,10 +152,19 @@ class AgentStateChanged(Event):
 
 @dataclass
 class SubagentLifecycle(Event):
-    """子 agent 生命周期事件 — 由 subagent_mgr 在启动/结束时发射，供路由器维护 agent 视图。"""
+    """子 agent 生命周期事件 — 由 subagent_mgr 在启动/结束时发射，供路由器维护 agent 视图。
+
+    Attributes:
+        agent_uuid: 子 agent 实例 uuid 字符串。
+        agent_type: 子 agent 类型标识。
+        phase: "start" 启动 / "end" 结束。
+        messages: 仅 phase=="end" 携带 —— 子 agent 结束时的完整原始消息记录（Agent.history 浅拷贝），
+            供 /agents 回看；"start" 阶段为 None。
+    """
     agent_uuid: str = ""
     agent_type: str = ""
     phase: Literal["start", "end"] = "start"
+    messages: list[dict] | None = None
     level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
     type: Literal["subagent_lifecycle"] = field(default="subagent_lifecycle", init=False)
 
