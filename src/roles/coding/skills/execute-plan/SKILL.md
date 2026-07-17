@@ -21,10 +21,11 @@ description: 编码任务的执行与验收工作流。当已有一份批准或�
 目标：把计划的「任务分解」逐条落成可跟踪任务。
 
 1. 对计划「任务分解」中的每一条，调用 `task_create(subject, description)` 建任务：`subject` 用祈使句短标题，`description` 写明「目标 / 涉及文件 / 验证方式」。
-2. 任务间有先后依赖时，用 `task_update(task_id, add_blocked_by=[...])` 声明依赖，确保被依赖任务先完成。
-3. 委派实现某任务时，在 `task_delegator` 传 `task_id`——框架会自动将该任务标记为 `in_progress` 并设置 owner（无需再手动改状态）。
-4. 子 agent 返回**且你确认其验证通过后**，由你调用 `task_update(task_id, status="completed")` 标记完成（框架不会自动完成任务）。
-5. 用 `task_list` 跟踪进度，始终优先推进无未完成依赖的任务。
+2. 建完后核对完整性与互斥性：计划「涉及文件 / 影响面」中每一处改动都能对应到某条任务（不遗漏、不塞入范围外任务），任务间范围两两不重叠。发现缺口就补建任务，发现重叠就合并或重新划分边界，再进入实现。
+3. 任务间有先后依赖时，用 `task_update(task_id, add_blocked_by=[...])` 声明依赖，确保被依赖任务先完成。
+4. 委派实现某任务时，在 `task_delegator` 传 `task_id`——框架会自动将该任务标记为 `in_progress` 并设置 owner（无需再手动改状态）。
+5. 子 agent 返回**且你确认其验证通过后**，由你调用 `task_update(task_id, status="completed")` 标记完成（框架不会自动完成任务）。
+6. 用 `task_list` 跟踪进度，始终优先推进无未完成依赖的任务。
 
 ### 阶段 2：实现
 目标：委派 `coder` 完成每个实现任务。
