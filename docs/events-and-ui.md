@@ -87,7 +87,7 @@
 | 可输入态 | Enter 提交（补全选中时应用补全）；Ctrl+J / Shift+Enter 换行；Shift+Tab 切换权限模式；Ctrl+C 清空/中断；Ctrl+D 空缓冲 EOF |
 | select 态（选择菜单） | ↑↓ 移动、1–9 数字直选、Enter 确认、Esc 取消 |
 | 补全态（斜杠命令下拉） | ↓/Tab 下一项、↑ 上一项、Esc 关闭 |
-| agent 列表/转录面板 | ↓↑ 进入列表/导航/返回；列表内 Enter 打开子 agent 转录面板；面板内 PgUp/PgDn 滚动、Esc 关闭 |
+| agent 列表/转录面板 | ↓↑ 进入列表/导航/返回；列表内 Enter 打开子 agent 转录面板；面板内 ↑/↓ 整页滚动、Esc 关闭 |
 
 ### 权限对话选项
 

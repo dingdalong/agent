@@ -173,11 +173,11 @@ class TranscriptView(MenuRequest):
 
     由 /agents 浏览器在用户选中某子 agent 后发起。TUI 呈现（复用半屏转录覆盖面板 _render_transcript_panel /
     _render_transcript_header）：面板按「是否已有完整原始记录」选源——已完成 agent 渲染其原始消息
-    （user/assistant/thinking/工具调用完整参数/工具完整返回），PgUp/PgDn 滚动，Esc 返回列表。下图为示意，
+    （user/assistant/thinking/工具调用完整参数/工具完整返回），↑/↓ 滚动，Esc 返回列表。下图为示意，
     实际渲染以 inline_ui.py 的 _render_transcript_panel / _message_lines 为准，可能随其改动而滞后
     （标题即选中项的 label，已含状态与 token）：
 
-        ── ◯ code  a1b2  已完成  ↑1.2k(80%) ↓340 · 5s ──  实时  ·  PgUp/PgDn 滚动 · Esc 返回列表
+        ── ◯ code  a1b2  已完成  ↑1.2k(80%) ↓340 · 5s ──  实时  ·  ↑/↓ 滚动 · Esc 返回列表
         ▶ 用户
         <初始任务提示…>
         ● 助手

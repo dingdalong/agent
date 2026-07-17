@@ -864,7 +864,7 @@ class InlineInterface(UserInterface):
         return None
 
     def _render_transcript_header(self) -> ANSI:
-        """渲染转录面板顶部标题行：「── <标题>（状态）── <跟随态> · PgUp/PgDn 滚动 · <退出提示>」。
+        """渲染转录面板顶部标题行：「── <标题>（状态）── <跟随态> · ↑/↓ 滚动 · <退出提示>」。
 
         两态：
         - 实时态（列表 Enter 打开）：标题取实时行 label，状态运行中/已完成（rows 中查不到则退化 uuid8 + 已结束），退出提示「Esc 关闭」。
@@ -896,7 +896,7 @@ class InlineInterface(UserInterface):
             header.append(f"（{status}）", style="bright_black")
         header.append(" ──  ", style="bright_black")
         header.append(follow, style="cyan")
-        header.append(f"  ·  PgUp/PgDn 滚动 · {exit_hint}", style="bright_black")
+        header.append(f"  ·  ↑/↓ 滚动 · {exit_hint}", style="bright_black")
         with self._status_console.capture() as capture:
             self._status_console.print(header, end="")
         return ANSI(capture.get())
@@ -908,7 +908,7 @@ class InlineInterface(UserInterface):
         - 已完成（messages_provider 返回非空）→ 渲染完整原始消息（_message_lines）；
         - 运行中（尚无原始快照）→ 渲染实时增量分段（_transcript_lines），借 100ms 重绘实现 tail -f。
         故实时查看一个运行中的子 agent，待其完成后面板会就地升级为完整原始记录。
-        _view_scroll==0 时恒切末段；_view_scroll 在此就地夹取到合法上界，使越界的 PgUp 自然停在顶部。
+        _view_scroll==0 时恒切末段；_view_scroll 在此就地夹取到合法上界，使越界的 ↑ 自然停在顶部。
 
         Returns:
             可作为 Window 内容的 ANSI（至多 _TRANSCRIPT_PANEL_ROWS 行）。
@@ -1296,7 +1296,7 @@ class InlineInterface(UserInterface):
             self._enter_processing_idle()
 
     async def _await_transcript_view(self, uuid: str, label: str) -> str:
-        """进入 /agents 调起的模态原始消息查看：显示半屏面板，await 由 PgUp/PgDn/Esc 绑定驱动的 future。
+        """进入 /agents 调起的模态原始消息查看：显示半屏面板，await 由 ↑/↓/Esc 绑定驱动的 future。
 
         与实时查看（列表 Enter 打开）区别：置 _viewing_invoked=True 使面板渲染原始 history 消息，
         Esc 经 _resolve_input("") 解开本 future（而非就地清面板），令 request_transcript_view 返回、
@@ -2445,7 +2445,7 @@ class InlineInterface(UserInterface):
         - 补全态（斜杠命令下拉）：↓/Tab 下一项、↑ 上一项、Esc 关闭。
         - 方向键（↓↑）：从输入框进入 agent 列表 / 列表内导航 / 返回输入框（查看面板/选择菜单/补全时不进列表）。
         - 列表聚焦时 Enter：在输入框上方打开选中子 agent 的转录覆盖面板（焦点回输入框）；Esc：返回输入框。
-        - 查看面板时：PgUp/PgDn 上下滚动（暂停/恢复贴底实时跟随）；Esc：关闭面板还原主对话。
+        - 查看面板时：↑/↓ 整页上下滚动（暂停/恢复贴底实时跟随）；Esc：关闭面板还原主对话。
 
         Returns:
             供常驻 Application 使用的 KeyBindings。
@@ -2712,16 +2712,16 @@ class InlineInterface(UserInterface):
         def _(event) -> None:
             event.app.layout.focus(self._input_window)
 
-        # ---- 转录面板：滚动 / 关闭（输入框聚焦下仍全局响应；用 PgUp/PgDn 以让出 ↑↓ 给输入框）----
+        # ---- 转录面板：滚动 / 关闭（输入框聚焦下仍全局响应；查看时 ↑/↓ 占用于整页滚动，Esc 关闭后恢复输入框方向键）----
 
-        # PgUp：面板上滚（暂停贴底跟随）；越界由 _render_transcript_panel 就地夹取
-        @bindings.add("pageup", filter=_cond_viewing)
+        # ↑：面板上滚一整页（暂停贴底跟随）；越界由 _render_transcript_panel 就地夹取
+        @bindings.add("up", filter=_cond_viewing & ~_cond_select & ~_cond_completing, eager=True)
         def _(event) -> None:
             self._view_scroll += _TRANSCRIPT_PANEL_ROWS - 1
             event.app.invalidate()
 
-        # PgDn：面板下滚；回到 0 即恢复贴底实时跟随
-        @bindings.add("pagedown", filter=_cond_viewing)
+        # ↓：面板下滚一整页；回到 0 即恢复贴底实时跟随
+        @bindings.add("down", filter=_cond_viewing & ~_cond_select & ~_cond_completing, eager=True)
         def _(event) -> None:
             self._view_scroll = max(0, self._view_scroll - (_TRANSCRIPT_PANEL_ROWS - 1))
             event.app.invalidate()
