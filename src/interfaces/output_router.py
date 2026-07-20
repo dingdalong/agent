@@ -61,6 +61,8 @@ class _AgentView:
     in_tokens: int = 0
     out_tokens: int = 0
     cache_read: int = 0
+    context_used_tokens: int = 0
+    context_limit: int = 0
     started_monotonic: float | None = None
     ended_monotonic: float | None = None
     # 分段转录：每项为 (kind, text)，kind ∈ "response"|"thinking"|"tool"；供 UI 运行中实时渲染。
@@ -82,6 +84,8 @@ class AgentRow:
     in_tokens: int
     out_tokens: int
     cache_read: int
+    context_used_tokens: int
+    context_limit: int
     started_monotonic: float | None
     ended_monotonic: float | None
 
@@ -94,7 +98,8 @@ class OutputRouter:
     - 子 agent 的流/工具事件按 agent 进缓冲转录，不交叉
     - 控制面事件（全部菜单事件 + 权限通知/输出请求）始终实时转发
     - SubagentLifecycle 自消费，维护 _agents 视图
-    - 前台 LLMCallStarted 落在轮边界：先把本轮已完成子 agent 从 _agents 移入 _history，再转发
+    - LLMCallStarted 按 agent 记录上下文窗口；前台调用同时在轮边界冲刷已完成子 agent
+    - LLMCallCompleted 累计 token，并以准确 input_tokens 更新该 agent 的最近上下文占用
     - 非 TTY 透传模式：全部实时转发、不缓存、无列表
     """
 
@@ -134,14 +139,16 @@ class OutputRouter:
 
         - 透传模式：全部实时转发（SubagentLifecycle 除外，直接丢弃）
         - 控制面（全部菜单事件 + 权限通知/输出请求）：始终实时
-        - LLMCallCompleted：先按 agent 累计 token，再转发（保持 UI 会话累计）
+        - LLMCallCompleted：累计 agent token、更新最近上下文占用，再转发（保持 UI 会话累计）
         - SubagentLifecycle：自消费，维护 _agents 视图
-        - 前台 LLMCallStarted：落在轮边界，先冲刷本轮已完成子 agent 入 _history，再转发点亮 spinner
+        - LLMCallStarted：先记录 agent 上下文窗口；前台调用再冲刷历史并转发，后台调用静默
         - CompactDelta：始终实时
         - 流/工具事件：前台实时，后台进缓冲
 
         Args:
             event: 待分发的事件。
+        Returns:
+            None；事件按类型被消费、缓存或转发给 UI。
         """
         if self.passthrough:
             if not isinstance(event, SubagentLifecycle):
@@ -153,7 +160,7 @@ class OutputRouter:
             await self.ui.on_event(event)
             return
 
-        # LLMCallCompleted：先累计 per-agent token，再转发（保持 UI 会话累计不变）
+        # LLMCallCompleted：先更新 per-agent 累计 token 与最近上下文，再转发（保持 UI 会话累计不变）
         if isinstance(event, LLMCallCompleted):
             self._accumulate_tokens(event)
             await self.ui.on_event(event)
@@ -169,12 +176,14 @@ class OutputRouter:
             await self.ui.on_event(event)
             return
 
-        # 前台 LLMCallStarted：处于轮边界（子 agent 在父工具调用内同步跑完），
-        # 先把本轮已完成子 agent 从实时展示区移入历史，再转发（UI 据此点亮 spinner）。
-        if isinstance(event, LLMCallStarted) and getattr(event, "caller_uuid", None) == self._foreground_uuid:
-            self.flush_completed_subagents()
-            await self.ui.on_event(event)
-            return
+        if isinstance(event, LLMCallStarted):
+            self._record_context_limit(event)
+            # 前台调用开始处于轮边界（子 agent 在父工具调用内同步跑完）：
+            # 先把本轮已完成子 agent 从实时展示区移入历史，再转发点亮 spinner。
+            if getattr(event, "caller_uuid", None) == self._foreground_uuid:
+                self.flush_completed_subagents()
+                await self.ui.on_event(event)
+                return
 
         # 流/工具事件：后台判定
         # LLMCallStarted 落入此处且无匹配缓冲分支 — 后台 spinner 信息无需缓存，静默丢弃。
@@ -203,11 +212,28 @@ class OutputRouter:
 
     # ---- token 累计 ----
 
+    def _record_context_limit(self, event: LLMCallStarted) -> None:
+        """记录发起调用的 agent 上下文窗口上限。
+
+        Args:
+            event: LLM 调用开始事件，含调用方 UUID 与上下文窗口上限。
+        Returns:
+            None；有效窗口上限原地写入对应 agent 视图。
+        """
+        caller_uuid = event.caller_uuid
+        if caller_uuid is None or event.context_limit <= 0:
+            return
+        view = self._ensure_view(event)
+        if view is not None:
+            view.context_limit = event.context_limit
+
     def _accumulate_tokens(self, event: LLMCallCompleted) -> None:
-        """按 caller_uuid 累计每 agent 的 token 用量。
+        """按 caller_uuid 更新每个 agent 的累计 token 与最新上下文占用。
 
         Args:
             event: LLM 调用完成事件，含 caller_uuid 与 token 字段。
+        Returns:
+            None；累计值与最近上下文占用原地写入对应 agent 视图。
         """
         caller_uuid = getattr(event, "caller_uuid", None)
         if caller_uuid is None:
@@ -215,11 +241,32 @@ class OutputRouter:
         view = self._find_view(caller_uuid)
         if view is None:
             return
-        view.in_tokens += event.input_tokens or 0
+        input_tokens = event.input_tokens
+        view.in_tokens += input_tokens or 0
         view.out_tokens += event.output_tokens or 0
         view.cache_read += event.cache_read_input_tokens or 0
+        if input_tokens is not None:
+            view.context_used_tokens = input_tokens
 
     # ---- 后台缓冲 ----
+
+    def _ensure_view(self, event: Event) -> _AgentView | None:
+        """返回事件所属 agent 视图，缺失时按事件身份补建后台视图。
+
+        Args:
+            event: 可能携带 caller_uuid 与 caller_agent_type 的 agent 事件。
+        Returns:
+            已存在或补建的 agent 视图；事件不含调用方 UUID 时返回 None。
+        """
+        caller_uuid = getattr(event, "caller_uuid", None)
+        if caller_uuid is None:
+            return None
+        view = self._find_view(caller_uuid)
+        if view is None:
+            agent_type = getattr(event, "caller_agent_type", None) or "?"
+            view = _AgentView(agent_type=agent_type, is_main=False)
+            self._agents[caller_uuid] = view
+        return view
 
     def _buffer_event(self, event: Event) -> None:
         """把后台事件追加到对应 _AgentView 转录（纯内存 append，不 await）。
@@ -228,16 +275,12 @@ class OutputRouter:
 
         Args:
             event: 待缓冲的后台事件。
+        Returns:
+            None；支持的事件内容原地追加到对应 agent 转录。
         """
-        caller_uuid: str | None = getattr(event, "caller_uuid", None)
-        if caller_uuid is None:
-            return
-        view = self._find_view(caller_uuid)
+        view = self._ensure_view(event)
         if view is None:
-            # 防御性建项：正常情况下 SubagentLifecycle start 先于流事件到达
-            agent_type = getattr(event, "caller_agent_type", None) or "?"
-            view = _AgentView(agent_type=agent_type, is_main=False)
-            self._agents[caller_uuid] = view
+            return
 
         if isinstance(event, ResponseDelta):
             self._append_transcript(view, "response", event.content)
@@ -347,6 +390,8 @@ class OutputRouter:
                     uuid=uid, agent_type=view.agent_type, is_main=True,
                     running=view.running, in_tokens=view.in_tokens,
                     out_tokens=view.out_tokens, cache_read=view.cache_read,
+                    context_used_tokens=view.context_used_tokens,
+                    context_limit=view.context_limit,
                     started_monotonic=view.started_monotonic,
                     ended_monotonic=view.ended_monotonic,
                 ))
@@ -358,6 +403,8 @@ class OutputRouter:
                     uuid=uid, agent_type=view.agent_type, is_main=False,
                     running=view.running, in_tokens=view.in_tokens,
                     out_tokens=view.out_tokens, cache_read=view.cache_read,
+                    context_used_tokens=view.context_used_tokens,
+                    context_limit=view.context_limit,
                     started_monotonic=view.started_monotonic,
                     ended_monotonic=view.ended_monotonic,
                 ))
@@ -390,7 +437,7 @@ class OutputRouter:
     def _format_view_line(self, uid: str, view: _AgentView) -> str:
         """把单个子 agent 视图格式化为一行摘要（供文本摘要与选择菜单标签共用）。
 
-        格式：`◯ <agent_type>  <uid8>  <运行中|已完成>  ↑<in>(<hit>%) ↓<out> · <elapsed>s`。
+        格式：`◯ <agent_type>  <uid8>  <状态>  ↑<in>(<hit>%) ↓<out> · 上下文 <used>(<pct>%) · <elapsed>s`。
 
         Args:
             uid: 子 agent uuid 字符串。
@@ -407,9 +454,13 @@ class OutputRouter:
         hit_pct = (view.cache_read / view.in_tokens * 100) if view.in_tokens else 0.0
         status = "运行中" if view.running else "已完成"
         uid8 = uid.split("-")[0] if uid else ""
+        context = f"上下文 {_fmt_tok(view.context_used_tokens)}"
+        if view.context_limit > 0:
+            context += f"({view.context_used_tokens / view.context_limit * 100:.0f}%)"
         return (
             f"◯ {view.agent_type}  {uid8}  {status}  "
-            f"↑{_fmt_tok(view.in_tokens)}({hit_pct:.0f}%) ↓{_fmt_tok(view.out_tokens)} · {elapsed:.1f}s"
+            f"↑{_fmt_tok(view.in_tokens)}({hit_pct:.0f}%) ↓{_fmt_tok(view.out_tokens)}"
+            f" · {context} · {elapsed:.1f}s"
         )
 
     def format_subagent_summary(self) -> str:

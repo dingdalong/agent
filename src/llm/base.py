@@ -402,6 +402,7 @@ class LLMProvider(ABC):
             timestamp=started_at,
             source=self.model,
             model=self.model,
+            context_limit=self.context_limit,
             estimated_input_tokens=self.estimate_tokens(messages, prompt, tools),
             message_count=len(all_messages),
             tool_count=len(tools or []),

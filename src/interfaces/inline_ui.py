@@ -747,7 +747,7 @@ class InlineInterface(UserInterface):
         return ANSI(capture.get())
 
     def _render_core_status(self) -> ANSI:
-        """构建底部核心状态行的 ANSI：「<权限模式> (Shift+Tab 切换) · ↑总输入 (缓存命中%) ↓输出 · 耗时s [· Ctrl+C 中断] [· ↓查看 agent]」。
+        """构建底部核心状态行的 ANSI：「<权限模式> · ↑输入 ↓输出 · 上下文 XXk(N%) · 耗时 [· 操作提示]」。
 
         处理态（有活动）显示本回合实时累计耗时并追加「Ctrl+C 中断」提示；
         其余（可输入态、或提交后首个处理事件前的空闲）显示上一回合最终耗时、不带中断提示。
@@ -773,7 +773,7 @@ class InlineInterface(UserInterface):
         """渲染 agent 列表（每 agent 一行），供 agent_list_window 使用。
 
         主 agent 行置顶，其余子 agent 按插入序。每行格式：
-        <标记> <agent_type> <uuid8> <状态> <token> · <elapsed>s
+        <标记> <agent_type> <uuid8> <状态> <token> · 上下文 <used>(<pct>%) · <elapsed>s
         选中行反显（列表聚焦时）。行数 > _AGENT_LIST_MAX_ROWS 时按选中项裁出可视窗口段，
         并在上/下方按需补一行「↑/↓ 还有 N 个」滚动指示（聚焦与否都显示）。
 
@@ -852,6 +852,13 @@ class InlineInterface(UserInterface):
                 line.append(f" ↑{self._format_token_count(total_in)}", style=style)
                 line.append(f" ({hit_pct:.0f}%)", style="bright_black")
                 line.append(f" ↓{self._format_token_count(row.out_tokens)}", style=style)
+                line.append("  ·  ", style=style)
+                self._append_context_segment(
+                    line,
+                    row.context_used_tokens,
+                    row.context_limit,
+                    base_style=style,
+                )
                 line.append(f"  ·  {elapsed:.1f}s", style=style)
 
             lines.append(line)
@@ -1072,10 +1079,16 @@ class InlineInterface(UserInterface):
         line.append("  ·  ", style="bright_black")
         line.append(f"{elapsed:.1f}s")
 
-    def _append_context_segment(self, line: Text, used: int, limit: int) -> None:
+    def _append_context_segment(
+        self,
+        line: Text,
+        used: int,
+        limit: int,
+        base_style: str = "",
+    ) -> None:
         """把「上下文 XXk(N%)」当前上下文占用段原地追加到给定 Text。
 
-        XXk = 主 agent 最近一次 LLM 调用提交的输入 token（含缓存），即当前上下文占用量；
+        XXk = 目标 agent 最近一次 LLM 调用提交的输入 token（含缓存），即当前上下文占用量；
         N% = XXk / 上下文窗口上限，按阈值着色以预警临近自动压缩（默认 0.8）：≥90% 红、≥80% 黄、否则暗灰。
         窗口上限未知（limit <= 0）时无法计算百分比，仅显示「上下文 XXk」，不着色。
 
@@ -1083,8 +1096,11 @@ class InlineInterface(UserInterface):
             line: 目标 Rich Text，原地追加内容。
             used: 当前上下文占用的输入 token 数。
             limit: 上下文窗口上限；<= 0 表示未知。
+            base_style: 整段叠加的基础样式；空串表示不叠加。
+        Returns:
+            None；上下文段原地追加到 line。
         """
-        line.append(f"上下文 {self._format_token_count(used)}")
+        line.append(f"上下文 {self._format_token_count(used)}", style=base_style)
         if limit <= 0:
             return
         pct = used / limit * 100
@@ -1094,6 +1110,8 @@ class InlineInterface(UserInterface):
             pct_style = "yellow"
         else:
             pct_style = "bright_black"
+        if base_style:
+            pct_style = f"{base_style} {pct_style}"
         line.append(f"({pct:.0f}%)", style=pct_style)
 
     def _append_token_segment(self, line: Text) -> None:

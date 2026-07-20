@@ -45,7 +45,7 @@
 | `CompactDelta` | `compact_delta` | PROGRESS | `content` |
 | `ToolCallStarted` | `tool_call_started` | PROGRESS | `tool_name`、`tool_call_id`、`detail`、`caller_*` |
 | `ToolCallCompleted` | `tool_call_completed` | PROGRESS | `status`(success/error)、`duration_seconds`、`result_preview` |
-| `LLMCallStarted` | `llm_call_started` | PROGRESS | `model`、`estimated_input_tokens`、`message_count`、`tool_count`、`caller_*` |
+| `LLMCallStarted` | `llm_call_started` | PROGRESS | `model`、`context_limit`、`estimated_input_tokens`、`message_count`、`tool_count`、`caller_*` |
 | `LLMCallCompleted` | `llm_call_completed` | PROGRESS | `input/output/total_tokens`、`cache_read/creation_input_tokens`、速度、`caller_uuid` |
 | `OutputRequested` | `output_requested` | PROGRESS | `content`、`markdown` |
 | `InterruptRequested` | `interrupt_requested` | PROGRESS | — |
@@ -66,7 +66,7 @@
 - **流收尾**：任何非 `ThinkingDelta`/`ResponseDelta` 事件到达前，先收尾未结束的思考流/回应流（`_end_streams_for`），保证输出不交叉。
 - **交互事件**（`InputRequested`/`ChoiceRequested`/`PermissionRequested`）：记为 `_active_user_request`，经 `_complete_user_request` 读取并回填 `future`；中断时 `cancel_active_input()` 取消。
 - **展示事件**：转发到可覆盖的 `on_*` 钩子（`on_response_delta`、`on_thinking_delta`、`on_tool_call_started/completed`、`on_llm_call_started/completed`、`on_compact_delta`、`on_permission_notice`），基类默认无操作，由具体 UI 实现渲染。
-- **系统状态**：`SystemStateChanged` → `on_system_state_changed()`；UI 经 `get_system_state()`（pull 模型，返回 `SystemState(permission_mode, context_used_tokens, context_limit)`）读取最新状态。状态提供函数由 `PermissionModeController.install_state_provider` 注册，闭包只持有主 agent 引用：`context_used_tokens` 取主 agent 的 `last_input_tokens`（最近一次 LLM 调用返回 usage 中提交给模型的输入 token，含缓存，即当前上下文占用量），`context_limit` 取 `agent.llm.context_limit`；子 agent 是独立实例，不污染该显示。
+- **系统状态**：`SystemStateChanged` → `on_system_state_changed()`；UI 经 `get_system_state()`（pull 模型，返回 `SystemState(permission_mode, context_used_tokens, context_limit)`）读取最新状态。状态提供函数由 `PermissionModeController.install_state_provider` 注册，闭包只持有主 agent 引用：`context_used_tokens` 取主 agent 的 `last_input_tokens`（最近一次 LLM 调用返回 usage 中提交给模型的输入 token，含缓存，即当前上下文占用量），`context_limit` 取 `agent.llm.context_limit`。子 agent 不使用该 pull 状态，其上下文由 `OutputRouter` 按 UUID 独立维护，因此不会污染主状态栏。
 
 子类须实现四个抽象方法：`_write`、`_read_input`、`_read_permission`、`_read_choice`。
 
@@ -76,7 +76,7 @@
 
 ### 状态栏与布局
 
-底部常驻区域按需渲染（`_render_*` 系列）：活动行（当前 agent + spinner + 计时）、核心状态、子 agent 列表、转录覆盖面板、选择菜单、斜杠命令补全下拉、分隔线。核心状态行（`_append_core_status`）依次为：权限模式、token 段（本会话累计 `↑总输入 (缓存命中%) ↓输出`，`_append_token_segment`）、上下文占用段（`上下文 XXk(N%)`，`_append_context_segment`，XXk = 当前上下文占用 token，N% = XXk / `context_limit`，百分比 ≥90% 红、≥80% 黄预警临近自动压缩；`context_limit` 为 0 时无法算百分比，仅显示「上下文 XXk」不着色）、耗时。
+底部常驻区域按需渲染（`_render_*` 系列）：活动行（当前 agent + spinner + 计时）、核心状态、子 agent 列表、转录覆盖面板、选择菜单、斜杠命令补全下拉、分隔线。核心状态行（`_append_core_status`）依次为：权限模式、token 段（本会话累计 `↑总输入 (缓存命中%) ↓输出`，`_append_token_segment`）、上下文占用段（`上下文 XXk(N%)`，`_append_context_segment`，XXk = 当前上下文占用 token，N% = XXk / `context_limit`，百分比 ≥90% 红、≥80% 黄预警临近自动压缩；`context_limit` 为 0 时无法算百分比，仅显示「上下文 XXk」不着色）、耗时。子 agent 实时行和 `/agents` 摘要在累计 token 后显示同一上下文段；实时行复用相同预警色，纯文本摘要只保留数值。
 
 ### 三种交互模式与按键
 
@@ -114,16 +114,18 @@
 |---|---|
 | 透传模式（非 TTY） | 全部实时转发（`SubagentLifecycle` 丢弃） |
 | 控制面（`InputRequested`/`PermissionRequested`/`PermissionNotice`/`OutputRequested`） | 始终实时转发 |
-| `LLMCallCompleted` | 先按 `caller_uuid` 累计 per-agent token，再转发 |
+| `LLMCallStarted` | 按 `caller_uuid` 记录 `context_limit`；前台调用冲刷历史并转发，后台调用不显示 spinner |
+| `LLMCallCompleted` | 按 `caller_uuid` 累计 token，以非空 `input_tokens` 覆盖最近上下文占用，再转发 |
 | `SubagentLifecycle` | 自消费，维护 `_agents` 视图（不转发 UI） |
 | `CompactDelta` | 始终实时 |
 | 流/工具事件（携带 `caller_uuid` 且 ≠ 前台 uuid） | **进后台缓冲**转录，不实时渲染 |
 | 其余（前台 agent） | 实时转发 |
 
 - **前台 agent**（`set_foreground` 登记的根 agent uuid）的输出实时渲染在滚动区；**后台子 agent** 的流/工具事件按 agent 追加到 `_AgentView.transcript`（`deque`，`_MAX_TRANSCRIPT_SEGMENTS=400`），供用户在列表中打开转录面板回看。
+- `_AgentView` 分开保存累计 `in_tokens`/`out_tokens` 与最近 `context_used_tokens`/`context_limit`：累计 token 每次相加，最近上下文仅在完成事件提供准确 `input_tokens` 时覆盖；调用开始事件缺少生命周期视图时会按 `caller_*` 防御性补建。
 - 连续同类流文本合并进同一段（`_append_transcript`），避免跨 delta 把 Markdown 代码围栏/列表拆碎。
-- 已完成 agent 视图至多保留 `_MAX_COMPLETED_VIEWS=20` 个，按结束时间逐出最旧（运行中的恒保留）。
-- `agent_rows()` / `transcript_segments(uuid)` 供 UI 每帧拉取快照渲染。`reload()` 在 `/clear` 时清空所有视图。
+- 已完成 agent 视图至多保留 `_MAX_HISTORY_VIEWS=50` 个，按结束时间逐出最旧（运行中的恒保留）。
+- `agent_rows()` / `transcript_segments(uuid)` 供 UI 每帧拉取快照渲染；`format_subagent_summary()` / `subagent_choices()` 复用同一摘要格式并保留历史上下文。`reload()` 在 `/clear` 时清空所有视图。
 
 ## MarkdownStreamRenderer — 流式 Markdown
 

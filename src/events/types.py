@@ -80,9 +80,11 @@ class ToolCallCompleted(Event):
 class LLMCallStarted(Event):
     """LLM 调用开始时的 token 估算信息。
 
-    级别为 PROGRESS：内联状态条在 LLM 调用一开始（首个增量到达前）就需要据此点亮 spinner。
+    级别为 PROGRESS：内联状态条在 LLM 调用一开始（首个增量到达前）就需要据此点亮 spinner；
+    context_limit 携带当前 provider 的上下文窗口上限，供 UI 按 agent 计算占用比例。
     """
     model: str = ""
+    context_limit: int = 0
     estimated_input_tokens: int = 0
     message_count: int = 0
     tool_count: int = 0
