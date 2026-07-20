@@ -30,9 +30,9 @@ tool:
   page_token_rate: 0.03 # 工具调用结果每页最多占上下文比例
 
 compact:
-  auto_compact_rate: 0.8 # 达到上下文多少时进行压缩
-  keep_recent_user_turns: 3 # 压缩时保留最近N次用户输入及其后的完整原始对话
-  keep_recent_messages_token_rate: 0.25 # 最近原始对话最多保留上下文窗口的比例，低于最小轮次时仍保留最小轮次
+  auto_compact_rate: 0.8 # context_limit 已知且输入估算超过该比例时自动压缩；context_limit<=0 时禁用
+  keep_recent_user_turns: 3 # 优先保留原文的最近 N 个用户轮次范围
+  keep_recent_messages_token_rate: 0.25 # 近期原文的硬预算比例；超限时可在优先轮次内部按原子消息块切分
 
 # 激活的角色名。coding = 编程助手（默认），可切换为自定义角色。
 role: coding

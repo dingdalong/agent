@@ -13,7 +13,7 @@ Manager 服务层是框架的横切能力层：每个 Manager 类各司其职（
 Manager 分两批被构造：
 
 1. **deps 层 Manager**（进程级、跨 agent 共享）——在 `src/app/bootstrap.py` 的 `create_app()` 中手动构造并注入 `AgentDeps` dataclass。包括：`ConfigManager`、`RoleMgr`、`ToolsMgr`、`MemoryMgr`、`PluginMgr`、`HooksMgr`、`PlanMgr`、`McpMgr`、`PermissionManager`、`SessionMgr`、`LLMMgr`。
-2. **每 agent 层 Manager**（随 `Agent` 实例创建，主/子 agent 各自独立）——在 `Agent.__post_init__`（`src/agent/agent.py:120-157`）中构造。包括：`CompactMgr`、`FileMgr`、`SkillMgr`、`SubAgentMgr`、`PromptMgr`、`TaskManager`、`ReminderMgr`。子 agent 是共享同一份 `AgentDeps` 的完整 `Agent` 实例，因此复用 deps 层 Manager，但拥有自己的每 agent 层 Manager。
+2. **每 agent 层 Manager**（随 `Agent` 实例创建，主/子 agent 各自独立）——在 `Agent.__post_init__`（`src/agent/agent.py:113-160`）中构造。包括：`CompactMgr`、`FileMgr`、`SkillMgr`、`SubAgentMgr`、`PromptMgr`、`TaskManager`、`ReminderMgr`。子 agent 是共享同一份 `AgentDeps` 的完整 `Agent` 实例，因此复用 deps 层 Manager，但拥有自己的每 agent 层 Manager。
 
 ### feature 门控哪些 Manager
 
@@ -210,30 +210,32 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 
 `src/mgr/compact_mgr.py`
 
-**单一职责**：判断是否需要压缩，切分历史（保留最近若干用户轮次 + 首条原始需求），用 LLM 生成摘要，拼装压缩后的上下文前缀，并把原始历史写入 transcript。
+**单一职责**：判断是否需要压缩，按原子消息块无损切分历史，用 LLM 滚动生成摘要，拼装压缩后的上下文前缀，并把完整原始历史写入 transcript。
 
-**构造参数**（每 agent 层，在 `Agent.__post_init__` `agent.py:128-134` 从 `compact` 配置换算）：
+**构造参数**（每 agent 层，在 `Agent.__post_init__` `agent.py:129-137` 从 `compact` 配置换算）：
 - `llm`：本 agent 的 provider（估算 token、生成摘要）。
-- `workdir`：transcript 落盘目录 `workdir/.transcripts/`。
-- `auto_compact_size` = `context_limit * compact.auto_compact_rate`（源码默认字段值 `0.8`，实际按 context_limit 换算成绝对 token 数）。
-- `keep_recent_user_turns` = `compact.keep_recent_user_turns`（缺省 3）。
-- `recent_messages_token_limit` = `context_limit * compact.keep_recent_messages_token_rate`（缺省率 0.25）。
+- `workdir`：transcript 落盘目录 `workdir/.agent/transcripts/`。
+- `auto_compact_size` = `context_limit * compact.auto_compact_rate`；非正数禁用自动压缩。
+- `keep_recent_user_turns` = `compact.keep_recent_user_turns`（缺省 3），定义优先保留近期原文的用户轮次范围。
+- `recent_messages_token_limit` = `context_limit * compact.keep_recent_messages_token_rate`（缺省率 0.25），是近期原文的硬预算。
 
 **公共方法**：
 
 | 方法 | 关键参数 | 返回 | 作用 |
 |---|---|---|---|
-| `is_need_compact` | `messages`, `prompt`, `tools` | `bool` | 估算输入 token 是否超 `auto_compact_size` |
+| `is_need_compact` | `messages`, `prompt`, `tools`, `estimated_tokens` | `bool` | 判断完整 provider 输入估算是否超 `auto_compact_size`；可复用调用方估算，非正阈值直接返回 `False` |
 | `track_recent_file` (async) | `path: str` | `None` | 维护最近文件列表（上限 5，去重后置尾） |
-| `write_transcript` (async) | `messages: list` | `Path` | 将历史写入 `.transcripts/transcript_{ts}.jsonl` 并记入 recent_files |
-| `split_history_for_compaction` | `messages: list` | `tuple[list, list, list]` | 切分为（保留的首条用户消息, 待压缩历史, 近期原文） |
-| `summarize_history` (async) | `preserved_messages`, `messages_to_summarize`, `recent_messages`, `focus` | `str` | 调 LLM（关闭 thinking）生成摘要 |
+| `write_transcript` (async) | `messages: list` | `Path` | 在线程中以 UTF-8/Unicode JSONL 写入 `.agent/transcripts/transcript_{time_ns}.jsonl`，排他创建避免并发覆盖 |
+| `split_history_for_compaction` | `messages: list` | `CompactionPartition` | 切分为必须原文保留、待摘要、预算内近期原文；assistant 及紧随其后的 tool 结果不可拆散 |
+| `summarize_history` (async) | `preserved_messages`, `messages_to_summarize`, `recent_messages`, `focus` | `str` | 完整输入不超过上下文 95% 时一次摘要；超限则按原子块滚动摘要，单块仍超限时无损分页 |
 | `build_compacted_context_prefix` | `preserved_messages`, `summary`, `recent_files_hint` | `str` | 拼装“原始需求 + 摘要 + 近期文件提示”前缀 |
-| `compact_history` (async) | `messages`, `focus` | `CompactResult` | 端到端压缩：落 transcript→切分→摘要→拼装并置 `has_compacted=True` |
+| `compact_history` (async) | `messages`, `focus` | `CompactResult` | 端到端压缩；返回消息、transcript、摘要消息数及摘要正文，无可摘要消息或空摘要时保留原历史 |
 
 **feature 门控**：否。 **reload**：无（随新 Agent 重建）。
 
-**持有的关键状态**：`recent_files`（最近文件路径，上限 5）、`has_compacted`（是否已压缩过）。
+最近 N 个用户轮次只是优先保留范围：如果其完整原文超过硬预算，切分点会继续向后移动；被移出近期原文的首条用户消息和当前用户消息仍以原文进入压缩前缀，其余旧消息进入摘要。序列化、token 计算、分页与 transcript 文件 I/O 均卸载到线程，且不做字符截断。
+
+**持有的关键状态**：`recent_files`（最近文件路径，上限 5）、`has_compacted`（是否已完成过有效压缩）。
 
 压缩在状态机的 `CHECK_COMPACT`/`COMPACT`/`CONTEXT_OVERFLOW` 阶段驱动，见 [agent-runtime.md](agent-runtime.md)。
 
@@ -441,7 +443,7 @@ MCP 连接配置格式、per-server 权限分层见 [mcp-and-hooks.md](mcp-and-h
 
 **单一职责**：会话内任务的 CRUD、依赖关系（双向同步 + 环检测）、文件持久化，并作为提醒源向 `ReminderMgr` 注入任务状态。
 
-**消费的配置或文件**：`tasks_dir`（主 agent 为 `{global_dir}/tasks/{session_id}/`，`agent.py:150-151`；子 agent 传 `None` 为**纯内存模式**）。每 task 一个 `{id}.json`（原子写），`.highwatermark` 记录最高分配 ID 防重用；所有任务 `completed` 后 `_auto_cleanup` 删除整个目录。`MAX_TASKS = 50`。
+**消费的配置或文件**：`tasks_dir`（主 agent 为 `{global_dir}/tasks/{session_id}/`，`agent.py:151-155`；子 agent 传 `None` 为**纯内存模式**）。每 task 一个 `{id}.json`（原子写），`.highwatermark` 记录最高分配 ID 防重用；所有任务 `completed` 后 `_auto_cleanup` 删除整个目录。`MAX_TASKS = 50`。
 
 **`Task` 字段**（`task_mgr.py:14-36`）：`id`、`subject`、`description`、`active_form`、`status`（`pending`/`in_progress`/`completed`）、`owner`、`blocks`、`blocked_by`、`metadata`。
 

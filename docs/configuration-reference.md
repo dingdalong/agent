@@ -139,15 +139,15 @@
 
 ### 3.4 `compact` — 上下文压缩
 
-`Agent.__post_init__`（`agent.py:126`）读取整个 `compact` 段，按 provider 的 `context_limit` 换算为**绝对 token 数**后构造 `CompactMgr`：
+`Agent.__post_init__`（`agent.py:129-137`）读取整个 `compact` 段，按 provider 的 `context_limit` 换算为**绝对 token 数**后构造 `CompactMgr`：
 
 | 键 | 类型 | 默认值 | 可选值 | 效果 |
 |----|------|--------|--------|------|
-| `compact.auto_compact_rate` | float | `0.8` | `0`~`1` | 达到 `context_limit × auto_compact_rate` token 时触发自动压缩。换算为 `auto_compact_size = int(context_limit * auto_compact_rate)`（`agent.py:131`） |
-| `compact.keep_recent_user_turns` | int | `3` | 正整数 | 压缩时保留最近 N 次用户输入及其后完整原始对话；直接传给 `CompactMgr`（`agent.py:132`） |
-| `compact.keep_recent_messages_token_rate` | float | `0.25` | `0`~`1` | 最近原始对话最多保留上下文窗口的比例；换算为 `recent_messages_token_limit = int(context_limit * keep_recent_messages_token_rate)`（`agent.py:133`）。低于最小轮次时仍保留最小轮次 |
+| `compact.auto_compact_rate` | float | `0.8` | `0`~`1` | 输入估算超过 `context_limit × auto_compact_rate` 时触发自动压缩。换算为 `auto_compact_size = int(context_limit * auto_compact_rate)`（`agent.py:134`）；`context_limit <= 0` 时自动压缩禁用 |
+| `compact.keep_recent_user_turns` | int | `3` | 非负整数 | 定义优先保留原文的最近 N 个用户轮次范围；直接传给 `CompactMgr`（`agent.py:135`），不覆盖近期原文硬预算 |
+| `compact.keep_recent_messages_token_rate` | float | `0.25` | `0`~`1` | 近期原文的硬预算比例；换算为 `recent_messages_token_limit = int(context_limit * keep_recent_messages_token_rate)`（`agent.py:136`）。优先轮次超限时会在其内部按 assistant/tool 原子块移动切分点 |
 
-> **换算说明**：`config.yaml` 里存的是**比例**，`Agent` 在构造 `CompactMgr` 时用当前 agent 所用模型的 `context_limit`（`self.llm.context_limit`，`agent.py:130`）乘以比例得到绝对 token 数。不同 agent 若用不同 `context_limit` 的模型，绝对阈值也不同。`CompactMgr` 细节见 [managers.md](managers.md)。
+> **换算说明**：`config.yaml` 里存的是**比例**，`Agent` 在构造 `CompactMgr` 时用当前 agent 所用模型的 `context_limit`（`self.llm.context_limit`，`agent.py:130`）乘以比例得到绝对 token 数。不同 agent 若用不同 `context_limit` 的模型，绝对阈值也不同；窗口未知（非正数）时不会自动压缩。`CompactMgr` 细节见 [managers.md](managers.md)。
 
 ### 3.5 `role` — 激活角色
 
@@ -206,9 +206,9 @@ tool:
 
 # ── 上下文压缩（比例，运行时按 context_limit 换算为绝对 token）──
 compact:
-  auto_compact_rate: 0.8                 # 用量达 context_limit×0.8 时自动压缩
-  keep_recent_user_turns: 3              # 保留最近 N 次用户输入及其后原始对话
-  keep_recent_messages_token_rate: 0.25  # 最近原始对话最多占上下文窗口比例
+  auto_compact_rate: 0.8                 # 窗口已知且输入估算超过 context_limit×0.8 时自动压缩
+  keep_recent_user_turns: 3              # 优先保留原文的最近 N 个用户轮次范围
+  keep_recent_messages_token_rate: 0.25  # 近期原文硬预算占上下文窗口的比例
 
 # ── 激活角色 ────────────────────────────────────────────
 role: mijia                              # 缺省回退 coding
@@ -391,9 +391,9 @@ OPENAI_API_KEY=sk-yyyyyyyyyyyyyyyy
 
 | 路径 | 内容 | 来源 |
 |------|------|------|
-| `{workdir}/.transcripts/transcript_<ts>.jsonl` | 压缩前完整对话备份 | `CompactMgr.write_transcript`（`compact_mgr.py:58`，`workdir / ".transcripts"`） |
+| `{workdir}/.agent/transcripts/transcript_<time_ns>.jsonl` | 压缩前完整 Unicode 对话备份 | `CompactMgr.write_transcript`（`compact_mgr.py:279`，`project_data_dir(workdir) / "transcripts"`） |
 
-> 落盘目录要点：会话（`sessions/`）与主 agent 任务（`tasks/`）在**全局** `~/.agent/` 下；记忆（`memory/`）、plan（`plans/`）在**项目** `{workdir}/.agent/` 下；transcript 在 `{workdir}/.transcripts/`。子 agent 的 `TaskManager` 为纯内存模式（`tasks_dir=None`），不落盘（`agent.py:150`、`task_mgr.py:82`）。目录路径体系见 [architecture.md](architecture.md)。
+> 落盘目录要点：会话（`sessions/`）与主 agent 任务（`tasks/`）在**全局** `~/.agent/` 下；记忆（`memory/`）、plan（`plans/`）、transcript（`transcripts/`）在**项目** `{workdir}/.agent/` 下。子 agent 的 `TaskManager` 为纯内存模式（`tasks_dir=None`），不落盘（`agent.py:150`、`task_mgr.py:82`）。目录路径体系见 [architecture.md](architecture.md)。
 
 ---
 

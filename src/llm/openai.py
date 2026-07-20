@@ -29,16 +29,27 @@ class OpenAIProvider(LLMProvider):
         prompt: list[dict] | None = None,
         tools: list[ToolDict] | None = None,
     ) -> int:
+        """估算 Responses API 实际输入内容的 token 数。
+
+        Args:
+            messages: OpenAI 兼容格式的对话消息列表。
+            prompt: 可选的系统提示词消息列表。
+            tools: 可选的 OpenAI function-calling 工具 schema 列表。
+
+        Returns:
+            转换后 input 项与工具 schema 的估算 token 数。
+        """
         try:
             encoding = tiktoken.encoding_for_model(self.model)
         except KeyError:
             encoding = tiktoken.get_encoding("o200k_base")
-        all_messages = (prompt or []) + messages
-        messages_for_estimate = [{
-            "messages": all_messages,
-            "tools": tools,
-        }] if tools else all_messages
-        return len(encoding.encode(str(messages_for_estimate)))
+        payload: dict[str, object] = {
+            "input": self._convert_to_input(messages, prompt),
+        }
+        converted_tools = self._convert_tools(tools)
+        if converted_tools:
+            payload["tools"] = converted_tools
+        return len(encoding.encode(str(payload)))
 
     def _extract_token_usage(
         self,

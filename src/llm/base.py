@@ -65,7 +65,18 @@ class LLMProvider(ABC):
         messages: list[dict],
         prompt: list[dict] | None = None,
         tools: list[ToolDict] | None = None,
-    ) -> int: ...
+    ) -> int:
+        """Estimate tokens in the request payload actually sent by this provider.
+
+        Args:
+            messages: Conversation messages to include after provider conversion.
+            prompt: Optional system prompt to include after provider conversion.
+            tools: Optional tool schemas to include after provider conversion.
+
+        Returns:
+            Estimated token count for the complete provider-specific input payload.
+        """
+        ...
 
     def _split_page_once(self, text: str) -> tuple[str, str]:
         if self.estimate_tokens([{"role": "tool", "content": text}]) <= self.page_token_budget:
@@ -398,12 +409,18 @@ class LLMProvider(ABC):
             return started_at
 
         all_messages = (prompt or []) + messages
+        estimated_input_tokens = await asyncio.to_thread(
+            self.estimate_tokens,
+            messages,
+            prompt,
+            tools,
+        )
         await self.event_bus.emit(LLMCallStarted(
             timestamp=started_at,
             source=self.model,
             model=self.model,
             context_limit=self.context_limit,
-            estimated_input_tokens=self.estimate_tokens(messages, prompt, tools),
+            estimated_input_tokens=estimated_input_tokens,
             message_count=len(all_messages),
             tool_count=len(tools or []),
             caller_agent_type=caller_agent_type,

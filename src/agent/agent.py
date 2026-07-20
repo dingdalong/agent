@@ -541,17 +541,103 @@ class Agent:
             await controller.prompt_selection()
 
     async def _on_check_compact(self, ctx: RunContext) -> AgentState:
+        """估算完整输入并推进自动 compact 状态。
+
+        Args:
+            ctx: 当前运行上下文，保存自动 compact 的进展信号。
+
+        Returns:
+            下一状态：继续调用 LLM、执行 compact，或进入退出总结。
+        """
         ctx.prompt = self._prompt_mgr.build()
-        if not self._compact_mgr.is_need_compact(ctx.messages, ctx.prompt, self._tools_schemas):
+        if self._compact_mgr.auto_compact_size <= 0:
             ctx.compact_streak = 0
+            ctx.auto_compact_before_tokens = None
+            ctx.auto_compact_summarized_message_count = None
+            ctx.auto_compact_has_summary = None
             return AgentState.LLM_CALL
-        ctx.compact_streak += 1
-        if ctx.compact_streak > ctx.max_compact_streak:
-            logger.warning("连续 %d 次 compact 后仍需压缩", ctx.compact_streak - 1)
-            return AgentState.SUMMARIZE_EXIT
+
+        estimated_tokens = await asyncio.to_thread(
+            self.llm.estimate_tokens,
+            ctx.messages,
+            ctx.prompt,
+            self._tools_schemas,
+        )
+        needs_compact = self._compact_mgr.is_need_compact(
+            ctx.messages,
+            ctx.prompt,
+            self._tools_schemas,
+            estimated_tokens=estimated_tokens,
+        )
+
+        summarized_count = ctx.auto_compact_summarized_message_count
+        before_tokens = ctx.auto_compact_before_tokens
+        if summarized_count is not None and before_tokens is not None:
+            failure_reason = ""
+            if summarized_count == 0:
+                failure_reason = "summarized_message_count=0"
+            elif not ctx.auto_compact_has_summary:
+                failure_reason = "summary_empty"
+            elif estimated_tokens >= before_tokens:
+                failure_reason = "token_count_not_decreased"
+
+            if failure_reason:
+                ctx.auto_compact_before_tokens = None
+                ctx.auto_compact_summarized_message_count = None
+                ctx.auto_compact_has_summary = None
+                logger.warning(
+                    "agent=%s compact 无有效进展: before_tokens=%d "
+                    "after_tokens=%d summarized_message_count=%d reason=%s",
+                    self.agent_type,
+                    before_tokens,
+                    estimated_tokens,
+                    summarized_count,
+                    failure_reason,
+                )
+                return AgentState.SUMMARIZE_EXIT
+
+            ctx.auto_compact_summarized_message_count = None
+            ctx.auto_compact_has_summary = None
+            if not needs_compact:
+                ctx.compact_streak = 0
+                ctx.auto_compact_before_tokens = None
+                return AgentState.LLM_CALL
+
+            ctx.compact_streak += 1
+            if ctx.compact_streak >= ctx.max_compact_streak:
+                ctx.auto_compact_before_tokens = None
+                logger.warning(
+                    "agent=%s 连续 %d 次有效 compact 后仍需压缩: "
+                    "before_tokens=%d after_tokens=%d",
+                    self.agent_type,
+                    ctx.max_compact_streak,
+                    before_tokens,
+                    estimated_tokens,
+                )
+                return AgentState.SUMMARIZE_EXIT
+
+            ctx.auto_compact_before_tokens = estimated_tokens
+            return AgentState.COMPACT
+
+        if not needs_compact:
+            ctx.compact_streak = 0
+            ctx.auto_compact_before_tokens = None
+            ctx.auto_compact_summarized_message_count = None
+            ctx.auto_compact_has_summary = None
+            return AgentState.LLM_CALL
+
+        ctx.auto_compact_before_tokens = estimated_tokens
         return AgentState.COMPACT
 
     async def _on_compact(self, ctx: RunContext) -> AgentState:
+        """执行一次自动 compact 并保存其进展信号。
+
+        Args:
+            ctx: 当前运行上下文，其消息会替换为 compact 结果。
+
+        Returns:
+            CHECK_COMPACT，以便立即重新估算 compact 后的完整输入。
+        """
         await self.deps.event_bus.emit(CompactDelta(
             timestamp=time.time(),
             source=self.agent_type,
@@ -559,9 +645,11 @@ class Agent:
         ))
         result = await self._compact_mgr.compact_history(ctx.messages)
         ctx.messages[:] = result.messages
+        ctx.auto_compact_summarized_message_count = result.summarized_message_count
+        ctx.auto_compact_has_summary = bool(result.summary.strip())
         if result.transcript_path:
             await self.deps.event_bus.request_output(f"[transcript saved: {result.transcript_path}]\n")
-        return AgentState.LLM_CALL
+        return AgentState.CHECK_COMPACT
 
     async def _on_llm_call(self, ctx: RunContext) -> AgentState:
         ctx.messages[:] = self.llm.normalize_messages(ctx.messages)

@@ -20,7 +20,7 @@
 
 **应用主循环层** — `src/app/app.py` 的 `AgentApp` 管理外层 REPL：启动 UI、创建事件消费任务、打印启动横幅、重置会话、循环驱动 Agent 轮次、处理中断、退出时收尾（`app.py:26-63`）。
 
-**Agent 状态机层** — `src/agent/agent.py` 的 `Agent` 是由 `_handlers: dict[AgentState, Callable]` 驱动的有限状态机（`agent.py:158-170`），枚举定义在 `src/agent/states.py:38-50`。每轮的可变状态封装在 `RunContext`（`states.py:53-71`）中，避免异步冲突。
+**Agent 状态机层** — `src/agent/agent.py` 的 `Agent` 是由 `_handlers: dict[AgentState, Callable]` 驱动的有限状态机（`agent.py:161-174`），枚举定义在 `src/agent/states.py:39-51`。每轮的可变状态封装在 `RunContext`（`states.py:54-100`）中，避免异步冲突。
 
 **Manager 服务层** — `src/mgr/` 下各 Manager 各司其职（`RoleMgr`、`LLMMgr`、`ToolsMgr`、`PermissionManager`、`CompactMgr`、`PromptMgr`、`SubAgentMgr`、`SkillMgr` 等）。部分 Manager 受 feature 门控，未启用时在 `create_app()` 注入 `None`。
 
@@ -43,7 +43,8 @@
 ┌─────────────────────────────────────────────────────────────┐
 │ Agent 状态机层                                                 │
 │   Agent (src/agent/agent.py) + _handlers[AgentState]          │
-│   REQUEST_INPUT → CHECK_COMPACT → [COMPACT] → LLM_CALL         │
+│   REQUEST_INPUT → CHECK_COMPACT → [COMPACT → CHECK_COMPACT]    │
+│   → LLM_CALL                                                   │
 │   → PROCESS_RESPONSE → [EXECUTE_TOOLS → POST_ROUND] → …→ DONE  │
 └───────────────────────────────┬─────────────────────────────┘
                                  │ 调用 Manager 方法
@@ -100,7 +101,7 @@
 
 ## 3. `AgentDeps` 依赖容器
 
-`AgentDeps` 是进程级依赖容器，定义在 `src/agent/agent.py:48-73`（**并非单独文件**）。它由 `create_app()` 一次性组装，注入所有 Agent 实例共享。门控 Manager 未启用时注入 `None`。
+`AgentDeps` 是进程级依赖容器，定义在 `src/agent/agent.py:49-73`（**并非单独文件**）。它由 `create_app()` 一次性组装，注入所有 Agent 实例共享。门控 Manager 未启用时注入 `None`。
 
 | 字段 | 类型 | feature 门控 | 用途 |
 |---|---|---|---|
@@ -150,16 +151,16 @@ ALL_FEATURES = frozenset({"task", "skill", "subagent", "file", "memory", "plan"}
 
 | feature | 门控的 Manager / 工具 / 提示词段 |
 |---|---|
-| `task` | `TaskManager`（`agent.py:148-154`），任务工具，任务提醒段 |
-| `skill` | `SkillMgr`（`agent.py:138-141`），`load_skill` 等技能工具，技能提示词段 |
-| `subagent` | `SubAgentMgr`（`agent.py:142-145`），`task_delegator` 工具 |
-| `file` | `FileMgr`（`agent.py:137`），文件读写工具 |
+| `task` | `TaskManager`（`agent.py:151-155`），任务工具，任务提醒段 |
+| `skill` | `SkillMgr`（`agent.py:141-144`），`load_skill` 等技能工具，技能提示词段 |
+| `subagent` | `SubAgentMgr`（`agent.py:145-148`），`task_delegator` 工具 |
+| `file` | `FileMgr`（`agent.py:140`），文件读写工具 |
 | `memory` | `MemoryMgr`（`bootstrap.py:40`），记忆工具与提示词段 |
 | `plan` | `PlanMgr`（`bootstrap.py:43`），4 个 plan 工具，计划模式 |
 
-`create_app()` 用 `resolve_features(role_mgr.manifest.features)` 计算有效集（`bootstrap.py:39`），决定 `MemoryMgr`/`PlanMgr` 是否实例化。每个 `Agent` 在 `__post_init__` 中再次调用 `resolve_features(self.features)`（`agent.py:122-123`）解析自身 feature 集，据此过滤工具 schema、按需创建 agent 级 Manager。子 agent 的 feature 集：自身 manifest 声明则用其值，否则继承父 agent。详见 [roles-subagents-skills.md](./roles-subagents-skills.md) 与 [managers.md](./managers.md)。
+`create_app()` 用 `resolve_features(role_mgr.manifest.features)` 计算有效集（`bootstrap.py:39`），决定 `MemoryMgr`/`PlanMgr` 是否实例化。每个 `Agent` 在 `__post_init__` 中再次调用 `resolve_features(self.features)`（`agent.py:125-126`）解析自身 feature 集，据此过滤工具 schema、按需创建 agent 级 Manager。子 agent 的 feature 集：自身 manifest 声明则用其值，否则继承父 agent。详见 [roles-subagents-skills.md](./roles-subagents-skills.md) 与 [managers.md](./managers.md)。
 
-未启用的 feature 对应工具通过 `tools_mgr.excluded_tool_names(features)` 计算出 `_excluded_tools`（`agent.py:124`），在 `refresh_tools_schemas()` 中从 schema 中减去（`agent.py:225-233`），LLM 不再看到这些工具。
+未启用的 feature 对应工具通过 `tools_mgr.excluded_tool_names(features)` 计算出 `_excluded_tools`（`agent.py:127`），在 `refresh_tools_schemas()` 中从 schema 中减去（`agent.py:228-236`），LLM 不再看到这些工具。
 
 ---
 

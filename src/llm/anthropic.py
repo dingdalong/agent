@@ -1,6 +1,7 @@
 """Anthropic LLM Provider。"""
 
 import asyncio
+from copy import deepcopy
 import json
 import logging
 import tiktoken
@@ -46,16 +47,30 @@ class AnthropicProvider(LLMProvider):
         prompt: list[dict] | None = None,
         tools: list[ToolDict] | None = None,
     ) -> int:
-        all_messages = (prompt or []) + messages
-        messages_for_estimate = [{
-            "messages": all_messages,
-            "tools": tools,
-        }] if tools else all_messages
+        """估算 Messages API 实际输入内容的 token 数。
+
+        Args:
+            messages: OpenAI 兼容格式的对话消息列表。
+            prompt: 可选的系统提示词消息列表。
+            tools: 可选的 OpenAI function-calling 工具 schema 列表。
+
+        Returns:
+            转换后 system、messages 与工具 schema 的估算 token 数。
+        """
+        system, claude_messages = self._convert_messages(messages, prompt)
+        claude_messages = deepcopy(claude_messages)
+        self._apply_cache_control(claude_messages)
+        payload: dict[str, object] = {"messages": claude_messages}
+        if system:
+            payload["system"] = self._system_blocks(system)
+        claude_tools = self._convert_tools(tools)
+        if claude_tools:
+            payload["tools"] = claude_tools
         try:
             encoding = tiktoken.get_encoding("cl100k_base")
         except Exception:
-            return len(str(messages_for_estimate)) // 4
-        return len(encoding.encode(str(messages_for_estimate)))
+            return len(str(payload)) // 4
+        return len(encoding.encode(str(payload)))
 
     def _extract_token_usage(
         self,

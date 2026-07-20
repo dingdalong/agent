@@ -53,7 +53,32 @@ class AgentState(Enum):
 
 @dataclass
 class RunContext:
-    """一次 Agent.run() 的全部可变状态。"""
+    """一次 Agent.run() 的全部可变状态。
+
+    Attributes:
+        messages: 当前会话消息列表。
+        prompt: 当前完整系统提示词。
+        final_text: 本轮最终输出文本。
+        has_tool_calls: 本轮是否执行过工具调用。
+        round_start_idx: 本轮消息在历史中的起始下标。
+        compact_streak: 连续有效但仍不足的自动 compact 次数。
+        max_compact_streak: 自动 compact 有效但仍不足的保护上限。
+        auto_compact_before_tokens: 最近一次自动 compact 前的输入 token 估算；
+            无待评估的自动 compact 时为 None。
+        auto_compact_summarized_message_count: 最近一次自动 compact 返回的摘要消息数；
+            尚未返回自动 compact 结果时为 None。
+        auto_compact_has_summary: 最近一次自动 compact 是否返回非空摘要；
+            尚未返回自动 compact 结果时为 None。
+        stop_hook_used: 本轮 Stop hook 是否已阻止过一次停止。
+        length_recoveries: 本轮长度截断恢复次数。
+        max_length_recoveries: 本轮长度截断恢复上限。
+        response: 最近一次 LLM 响应。
+        manual_compact: 当前工具轮是否请求手动 compact。
+        compact_focus: 手动 compact 的可选关注点。
+        user_input: 本轮用户原始输入。
+        command: 需要上抛应用层的斜杠命令。
+        exit_requested: 用户是否请求退出。
+    """
     messages: list[dict]
     prompt: list[dict] | None = None
     final_text: str = ""
@@ -61,6 +86,9 @@ class RunContext:
     round_start_idx: int = 0
     compact_streak: int = 0
     max_compact_streak: int = 3
+    auto_compact_before_tokens: int | None = None
+    auto_compact_summarized_message_count: int | None = None
+    auto_compact_has_summary: bool | None = None
     stop_hook_used: bool = False
     length_recoveries: int = 0
     max_length_recoveries: int = 3

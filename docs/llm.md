@@ -93,13 +93,13 @@ LLM 层位于 `src/llm/`，职责是把「一段消息 + 工具 schema」转换�
 
 ## 4. `chat()` 机制
 
-`chat()`（`src/llm/base.py:299`）是唯一对外调用入口，模板方法模式：并发限流 + 重试循环 + 发事件，真正的 API 调用委托给抽象方法 `_do_chat`。
+`chat()`（`src/llm/base.py:310`）是唯一对外调用入口，模板方法模式：并发限流 + 重试循环 + 发事件，真正的 API 调用委托给抽象方法 `_do_chat`。
 
-流程（`src/llm/base.py:310`）：
+流程（`src/llm/base.py:321`）：
 
 1. `async with self._semaphore` — 并发不超过 `concurrency`。
 2. 循环最多 `max(1, max_retries)` 次：
-   - 发 `LLMCallStarted` 事件（`_emit_llm_call_started`，带 `estimate_tokens` 估算的输入 token）。
+   - 发 `LLMCallStarted` 事件（`_emit_llm_call_started`，在线程中运行 `estimate_tokens`，携带输入 token 估算且不阻塞事件循环）。
    - `await self._do_chat(...)` 执行真实调用。
    - 发 `LLMCallCompleted` 事件（带耗时、token 用量、吞吐率）。
    - 返回 `LLMResponse`。
@@ -108,11 +108,11 @@ LLM 层位于 `src/llm/`，职责是把「一段消息 + 工具 schema」转换�
 
 ### 退避策略
 
-`_retry_delay(attempt)`（`src/llm/base.py:195`）= `min(2 ** attempt * 5, 60) + _retry_jitter()`，即指数退避，基数 5 秒、封顶 60 秒，叠加 `random.uniform(0, 1)` 的抖动。
+`_retry_delay(attempt)`（`src/llm/base.py:206`）= `min(2 ** attempt * 5, 60) + _retry_jitter()`，即指数退避，基数 5 秒、封顶 60 秒，叠加 `random.uniform(0, 1)` 的抖动。
 
 ### 是否重试的判定
 
-`is_retryable_error`（`src/llm/base.py:132`）：
+`is_retryable_error`（`src/llm/base.py:143`）：
 
 - **首先** 若 `is_context_too_long_error(e)` 为真 → 不重试（返回 `False`）。
 - **不重试** 的异常类型：认证 `AuthenticationError`、权限 `PermissionDeniedError`、`NotFoundError`（404）、`BadRequestError`、`UnprocessableEntityError`、`APIResponseValidationError`，以及 OpenAI 的 `ContentFilterFinishReasonError` / `LengthFinishReasonError`（openai 与 anthropic 两套 SDK 的对应类型均列入）。
@@ -122,18 +122,18 @@ LLM 层位于 `src/llm/`，职责是把「一段消息 + 工具 schema」转换�
 
 ### 上下文超长判定
 
-`is_context_too_long_error`（`src/llm/base.py:119`）对异常文本（`_exception_text` 拼接 `str(exc)` + `body` + `response.text` 并小写）做关键短语匹配，命中任一即判定为上下文超长：`context length`、`maximum context`、`prompt too long`、`overlong_prompt`、`input is too long`、`tokens exceed`、`too many tokens`。此类错误不重试，交由 Agent 状态机的 `CONTEXT_OVERFLOW` 处理（见 [agent-runtime.md](agent-runtime.md)）。
+`is_context_too_long_error`（`src/llm/base.py:130`）对异常文本（`_exception_text` 拼接 `str(exc)` + `body` + `response.text` 并小写）做关键短语匹配，命中任一即判定为上下文超长：`context length`、`maximum context`、`prompt too long`、`overlong_prompt`、`input is too long`、`tokens exceed`、`too many tokens`。此类错误不重试，交由 Agent 状态机的 `CONTEXT_OVERFLOW` 处理（见 [agent-runtime.md](agent-runtime.md)）。
 
 ### 抽象方法
 
 子类必须实现两个抽象方法：
 
-- `estimate_tokens(messages, prompt=None, tools=None)`（`src/llm/base.py:62`）— 估算输入 token 数，用于状态条显示与分页判定。
-- `_do_chat(...)`（`src/llm/base.py:452`）— 执行真实的流式 API 调用并返回 `LLMResponse`。
+- `estimate_tokens(messages, prompt=None, tools=None)`（`src/llm/base.py:62`）— 估算该 provider **实际发送的完整请求载荷** token 数，用于状态条、自动压缩与分页判定；外部签名不变。
+- `_do_chat(...)`（`src/llm/base.py:471`）— 执行真实的流式 API 调用并返回 `LLMResponse`。
 
 ### normalize_messages
 
-`normalize_messages`（`src/llm/base.py:198`）把上层传入的松散消息列表清洗为合法结构：校验并规范 `role`（合法集 `system`/`user`/`assistant`/`tool`，可选 `developer`）、规整 `content`、过滤空消息、规范 assistant 的 `tool_calls` 与 tool 消息的 `tool_call_id`，并通过可覆写的钩子 `_normalize_role` / `_normalize_content` / `_normalize_assistant_extra` 让各 provider 注入自己的转换逻辑（如 Ollama 把 `developer` 归为 `system`、DeepSeek 保留 `prefix` 字段等）。`strict=True` 时对非法输入抛异常而非静默修正。
+`normalize_messages`（`src/llm/base.py:209`）把上层传入的松散消息列表清洗为合法结构：校验并规范 `role`（合法集 `system`/`user`/`assistant`/`tool`，可选 `developer`）、规整 `content`、过滤空消息、规范 assistant 的 `tool_calls` 与 tool 消息的 `tool_call_id`，并通过可覆写的钩子 `_normalize_role` / `_normalize_content` / `_normalize_assistant_extra` 让各 provider 注入自己的转换逻辑（如 Ollama 把 `developer` 归为 `system`、DeepSeek 保留 `prefix` 字段等）。`strict=True` 时对非法输入抛异常而非静默修正。
 
 ---
 
@@ -141,8 +141,8 @@ LLM 层位于 `src/llm/`，职责是把「一段消息 + 工具 schema」转换�
 
 单次工具调用结果可能远超模型上下文窗口，因此按 `page_token_budget` 切页，由基类统一提供切分算法，`ToolsMgr` 负责触发与缓存（见 [tools.md](tools.md) 的执行流水线）。
 
-- `split_page(text)`（`src/llm/base.py:89`）— 反复调用 `_split_page_once` 直至耗尽，返回页列表（空文本返回 `[""]`）。
-- `_split_page_once(text)`（`src/llm/base.py:70`）— 若整段 `estimate_tokens` 已不超预算则整段返回；否则二分查找最大的、`estimate_tokens` 不超过 `page_token_budget` 的前缀切点。
+- `split_page(text)`（`src/llm/base.py:100`）— 反复调用 `_split_page_once` 直至耗尽，返回页列表（空文本返回 `[""]`）。
+- `_split_page_once(text)`（`src/llm/base.py:81`）— 若整段 `estimate_tokens` 已不超预算则整段返回；否则二分查找最大的、`estimate_tokens` 不超过 `page_token_budget` 的前缀切点。
 
 `page_token_budget` 与 `tool.page_token_rate`、`context_limit` 的关系见第 2 节。运维侧调节单页大小改 `tool.page_token_rate`（见 [configuration-reference.md](configuration-reference.md)）。
 
@@ -155,7 +155,7 @@ LLM 层位于 `src/llm/`，职责是把「一段消息 + 工具 schema」转换�
 | API 类型 | Messages API（`messages.stream`） | Responses API（`responses.create`，流式） | OpenAI 兼容 Chat Completions | OpenAI 兼容 Chat Completions（本地） |
 | SDK 客户端 | `AsyncAnthropic` | `AsyncOpenAI` | `AsyncOpenAI` | `AsyncOpenAI`（默认 `base_url` 回退 `http://localhost:11434/v1`，`api_key` 回退 `"ollama"`） |
 | 结构化输出 | `supports_native_structured_output=True` | `True` | `False` | `False` |
-| tokenizer（estimate_tokens） | tiktoken `cl100k_base`（异常时回退 `len//4`） | `tiktoken.encoding_for_model(model)`，未知模型回退 `o200k_base` | 本地 transformers tokenizer（`src/llm/tokenizer/deepseek`，`trust_remote_code=True`，`cached_property`） | 字符估算 `len(str(...)) // 4` |
+| tokenizer（estimate_tokens） | tiktoken `cl100k_base`（异常时回退 `len//4`）；统计 `_convert_messages`、system/cache-control 与转换后的 tools | `tiktoken.encoding_for_model(model)`，未知模型回退 `o200k_base`；统计 `_convert_to_input` 与转换后的 tools | 本地 transformers tokenizer（`src/llm/tokenizer/deepseek`，`trust_remote_code=True`，`cached_property`） | 字符估算 `len(str(...)) // 4` |
 | 思考处理 | `thinking={"type":"adaptive"}` + `output_config={"effort": _map_effort(...)}`；关闭时 `thinking={"type":"disabled"}` | `reasoning={"effort": reasoning_effort, "summary":"auto"}`；关闭时不传 `reasoning` | `reasoning_effort` + `extra_body={"thinking":{"type":"enabled"}}`；关闭时 `{"type":"disabled"}` | 开启时按需传 `reasoning_effort`，`preserve_thinking` 时传 `chat_template_kwargs`；关闭时 `chat_template_kwargs={"enable_thinking": False}` |
 | 思考流式事件 | `content_block_delta` 中 `thinking_delta`→`emit_thinking_delta`，`text_delta`→`emit_response_delta` | `response.reasoning_summary_text.delta`→思考，`response.output_text.delta`→正文 | `delta.reasoning_content`→思考，`delta.content`→正文 | `delta.reasoning` 与 `delta.reasoning_content` 双字段均→思考；正文在流末尾一次性 emit |
 | 历史往返载体 | `_anthropic_content`（含 text/thinking/tool_use 原始块，回填时严格交替，`_merge_messages` 合并同角色） | `_response_output`（Responses API 的 `output` 项，`model_dump(exclude_none=True)`） | `reasoning_content`（可选 `prefix`） | `reasoning` 与 `reasoning_content` |
@@ -163,8 +163,8 @@ LLM 层位于 `src/llm/`，职责是把「一段消息 + 工具 schema」转换�
 
 补充要点：
 
-- **Anthropic**：`max_tokens` 固定 16000（`src/llm/anthropic.py:265`）；`_convert_messages` 把 OpenAI 兼容消息转为 Claude 格式并抽取 system，`_merge_messages` 合并连续同角色消息以满足 Claude 严格交替要求；`_convert_tools` / `_convert_tool_choice` 做格式转换（`auto`/`any`/`tool`）。`clear_reasoning_content` 会剥离历史中的 thinking 块。
-- **OpenAI**：`_convert_to_input` 把 Chat 消息转为 Responses API 的 `input` 项与 `instructions`；工具 `strict=False`。
+- **Anthropic**：`max_tokens` 固定 16000；`_convert_messages` 把 OpenAI 兼容消息转为 Claude 格式并抽取 system，`_merge_messages` 合并连续同角色消息以满足 Claude 严格交替要求；`_convert_tools` / `_convert_tool_choice` 做格式转换（`auto`/`any`/`tool`）。token 估算复用同一转换结果，并对副本应用 cache-control，不修改调用方消息。`clear_reasoning_content` 会剥离历史中的 thinking 块。
+- **OpenAI**：`_convert_to_input` 把 Chat 消息转为 Responses API 的 `input` 项，并把 system/developer 内容合并为首条 developer input 以进入可缓存前缀；工具 `strict=False`。token 估算只序列化转换后的 Responses API `input` 和 tools，不重复统计 `_response_output` 与标准消息字段。
 - **DeepSeek**：`_normalize_content` 会 `strip()` 文本；支持 assistant 的 `prefix: true`（前缀续写）。流式解析中当既有 `tool_calls` 又 `content.isspace()` 时跳过空白内容。
 - **Ollama**：流式解析末尾对有工具调用的情形 `strip()` 正文；`reasoning_effort` 为 `"none"`（大小写不敏感）时不传该参数。
 
