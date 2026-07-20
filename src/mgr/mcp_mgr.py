@@ -15,6 +15,7 @@ import re
 import subprocess
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict
@@ -67,6 +68,31 @@ def _safe_tool_name(raw: str) -> str:
     return re.sub(r"[^A-Za-z0-9_-]", "_", raw)[:_MAX_TOOL_NAME]
 
 
+def _interpolate_env(env: dict[str, Any], workdir: Path) -> dict[str, str]:
+    """替换 MCP server env 各值中的路径占位符为运行时绝对路径。
+
+    子进程 env 的值原样透传给子进程，框架在此先做占位符替换，使配置能引用随运行
+    变化的路径。支持两种占位符，其余内容原样保留：
+    - ``${workdir}`` → 当前工作目录（`--workdir` 指定的目标仓库）的绝对路径。
+    - 开头的 ``~`` → 用户家目录。
+    所有值统一转为字符串（子进程 env 仅接受字符串键值）。
+
+    Args:
+        env: 某 server 在 mcp_servers.json 中声明的 env 字典，值可含占位符。
+        workdir: 当前工作目录，用于替换 ``${workdir}``。
+
+    Returns:
+        占位符替换并展开后的 env 字典，键值均为字符串。
+    """
+    resolved: dict[str, str] = {}
+    for key, value in env.items():
+        text = str(value).replace("${workdir}", str(workdir))
+        if text.startswith("~"):
+            text = str(Path(text).expanduser())
+        resolved[key] = text
+    return resolved
+
+
 def _format_result(result: Any) -> str:
     """将 MCP CallToolResult 转为字符串结果。
 
@@ -101,6 +127,7 @@ class McpMgr:
         config_mgr: 配置管理器，用于读取合并后的 mcp_servers.json。
         tools_mgr: 工具管理器，发现的 MCP 工具注册到此。
         role_mgr: 角色管理器，为 None 时跳过角色层 MCP 配置。
+        workdir: 当前工作目录，用于展开各 server env 值中的 ``${workdir}`` 占位符。
     """
 
     def __init__(
@@ -108,10 +135,12 @@ class McpMgr:
         config_mgr: ConfigManager,
         tools_mgr: ToolsMgr,
         role_mgr: RoleMgr | None = None,
+        workdir: Path | None = None,
     ) -> None:
         self.config_mgr = config_mgr
         self.tools_mgr = tools_mgr
         self.role_mgr = role_mgr
+        self.workdir = workdir or Path.cwd()
         self._conns: dict[str, _ServerConn] = {}
         self._tasks: list[asyncio.Task] = []
         self._stop_event: asyncio.Event | None = None
@@ -271,8 +300,12 @@ class McpMgr:
             params = StdioServerParameters(
                 command=spec["command"],
                 args=spec.get("args", []),
-                # 默认环境（含 PATH）叠加用户声明的 env，避免子进程丢失 PATH 导致启动失败。
-                env={**get_default_environment(), **(spec.get("env") or {})},
+                # 默认环境（含 PATH）叠加用户声明的 env，避免子进程丢失 PATH 导致启动失败；
+                # env 值先经占位符替换（${workdir}、~），使其能引用随运行变化的绝对路径。
+                env={
+                    **get_default_environment(),
+                    **_interpolate_env(spec.get("env") or {}, self.workdir),
+                },
             )
             # 将 server 子进程的 stderr 导向 DEVNULL，避免日志输出到控制台
             read, write = await stack.enter_async_context(

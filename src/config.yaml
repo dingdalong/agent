@@ -12,8 +12,8 @@ llm_provider:
       - gpt-5.6-terra
       - gpt-5.6-luna
     base_url: https://api.openai.com/v1
-    reasoning_effort: medium # 推理力度
-    context_limit: 262144 # 上下文限制
+    reasoning_effort: max # 推理力度
+    context_limit: 400000 # 上下文限制
   anthropic:
     models:
       - claude-opus-4-8
@@ -22,7 +22,7 @@ llm_provider:
     base_url: https://api.anthropic.com
     max_pause_turn_continuations: 5 # pause_turn 协议终态的单轮最大自动续接次数
     reasoning_effort: high # 推理力度
-    context_limit: 262144 # 上下文限制
+    context_limit: 1000000 # 上下文限制
   ollama:
     base_url: http://127.0.0.1:8001/v1
     reasoning_effort: high
@@ -31,10 +31,10 @@ llm_provider:
   moonshot:
     base_url: https://api.moonshot.cn/v1 # 可被 MOONSHOT_API_URL 覆盖
     reasoning_effort: max # 恒开思考，当前仅支持 max
-    context_limit: 262144 # 上下文限制
+    context_limit: 400000 # 上下文限制
 
 llm:
-  default: gpt-5.6-luna # 必填，默认模型，子agent通过别名引用
+  default: k3 # 必填，默认模型，子agent通过别名引用
   # best: ...                   # 可选，最强模型，不填时使用 default
   # fast: ...                   # 可选，最快/最便宜模型，不填时使用 default
   concurrency: 5 # 最大并发数量

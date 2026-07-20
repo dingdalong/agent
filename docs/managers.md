@@ -251,7 +251,7 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 
 **单一职责**：分层拼装系统提示词的静态前缀并缓存，构建时附上当前日期。PromptMgr 负责段顺序，各可插拔段内容由对应 Manager 提供（Manager 缺席则该段自动省略）。
 
-**段顺序**（`_build_static_prefix` `prompt_mgr.py:105-151`）：
+**段顺序**（`_build_static_prefix` `prompt_mgr.py:111-157`）：
 1. **核心身份**（primacy）——`role_prompt` 非空时用之，否则默认身份（`_build_core`）；
 2. **行为准则**——`AGENTS.md` 四层叠加：共享 `roles/common/AGENTS.md` → 角色 `AGENTS.md` → 全局 `~/.agent/AGENTS.md` → 项目 `AGENTS.md`（`_build_agent_md`）；激活角色层会注入该角色的主 agent 与所有子 agent；
 3. **运行环境**——平台/模型/工作目录（`_build_environment`）；

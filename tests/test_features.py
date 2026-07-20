@@ -2,17 +2,39 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import src.tools  # noqa: F401  导入触发内置工具注册到 _registry
 from src.mgr.features import ALL_FEATURES, resolve_features
 from src.mgr.paths import builtin_root
-from src.mgr.role_mgr import extract_manifest, parse_frontmatter
+from src.mgr.permission_mgr import DEFAULT_MODE, PLAN_MODE
+from src.mgr.role_mgr import AgentManifest, extract_manifest, parse_frontmatter
 from src.mgr.tools_mgr import ToolsMgr
 from src.tools.decorator import _registry
 
 
-def _load_role_manifest(role_name: str):
-    """读取内置角色 role.md 并解析为 AgentManifest。"""
-    role_md = builtin_root() / "roles" / role_name / "role.md"
+def _builtin_role_md_path(role_name: str) -> Path:
+    """返回内置角色定义文件的路径。
+
+    Args:
+        role_name: 内置角色目录名。
+
+    Returns:
+        对应角色的 role.md 路径。
+    """
+    return builtin_root() / "roles" / role_name / "role.md"
+
+
+def _load_role_manifest(role_name: str) -> AgentManifest:
+    """读取内置角色 role.md 并解析为 AgentManifest。
+
+    Args:
+        role_name: 内置角色目录名。
+
+    Returns:
+        从对应 role.md 解析出的角色清单。
+    """
+    role_md = _builtin_role_md_path(role_name)
     meta, prompt = parse_frontmatter(role_md.read_text())
     return extract_manifest(
         meta, role_md, prompt=prompt,
@@ -102,6 +124,43 @@ def test_all_features_excludes_nothing():
 
 
 # ── 角色 role.md → features 端到端 ──────────────────────────────────
+
+def test_coding_role_configuration_contract():
+    """coding 角色保留全工具与全 feature 默认值，并声明其主 agent 配置。"""
+    raw_meta, _ = parse_frontmatter(_builtin_role_md_path("coding").read_text())
+    assert "agent_type" not in raw_meta
+    assert "tools" not in raw_meta
+    assert "features" not in raw_meta
+
+    manifest = _load_role_manifest("coding")
+
+    assert manifest.model == "best"
+    assert manifest.permission_mode is PLAN_MODE
+    assert manifest.enable_thinking is True
+    assert manifest.reasoning_effort == "max"
+    assert manifest.memory == "project"
+    assert manifest.tools is None
+    assert manifest.features is None
+
+
+def test_mijia_role_configuration_contract():
+    """mijia 角色仅声明其快速模型、默认权限和 subagent feature。"""
+    raw_meta, _ = parse_frontmatter(_builtin_role_md_path("mijia").read_text())
+    assert "agent_type" not in raw_meta
+    assert "tools" not in raw_meta
+    assert "reasoning_effort" not in raw_meta
+    assert "memory" not in raw_meta
+
+    manifest = _load_role_manifest("mijia")
+
+    assert manifest.model == "fast"
+    assert manifest.permission_mode is DEFAULT_MODE
+    assert manifest.enable_thinking is False
+    assert manifest.features == {"subagent"}
+    assert manifest.tools is None
+    assert manifest.reasoning_effort is None
+    assert manifest.memory is None
+
 
 def test_mijia_role_features_and_schema():
     """mijia 声明 features:[subagent]，解析后仅保留 subagent，有效工具集恰好排除其余 feature 工具。"""

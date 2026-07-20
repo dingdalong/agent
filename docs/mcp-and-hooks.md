@@ -31,6 +31,8 @@ MCP server 连接配置写在 `mcp_servers.json`，格式为 `{"mcpServers": {"<
 
 其他值抛 `不支持的 MCP transport`。
 
+**`env` 值路径占位符**：`stdio` server 的 `env` 各值在传给子进程前，由 `_interpolate_env()`（`mcp_mgr.py`）做占位符替换——`${workdir}` 展开为当前工作目录（`--workdir` 指定的目标仓库）的绝对路径，开头的 `~` 展开为家目录，其余原样保留。因子进程 env 原样透传、且进程不 `chdir` 到 workdir，需要随仓库变化的路径（如把索引写进被分析项目而非全局缓存）必须借此写成绝对路径。例：onboard 角色用 `"CBM_CACHE_DIR": "${workdir}/.agent/codebase-memory"` 把 `codebase-memory` 的索引落到被分析仓库的 `.agent/` 下。
+
 ### 工具注册与命名
 
 `_register_tool()`（`mcp_mgr.py:299-335`）为每个上游工具注册一个 `ToolEntry`：

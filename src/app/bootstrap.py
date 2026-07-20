@@ -54,7 +54,7 @@ async def create_app(
     hooks_mgr = HooksMgr(workdir=work_dir, global_dir=global_dir, plugin_mgr=plugin_mgr)
     plan_mgr = PlanMgr(work_dir) if "plan" in feats else None
     # 须先于 permission_mgr：MCP 工具注册进 tools_mgr 后，其权限元数据才会被 PermissionManager 收录。
-    mcp_mgr = McpMgr(config_mgr=config_mgr, tools_mgr=tools_mgr, role_mgr=role_mgr)
+    mcp_mgr = McpMgr(config_mgr=config_mgr, tools_mgr=tools_mgr, role_mgr=role_mgr, workdir=work_dir)
     await mcp_mgr.start()
     permission_mgr = PermissionManager(
         tools=tools_mgr.list_entries(),
