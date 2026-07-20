@@ -1,8 +1,8 @@
 """菜单/交互事件 — 阻塞等待用户经 TUI 作答、并通过 future 回传结果的事件。
 
-这些事件都是 UI 的"控制面"：EventBus 发布后，UI 进入相应的模态 `_mode`
-（select/form/input），渲染对应界面，待用户作答后经 future 回传，UI 退出模态。
-每个事件的注释给出其在 TUI（src/interfaces/inline_ui.py）上的具体呈现形态。
+这些事件都是 UI 的"控制面"：EventBus 发布后，UI 进入明确的 `InteractionMode`，
+由 `src/interfaces/inline/` 中对应组件渲染；用户完成或取消后经 future 回传。
+每个事件的注释给出其在组合式 TUI 上的具体呈现形态。
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from src.events.types import Event
 class MenuRequest(Event):
     """需 UI 阻塞作答、经 future 回传结果的交互事件基类。
 
-    UI 收到后进入模态（select/form/input），渲染对应界面；用户作答后由
+    UI 收到后进入相应交互模式并渲染对应界面；用户作答后由
     complete() 回填 future（空串约定为取消），失败/取消分别走 fail()/cancel()。
     """
 
@@ -49,9 +49,8 @@ class MenuRequest(Event):
 class PermissionMenu(MenuRequest):
     """请求 UI 读取工具权限确认，并通过 future 返回结果。
 
-    TUI 呈现（_mode="select" → _render_select，上下文经 _permission_context_text
-    打印、选项经 _permission_options 生成）。下图为示意，实际渲染以 inline_ui.py 的
-    _render_select / _permission_context_text / _permission_options 为准，可能随其改动而滞后：
+    TUI 由 `inline/menus.py` 的 `MenuActions` 呈现：权限上下文经
+    `_permission_context_text` 打印，选项经 `_permission_options` 生成：
 
         工具请求权限
           工具: shell
@@ -77,9 +76,8 @@ class PermissionMenu(MenuRequest):
 class InputMenu(MenuRequest):
     """请求 UI 串行读取用户输入，并通过 future 返回结果。
 
-    TUI 呈现（_mode="input"）——上文提示打印在滚动区，可编辑输入行以 › 起头、
-    行内为原生块光标，无占位符；Enter 提交。input 模式无独立渲染窗口，下图为示意，
-    实际渲染以 inline_ui.py 的 _read_input / _render_input_context 为准，可能随其改动而滞后：
+    TUI 由 `inline/controller.py` 的普通输入协调逻辑呈现：上文提示打印在滚动区，
+    可编辑输入行以 › 起头、行内为原生块光标，无占位符；Enter 提交：
 
         你叫什么名字？
         ──────────────────────────────
@@ -100,9 +98,8 @@ class InputMenu(MenuRequest):
 class ChoiceMenu(MenuRequest):
     """请求 UI 以菜单读取一次选择，通过 future 返回所选 value（空串表示取消）。
 
-    TUI 呈现（_mode="select" → _render_select，与 PermissionMenu 共用），上文为
-    调用方 prompt。下图为示意，实际渲染以 inline_ui.py 的 _render_select 为准，可能随其改动而滞后
-    （/mode 权限模式切换，仅示前 3 项）：
+    TUI 由 `inline/menus.py` 的 `_render_select` 呈现，与 PermissionMenu 共用；
+    上文为调用方 prompt（/mode 权限模式切换仅示前 3 项）：
 
         权限模式（当前: default）
         ❯ 1. default - 只读自动放行；文件编辑和命令执行默认询问，可被 allow 规则放行
@@ -141,10 +138,9 @@ class FormQuestion:
 class FormMenu(MenuRequest):
     """请求 UI 以单屏表单读取多个问题的作答，通过 future 返回 JSON 编码的答案列表（空串表示取消）。
 
-    TUI 呈现（_mode="form" → _render_form）——顶部标签栏（已答 ☑ 未答 ☐ + header
+    TUI 由 `inline/form.py` 的 `FormActions` 呈现：顶部标签栏（已答 ☑ 未答 ☐ + header
     简介 + 末尾「提交」）、题干、单选 ●/○ 或多选 [x]/[ ] 选项行（可带浅色参考说明副行）、
-    末行自定义输入行、底部操作提示与讨论栏。下图为示意，实际渲染以 inline_ui.py 的
-    _render_form 为准，可能随其改动而滞后：
+    末行自定义输入行、底部操作提示与讨论栏：
 
          ☑ 语言   ☐ 经验   提交
 
@@ -171,13 +167,12 @@ class FormMenu(MenuRequest):
 class TranscriptView(MenuRequest):
     """请求 UI 以只读分页面板查看某子 agent 的完整原始消息记录，通过 future 回传结果（恒 ""）。
 
-    由 /agents 浏览器在用户选中某子 agent 后发起。TUI 呈现（复用半屏转录覆盖面板 _render_transcript_panel /
-    _render_transcript_header）：面板按「是否已有完整原始记录」选源——已完成 agent 渲染其原始消息
+    由 /agents 浏览器在用户选中某子 agent 后发起。TUI 由 `inline/agent_panel.py` 的
+    `_render_transcript_panel` / `_render_transcript_header` 呈现：面板按「是否已有完整原始记录」选源——已完成 agent 渲染其原始消息
     （user/assistant/thinking/工具调用完整参数/工具完整返回），↑/↓ 滚动，Esc 返回列表。下图为示意，
-    实际渲染以 inline_ui.py 的 _render_transcript_panel / _message_lines 为准，可能随其改动而滞后
-    （标题即选中项的 label，已含状态与 token）：
+    标题在渲染时从共享 agent 快照现场生成：
 
-        ── ◯ code  a1b2  已完成  ↑1.2k(80%) ↓340 · 5s ──  实时  ·  ↑/↓ 滚动 · Esc 返回列表
+        ── ◯ code  a1b2  已完成  ↑1.2k(20%) ↓340 · 上下文 8.0k(80%) · 5.0s ──  实时  ·  ↑/↓ 滚动 · Esc 返回列表
         ▶ 用户
         <初始任务提示…>
         ● 助手
@@ -190,7 +185,6 @@ class TranscriptView(MenuRequest):
     这是只读查看而非作答菜单：无选项、无输入；Esc 经 _resolve_input("") 解开 future，返回 ""。
     """
     uuid: str = ""  # 目标子 agent 的 uuid 字符串
-    label: str = ""  # 面板标题用的一行摘要（来自 OutputRouter.subagent_choices）
     level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
     type: Literal["transcript_view"] = field(default="transcript_view", init=False)
 
@@ -200,10 +194,10 @@ class ChoiceInputMenu(MenuRequest):
     """请求 UI 以「选项列表 + 一行可编辑输入」读取一次作答，通过 future 返回 JSON
     {"choice": "<value|''>", "text": "<typed|''>"} 串（空串表示取消）。
 
-    TUI 呈现（_mode="choice_input" → _render_choice_input）——上文为调用方 prompt（打印到
+    TUI 由 `inline/menus.py` 的 `_render_choice_input` 呈现：上文为调用方 prompt（打印到
     scrollback）；选项行（❯ 序号. 标签，可带浅色说明副行）与操作提示画在分割线上方的
     choice_input_window，而「输入行」即分割线下方那条常驻输入框（› 前缀），并非窗口内的内联行。
-    下图为示意，实际渲染以 inline_ui.py 的 _render_choice_input 为准，可能随其改动而滞后：
+    布局如下：
 
         计划审核
         ❯ 1. 自动执行

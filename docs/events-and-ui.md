@@ -1,141 +1,149 @@
 # 事件系统与 UI
 
-框架的**所有输出与输入都通过 `EventBus` 以类型化事件流转**，Agent/Manager 从不直接调用 UI。这实现了业务层与 UI 层的解耦：业务层 `emit` 事件，UI 层 `subscribe` 消费。事件类型见 `src/events/types.py`，总线见 `src/events/bus.py`，UI 见 `src/interfaces/`。
+框架的所有输入与输出都通过 `EventBus` 以类型化事件流转。Agent 和 Manager 发布事件，`AgentApp` 消费事件并交给 `OutputRouter`；UI 不参与业务决策。事件定义见 `src/events/types.py` 与 `src/events/menu.py`，总线见 `src/events/bus.py`。
 
 ## EventBus
 
-`EventBus`（`src/events/bus.py`）是 `asyncio.Queue` 驱动的发布订阅总线。
+`EventBus` 由 `asyncio.Queue` 驱动，包含两层过滤：
 
-### 两层过滤
+1. `emit()` 按全局 `EventLevel` 丢弃高于当前级别的事件。
+2. 每个订阅者可按事件类型集合过滤；未指定集合表示接收全部事件。
 
-1. **全局级别门控**（`emit`，`bus.py:56-62`）：`event.level.value > bus.level.value` 的事件直接丢弃，不广播。级别由 `config.yaml` 的 `events.level` 设定（见下）。
-2. **订阅者类型过滤**（`_Subscription.accepts`，`bus.py:38-41`）：每个订阅者可选只关注特定事件类型集合，`None` 表示全收。
+主要生产者 API：
 
-### 生产者 API
+| 方法 | 返回 |
+|---|---|
+| `emit(event)` | 无 |
+| `request_output(content, markdown)` | 无 |
+| `request_interrupt()` | 无 |
+| `request_input(prompt, default, markdown)` | 用户文本 |
+| `request_choice(prompt, options, default_index, markdown)` | 所选 value，空串表示取消 |
+| `request_form(prompt, questions, markdown)` | `{"answers": [...], "discussion": "..."}` JSON |
+| `request_choice_input(...)` | `{"choice": "...", "text": "..."}` JSON |
+| `request_transcript_view(uuid)` | 恒为空串 |
+| `request_permission(...)` | `yes/session/always/session_server/always_server/deny` |
+| `notify_permission(...)` | 无 |
 
-| 方法 | 作用 | 返回 |
+需要应答的请求统一继承 `MenuRequest`，内部 future 由 `complete/cancel/fail` 落定；无订阅者时抛 `NoEventSubscribers`。转录请求只携带 UUID（`bus.py:248`、`menu.py:171`），标题在渲染时从当前 agent 快照生成。
+
+消费者使用 `subscribe(event_types)` 获取 async iterator，`join()` 等待队列处理完毕，`close()` 通过 sentinel 结束全部订阅。
+
+## 事件目录
+
+`EventLevel` 三级：`PROGRESS=1`、`DETAIL=2`、`TRACE=3`。交互、状态和 token 事件均为 PROGRESS；`ThinkingDelta` 与 `AgentStateChanged` 为 DETAIL。
+
+| 类名 | `type` | 关键 payload |
 |---|---|---|
-| `emit(event)` | 广播事件（非阻塞，`put_nowait`） | — |
-| `request_output(content, markdown)` | 请求 UI 串行输出文本 | — |
-| `request_interrupt()` | 请求中断当前交互/agent 工作 | — |
-| `request_input(prompt, default, markdown)` | 请求用户输入 | 用户文本 |
-| `request_choice(prompt, options, default_index, markdown)` | 请求菜单选择 | 所选 value（空串=取消） |
-| `request_permission(tool_name, detail, suggested_rules, mcp_server_rule)` | 请求权限确认 | `yes`/`session`/`always`/`session_server`/`always_server`/`deny` |
-| `notify_permission(status, tool_name, detail)` | 发布权限状态通知 | — |
+| `ResponseDelta` | `token_delta` | `content`、`caller_agent_type`、`caller_uuid` |
+| `ThinkingDelta` | `thinking_delta` | `content`、`caller_*` |
+| `CompactDelta` | `compact_delta` | `content` |
+| `ToolCallStarted` | `tool_call_started` | 工具名、调用 ID、detail、`caller_*` |
+| `ToolCallCompleted` | `tool_call_completed` | 状态、耗时、结果预览、`caller_*` |
+| `LLMCallStarted` | `llm_call_started` | 模型、`context_limit`、输入估算、`caller_*` |
+| `LLMCallCompleted` | `llm_call_completed` | 输入/输出/cache token、速度、`caller_uuid` |
+| `OutputRequested` | `output_requested` | `content`、`markdown` |
+| `InterruptRequested` | `interrupt_requested` | 无 |
+| `PermissionNotice` | `permission_notice` | 状态、工具名、detail |
+| `AgentStateChanged` | `agent_state_changed` | agent、前后状态 |
+| `SubagentLifecycle` | `subagent_lifecycle` | UUID、类型、start/end、结束 messages |
+| `PermissionModeChanged` | `permission_mode_changed` | 无 payload，仅通知重读权限模式 |
+| `InputMenu` | `input_menu` | prompt、default、markdown、future |
+| `ChoiceMenu` | `choice_menu` | options、默认项、markdown、future |
+| `ChoiceInputMenu` | `choice_input_menu` | options、descriptions、placeholder、future |
+| `FormMenu` | `form_menu` | questions、markdown、future |
+| `PermissionMenu` | `permission_menu` | 工具详情、建议规则、MCP server 规则、future |
+| `TranscriptView` | `transcript_view` | UUID、future |
 
-需要 UI 应答的 `request_*`（input/choice/permission）在无订阅者时抛 `NoEventSubscribers`（`bus.py:23-28`）——它们经 `asyncio.Future` 等待 UI 回填结果（`UserInputRequest.complete/cancel/fail`，`types.py:22-38`）。
+`PermissionModeChanged` 定义于 `types.py:175`。UI 经明确的 `set_permission_mode_provider()` pull 当前入口主 agent 模式（`base.py:90`），权限状态不承载 token/context。
 
-### 消费者 API
+## AgentViewStore：唯一 UI 状态源
 
-- `subscribe(event_types)`（`bus.py:199-216`）：返回 async iterator，`async for` 消费；退出时自动摘除订阅。
-- `join()`（`bus.py:218-223`）：等待已投递事件全部处理完（`queue.join()`）。
-- `close()`（`bus.py:233-236`）：向所有订阅者投 `_SENTINEL`，令其退出循环。
-- `set_level(level)` / `level`：运行时动态调整级别。
+`AgentViewStore`（`src/interfaces/agent_view_store.py:75`）由 bootstrap 创建一次，并显式注入 `InlineInterface`、`OutputRouter` 和 `AgentApp`（`bootstrap.py:37-46`、`:88-92`）。
 
-## EventLevel 与事件目录
+冻结快照类型：
 
-`EventLevel`（`src/events/levels.py`）三级：`PROGRESS=1`、`DETAIL=2`、`TRACE=3`。`from_str()` 对无效值回退 `PROGRESS`。`events.level` 越高看到的事件越多（高级别包含低级别）。
+- `TokenUsage(input_tokens, output_tokens, cache_read_tokens)`
+- `ContextUsage(used_tokens, limit_tokens)`
+- `AgentSnapshot(uuid, agent_type, is_main, running, usage, context, elapsed_seconds)`
+- `SessionSnapshot(usage, foreground_context)`
 
-事件类型（`src/events/types.py`，均继承 `Event`：`timestamp`/`source`/`level`/`type`）：
+Store 的职责：
 
-| 类名 | `type` | level | 关键 payload |
-|---|---|---|---|
-| `ResponseDelta` | `token_delta` | PROGRESS | `content`、`caller_agent_type`、`caller_uuid` |
-| `ThinkingDelta` | `thinking_delta` | DETAIL | `content`、`caller_*`（progress 级别下被门控丢弃） |
-| `CompactDelta` | `compact_delta` | PROGRESS | `content` |
-| `ToolCallStarted` | `tool_call_started` | PROGRESS | `tool_name`、`tool_call_id`、`detail`、`caller_*` |
-| `ToolCallCompleted` | `tool_call_completed` | PROGRESS | `status`(success/error)、`duration_seconds`、`result_preview` |
-| `LLMCallStarted` | `llm_call_started` | PROGRESS | `model`、`context_limit`、`estimated_input_tokens`、`message_count`、`tool_count`、`caller_*` |
-| `LLMCallCompleted` | `llm_call_completed` | PROGRESS | `input/output/total_tokens`、`cache_read/creation_input_tokens`、速度、`caller_uuid` |
-| `OutputRequested` | `output_requested` | PROGRESS | `content`、`markdown` |
-| `InterruptRequested` | `interrupt_requested` | PROGRESS | — |
-| `PermissionNotice` | `permission_notice` | PROGRESS | `status`(allow/deny/auto_allow)、`tool_name`、`detail` |
-| `PermissionRequested` | `permission_requested` | PROGRESS | `tool_name`、`detail`、`suggested_rules`、`mcp_server_rule`、`future` |
-| `InputRequested` | `input_requested` | PROGRESS | `prompt`、`default`、`markdown`、`future` |
-| `ChoiceRequested` | `choice_requested` | PROGRESS | `prompt`、`options:list[(value,label)]`、`default_index`、`future` |
-| `AgentStateChanged` | `agent_state_changed` | DETAIL | `agent_id`、`agent_type`、`from_state`、`to_state` |
-| `SubagentLifecycle` | `subagent_lifecycle` | PROGRESS | `agent_uuid`、`agent_type`、`phase`(start/end) |
-| `SystemStateChanged` | `system_state_changed` | PROGRESS | 无 payload（pull 模型，仅作重绘信号） |
+- `register_foreground()` 登记入口主 agent（`agent_view_store.py:111`）。
+- `record(event)` 处理 usage、context、lifecycle 和转录（`:135`）。
+- `flush_completed()` 把结束的子 agent 移入最多 50 项的历史（`:159`）。
+- `session_snapshot()` 返回全会话 token 总量和主 agent 当前上下文（`:181`）。
+- `active_agent_snapshots()` / `subagent_snapshots()` 分别服务实时面板与 `/agents`（`:205`、`:217`）。
+- 转录支持连续同类流合并、最多 400 段、原始 messages 查询。
+- `reset()` 原子清空前台、usage、实时项、历史与转录（`:260`）。
 
-> 交互与状态类事件（权限、输入、token 统计、状态刷新）刻意定为 PROGRESS，确保任何级别下都不被门控丢弃；仅 `ThinkingDelta`（思考正文）与 `AgentStateChanged` 为 DETAIL。
+缺 UUID 的 usage 仍计入会话总量，但不会虚构 agent；缺 input usage 时保留上一次准确上下文；未知窗口省略百分比；结束先于开始时不会被迟到的 start 复活。历史逐出只删除可浏览视图，不回退会话累计量。
 
-## UserInterface 抽象
+## StatusPresenter：统一指标文本
 
-`UserInterface`（`src/interfaces/base.py`）是 I/O 抽象基类，封装事件→handler 分发。核心是 `on_event(event)`（`base.py:178-243`）的 `match` 分派：
+`src/interfaces/status_presenter.py` 以纯函数把快照转成 Rich `Text`。TTY 使用 span 样式，历史摘要和非 TTY 使用同一 `Text.plain`。
 
-- **流收尾**：任何非 `ThinkingDelta`/`ResponseDelta` 事件到达前，先收尾未结束的思考流/回应流（`_end_streams_for`），保证输出不交叉。
-- **交互事件**（`InputRequested`/`ChoiceRequested`/`PermissionRequested`）：记为 `_active_user_request`，经 `_complete_user_request` 读取并回填 `future`；中断时 `cancel_active_input()` 取消。
-- **展示事件**：转发到可覆盖的 `on_*` 钩子（`on_response_delta`、`on_thinking_delta`、`on_tool_call_started/completed`、`on_llm_call_started/completed`、`on_compact_delta`、`on_permission_notice`），基类默认无操作，由具体 UI 实现渲染。
-- **系统状态**：`SystemStateChanged` → `on_system_state_changed()`；UI 经 `get_system_state()`（pull 模型，返回 `SystemState(permission_mode, context_used_tokens, context_limit)`）读取最新状态。状态提供函数由 `PermissionModeController.install_state_provider` 注册，闭包只持有主 agent 引用：`context_used_tokens` 取主 agent 的 `last_input_tokens`（最近一次 LLM 调用返回 usage 中提交给模型的输入 token，含缓存，即当前上下文占用量），`context_limit` 取 `agent.llm.context_limit`。子 agent 不使用该 pull 状态，其上下文由 `OutputRouter` 按 UUID 独立维护，因此不会污染主状态栏。
+统一指标格式：
 
-子类须实现四个抽象方法：`_write`、`_read_input`、`_read_permission`、`_read_choice`。
+```text
+↑输入(缓存%) ↓输出 · 上下文 used(pct%) · elapsed
+```
 
-## InlineInterface — 终端 UI
+百分比取整数，括号前无空格；context 达 80% 显示黄、达 90% 显示红；窗口未知时只显示 used。主状态栏使用“全会话 token + 主 agent context”，子 agent 实时行、历史行和转录标题均调用 `present_agent()`（`status_presenter.py:52`）。
 
-`InlineInterface`（`src/interfaces/inline_ui.py`，基于 `prompt_toolkit`）是默认交互式 UI，维护一个常驻 `Application` 与底部状态栏。非 TTY（管道/CI）时降级为无状态条的 plain 读写（`_read_*_plain`）。
+## OutputRouter
 
-### 状态栏与布局
+`OutputRouter.dispatch()`（`src/interfaces/output_router.py:48`）始终先调用 `store.record(event)`，再决定可见性：
 
-底部常驻区域按需渲染（`_render_*` 系列）：活动行（当前 agent + spinner + 计时）、核心状态、子 agent 列表、转录覆盖面板、选择菜单、斜杠命令补全下拉、分隔线。核心状态行（`_append_core_status`）依次为：权限模式、token 段（本会话累计 `↑总输入 (缓存命中%) ↓输出`，`_append_token_segment`）、上下文占用段（`上下文 XXk(N%)`，`_append_context_segment`，XXk = 当前上下文占用 token，N% = XXk / `context_limit`，百分比 ≥90% 红、≥80% 黄预警临近自动压缩；`context_limit` 为 0 时无法算百分比，仅显示「上下文 XXk」不着色）、耗时。子 agent 实时行和 `/agents` 摘要在累计 token 后显示同一上下文段；实时行复用相同预警色，纯文本摘要只保留数值。
-
-### 三种交互模式与按键
-
-`_build_key_bindings()`（`inline_ui.py:1373+`）按交互模式门控按键：
-
-| 场景 | 按键 |
+| 情况 | 处理 |
 |---|---|
-| 可输入态 | Enter 提交（补全选中时应用补全）；Ctrl+J / Shift+Enter 换行；Shift+Tab 切换权限模式；Ctrl+C 清空/中断；Ctrl+D 空缓冲 EOF |
-| select 态（选择菜单） | ↑↓ 移动、1–9 数字直选、Enter 确认、Esc 取消 |
-| 补全态（斜杠命令下拉） | ↓/Tab 下一项、↑ 上一项、Esc 关闭 |
-| agent 列表/转录面板 | ↓↑ 进入列表/导航/返回；列表内 Enter 打开子 agent 转录面板；面板内 ↑/↓ 整页滚动、Esc 关闭 |
+| `SubagentLifecycle` | Store 消费后不转发 |
+| 非 TTY passthrough | 正文事件保持透传，Store 同时记录真实摘要数据 |
+| 菜单、权限通知、显式输出 | 始终转发 |
+| `CompactDelta` | 始终转发 |
+| 前台 `LLMCallStarted` | 迁移已完成子 agent 后转发 |
+| 后台 `LLMCallStarted` | 静默 |
+| TTY 后台正文、工具、`LLMCallCompleted` | Store 记录后静默，避免结束前台 Markdown 流 |
+| 其余前台事件 | 转发 UI |
 
-### 权限对话选项
+Router 不持有 agent 视图、不格式化摘要，也不提供 UI 数据 provider。`AgentApp._browse_subagents()` 直接读取 Store，并用共享 Presenter 生成非 TTY 摘要和 TTY 选择标签。
 
-`_permission_options()`（`inline_ui.py:964-984`）根据 `mcp_server_rule` 是否存在构建菜单：
+## Inline UI 组件
 
-| value | label（有建议规则时） |
+`src/interfaces/inline_ui.py` 是薄 `UserInterface` 门面；完整实现由 `src/interfaces/inline/` 下的组合根和职责组件完成：
+
+| 模块 | 职责 |
 |---|---|
-| `yes` | 允许一次 |
-| `session` | 会话允许(上述规则) |
-| `always` | 始终允许并保存(上述规则) |
-| `session_server` | 会话信任整个 server(...)（仅 MCP 工具） |
-| `always_server` | 始终信任整个 server 并保存(...)（仅 MCP 工具） |
-| `deny` | 拒绝 (esc) |
+| `controller.py` | 组装 Runtime、控制器和 prompt-toolkit 布局，协调普通输入 |
+| `runtime.py` | 唯一持有 Application、Buffer、Layout、future、焦点引用和 stdout 代理；`interaction()` 排他管理 future 生命周期 |
+| `status_bar.py` | 活动状态、主状态栏和共享 Presenter |
+| `agent_panel.py` | agent 列表、转录渲染、滚动、缓存、实时查看恢复状态 |
+| `menus.py` | 选择菜单、权限菜单、ChoiceInput 状态与动作 |
+| `form.py` | 表单状态、渲染、导航和 JSON wire payload |
+| `output.py` | TTY Rich/流式 Markdown 输出与进度事件 |
+| `plain.py` | 非 TTY 输入和保证无 ANSI 的输出 |
+| `keymap.py` | 全部快捷键声明与优先级判断 |
 
-非 TTY 降级时接受打字缩写 `y/s/a/n`（MCP 追加 `ss/aa`），由 `_normalize_permission_answer()`（`inline_ui.py:1033-1054`）归一化。
+`InteractionMode`（`runtime.py:10`）包含 `PROCESSING/INPUT/SELECT/FORM/CHOICE_INPUT/TRANSCRIPT`。快捷键冲突优先级固定为：
 
-## OutputRouter — 多 agent 输出路由
+```text
+转录 → 补全 → 模态组件 → agent 列表 → 普通输入
+```
 
-`OutputRouter`（`src/interfaces/output_router.py`）插在事件消费与 `ui.on_event` 之间，解决并发子 agent 输出交叉的问题。
+关键约束：
 
-`dispatch(event)`（`output_router.py:104-150`）的决策表：
+- Enter 提交；Ctrl+J/Shift+Enter 仅在 Buffer 可编辑时插入换行。
+- Shift+Tab 只在无遮罩的普通输入态切权限模式；转录、补全、列表和所有模态层禁用。
+- select：↑↓、1–9、Enter、Esc。
+- form：左右切题、上下移行、空格/数字选择、Tab 切讨论区、Enter 确认/提交、Esc 取消。
+- ChoiceInput：上下切选项/输入行、Enter/数字提交、Esc 取消。
+- agent 列表 Enter 打开只读实时转录；打开时保存 mode、Buffer 文本和光标，Esc 完整恢复。
+- `/agents` 历史转录同样只读，事件只传 UUID，标题每帧从 Store 当前快照生成。
+- 所有通过 future 等待结果的 TTY 交互都必须在 `InlineRuntime.interaction()` 上下文中完成；上下文从 future 创建、组件初始化和等待覆盖到组件清理，期间排他持有其所有权。退出时若 future 尚未完成则取消，随后释放所有权引用。
+- 非 TTY 由 `PlainFrontend` 去除 ANSI，仍保留菜单/form/ChoiceInput 的既有返回 wire shape。
 
-| 事件 | 处理 |
-|---|---|
-| 透传模式（非 TTY） | 全部实时转发（`SubagentLifecycle` 丢弃） |
-| 控制面（`InputRequested`/`PermissionRequested`/`PermissionNotice`/`OutputRequested`） | 始终实时转发 |
-| `LLMCallStarted` | 按 `caller_uuid` 记录 `context_limit`；前台调用冲刷历史并转发，后台调用不显示 spinner |
-| `LLMCallCompleted` | 按 `caller_uuid` 累计 token，以非空 `input_tokens` 覆盖最近上下文占用，再转发 |
-| `SubagentLifecycle` | 自消费，维护 `_agents` 视图（不转发 UI） |
-| `CompactDelta` | 始终实时 |
-| 流/工具事件（携带 `caller_uuid` 且 ≠ 前台 uuid） | **进后台缓冲**转录，不实时渲染 |
-| 其余（前台 agent） | 实时转发 |
+## Markdown 与补全
 
-- **前台 agent**（`set_foreground` 登记的根 agent uuid）的输出实时渲染在滚动区；**后台子 agent** 的流/工具事件按 agent 追加到 `_AgentView.transcript`（`deque`，`_MAX_TRANSCRIPT_SEGMENTS=400`），供用户在列表中打开转录面板回看。
-- `_AgentView` 分开保存累计 `in_tokens`/`out_tokens` 与最近 `context_used_tokens`/`context_limit`：累计 token 每次相加，最近上下文仅在完成事件提供准确 `input_tokens` 时覆盖；调用开始事件缺少生命周期视图时会按 `caller_*` 防御性补建。
-- 连续同类流文本合并进同一段（`_append_transcript`），避免跨 delta 把 Markdown 代码围栏/列表拆碎。
-- 已完成 agent 视图至多保留 `_MAX_HISTORY_VIEWS=50` 个，按结束时间逐出最旧（运行中的恒保留）。
-- `agent_rows()` / `transcript_segments(uuid)` 供 UI 每帧拉取快照渲染；`format_subagent_summary()` / `subagent_choices()` 复用同一摘要格式并保留历史上下文。`reload()` 在 `/clear` 时清空所有视图。
+`MarkdownStreamRenderer`（`src/interfaces/markdown_renderer.py`）只渲染已完成的 Markdown 块：`append()` 输出完整块，`flush()` 收尾，`reset()` 清空。回应和思考各有独立流，思考流叠加 dim 样式。
 
-## MarkdownStreamRenderer — 流式 Markdown
-
-`MarkdownStreamRenderer`（`src/interfaces/markdown_renderer.py`）在流式输出中**只渲染已完成的 Markdown 块**，不重解析已输出内容：
-
-- `append(content)` 累积缓冲并吐出已完成块；`flush()` 收尾剩余；`reset()` 清空。
-- `_completed_block_end()` 识别块边界：代码围栏配对、空行、原子行（标题/列表项/引用/分隔线）。
-- `base_style`（如 `"dim"`）在渲染时整体叠加到 Markdown 上并烘焙进 ANSI（思考流用来整体压暗），避免污染 `Live` 底部状态栏。
-- `render_markdown()` 是一次性渲染函数，基于 `rich`（`code_theme` 默认 `monokai`）。
-
-## SlashCommandCompleter — 斜杠命令补全
-
-`SlashCommandCompleter`（`src/interfaces/completer.py`）为输入框提供斜杠命令补全：仅在命令名阶段（以 `/` 开头且不含空格）产出候选，一旦输入空格（带参数）即停止。命令列表 `(name, description)` 由组装层注入，避免 UI 反向依赖业务层。
+`SlashCommandCompleter`（`src/interfaces/completer.py`）只在输入以 `/` 开头且尚未出现空格时返回候选；命令列表由 bootstrap 注入 UI，避免 UI 反向依赖业务层。

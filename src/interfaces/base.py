@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
 
 from src.events.types import (
     CompactDelta,
@@ -16,7 +14,7 @@ from src.events.types import (
     OutputRequested,
     PermissionNotice,
     ResponseDelta,
-    SystemStateChanged,
+    PermissionModeChanged,
     ThinkingDelta,
     ToolCallCompleted,
     ToolCallStarted,
@@ -33,26 +31,32 @@ from src.events.menu import (
 )
 
 
-@dataclass(frozen=True, slots=True)
-class SystemState:
-    """UI 可查询的系统状态。"""
-
-    permission_mode: str = "default"
-    context_used_tokens: int = 0  # 主 agent 最近一次 LLM 调用提交的输入 token（含缓存），即当前上下文占用量
-    context_limit: int = 0  # 主 agent 模型的上下文窗口上限；为 0 表示未知（仅显示占用 token，不算百分比）
-
-
 class UserInterface(ABC):
     """I/O 抽象基类，封装各 interface 共享的事件处理逻辑。"""
 
     def __init__(self) -> None:
+        """初始化共享中断、权限模式 provider 与活跃交互状态。
+
+        Returns:
+            None.
+        """
         self._request_interrupt: Callable[[], None] | None = None
-        self._system_state_provider: Callable[[], SystemState] | None = None
+        self._permission_mode_provider: Callable[[], str] | None = None
         self._active_user_request: MenuRequest | None = None
 
     @contextmanager
-    def watch_interrupt(self, request_interrupt: Callable[[], None]):
-        """监听用户取消信号。检测到取消时调用 request_interrupt。"""
+    def watch_interrupt(
+        self,
+        request_interrupt: Callable[[], None],
+    ) -> Iterator[None]:
+        """监听用户取消信号并在退出时恢复原处理器。
+
+        Args:
+            request_interrupt: 检测到用户取消时调用的函数。
+
+        Returns:
+            包围一次 agent 执行的上下文管理器迭代器。
+        """
         previous = self._request_interrupt
         self._request_interrupt = request_interrupt
         try:
@@ -61,6 +65,11 @@ class UserInterface(ABC):
             self._request_interrupt = previous
 
     def _request_user_interrupt(self) -> None:
+        """调用当前已安装的用户中断处理器。
+
+        Returns:
+            None.
+        """
         if self._request_interrupt is not None:
             self._request_interrupt()
 
@@ -78,34 +87,64 @@ class UserInterface(ABC):
         self._active_user_request = None
         return True
 
-    def set_system_state_provider(self, provider: Callable[[], SystemState] | None) -> None:
-        """设置 UI 查询系统状态时使用的数据源。"""
+    def set_permission_mode_provider(self, provider: Callable[[], str] | None) -> None:
+        """设置 UI 查询权限模式时使用的明确数据源。
 
-        self._system_state_provider = provider
+        Args:
+            provider: 返回当前入口主 agent 权限模式的函数，None 表示移除。
 
-    def get_system_state(self) -> SystemState:
-        """获取当前系统状态。"""
+        Returns:
+            None.
+        """
 
-        if self._system_state_provider is None:
-            return SystemState()
-        return self._system_state_provider()
+        self._permission_mode_provider = provider
 
-    def on_system_state_changed(self) -> None:
-        """系统状态变化通知。固定状态栏 UI 可在这里触发刷新。"""
+    def get_permission_mode(self) -> str:
+        """获取当前入口主 agent 的权限模式。
+
+        Returns:
+            当前权限模式；未装配 provider 时返回 ``default``。
+        """
+
+        if self._permission_mode_provider is None:
+            return "default"
+        return self._permission_mode_provider()
+
+    def on_permission_mode_changed(self) -> None:
+        """权限模式变化通知。固定状态栏 UI 可在这里触发刷新。
+
+        Returns:
+            None.
+        """
 
         pass
 
     def set_permission_mode_toggle_handler(self, handler: Callable[[], None] | None) -> None:
-        """设置输入期间的权限模式快捷键处理器。"""
+        """设置输入期间的权限模式快捷键处理器。
+
+        Args:
+            handler: 模式轮转回调，None 表示禁用。
+
+        Returns:
+            None.
+        """
 
         pass
 
     async def start(self) -> None:
-        """启动 UI 生命周期钩子。默认实现供同步 UI 使用。"""
+        """启动 UI 生命周期钩子。默认实现供同步 UI 使用。
+
+        Returns:
+            None.
+        """
         pass
 
     async def stop(self) -> None:
-        """停止 UI 生命周期钩子。默认实现供同步 UI 使用。"""
+        """停止 UI 生命周期钩子。默认实现供同步 UI 使用。
+
+        Returns:
+            None.
+        """
         pass
 
     @abstractmethod
@@ -192,12 +231,11 @@ class UserInterface(ABC):
         ...
 
     @abstractmethod
-    async def _read_transcript_view(self, uuid: str, label: str) -> str:
+    async def _read_transcript_view(self, uuid: str) -> str:
         """以只读分页面板查看某子 agent 的完整原始消息记录。
 
         Args:
             uuid: 目标子 agent 的 uuid 字符串。
-            label: 面板标题用的一行摘要。
         Returns:
             恒为空串（只读查看；用户 Esc 关闭）。
         """
@@ -206,8 +244,17 @@ class UserInterface(ABC):
     async def _complete_user_request(
         self,
         request: MenuRequest | None,
-        reader,
+        reader: Callable[[], Awaitable[str]],
     ) -> None:
+        """重复读取非空答案并落定一个菜单请求。
+
+        Args:
+            request: 要落定的菜单请求；None 表示只执行 reader。
+            reader: 返回一次候选答案的异步函数。
+
+        Returns:
+            None.
+        """
         try:
             while True:
                 answer = await reader()
@@ -229,12 +276,28 @@ class UserInterface(ABC):
         """收尾回应流（若有未结束的流）。由具体 UI 覆盖实现，默认无操作。"""
 
     async def _end_streams_for(self, event: Event) -> None:
+        """在事件类型切换前收尾不匹配的流式输出。
+
+        Args:
+            event: 即将处理的事件。
+
+        Returns:
+            None.
+        """
         if not isinstance(event, ThinkingDelta):
             await self._end_thinking_if_needed()
         if not isinstance(event, ResponseDelta):
             await self._end_response_if_needed()
 
     async def on_event(self, event: Event) -> None:
+        """把一个可见事件分派到共享交互流程或具体 UI hook。
+
+        Args:
+            event: OutputRouter 决定可见的事件。
+
+        Returns:
+            None.
+        """
         await self._end_streams_for(event)
 
         match event:
@@ -299,11 +362,11 @@ class UserInterface(ABC):
                 finally:
                     if self._active_user_request is event:
                         self._active_user_request = None
-            case TranscriptView(uuid=uuid, label=label):
+            case TranscriptView(uuid=uuid):
                 # 只读查看，恒回传 ""（Esc 关闭）；与 ChoiceMenu 同样单次读取、不走非空重读循环。
                 self._active_user_request = event
                 try:
-                    answer = await self._read_transcript_view(uuid, label)
+                    answer = await self._read_transcript_view(uuid)
                     event.complete(answer)
                 except (EOFError, KeyboardInterrupt):
                     self._request_user_interrupt()
@@ -338,8 +401,8 @@ class UserInterface(ABC):
                 await self.on_response_delta(event, content)
             case ThinkingDelta(content=content):
                 await self.on_thinking_delta(event, content)
-            case SystemStateChanged():
-                self.on_system_state_changed()
+            case PermissionModeChanged():
+                self.on_permission_mode_changed()
             case _:
                 await self.on_unhandled_event(event)
 

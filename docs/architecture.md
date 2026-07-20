@@ -16,9 +16,9 @@
 
 框架是一个基于 Python `asyncio` 单事件循环运行的 AI Agent CLI，自顶向下分为四层。上层依赖下层，装配方向自下而上（先构造底层 Manager，再注入上层）。
 
-**入口装配层** — `main.py` 解析 CLI 参数（`--workdir`、`--debug`），调用 `src/app/bootstrap.py` 的 `create_app()`。这是整个框架**唯一的具体实现实例化点**：手动构造所有 Manager，注入 `AgentDeps` dataclass，返回 `AgentApp`（`bootstrap.py:19-78`）。
+**入口装配层** — `main.py` 解析 CLI 参数（`--workdir`、`--debug`），调用 `src/app/bootstrap.py` 的 `create_app()`。这是整个框架**唯一的具体实现实例化点**：手动构造所有 Manager 与 UI 状态服务，注入 `AgentDeps` dataclass，返回 `AgentApp`（`bootstrap.py:19-92`）。
 
-**应用主循环层** — `src/app/app.py` 的 `AgentApp` 管理外层 REPL：启动 UI、创建事件消费任务、打印启动横幅、重置会话、循环驱动 Agent 轮次、处理中断、退出时收尾（`app.py:26-63`）。
+**应用主循环层** — `src/app/app.py` 的 `AgentApp` 管理外层 REPL：启动 UI、创建事件消费任务、打印启动横幅、重置会话、循环驱动 Agent 轮次、处理中断、退出时收尾（`app.py:30-76`）。
 
 **Agent 状态机层** — `src/agent/agent.py` 的 `Agent` 是由 `_handlers: dict[AgentState, Callable]` 驱动的有限状态机（`agent.py:161-174`），枚举定义在 `src/agent/states.py:39-51`。每轮的可变状态封装在 `RunContext`（`states.py:54-100`）中，避免异步冲突。
 
@@ -64,38 +64,39 @@
 
 ## 2. 启动装配 `create_app()`
 
-`create_app(workdir_override)` 按固定顺序构造组件（`bootstrap.py:19-78`）。顺序不可随意调整——存在若干硬依赖，下表标注关键先后约束。
+`create_app(workdir_override)` 按固定顺序构造组件（`bootstrap.py:19-92`）。顺序不可随意调整——存在若干硬依赖，下表标注关键先后约束。
 
 | 步骤 | 构造对象 | 源码 | 说明 |
 |---|---|---|---|
-| 1 | `global_dir` | `bootstrap.py:27-28` | `global_data_dir()`（`$AGENT_HOME` 或 `~/.agent/`），并 `mkdir` 确保存在 |
-| 2 | `work_dir` | `bootstrap.py:29` | `workdir(workdir_override)` 解析工作目录 |
-| 3 | `ConfigManager` | `bootstrap.py:31` | 三层配置合并（内置 → 全局 → 项目） |
-| 4 | `RoleMgr` | `bootstrap.py:32` | 发现并激活角色，提供 `manifest` |
-| 5 | `EventBus` | `bootstrap.py:33` | 事件级别取自 `config_mgr.get_config("events")["level"]`（缺省 `"progress"`），经 `EventLevel.from_str` 解析 |
-| 6 | `InlineInterface` | `bootstrap.py:34` | 终端 UI，注入 `SLASH_COMMANDS` 供自动补全 |
-| 7 | `OutputRouter` | `bootstrap.py:35-36` | 消费端事件路由器；非 TTY 时 `passthrough=True` |
-| 8 | `ToolsMgr` | `bootstrap.py:37` | 工具注册表 |
-| 9 | `resolve_features` | `bootstrap.py:39` | 依据激活角色 manifest 的 `features` 计算有效 feature 集 |
-| 10 | `MemoryMgr`（门控） | `bootstrap.py:40` | 仅当 `"memory" in feats` 才实例化，否则 `None` |
-| 11 | `PluginMgr` | `bootstrap.py:41` | 插件发现 |
-| 12 | `HooksMgr` | `bootstrap.py:42` | 生命周期钩子，依赖 `plugin_mgr` |
-| 13 | `PlanMgr`（门控） | `bootstrap.py:43` | 仅当 `"plan" in feats` 才实例化，否则 `None` |
-| 14 | `McpMgr` + `await start()` | `bootstrap.py:45-46` | 连接 MCP server 并将其工具注册进 `tools_mgr` |
-| 15 | `PermissionManager` | `bootstrap.py:47-53` | 从 `tools_mgr.list_entries()` 收集工具权限元数据 |
-| 16 | `SessionMgr` | `bootstrap.py:54` | 会话历史持久化与恢复 |
-| 17 | `LLMMgr` + `await load_models()` | `bootstrap.py:55-56` | 加载模型清单 |
-| 18 | `ensure_default_available()` | `bootstrap.py:59` | 启动前置校验，默认模型不可用时抛错 |
-| 19 | `AgentDeps` | `bootstrap.py:60-77` | 组装依赖容器 |
-| 20 | `AgentApp` | `bootstrap.py:78` | 返回应用实例 |
+| 1 | `global_dir` | `bootstrap.py:30-31` | `global_data_dir()`（`$AGENT_HOME` 或 `~/.agent/`），并 `mkdir` 确保存在 |
+| 2 | `work_dir` | `bootstrap.py:32` | `workdir(workdir_override)` 解析工作目录 |
+| 3 | `ConfigManager` | `bootstrap.py:34` | 三层配置合并（内置 → 全局 → 项目） |
+| 4 | `RoleMgr` | `bootstrap.py:35` | 发现并激活角色，提供 `manifest` |
+| 5 | `EventBus` | `bootstrap.py:36` | 事件级别取自 `config_mgr.get_config("events")["level"]`（缺省 `"progress"`），经 `EventLevel.from_str` 解析 |
+| 6 | `AgentViewStore` | `bootstrap.py:37` | UI 唯一 session/agent 状态读模型 |
+| 7 | `InlineInterface` | `bootstrap.py:38-41` | 注入 Store 与 `SLASH_COMMANDS`；自身是薄门面 |
+| 8 | `OutputRouter` | `bootstrap.py:42-46` | 注入同一 Store；非 TTY 时 `passthrough=True` |
+| 9 | `ToolsMgr` | `bootstrap.py:47` | 工具注册表 |
+| 10 | `resolve_features` | `bootstrap.py:49` | 依据激活角色 manifest 的 `features` 计算有效 feature 集 |
+| 11 | `MemoryMgr`（门控） | `bootstrap.py:50` | 仅当 `"memory" in feats` 才实例化，否则 `None` |
+| 12 | `PluginMgr` | `bootstrap.py:51` | 插件发现 |
+| 13 | `HooksMgr` | `bootstrap.py:52` | 生命周期钩子，依赖 `plugin_mgr` |
+| 14 | `PlanMgr`（门控） | `bootstrap.py:53` | 仅当 `"plan" in feats` 才实例化，否则 `None` |
+| 15 | `McpMgr` + `await start()` | `bootstrap.py:55-56` | 连接 MCP server 并将其工具注册进 `tools_mgr` |
+| 16 | `PermissionManager` | `bootstrap.py:57-63` | 从 `tools_mgr.list_entries()` 收集工具权限元数据 |
+| 17 | `SessionMgr` | `bootstrap.py:64` | 会话历史持久化与恢复 |
+| 18 | `LLMMgr` + `await load_models()` | `bootstrap.py:65-66` | 加载模型清单 |
+| 19 | `ensure_default_available()` | `bootstrap.py:69` | 启动前置校验，默认模型不可用时抛错 |
+| 20 | `AgentDeps` | `bootstrap.py:70-87` | 组装业务依赖容器 |
+| 21 | `AgentApp` | `bootstrap.py:88-92` | 注入同一 Store 与 Router，返回应用实例 |
 
 ### 为何 `McpMgr.start()` 必须在 `PermissionManager` 之前
 
-`McpMgr.start()`（`bootstrap.py:46`）在连接 MCP server 后会把每个 server 的上游工具注册进 `tools_mgr`。`PermissionManager` 构造时（`bootstrap.py:47-53`）通过 `tools=tools_mgr.list_entries()` 一次性收集**所有已注册工具**的权限元数据。若权限层先于 MCP 启动构造，MCP 工具尚未进入 `tools_mgr`，其权限元数据就不会被收录——权限检查将无法识别 MCP 工具。因此二者顺序是硬约束。注释见 `bootstrap.py:44`。
+`McpMgr.start()`（`bootstrap.py:55-56`）在连接 MCP server 后会把每个 server 的上游工具注册进 `tools_mgr`。`PermissionManager` 构造时（`bootstrap.py:57-63`）通过 `tools=tools_mgr.list_entries()` 一次性收集**所有已注册工具**的权限元数据。若权限层先于 MCP 启动构造，MCP 工具尚未进入 `tools_mgr`，其权限元数据就不会被收录——权限检查将无法识别 MCP 工具。因此二者顺序是硬约束。注释见 `bootstrap.py:54`。
 
 ### 为何 `ensure_default_available()` 在 UI 启动前
 
-`llm_mgr.ensure_default_available()`（`bootstrap.py:59`）在 `load_models()` 之后、返回 `AgentApp` 之前执行前置校验：默认模型不可用时抛 `ModelUnavailableError`。此时 UI（`AgentApp.run()` 里的 `ui.start()`）尚未启动，异常直接冒泡到 `main.cli()`，被捕获后打印可操作提示并以非零码干净退出，而非在 UI 已接管终端后抛出深层堆栈（`main.py:53-56`，注释见 `bootstrap.py:57-58`）。
+`llm_mgr.ensure_default_available()`（`bootstrap.py:69`）在 `load_models()` 之后、返回 `AgentApp` 之前执行前置校验：默认模型不可用时抛 `ModelUnavailableError`。此时 UI（`AgentApp.run()` 里的 `ui.start()`）尚未启动，异常直接冒泡到 `main.cli()`，被捕获后打印可操作提示并以非零码干净退出，而非在 UI 已接管终端后抛出深层堆栈（`main.py:53-56`，注释见 `bootstrap.py:67-68`）。
 
 ---
 
@@ -124,7 +125,9 @@
 | `workdir` | `Path \| None` | 否 | 用户工作目录 |
 | `global_dir` | `Path \| None` | 否 | 全局配置目录 |
 
-> 说明：`memory_mgr` 与 `plan_mgr` 在 `bootstrap.create_app()` 处即按 feature 门控决定是否实例化（`bootstrap.py:40,43`）。而 `FileMgr`、`SkillMgr`、`SubAgentMgr`、`TaskManager` 则是在每个 `Agent.__post_init__` 内按该 agent 自身的 feature 集创建（见 [agent-runtime.md](./agent-runtime.md) 第 6 节），不进入 `AgentDeps`。
+> 说明：`memory_mgr` 与 `plan_mgr` 在 `bootstrap.create_app()` 处即按 feature 门控决定是否实例化（`bootstrap.py:50,53`）。而 `FileMgr`、`SkillMgr`、`SubAgentMgr`、`TaskManager` 则是在每个 `Agent.__post_init__` 内按该 agent 自身的 feature 集创建（见 [agent-runtime.md](./agent-runtime.md) 第 6 节），不进入 `AgentDeps`。
+
+`AgentViewStore` 与 `OutputRouter` 属于 app/UI 层，不进入业务依赖容器 `AgentDeps`。同一个 Store 实例由 `InlineInterface`、`OutputRouter` 和 `AgentApp` 共享，避免业务 Agent 持有展示状态。
 
 ---
 
@@ -155,10 +158,10 @@ ALL_FEATURES = frozenset({"task", "skill", "subagent", "file", "memory", "plan"}
 | `skill` | `SkillMgr`（`agent.py:141-144`），`load_skill` 等技能工具，技能提示词段 |
 | `subagent` | `SubAgentMgr`（`agent.py:145-148`），`task_delegator` 工具 |
 | `file` | `FileMgr`（`agent.py:140`），文件读写工具 |
-| `memory` | `MemoryMgr`（`bootstrap.py:40`），记忆工具与提示词段 |
-| `plan` | `PlanMgr`（`bootstrap.py:43`），4 个 plan 工具，计划模式 |
+| `memory` | `MemoryMgr`（`bootstrap.py:50`），记忆工具与提示词段 |
+| `plan` | `PlanMgr`（`bootstrap.py:53`），4 个 plan 工具，计划模式 |
 
-`create_app()` 用 `resolve_features(role_mgr.manifest.features)` 计算有效集（`bootstrap.py:39`），决定 `MemoryMgr`/`PlanMgr` 是否实例化。每个 `Agent` 在 `__post_init__` 中再次调用 `resolve_features(self.features)`（`agent.py:125-126`）解析自身 feature 集，据此过滤工具 schema、按需创建 agent 级 Manager。子 agent 的 feature 集：自身 manifest 声明则用其值，否则继承父 agent。详见 [roles-subagents-skills.md](./roles-subagents-skills.md) 与 [managers.md](./managers.md)。
+`create_app()` 用 `resolve_features(role_mgr.manifest.features)` 计算有效集（`bootstrap.py:49`），决定 `MemoryMgr`/`PlanMgr` 是否实例化。每个 `Agent` 在 `__post_init__` 中再次调用 `resolve_features(self.features)`（`agent.py:125-126`）解析自身 feature 集，据此过滤工具 schema、按需创建 agent 级 Manager。子 agent 的 feature 集：自身 manifest 声明则用其值，否则继承父 agent。详见 [roles-subagents-skills.md](./roles-subagents-skills.md) 与 [managers.md](./managers.md)。
 
 未启用的 feature 对应工具通过 `tools_mgr.excluded_tool_names(features)` 计算出 `_excluded_tools`（`agent.py:127`），在 `refresh_tools_schemas()` 中从 schema 中减去（`agent.py:228-236`），LLM 不再看到这些工具。
 
@@ -166,9 +169,9 @@ ALL_FEATURES = frozenset({"task", "skill", "subagent", "file", "memory", "plan"}
 
 ## 5. `reload()` 协议
 
-有状态的 Manager 实现 `reload()` 方法。`/clear` 重置会话时（`AgentApp._reset_session`），框架通过 `hasattr(mgr, "reload")` 发现并统一调用（`app.py:135-142`）。
+有状态的 Manager 实现 `reload()` 方法。`/clear` 重置会话时（`AgentApp._reset_session`），框架通过 `hasattr(mgr, "reload")` 发现并统一调用（`app.py:200-205`）。
 
-`_reset_session` 中实际遍历并 reload 的对象列表（`app.py:135-137`）：
+`_reset_session` 中实际遍历并 reload 的对象列表（`app.py:200-202`）：
 
 ```python
 for attr in ("memory_mgr", "tools_mgr", "permission_mgr",
@@ -176,11 +179,9 @@ for attr in ("memory_mgr", "tools_mgr", "permission_mgr",
              "ui"):
 ```
 
-即：`memory_mgr`、`tools_mgr`、`permission_mgr`、`config_mgr`、`plugin_mgr`、`hooks_mgr`、`plan_mgr`、`ui`（其中 `memory_mgr`、`plan_mgr` 可能为 `None`，被 `mgr is not None` 跳过）。`ui` 一并纳入以清零会话级 token 统计（注释见 `app.py:134`）。
+即：`memory_mgr`、`tools_mgr`、`permission_mgr`、`config_mgr`、`plugin_mgr`、`hooks_mgr`、`plan_mgr`、`ui`（其中 `memory_mgr`、`plan_mgr` 可能为 `None`，被 `mgr is not None` 跳过）。UI 的 `reload()` 只清交互态；随后 `AgentViewStore.reset()` 原子清空前台、usage、agent 历史和转录，再登记新主 agent（`app.py:206-215`）。
 
-`output_router` 由 app 层单独持有（不在 `AgentDeps` 中），在遍历之后单独调用 `output_router.reload()` 清空 agent 视图（`app.py:141-142`）。
-
-> 每个 Manager 是否实现 `reload()` 请以其源码为准，见 [managers.md](./managers.md)。文档所述"实现 reload"的对象须与 `_reset_session` 实际调用列表一致，即上述 8 个属性 + `output_router`。
+> 每个 Manager 是否实现 `reload()` 请以其源码为准，见 [managers.md](./managers.md)。文档所述"实现 reload"的对象须与 `_reset_session` 实际调用列表一致，即上述 8 个属性；Store 通过明确的 `reset()` 调用处理。
 
 ---
 

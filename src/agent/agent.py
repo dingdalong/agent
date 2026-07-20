@@ -6,7 +6,7 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any, Callable, TYPE_CHECKING
 from src.tools import ToolDict
-from src.events.types import AgentStateChanged, CompactDelta, SystemStateChanged
+from src.events.types import AgentStateChanged, CompactDelta, PermissionModeChanged
 from src.agent.states import AgentState, RunContext, RunResult, parse_command
 from src.events import NoEventSubscribers
 from src.mgr import FileMgr, TaskManager, CompactMgr, CompactResult, PromptMgr, SkillMgr, SubAgentMgr, ReminderMgr
@@ -112,9 +112,8 @@ class Agent:
 
     def __post_init__(self):
         self.uuid = uuid.uuid4()
-        # 最近一次 LLM 调用提交给模型的输入 token（含缓存读/写），取自 LLM 返回 usage，即当前上下文占用量。
-        # 作为实例字段，/clear 新建 Agent 时天然从 0 起。
-        self.last_input_tokens: int = 0
+        # 主、子 agent 均以单实例 UUID 关联生命周期、usage 与转录事件，
+        # 供 AgentViewStore 汇聚成一致快照。
         # 未显式指定权限模式时回退到 permission_mgr.default_mode（缺失则全局 DEFAULT_MODE）
         if self.permission_mode is None:
             from src.mgr.permission_mgr import DEFAULT_MODE
@@ -368,7 +367,7 @@ class Agent:
                 ctx.command = cmd
                 return AgentState.DONE
             if cmd_name == "agents":
-                # 子 agent 视图归 app 层 OutputRouter 持有，上抛 app 层渲染摘要
+                # 子 agent 视图归 app 层 AgentViewStore 持有，上抛 app 层渲染摘要
                 ctx.command = cmd
                 return AgentState.DONE
             if cmd_name == "resume":
@@ -413,7 +412,7 @@ class Agent:
             await self.deps.event_bus.request_output("已在计划模式中。\n")
             return
         self.refresh_tools_schemas()
-        await self.deps.event_bus.emit(SystemStateChanged(timestamp=time.time(), source=self.agent_type))
+        await self.deps.event_bus.emit(PermissionModeChanged(timestamp=time.time(), source=self.agent_type))
         await self.deps.event_bus.request_output("已进入计划模式。\n")
 
     async def _handle_resume_command(self, cmd_args: list[str]) -> None:
@@ -530,7 +529,7 @@ class Agent:
                 return ""
 
         self.refresh_tools_schemas()
-        await self.deps.event_bus.emit(SystemStateChanged(timestamp=time.time(), source=self.agent_type))
+        await self.deps.event_bus.emit(PermissionModeChanged(timestamp=time.time(), source=self.agent_type))
 
         return mode_info
 
@@ -666,11 +665,6 @@ class Agent:
             if self.llm.is_context_too_long_error(exc):
                 return AgentState.CONTEXT_OVERFLOW
             raise
-        # 记录本次调用的准确输入 token 作为当前上下文占用量；缺字段时保留上一次值不清零。
-        if ctx.response.token_usage:
-            used = ctx.response.token_usage.get("input_tokens")
-            if used is not None:
-                self.last_input_tokens = used
         return AgentState.PROCESS_RESPONSE
 
     async def _on_process_response(self, ctx: RunContext) -> AgentState:

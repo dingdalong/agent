@@ -110,7 +110,7 @@ class LLMCallCompleted(Event):
     duration_seconds: float | None = None
     output_tokens_per_second: float | None = None
     total_tokens_per_second: float | None = None
-    caller_uuid: str | None = None  # 发起本次调用的 agent 实例 uuid，供路由器按 agent 累计 token
+    caller_uuid: str | None = None  # 发起本次调用的 agent 实例 uuid，供 AgentViewStore 按 agent 累计 token
     level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
     type: Literal["llm_call_completed"] = field(default="llm_call_completed", init=False)
 
@@ -154,7 +154,7 @@ class AgentStateChanged(Event):
 
 @dataclass
 class SubagentLifecycle(Event):
-    """子 agent 生命周期事件 — 由 subagent_mgr 在启动/结束时发射，供路由器维护 agent 视图。
+    """子 agent 生命周期事件 — 由 subagent_mgr 在启动/结束时发射，供 AgentViewStore 维护 agent 视图。
 
     Attributes:
         agent_uuid: 子 agent 实例 uuid 字符串。
@@ -172,11 +172,11 @@ class SubagentLifecycle(Event):
 
 
 @dataclass
-class SystemStateChanged(Event):
-    """系统状态（如权限模式）已变更 — 通知 UI 重读状态并重绘。
+class PermissionModeChanged(Event):
+    """权限模式已变更 — 通知 UI 重读明确的 permission-mode provider 并重绘。
 
-    无 payload：UI 以 pull 模型经 get_system_state() 读取最新状态，本事件仅作重绘信号。
+    无 payload：UI 以 pull 模型读取最新权限模式，本事件仅作重绘信号。
     级别为 PROGRESS：避免被级别门控丢弃，保证状态栏即时刷新。
     """
     level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
-    type: Literal["system_state_changed"] = field(default="system_state_changed", init=False)
+    type: Literal["permission_mode_changed"] = field(default="permission_mode_changed", init=False)

@@ -15,7 +15,7 @@ from src.events.types import (
     PermissionNotice,
     ResponseDelta,
     SubagentLifecycle,
-    SystemStateChanged,
+    PermissionModeChanged,
     ThinkingDelta,
     ToolCallCompleted,
     ToolCallStarted,
@@ -28,6 +28,7 @@ from src.events.menu import (
     InputMenu,
     MenuRequest,
     PermissionMenu,
+    TranscriptView,
 )
 
 # 全部事件的联合类型（含菜单事件）。原置于 types.py，因 types.py 不再依赖 menu.py
@@ -38,7 +39,7 @@ AgentEvent = Union[
     CompactDelta, ToolCallCompleted, ToolCallStarted,
     LLMCallCompleted, LLMCallStarted,
     ResponseDelta, ThinkingDelta,
-    AgentStateChanged, SubagentLifecycle, SystemStateChanged,
+    AgentStateChanged, SubagentLifecycle, PermissionModeChanged,
 ]
 
 __all__ = [
@@ -61,4 +62,6 @@ __all__ = [
     "ChoiceInputMenu",
     "FormMenu",
     "FormQuestion",
+    "TranscriptView",
+    "PermissionModeChanged",
 ]

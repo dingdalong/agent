@@ -12,25 +12,26 @@
 
 ## 1. `AgentApp` 外层 REPL
 
-`AgentApp`（`src/app/app.py:17-24`）是一个 dataclass，持有 `deps: AgentDeps` 与 `output_router`，管理外层 REPL 与会话生命周期。
+`AgentApp`（`src/app/app.py:20-28`）是一个 dataclass，持有 `deps: AgentDeps`、`agent_view_store` 与 `output_router`，管理外层 REPL 与会话生命周期。
 
-### `run()` — 主 REPL 循环（`app.py:26-63`）
+### `run()` — 主 REPL 循环（`app.py:30-76`）
 
 1. `await self.deps.ui.start()` 启动 UI。
 2. `asyncio.create_task(self._consume_events())` 创建事件消费任务，并 `await asyncio.sleep(0)` 让其先运行一步。
-3. `event_bus.request_output(self._startup_banner())` 打印启动横幅（含 model、permission mode、workdir、快捷键提示，见 `app.py:197-208`）。
+3. `event_bus.request_output(self._startup_banner())` 打印启动横幅（含 model、permission mode、workdir、快捷键提示，见 `app.py:277-293`）。
 4. `agent = await self._reset_session(source="startup")` 初始化会话与主 agent。
 5. `while True` 循环调用 `_run_agent_turn(agent)`，按返回的 `RunResult` 处理：
-   - `result is None` → 被中断，`continue` 继续下一轮（`app.py:38-39`）。
-   - `result.exit_requested` → `break` 退出循环（`app.py:40-41`）。
-   - `result.command[0] == "clear"` → 调用 `_reset_session(source="clear")` 重建 agent，输出"上下文已清理"，`continue`（`app.py:42-45`）。
-6. `finally` 收尾：运行 `SessionEnd` hook、关闭 `event_bus`、取消消费任务、`ui.stop()`（`app.py:46-62`）。
+   - `result is None` → 被中断，`continue` 继续下一轮（`app.py:45-47`）。
+   - `result.exit_requested` → `break` 退出循环（`app.py:48-49`）。
+   - `result.command[0] == "clear"` → 调用 `_reset_session(source="clear")` 重建 agent，输出"上下文已清理"，`continue`（`app.py:50-55`）。
+   - `result.command[0] == "agents"` → 从 Store 浏览子 agent 快照与只读转录（`app.py:56-59`）。
+6. `finally` 收尾：运行 `SessionEnd` hook、关闭 `event_bus`、取消消费任务、`ui.stop()`（`app.py:60-76`）。
 
-### `_consume_events()`（`app.py:64-77`）
+### `_consume_events()`（`app.py:120-132`）
 
-订阅 `event_bus.subscribe()` 异步迭代事件。`InterruptRequested` 事件**内联处理**（调用 `_handle_interrupt_requested`），其余事件交 `output_router.dispatch(event)` 分流；`output_router` 为 `None` 时回退直接转发 `ui.on_event(event)`。
+订阅 `event_bus.subscribe()` 异步迭代事件。`InterruptRequested` 事件**内联处理**（调用 `_handle_interrupt_requested`），其余事件统一交 `output_router.dispatch(event)` 先写 Store 再分流。
 
-### `_run_agent_turn()`（`app.py:79-100`）
+### `_run_agent_turn()`（`app.py:134-155`）
 
 把 `agent.run()` 包成 task 存入 `self._work_task`，在 `ui.watch_interrupt(self._request_interrupt)` 上下文中 `await` 它：
 
@@ -38,21 +39,21 @@
 - 捕获 `asyncio.CancelledError` / `KeyboardInterrupt` → 调用 `_handle_interrupted_turn()` 并返回 `None`（表示被中断）。
 - `finally` 清空 `_work_task`。
 
-`_handle_interrupted_turn()`（`app.py:171-181`）先消化当前 task 的 cancelling 状态（`uncancel`），取消工作任务与活跃输入，等待工作任务收束，输出"已中断当前任务"。
+`_handle_interrupted_turn()`（`app.py:234-249`）先消化当前 task 的 cancelling 状态（`uncancel`），取消工作任务与活跃输入，等待工作任务收束，输出"已中断当前任务"。
 
-### `_reset_session()`（`app.py:117-157`）
+### `_reset_session()`（`app.py:182-220`）
 
 会话重置流程：
 
-1. 生成新 `session_id = str(uuid.uuid4())`（`app.py:133`），使新 agent 的 `TaskManager` 指向空目录（旧任务留在磁盘可 `/resume` 找回）。
-2. 遍历有状态 Manager 逐个 `reload()`（列表见 [architecture.md](./architecture.md) 第 5 节，`app.py:135-140`），再单独 `output_router.reload()`。
-3. `session_context.clear()`。
-4. `_install_permission_mode_controller()` 创建 `PermissionModeController` 并注入 `deps.permission_mode_controller`（`app.py:144-145`）。
-5. `Agent.from_manifest(...)` 以激活角色 manifest 构造主 agent（`is_subagent=False`，`app.py:146-150`）。
-6. `output_router.set_foreground(...)`、`controller.install_shortcut(agent)`、`notify_state_changed()`（`app.py:151-155`）。
-7. `_run_session_start_hooks(source)` 运行 `SessionStart` hook，其附加上下文追加到 `session_context`（`app.py:156`、`app.py:188-195`）。
+1. 生成新 `session_id = str(uuid.uuid4())`（`app.py:198`），使新 agent 的 `TaskManager` 指向空目录（旧任务留在磁盘可 `/resume` 找回）。
+2. 遍历有状态 Manager 逐个 `reload()`（列表见 [architecture.md](./architecture.md) 第 5 节，`app.py:200-205`）。
+3. `AgentViewStore.reset()` 原子清空会话展示状态，再清空 `session_context`（`app.py:206-207`）。
+4. `_install_permission_mode_controller()` 创建 `PermissionModeController` 并注入 `deps.permission_mode_controller`（`app.py:208-209`）。
+5. `Agent.from_manifest(...)` 以激活角色 manifest 构造主 agent（`is_subagent=False`，`app.py:210-214`）。
+6. `AgentViewStore.register_foreground(...)` 登记新主 agent，再安装权限快捷键并通知重绘（`app.py:215-218`）。
+7. `_run_session_start_hooks(source)` 运行 `SessionStart` hook，其附加上下文追加到 `session_context`（`app.py:219`、`app.py:260-275`）。
 
-### `shutdown()`（`app.py:183-186`）
+### `shutdown()`（`app.py:251-258`）
 
 断开 MCP server 连接（`mcp_mgr.stop()`）。与 `create_app()` 中的 `mcp_mgr.start()` 同处 `main` 任务，由 `main.py:41-42` 的 `finally` 保证调用。
 
@@ -270,10 +271,10 @@ EXECUTE_TOOLS ──▶ POST_ROUND ──▶ CHECK_COMPACT （循环下一轮）
 
 | 成员 | 源码 | 行为 |
 |---|---|---|
-| `install_state_provider()` | `permission_mode_controller.py:32-45` | 向 UI 注册状态提供函数，状态条显示主 agent 当前模式，未绑定时回退 `default_mode` |
-| `prompt_selection()` | `permission_mode_controller.py:47-73` | `/mode` 命令：以 `MENU_MODES` 构建方向键选择菜单，选中后 `agent.set_permission_mode(mode)`，变化则 `_refresh_agent()` |
-| `install_shortcut(agent)` | `permission_mode_controller.py:75-83` | 绑定主 agent 并注册 Shift+Tab 轮转回调（`cycle_mode`） |
-| `cycle_mode()` | `permission_mode_controller.py:88-104` | Shift+Tab：在 `CAROUSEL_MODES` 中循环切换主 agent 权限模式，变化则 `_refresh_agent()` |
-| `_refresh_agent()` | `permission_mode_controller.py:106-109` | 刷新 agent 工具 schema（`refresh_tools_schemas`）并通知 UI 状态变更 |
+| `install_mode_provider()` | `permission_mode_controller.py:44-58` | 向 UI 注册明确的权限模式 provider；主 agent 未绑定时回退 `default_mode` |
+| `prompt_selection()` | `permission_mode_controller.py:60-86` | `/mode` 命令：以 `MENU_MODES` 构建方向键选择菜单，选中后 `agent.set_permission_mode(mode)`，变化则 `_refresh_agent()` |
+| `install_shortcut(agent)` | `permission_mode_controller.py:88-98` | 绑定主 agent 并注册 Shift+Tab 轮转回调（`cycle_mode`） |
+| `cycle_mode()` | `permission_mode_controller.py:108-124` | Shift+Tab：在 `CAROUSEL_MODES` 中循环切换主 agent 权限模式，变化则 `_refresh_agent()` |
+| `_refresh_agent()` | `permission_mode_controller.py:126-132` | 刷新 agent 工具 schema（`refresh_tools_schemas`）并发出权限模式重绘通知 |
 
 `CAROUSEL_MODES`（Shift+Tab 轮换集）与 `MENU_MODES`（`/mode` 菜单集）定义在 `src/mgr/permission_mgr.py`，详见 [permissions.md](./permissions.md)。控制器由 `AgentApp._install_permission_mode_controller()` 在每次 `_reset_session` 时创建并注入 `deps.permission_mode_controller`。

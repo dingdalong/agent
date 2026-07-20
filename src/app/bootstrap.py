@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from src.interfaces import InlineInterface, OutputRouter
+from src.interfaces import AgentViewStore, InlineInterface, OutputRouter
 from src.events import EventBus, EventLevel
 from src.mgr import ConfigManager, HooksMgr, LLMMgr, McpMgr, MemoryMgr, PermissionManager, PlanMgr, PluginMgr, RoleMgr, SessionMgr, ToolsMgr, resolve_features
 from src.mgr.paths import global_data_dir, workdir as resolve_workdir
@@ -23,6 +23,9 @@ async def create_app(
 
     Args:
         workdir_override: 命令行传入的工作目录覆盖值，None 时使用 cwd。
+
+    Returns:
+        已完成依赖装配、尚未进入 REPL 的 AgentApp。
     """
     global_dir = global_data_dir()
     global_dir.mkdir(parents=True, exist_ok=True)
@@ -31,9 +34,16 @@ async def create_app(
     config_mgr = ConfigManager(global_dir=global_dir, workdir=work_dir)
     role_mgr = RoleMgr(config_mgr=config_mgr, workdir=work_dir, global_dir=global_dir)
     event_bus = EventBus(level=EventLevel.from_str(config_mgr.get_config("events").get("level", "progress")))
-    ui = InlineInterface(slash_commands=SLASH_COMMANDS)
-    output_router = OutputRouter(ui=ui, passthrough=not ui.is_tty)
-    ui.set_agent_source(output_router.agent_rows, output_router.transcript_segments, output_router.transcript_messages)
+    agent_view_store = AgentViewStore()
+    ui = InlineInterface(
+        agent_view_store=agent_view_store,
+        slash_commands=SLASH_COMMANDS,
+    )
+    output_router = OutputRouter(
+        ui=ui,
+        store=agent_view_store,
+        passthrough=not ui.is_tty,
+    )
     tools_mgr = ToolsMgr()
     # 按激活角色的 feature 集门控 deps 层可插拔 Manager；未启用则注入 None，其工具从 schema 排除。
     feats = resolve_features(role_mgr.manifest.features if role_mgr.manifest else None)
@@ -75,4 +85,8 @@ async def create_app(
         workdir=work_dir,
         global_dir=global_dir,
     )
-    return AgentApp(deps=deps, output_router=output_router)
+    return AgentApp(
+        deps=deps,
+        agent_view_store=agent_view_store,
+        output_router=output_router,
+    )

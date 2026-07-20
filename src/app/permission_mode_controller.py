@@ -6,13 +6,14 @@ import asyncio
 from typing import Any
 
 from src.events import NoEventSubscribers
-from src.interfaces.base import SystemState, UserInterface
+from src.interfaces.base import UserInterface
 from src.mgr.permission_mgr import (
     CAROUSEL_MODES,
     MENU_MODES,
     PermissionManager,
     parse_permission_mode,
 )
+
 
 class PermissionModeController:
     """协调权限模式交互、UI 状态和 agent 工具 schema 刷新。"""
@@ -23,32 +24,35 @@ class PermissionModeController:
         ui: UserInterface,
         event_bus: Any,
     ) -> None:
+        """初始化入口主 agent 的权限模式 UI 协调器。
+
+        Args:
+            permission_mgr: 提供默认模式与模式定义的权限管理器。
+            ui: 接收 provider、快捷键和重绘通知的 UI。
+            event_bus: 发布选择菜单与结果提示的事件总线。
+
+        Returns:
+            None.
+        """
         self.permission_mgr = permission_mgr
         self.ui = ui
         self.event_bus = event_bus
         self.agent: Any = None
-        self.install_state_provider()
+        self.install_mode_provider()
 
-    def install_state_provider(self) -> None:
-        """向 UI 注册系统状态提供函数（pull 模型）。
+    def install_mode_provider(self) -> None:
+        """向 UI 注册权限模式提供函数（pull 模型）。
 
-        状态条显示主 agent 的当前权限模式与上下文占用；agent 尚未绑定时权限模式回退到
-        default_mode、上下文占用为 0。闭包只持有主 agent 引用，故上下文占用天然只反映
-        主对话，不被子 agent 调用污染。
+        agent 尚未绑定时权限模式回退到 default_mode。
+
+        Returns:
+            None.
         """
-        self.ui.set_system_state_provider(
-            lambda: SystemState(
-                permission_mode=(
-                    self.agent.permission_mode.value
-                    if self.agent is not None
-                    else self.permission_mgr.default_mode.value
-                ),
-                context_used_tokens=(
-                    self.agent.last_input_tokens if self.agent is not None else 0
-                ),
-                context_limit=(
-                    self.agent.llm.context_limit if self.agent is not None else 0
-                ),
+        self.ui.set_permission_mode_provider(
+            lambda: (
+                self.agent.permission_mode.value
+                if self.agent is not None
+                else self.permission_mgr.default_mode.value
             )
         )
 
@@ -85,13 +89,20 @@ class PermissionModeController:
 
         Args:
             agent: 主 Agent 实例，同时作为状态条显示的模式来源。
+
+        Returns:
+            None.
         """
         self.agent = agent
         self.ui.set_permission_mode_toggle_handler(lambda: self.cycle_mode())
 
     def notify_state_changed(self) -> None:
-        """通知 UI 权限模式已变更。"""
-        self.ui.on_system_state_changed()
+        """通知 UI 权限模式已变更。
+
+        Returns:
+            None.
+        """
+        self.ui.on_permission_mode_changed()
 
     def cycle_mode(self) -> bool:
         """在 CAROUSEL_MODES 中循环切换已绑定主 agent 的权限模式（Shift+Tab 回调）。
@@ -112,6 +123,10 @@ class PermissionModeController:
         return changed
 
     def _refresh_agent(self) -> None:
-        """刷新已绑定主 agent 的 schema 和 UI 状态。"""
+        """刷新已绑定主 agent 的 schema 和 UI 状态。
+
+        Returns:
+            None.
+        """
         self.agent.refresh_tools_schemas()
         self.notify_state_changed()

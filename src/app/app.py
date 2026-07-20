@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from src.agent import Agent, AgentDeps
 from src.agent.states import RunResult
 from src.interfaces.output_router import OutputRouter
+from src.interfaces.agent_view_store import AgentViewStore
+from src.interfaces.status_presenter import present_agent
 from src.app.permission_mode_controller import PermissionModeController
 from src.events import NoEventSubscribers
 from src.events.types import InterruptRequested
@@ -20,12 +22,17 @@ class AgentApp:
     """应用主循环，管理 REPL 交互和 Agent 执行。"""
 
     deps: AgentDeps = field(repr=False)
-    output_router: OutputRouter | None = None  # 消费端事件路由器（app 层持有，不入业务依赖容器）
+    agent_view_store: AgentViewStore = field(repr=False)
+    output_router: OutputRouter = field(repr=False)
     _work_task: asyncio.Task | None = field(default=None, init=False, repr=False)
     _permission_mode_controller: PermissionModeController | None = field(default=None, init=False, repr=False)
 
     async def run(self) -> None:
-        """启动主 REPL 循环。"""
+        """启动主 REPL 循环。
+
+        Returns:
+            None.
+        """
         consumer_task = None
         try:
             await self.deps.ui.start()
@@ -74,16 +81,26 @@ class AgentApp:
         循环：每轮重取列表（运行中的子 agent 可能已完成）→ request_choice 选择 → 选中则
         request_transcript_view 打开面板 → Esc 返回列表 → 直至列表 Esc 取消退出。非 TTY 环境
         无富交互面板，退回打印纯文本摘要。
+
+        Returns:
+            None.
         """
-        router = self.output_router
-        if router is None:
-            await self.deps.event_bus.request_output("子 agent 视图不可用。\n")
-            return
         if not self.deps.ui.is_tty:
-            await self.deps.event_bus.request_output(router.format_subagent_summary() + "\n")
+            snapshots = self.agent_view_store.subagent_snapshots()
+            if not snapshots:
+                summary = "本会话尚未启动任何子 agent。"
+            else:
+                lines = [f"本会话子 agent（{len(snapshots)}）:"]
+                lines.extend(present_agent(snapshot).plain for snapshot in snapshots)
+                summary = "\n".join(lines)
+            await self.deps.event_bus.request_output(summary + "\n")
             return
         while True:
-            choices = router.subagent_choices()
+            snapshots = self.agent_view_store.subagent_snapshots()
+            choices = [
+                (snapshot.uuid, present_agent(snapshot).plain)
+                for snapshot in snapshots
+            ]
             if not choices:
                 await self.deps.event_bus.request_output("暂无子 agent 记录。\n")
                 return
@@ -95,26 +112,24 @@ class AgentApp:
                 return
             if not picked:  # Esc 取消，退出浏览
                 return
-            label = next((lbl for uid, lbl in choices if uid == picked), picked)
             try:
-                await self.deps.event_bus.request_transcript_view(picked, label)
+                await self.deps.event_bus.request_transcript_view(picked)
             except (asyncio.CancelledError, KeyboardInterrupt, NoEventSubscribers):
                 return
 
     async def _consume_events(self) -> None:
         """消费事件总线上的事件并通过 OutputRouter 分发。
 
-        InterruptRequested 内联处理（不变）；其余经 output_router.dispatch 分流。
-        output_router 为 None 时回退直接转发 UI（非 bootstrap 构造路径兼容）。
+        InterruptRequested 内联处理；其余经唯一的 output_router.dispatch 分流。
+
+        Returns:
+            None.
         """
         async for event in self.deps.event_bus.subscribe():
             if isinstance(event, InterruptRequested):
                 self._handle_interrupt_requested()
                 continue
-            if self.output_router is not None:
-                await self.output_router.dispatch(event)
-            else:
-                await self.deps.ui.on_event(event)
+            await self.output_router.dispatch(event)
 
     async def _run_agent_turn(self, agent: Agent) -> RunResult | None:
         """执行 agent 对话循环。
@@ -140,9 +155,19 @@ class AgentApp:
                 self._work_task = None
 
     def _request_interrupt(self) -> None:
+        """把 UI 中断请求发布到事件总线。
+
+        Returns:
+            None.
+        """
         asyncio.create_task(self.deps.event_bus.request_interrupt(source="ui"))
 
     def _install_permission_mode_controller(self) -> None:
+        """为当前会话安装入口主 agent 的权限模式协调器。
+
+        Returns:
+            None.
+        """
         permission_mgr = getattr(self.deps, "permission_mgr", None)
         ui = getattr(self.deps, "ui", None)
         event_bus = getattr(self.deps, "event_bus", None)
@@ -171,15 +196,14 @@ class AgentApp:
             新创建的 Agent 实例。
         """
         self.deps.session_id = str(uuid.uuid4())
-        # "ui" 一并纳入：ui 清零会话级 token 统计。output_router 由 app 层持有，单独 reload 清空 agent 视图。
+        # UI 清理交互态；AgentViewStore 单独原子清空全部会话状态。
         for attr in ("memory_mgr", "tools_mgr", "permission_mgr",
                      "config_mgr", "plugin_mgr", "hooks_mgr", "plan_mgr",
                      "ui"):
             mgr = getattr(self.deps, attr, None)
             if mgr is not None and hasattr(mgr, "reload"):
                 mgr.reload()
-        if self.output_router is not None:
-            self.output_router.reload()
+        self.agent_view_store.reset()
         self.deps.session_context.clear()
         self._install_permission_mode_controller()
         self.deps.permission_mode_controller = self._permission_mode_controller
@@ -188,8 +212,7 @@ class AgentApp:
             deps=self.deps,
             is_subagent=False,
         )
-        if self.output_router is not None:
-            self.output_router.set_foreground(str(agent.uuid), agent.agent_type)
+        self.agent_view_store.register_foreground(str(agent.uuid), agent.agent_type)
         if self._permission_mode_controller is not None:
             self._permission_mode_controller.install_shortcut(agent)
             self._permission_mode_controller.notify_state_changed()
@@ -209,6 +232,11 @@ class AgentApp:
         return True
 
     async def _handle_interrupted_turn(self) -> None:
+        """收束当前工作与输入任务并输出中断提示。
+
+        Returns:
+            None.
+        """
         current_task = asyncio.current_task()
         if current_task is not None:
             while current_task.cancelling():
@@ -220,12 +248,24 @@ class AgentApp:
         await self.deps.event_bus.request_output("\n已中断当前任务。\n")
         await self.deps.event_bus.join()
 
-    async def shutdown(self):
-        """断开 MCP server 连接。与 create_app() 中的 mcp_mgr.start() 同处 main 任务。"""
+    async def shutdown(self) -> None:
+        """断开 MCP server 连接。
+
+        Returns:
+            None.
+        """
         if self.deps.mcp_mgr is not None:
             await self.deps.mcp_mgr.stop()
 
     async def _run_session_start_hooks(self, source: str = "startup") -> None:
+        """运行 SessionStart hook 并追加其会话上下文。
+
+        Args:
+            source: 会话启动来源。
+
+        Returns:
+            None.
+        """
         if self.deps.hooks_mgr is None:
             return
         result = await self.deps.hooks_mgr.run_event(
@@ -235,6 +275,11 @@ class AgentApp:
         self.deps.session_context.extend(result.additional_context)
 
     def _startup_banner(self) -> str:
+        """生成包含当前模型、权限模式和工作目录的启动横幅。
+
+        Returns:
+            启动时输出的纯文本横幅。
+        """
         model = getattr(self.deps.llm_mgr.get(), "model", "unknown") if self.deps.llm_mgr else "unknown"
         permission_mode = "unknown"
         if getattr(self.deps, "permission_mgr", None) is not None:
