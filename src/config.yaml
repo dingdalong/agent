@@ -18,6 +18,10 @@ llm_provider:
     reasoning_effort: high
     preserve_thinking: true # Qwen3.6 agent 场景保留历史 reasoning
     context_limit: 262144 # 上下文限制
+  moonshot:
+    base_url: https://api.moonshot.cn/v1 # 可被 MOONSHOT_API_URL 覆盖
+    reasoning_effort: max # 恒开思考，当前仅支持 max
+    context_limit: 262144 # 上下文限制
 
 llm:
   default: deepseek-v4-flash # 必填，默认模型，子agent通过别名引用

@@ -108,14 +108,15 @@
 | `llm_provider.<name>.preserve_thinking` | bool | `ollama` 为 `true`，其余无 | `true`/`false` | 是否在历史中保留 reasoning 内容；缺省 `false`（`llm_mgr.py:169`）。Qwen 类 agent 场景需保留 |
 | `llm_provider.<name>.models` | list[str] | `openai` 为 `[gpt-5.5]`，其余无 | 模型名列表 | provider API 拉取模型列表失败时的回退清单（`llm_mgr.py:62`） |
 
-`src/config.yaml` 现有的四个 provider 默认值：
+`src/config.yaml` 现有的五个 provider 默认值：
 
 | provider | base_url | reasoning_effort | context_limit | 其他 |
 |----------|----------|------------------|---------------|------|
 | `deepseek` | `https://api.deepseek.com` | `max` | `400000` | — |
-| `openai` | `https://api.openai.com/v1` | `xhigh` | `200000` | `models: [gpt-5.5]` |
-| `anthropic` | `https://api.anthropic.com` | `high` | `200000` | — |
-| `ollama` | `http://127.0.0.1:8001/v1` | `high` | `100000` | `preserve_thinking: true` |
+| `openai` | `https://api.openai.com/v1` | `xhigh` | `262144` | `models: [gpt-5.5]` |
+| `anthropic` | `https://api.anthropic.com` | `high` | `262144` | — |
+| `ollama` | `http://127.0.0.1:8001/v1` | `high` | `262144` | `preserve_thinking: true` |
+| `moonshot` | `https://api.moonshot.cn/v1` | `max` | `262144` | `models: [kimi-k2.6, kimi-k2.7-code]`；恒思考、无 `temperature`（见 [llm.md](llm.md)） |
 
 ### 3.2 `llm` — 模型别名与调用参数
 
@@ -190,7 +191,14 @@ llm_provider:
     base_url: http://127.0.0.1:8001/v1
     reasoning_effort: high
     preserve_thinking: true              # 保留历史 reasoning（Qwen 类 agent 场景）
-    context_limit: 100000
+    context_limit: 262144
+  moonshot:
+    base_url: https://api.moonshot.cn/v1 # 可被 MOONSHOT_API_URL 覆盖
+    reasoning_effort: max                # 恒开思考，当前仅支持 max
+    context_limit: 262144
+    models:                              # list_models 失败时的兜底，须含 llm.default
+      - kimi-k2.6
+      - kimi-k2.7-code
 
 # ── 模型别名与调用参数 ──────────────────────────────────
 llm:

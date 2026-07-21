@@ -3,12 +3,14 @@ from src.llm.deepseek import DeepSeekProvider
 from src.llm.openai import OpenAIProvider
 from llm.anthropic import AnthropicProvider
 from src.llm.ollama import OllamaProvider
+from src.llm.moonshot import MoonshotProvider
 
 _PROVIDERS: dict[str, type[LLMProvider]] = {
     "deepseek": DeepSeekProvider,
     "openai": OpenAIProvider,
     "anthropic": AnthropicProvider,
     "ollama": OllamaProvider,
+    "moonshot": MoonshotProvider,
 }
 
 def get_provider(name: str) -> type[LLMProvider]:

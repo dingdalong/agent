@@ -1,6 +1,6 @@
 # LLM 层
 
-本文档面向开发者与运维者，说明本框架的 LLM 抽象层：provider 注册表、`LLMProvider` 基类、`LLMResponse`、`chat()` 重试与并发机制、工具结果分页，以及四个具体 provider（Anthropic / OpenAI / DeepSeek / Ollama）的差异。
+本文档面向开发者与运维者，说明本框架的 LLM 抽象层：provider 注册表、`LLMProvider` 基类、`LLMResponse`、`chat()` 重试与并发机制、工具结果分页，以及五个具体 provider（Anthropic / OpenAI / DeepSeek / Ollama / Moonshot）的差异。
 
 相关文档：模型别名解析与 `LLMMgr` 见 [managers.md](managers.md)；配置键 `llm.*` / `llm_provider.*` / `tool.page_token_rate` 见 [configuration-reference.md](configuration-reference.md)；工具结果分页的消费端见 [tools.md](tools.md)；LLM 调用发出的事件见 [events-and-ui.md](events-and-ui.md)。
 
@@ -20,6 +20,7 @@ LLM 层位于 `src/llm/`，职责是把「一段消息 + 工具 schema」转换�
 | `openai` | `OpenAIProvider` | `src/llm/openai.py` |
 | `anthropic` | `AnthropicProvider` | `src/llm/anthropic.py` |
 | `ollama` | `OllamaProvider` | `src/llm/ollama.py` |
+| `moonshot` | `MoonshotProvider` | `src/llm/moonshot.py` |
 
 `get_provider(name)`（`src/llm/__init__.py:14`）按名查表返回实现类；未知名抛 `ValueError` 并列出可选值。
 
@@ -47,7 +48,7 @@ LLM 层位于 `src/llm/`，职责是把「一段消息 + 工具 schema」转换�
 | `page_token_budget` | 计算得出（`init=False`） | 单页 token 预算，`__post_init__` 中 `max(1, floor(context_limit * page_token_rate))`（`src/llm/base.py:49`）。`context_limit=0` 时退化为 1。 |
 | `supports_native_structured_output` | `False` | 是否原生支持结构化输出（Anthropic/OpenAI 在 `__post_init__` 置 `True`）。 |
 | `reasoning_effort` | `"max"` | 推理力度，来自 `llm_provider.<name>.reasoning_effort`。各 provider 映射方式不同，见第 7 节。 |
-| `preserve_thinking` | `False` | 是否在多轮中保留历史思考内容。仅 Ollama 使用（`chat_template_kwargs.preserve_thinking`）。来自 `llm_provider.<name>.preserve_thinking`。 |
+| `preserve_thinking` | `False` | 是否在多轮中保留历史思考内容。仅 Ollama 使用（`chat_template_kwargs.preserve_thinking`）。来自 `llm_provider.<name>.preserve_thinking`。Moonshot 不走此字段，而是通过「不覆写 `clear_reasoning_content`」保留历史 `reasoning_content`（见第 6 节）。 |
 
 `__post_init__`（`src/llm/base.py:47`）负责创建并发信号量 `self._semaphore` 与计算 `page_token_budget`；各子类在自己的 `__post_init__` 中先 `super().__post_init__()`，再构造 SDK 客户端并设置 `supports_native_structured_output`。
 
@@ -148,18 +149,20 @@ LLM 层位于 `src/llm/`，职责是把「一段消息 + 工具 schema」转换�
 
 ---
 
-## 6. 四 provider 差异
+## 6. 五 provider 差异
 
-| 维度 | Anthropic | OpenAI | DeepSeek | Ollama |
-|---|---|---|---|---|
-| API 类型 | Messages API（`messages.stream`） | Responses API（`responses.create`，流式） | OpenAI 兼容 Chat Completions | OpenAI 兼容 Chat Completions（本地） |
-| SDK 客户端 | `AsyncAnthropic` | `AsyncOpenAI` | `AsyncOpenAI` | `AsyncOpenAI`（默认 `base_url` 回退 `http://localhost:11434/v1`，`api_key` 回退 `"ollama"`） |
-| 结构化输出 | `supports_native_structured_output=True` | `True` | `False` | `False` |
-| tokenizer（estimate_tokens） | tiktoken `cl100k_base`（异常时回退 `len//4`）；统计 `_convert_messages`、system/cache-control 与转换后的 tools | `tiktoken.encoding_for_model(model)`，未知模型回退 `o200k_base`；统计 `_convert_to_input` 与转换后的 tools | 本地 transformers tokenizer（`src/llm/tokenizer/deepseek`，`trust_remote_code=True`，`cached_property`） | 字符估算 `len(str(...)) // 4` |
-| 思考处理 | `thinking={"type":"adaptive"}` + `output_config={"effort": _map_effort(...)}`；关闭时 `thinking={"type":"disabled"}` | `reasoning={"effort": reasoning_effort, "summary":"auto"}`；关闭时不传 `reasoning` | `reasoning_effort` + `extra_body={"thinking":{"type":"enabled"}}`；关闭时 `{"type":"disabled"}` | 开启时按需传 `reasoning_effort`，`preserve_thinking` 时传 `chat_template_kwargs`；关闭时 `chat_template_kwargs={"enable_thinking": False}` |
-| 思考流式事件 | `content_block_delta` 中 `thinking_delta`→`emit_thinking_delta`，`text_delta`→`emit_response_delta` | `response.reasoning_summary_text.delta`→思考，`response.output_text.delta`→正文 | `delta.reasoning_content`→思考，`delta.content`→正文 | `delta.reasoning` 与 `delta.reasoning_content` 双字段均→思考；正文在流末尾一次性 emit |
-| 历史往返载体 | `_anthropic_content`（含 text/thinking/tool_use 原始块，回填时严格交替，`_merge_messages` 合并同角色） | `_response_output`（Responses API 的 `output` 项，`model_dump(exclude_none=True)`） | `reasoning_content`（可选 `prefix`） | `reasoning` 与 `reasoning_content` |
-| 缓存 token | 三项相加进 `input_tokens`（见第 3 节） | `input_token_details.cached_tokens` / `cache_creation_tokens` | `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens` | `prompt_tokens_details.cached_tokens` / `cache_creation_tokens`（回退 `cache_creation_input_tokens`） |
+| 维度 | Anthropic | OpenAI | DeepSeek | Ollama | Moonshot |
+|---|---|---|---|---|---|
+| API 类型 | Messages API（`messages.stream`） | Responses API（`responses.create`，流式） | OpenAI 兼容 Chat Completions | OpenAI 兼容 Chat Completions（本地） | OpenAI 兼容 Chat Completions（Moonshot） |
+| SDK 客户端 | `AsyncAnthropic` | `AsyncOpenAI` | `AsyncOpenAI` | `AsyncOpenAI`（默认 `base_url` 回退 `http://localhost:11434/v1`，`api_key` 回退 `"ollama"`） | `AsyncOpenAI` |
+| 结构化输出 | `supports_native_structured_output=True` | `True` | `False` | `False` | `False` |
+| tokenizer（estimate_tokens） | tiktoken `cl100k_base`（异常时回退 `len//4`）；统计 `_convert_messages`、system/cache-control 与转换后的 tools | `tiktoken.encoding_for_model(model)`，未知模型回退 `o200k_base`；统计 `_convert_to_input` 与转换后的 tools | 本地 transformers tokenizer（`src/llm/tokenizer/deepseek`，`trust_remote_code=True`，`cached_property`） | 字符估算 `len(str(...)) // 4` | 字符估算 `len(str(...)) // 4` |
+| 思考处理 | `thinking={"type":"adaptive"}` + `output_config={"effort": _map_effort(...)}`；关闭时 `thinking={"type":"disabled"}` | `reasoning={"effort": reasoning_effort, "summary":"auto"}`；关闭时不传 `reasoning` | `reasoning_effort` + `extra_body={"thinking":{"type":"enabled"}}`；关闭时 `{"type":"disabled"}` | 开启时按需传 `reasoning_effort`，`preserve_thinking` 时传 `chat_template_kwargs`；关闭时 `chat_template_kwargs={"enable_thinking": False}` | 顶层 `reasoning_effort`（仅 `enable_thinking=True` 时下发，**不用** `extra_body.thinking`）；Kimi（k2.6/k2.7 系列）恒思考，关闭时仅不传该字段 |
+| 思考流式事件 | `content_block_delta` 中 `thinking_delta`→`emit_thinking_delta`，`text_delta`→`emit_response_delta` | `response.reasoning_summary_text.delta`→思考，`response.output_text.delta`→正文 | `delta.reasoning_content`→思考，`delta.content`→正文 | `delta.reasoning` 与 `delta.reasoning_content` 双字段均→思考；正文在流末尾一次性 emit | `delta.reasoning_content`→思考，`delta.content`→正文（逐块 emit） |
+| 历史往返载体 | `_anthropic_content`（含 text/thinking/tool_use 原始块，回填时严格交替，`_merge_messages` 合并同角色） | `_response_output`（Responses API 的 `output` 项，`model_dump(exclude_none=True)`） | `reasoning_content`（可选 `prefix`） | `reasoning` 与 `reasoning_content` | `reasoning_content`（带 `tool_calls` 时**恒有**该键，即使为 `""`） |
+| 缓存 token | 三项相加进 `input_tokens`（见第 3 节） | `input_token_details.cached_tokens` / `cache_creation_tokens` | `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens` | `prompt_tokens_details.cached_tokens` / `cache_creation_tokens`（回退 `cache_creation_input_tokens`） | `prompt_tokens_details.cached_tokens` / `cache_creation_tokens`（回退 `cache_creation_input_tokens`） |
+| temperature | 不下发 | 不下发 | 下发 | 下发 | **不下发**（思考模型不可传） |
+| max_tokens | 固定 16000 | 由 SDK 默认 | 由 SDK 默认 | 由 SDK 默认 | 固定 32768（容纳 reasoning + content） |
 
 补充要点：
 
@@ -167,6 +170,7 @@ LLM 层位于 `src/llm/`，职责是把「一段消息 + 工具 schema」转换�
 - **OpenAI**：`_convert_to_input` 把 Chat 消息转为 Responses API 的 `input` 项，并把 system/developer 内容合并为首条 developer input 以进入可缓存前缀；工具 `strict=False`。token 估算只序列化转换后的 Responses API `input` 和 tools，不重复统计 `_response_output` 与标准消息字段。
 - **DeepSeek**：`_normalize_content` 会 `strip()` 文本；支持 assistant 的 `prefix: true`（前缀续写）。流式解析中当既有 `tool_calls` 又 `content.isspace()` 时跳过空白内容。
 - **Ollama**：流式解析末尾对有工具调用的情形 `strip()` 正文；`reasoning_effort` 为 `"none"`（大小写不敏感）时不传该参数。
+- **Moonshot**：深度匹配 Kimi（k2.6/k2.7 系列）的 **Preserved Thinking 恒开**——API 无状态且要求跨轮回传历史 `reasoning_content`，尤其带 `tool_calls` 的 assistant 消息若缺该字段会报 `400 "reasoning_content is missing in assistant tool call message"`。实现靠两处配合：**不覆写 `clear_reasoning_content`**（继承基类无操作，Agent 轮末不剥离，思考持续留在 history 并随每轮回传）；`_normalize_assistant_extra` 在归一化时回注 `reasoning_content`，且当带 `tool_calls` 却无思考内容时补空串 `""`，从源头杜绝 400。`_do_chat` 不下发 `temperature`、固定 `max_tokens=32768`、思考仅经顶层 `reasoning_effort` 控制。
 
 `list_models`（分类方法）：基类版用 OpenAI SDK 的 `models.list`（`src/llm/base.py:53`）；Anthropic 覆写为分页拉取（`src/llm/anthropic.py:17`）。
 
@@ -182,6 +186,7 @@ LLM 层位于 `src/llm/`，职责是把「一段消息 + 工具 schema」转换�
 | openai | `xhigh` | 原样作为 Responses API `reasoning.effort` |
 | anthropic | `high` | 经 `_map_effort` 映射后作为 `output_config.effort` |
 | ollama | `high` | 原样作为 `reasoning_effort`（`none` 时不传） |
+| moonshot | `max` | 原样作为顶层 `reasoning_effort`（当前仅支持 `max`；`enable_thinking=False` 时不传） |
 
 ### Anthropic 的 `_map_effort`
 
@@ -196,7 +201,7 @@ LLM 层位于 `src/llm/`，职责是把「一段消息 + 工具 schema」转换�
 
 `chat()` / `_do_chat` 的 `enable_thinking` 参数（默认 `True`）控制是否开启思考：
 
-- `True`：按上表下发思考参数（Anthropic adaptive、OpenAI reasoning、DeepSeek/Ollama enabled）。
-- `False`：显式关闭（Anthropic `thinking.disabled`、OpenAI 不传 `reasoning`、DeepSeek `thinking.disabled`、Ollama `chat_template_kwargs.enable_thinking=False`）。
+- `True`：按上表下发思考参数（Anthropic adaptive、OpenAI reasoning、DeepSeek/Ollama enabled、Moonshot 顶层 `reasoning_effort`）。
+- `False`：显式关闭（Anthropic `thinking.disabled`、OpenAI 不传 `reasoning`、DeepSeek `thinking.disabled`、Ollama `chat_template_kwargs.enable_thinking=False`、Moonshot 不传 `reasoning_effort`——恒思考，返回的 `reasoning_content` 照常保留）。
 
 调用方（如子 agent 的 `thinking` frontmatter、`CompactMgr` 的总结调用）据此决定是否让模型思考。
