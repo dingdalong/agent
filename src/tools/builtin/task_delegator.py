@@ -17,8 +17,8 @@ class TaskDelegator(BaseModel):
     )
 
 @tool(model=TaskDelegator, description="委托一个任务给子智能体",
-      permission=ToolPermission(kind="readonly"), subagent=False, feature="subagent",
-      counts_as_work=False)
+      permission=ToolPermission(kind="readonly", tips="委托 {agent_type}"), subagent=False,
+      feature="subagent", counts_as_work=False)
 async def task_delegator(
     description: str,
     agent_type: str,

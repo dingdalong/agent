@@ -47,6 +47,7 @@ class AgentSnapshot:
     usage: TokenUsage
     context: ContextUsage
     elapsed_seconds: float
+    activity: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +71,7 @@ class _AgentState:
     ended_monotonic: float | None = None
     transcript: deque[tuple[str, str]] = field(default_factory=deque)
     messages: list[dict] | None = None
+    activity: str = ""  # 该 agent 的最新活动文案（思考中/回应中/工具名），驱动底部列表实时显示
 
 
 class AgentViewStore:
@@ -353,7 +355,7 @@ class AgentViewStore:
             )
 
     def _record_call_start(self, event: LLMCallStarted) -> None:
-        """Record a known context limit for the calling agent.
+        """Record a known context limit and mark the calling agent as thinking.
 
         Args:
             event: LLM call start event.
@@ -362,7 +364,10 @@ class AgentViewStore:
             None.
         """
         state = self._ensure_event_state(event)
-        if state is None or event.context_limit <= 0:
+        if state is None:
+            return
+        state.activity = "思考中"
+        if event.context_limit <= 0:
             return
         state.context = ContextUsage(
             used_tokens=state.context.used_tokens,
@@ -426,6 +431,8 @@ class AgentViewStore:
         state = self._ensure_event_state(event)
         if state is None:
             return
+        if kind == "response":
+            state.activity = "回应中"  # ThinkingDelta 为 DETAIL 级默认丢弃，故只据 response 更新
         if state.transcript and state.transcript[-1][0] == kind:
             previous_kind, previous_text = state.transcript[-1]
             state.transcript[-1] = (previous_kind, previous_text + content)
@@ -444,6 +451,7 @@ class AgentViewStore:
         state = self._ensure_event_state(event)
         if state is None:
             return
+        state.activity = event.tool_name
         detail = event.detail.strip()
         suffix = f" {detail}" if detail else ""
         state.transcript.append(("tool", f"● {event.tool_name}{suffix}\n"))
@@ -491,6 +499,7 @@ class AgentViewStore:
             usage=state.usage,
             context=state.context,
             elapsed_seconds=elapsed,
+            activity=state.activity,
         )
 
     @staticmethod

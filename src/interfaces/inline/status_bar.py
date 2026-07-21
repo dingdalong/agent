@@ -6,11 +6,13 @@ import asyncio
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 
 from prompt_toolkit.formatted_text import ANSI
 
 from rich.text import Text
 
+from src.events.types import ToolCallCompleted, ToolCallStarted
 from src.interfaces.agent_view_store import AgentViewStore
 from src.interfaces.status_presenter import (
     format_elapsed_time,
@@ -74,31 +76,179 @@ class StatusBarController:
 
 _SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
+# 顶部「本轮面板」最多逐条展开的工具行数；超出部分折叠为「… 还有 N 个」。
+_ROUND_PANEL_MAX_ROWS = 8
+
+
+@dataclass(slots=True)
+class _RoundEntry:
+    """前台 agent 本轮单个工具调用的实时/定稿状态，既驱动顶部面板又供轮边界 flush。"""
+
+    tool_call_id: str  # 工具调用 id，用于把完成事件对回到对应条目
+    tool_name: str  # 工具名
+    detail: str  # 工具详情（由 permission.tips 模板生成，已 strip）
+    started_monotonic: float  # 本工具开始的 monotonic 秒，用于面板实时计时
+    status: str = "running"  # running | success | error
+    preview: str = ""  # 完成后的结果预览（已 strip，仅 flush 时使用）
+    duration: float = 0.0  # 完成后的耗时秒（来自完成事件）
+
 
 class StatusBarActions:
     """Render and update activity and core status state."""
 
     def _render_activity(self) -> ANSI:
-        """构建活动行「spinner + 当前 agent · 活动 (分段整数耗时)」的 ANSI；仅处理态且有活动时由其窗口显示。
+        """构建实时区活动内容的 ANSI；仅处理态且有活动/本轮工具时由其窗口显示。
 
-        首行留空，与上方滚动正文（messages 区）分隔。
+        首行留空，与上方滚动正文（messages 区）分隔。本轮缓冲非空时渲染「本轮面板」
+        （头行统计 + 每工具一行，各自 spinner/✔/✘ + 计时）；否则回退单行
+        「spinner + 当前 agent · 活动 (分段整数耗时)」（思考中/回应中/压缩上下文等非工具阶段）。
 
         Returns:
-            可作为 Window 内容的 ANSI（空行 + 单行活动文案）。
+            可作为 Window 内容的 ANSI（空行 + 面板多行或单行活动文案）。
         """
         now = time.monotonic()
-        frame = _SPINNER_FRAMES[int(now * 10) % len(_SPINNER_FRAMES)]
-        step_elapsed = self._activity_elapsed(now)
         status = Text("\n")
-        status.append(f"{frame} ", style="cyan")
-        status.append(
-            f"{self._active_agent_name()} · {self._activity} "
-            f"({format_elapsed_time(step_elapsed)})",
-            style="cyan",
-        )
+        if self._round_entries:
+            self._append_round_panel(status, now)
+        else:
+            frame = _SPINNER_FRAMES[int(now * 10) % len(_SPINNER_FRAMES)]
+            step_elapsed = self._activity_elapsed(now)
+            status.append(f"{frame} ", style="cyan")
+            status.append(
+                f"{self._active_agent_name()} · {self._activity} "
+                f"({format_elapsed_time(step_elapsed)})",
+                style="cyan",
+            )
         with self._status_console.capture() as capture:
             self._status_console.print(status, end="")
         return ANSI(capture.get())
+
+    def _append_round_panel(self, status: Text, now: float) -> None:
+        """把「本轮面板」渲染进给定 Rich Text：头行统计 + 每工具一行（超限折叠）。
+
+        Args:
+            status: 目标 Rich Text，原地追加面板内容。
+            now: 当前 monotonic 秒，用于运行中工具的实时计时与 spinner 帧。
+        """
+        entries = self._round_entries
+        done = sum(1 for entry in entries if entry.status != "running")
+        running = len(entries) - done
+        frame = _SPINNER_FRAMES[int(now * 10) % len(_SPINNER_FRAMES)]
+        status.append(f"{frame} ", style="cyan")
+        status.append(f"本轮 · {len(entries)} 工具（{done} 完成 · {running} 进行中）", style="cyan")
+        for entry in entries[:_ROUND_PANEL_MAX_ROWS]:
+            status.append("\n")
+            self._append_round_entry(status, entry, now, frame)
+        hidden = len(entries) - _ROUND_PANEL_MAX_ROWS
+        if hidden > 0:
+            status.append(f"\n  … 还有 {hidden} 个", style="bright_black")
+
+    def _append_round_entry(self, status: Text, entry: _RoundEntry, now: float, frame: str) -> None:
+        """把「本轮面板」单条工具行渲染进给定 Rich Text。
+
+        Args:
+            status: 目标 Rich Text，原地追加该工具行。
+            entry: 本轮单个工具调用条目。
+            now: 当前 monotonic 秒，用于运行中工具的实时计时。
+            frame: 当前 spinner 帧字符，运行中工具共用。
+        """
+        detail = f" {entry.detail}" if entry.detail else ""
+        if entry.status == "running":
+            elapsed = format_elapsed_time(max(0.0, now - entry.started_monotonic))
+            status.append(f"  {frame} ", style="cyan")
+            status.append(f"{entry.tool_name}{detail} ({elapsed})", style="cyan")
+            return
+        ok = entry.status == "success"
+        mark_style = "green" if ok else "red"
+        status.append(f"  {'✔' if ok else '✘'} ", style=mark_style)
+        status.append(
+            f"{entry.tool_name}{detail} ({format_elapsed_time(entry.duration)})",
+            style=mark_style,
+        )
+
+    def _round_append_start(self, event: ToolCallStarted) -> None:
+        """把前台 agent 的一次工具开始追加进本轮缓冲（非前台 agent 忽略，其进展走底部列表）。
+
+        缓冲从空转非空时记录本轮所属 agent 身份，供轮边界 flush 的头行使用。
+
+        Args:
+            event: 工具调用开始事件。
+        """
+        if event.caller_uuid != self._agent_view_store.foreground_uuid:
+            return
+        if not self._round_entries:
+            self._round_agent_type = event.caller_agent_type
+            self._round_agent_uuid = event.caller_uuid
+        self._round_entries.append(_RoundEntry(
+            tool_call_id=event.tool_call_id,
+            tool_name=event.tool_name,
+            detail=event.detail.strip(),
+            started_monotonic=time.monotonic(),
+        ))
+
+    def _round_settle(self, event: ToolCallCompleted) -> None:
+        """按 tool_call_id 把本轮缓冲中对应条目落定为成功/失败并记录预览与耗时。
+
+        Args:
+            event: 工具调用完成事件。
+        """
+        for entry in self._round_entries:
+            if entry.tool_call_id == event.tool_call_id:
+                entry.status = "success" if event.status == "success" else "error"
+                entry.preview = (event.result_preview or "").strip()
+                entry.duration = event.duration_seconds
+                return
+
+    def _round_flush(self) -> None:
+        """在轮边界把本轮缓冲一次性定稿为 scrollback 分组块，随后清空缓冲。缓冲空则 no-op。
+
+        头行 `● {agent} · 本轮 N 工具`；每条目一行，按提交序：已落定 → `✔/✘ {工具} {详情} ⎿ {预览首行} (耗时)`
+        （成功绿、失败红且附剩余预览行）；仍运行（仅中断残留）→ dim `⋯ {工具} {详情} 已中断`。
+        """
+        if not self._round_entries:
+            return
+        agent = self._agent_label(self._round_agent_type, self._round_agent_uuid)
+        header = Text("● ", style="bold")
+        if agent:
+            header.append(f"{agent} ", style="cyan")
+        header.append(f"· 本轮 {len(self._round_entries)} 工具", style="bold")
+        self._print_rich(header)
+        for entry in self._round_entries:
+            self._flush_round_entry(entry)
+        self._round_entries = []
+        self._round_agent_type = None
+        self._round_agent_uuid = None
+
+    def _flush_round_entry(self, entry: _RoundEntry) -> None:
+        """把本轮单个工具条目定稿输出为一行（失败时附剩余预览行）到 scrollback。
+
+        Args:
+            entry: 本轮单个工具调用条目。
+        """
+        detail = entry.detail
+        if entry.status == "running":  # 仅 Ctrl+C 中断时残留
+            line = Text("  ⋯ ", style="bright_black")
+            line.append(entry.tool_name, style="bright_black")
+            if detail:
+                line.append(f"  {detail}", style="bright_black")
+            line.append("  已中断", style="bright_black")
+            self._print_rich(line)
+            return
+        ok = entry.status == "success"
+        style = "green" if ok else "red"
+        preview_lines = entry.preview.splitlines()
+        first = preview_lines[0] if preview_lines else ("完成" if ok else "失败")
+        line = Text(f"  {'✔' if ok else '✘'} ", style=style)
+        line.append(entry.tool_name, style=style)
+        if detail:
+            line.append(f"  {detail}", style=style)
+        line.append("  ⎿ ", style="bright_black")
+        line.append(first, style=style)
+        line.append(f"  ({entry.duration:.2f}s)", style="bright_black")
+        self._print_rich(line)
+        if not ok and len(preview_lines) > 1:
+            # 失败时保留完整预览（首行之后的剩余内容），便于排查
+            self._print_rich("\n".join(preview_lines[1:]), style="red")
 
     def _render_separator(self) -> ANSI:
         """构建一行占满终端宽度的暗色分割线 ANSI。
@@ -236,6 +386,10 @@ class StatusBarActions:
         self._activity = ""
         self._current_agent_type = None
         self._current_agent_uuid = None
+        # 防御性清空本轮缓冲：正常流程下 Trigger B 已在进入输入态前 flush，此处兜底避免残留跨回合。
+        self._round_entries = []
+        self._round_agent_type = None
+        self._round_agent_uuid = None
 
     def _active_agent_name(self) -> str:
         """返回活动行要显示的当前 agent 名：主 agent 与子 agent 均显示其 agent_type；

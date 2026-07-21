@@ -137,6 +137,9 @@ class AgentPanelActions:
             else:
                 # 子 agent 行使用共享完整 Presenter，与历史摘要同源。
                 line = present_agent(row, base_style=style)
+                # 运行中的子 agent 追加「· 当前活动」，让并发委托的实时进展一目了然。
+                if row.running and row.activity:
+                    line.append(f"  · {row.activity}", style=style)
 
             lines.append(line)
 

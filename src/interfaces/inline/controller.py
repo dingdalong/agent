@@ -49,7 +49,7 @@ from src.interfaces.inline.output import (
 )
 from src.interfaces.inline.plain import PlainActions, PlainFrontend
 from src.interfaces.inline.runtime import InlineRuntime, InteractionMode
-from src.interfaces.inline.status_bar import StatusBarActions, StatusBarController
+from src.interfaces.inline.status_bar import _RoundEntry, StatusBarActions, StatusBarController
 
 # 状态栏 agent 列表最多同时显示的 agent 行数（不含上下滚动指示行）。
 _AGENT_LIST_MAX_ROWS = 8
@@ -274,6 +274,11 @@ class InlineController(
         self._activity_paused_baseline: float = 0.0  # 本步起始时的累计暂停基线（本步耗时只剔除其后的暂停）
         self._session_elapsed_accumulated: float = 0.0  # 全会话已完成回合的累计有效耗时（秒），跨回合累加、剔除人工等待；/clear 归零
 
+        # ---- 本轮工具缓冲（前台 agent 当前这一轮的工具调用，驱动顶部「本轮面板」并在轮边界 flush 成 scrollback 定稿块）----
+        self._round_entries: list[_RoundEntry] = []
+        self._round_agent_type: str | None = None  # 本轮工具所属 agent 类型（缓冲空转非空时记录）
+        self._round_agent_uuid: str | None = None  # 本轮工具所属 agent 实例 uuid
+
         # ---- agent 列表（方向键导航，仅在有子 agent 时显示）----
         self._transcript_cache = None
         self._message_cache = None
@@ -430,7 +435,7 @@ class InlineController(
         )
         activity_window = ConditionalContainer(
             Window(FormattedTextControl(self._render_activity), dont_extend_height=True, height=Dimension(min=1)),
-            filter=Condition(lambda: self._mode == "processing" and bool(self._activity) and self._viewing_uuid is None),
+            filter=Condition(lambda: self._mode == "processing" and (bool(self._activity) or bool(self._round_entries)) and self._viewing_uuid is None),
         )
         # 选择菜单窗口：select 态可见，只画可重绘的选项（上文已先打到 scrollback），置于输入框上方。
         select_window = ConditionalContainer(
@@ -565,7 +570,7 @@ class InlineController(
         return ANSI(capture.get())
 
     def reload(self) -> None:
-        """/clear 重置 UI 的 agent 列表选中态、转录面板查看态与全会话累计耗时。
+        """/clear 重置 UI 的 agent 列表选中态、转录面板查看态、全会话累计耗时与本轮工具缓冲。
 
         与 Store 会话 token 归零同步：新会话耗时从 0 重新累计。
 
@@ -573,6 +578,9 @@ class InlineController(
             None.
         """
         self._session_elapsed_accumulated = 0.0
+        self._round_entries = []
+        self._round_agent_type = None
+        self._round_agent_uuid = None
         self._agent_selected_index = 0
         self._agent_panel.close_live()
         if (
@@ -597,7 +605,11 @@ class InlineController(
         """
         if not self._tty:
             return await self._read_input_plain(prompt, default)
-        # 回合边界：把刚结束回合的有效耗时并入全会话累计，随后 finally 里 _reset_turn_status
+        # 回合边界（Trigger B）：最后一轮工具后无后续 LLMCallStarted 触发 flush，故在回到输入态最前
+        # 先把本轮缓冲定稿成 scrollback 分组块（中断残留项标「已中断」）；缓冲空则 no-op。
+        # 仅 REPL「你:」提示经此路径；ask_user 走 request_form/FormMenu，不会在工具在飞时误 flush。
+        self._round_flush()
+        # 把刚结束回合的有效耗时并入全会话累计，随后 finally 里 _reset_turn_status
         # 清零本回合起点与时钟；输入态显示该累计值（冻结），下一回合在此基础上继续增长。
         self._session_elapsed_accumulated += self._turn_elapsed(time.monotonic())
         self._render_input_context(prompt, markdown)

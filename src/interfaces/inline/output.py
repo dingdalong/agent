@@ -220,11 +220,15 @@ class OutputActions:
         return f"{agent_type} {uid}" if uid else agent_type
 
     async def on_llm_call_started(self, event: LLMCallStarted) -> None:
-        """LLM 调用开始：记录当前 agent，状态条进入「思考中」。
+        """LLM 调用开始：轮边界先 flush 上一轮工具缓冲成 scrollback 定稿块，再记录当前 agent、进入「思考中」。
+
+        路由已保证只转发前台 agent 的 LLMCallStarted，故此处即前台新一轮的起点（Trigger A）；
+        缓冲空时 flush 为 no-op（含非 TTY 从不入缓冲的情形）。
 
         Args:
             event: LLM 调用开始事件，含 caller_agent_type / caller_uuid。
         """
+        self._round_flush()
         self._set_current_agent(event.caller_agent_type, event.caller_uuid)
         self._set_activity("思考中")
 
@@ -241,28 +245,28 @@ class OutputActions:
         self._print_rich(f"[compact] {prefix}{detail}", style="bright_black")
 
     async def on_permission_notice(self, event: PermissionNotice) -> None:
-        """工具权限状态通知：auto_allow 打印绿色 [auto] 行，deny 打印 [deny] 行，allow 静默；均带发起 agent 标签。
+        """工具权限状态通知：仅 deny 打印 [deny] 行；allow / auto_allow 静默（工具本身已由本轮面板/定稿块呈现）。
 
         Args:
             event: 权限状态通知事件，含 caller_agent_type / caller_uuid。
         """
+        if event.status != "deny":
+            return
         label = self._agent_label(event.caller_agent_type, event.caller_uuid)
         prefix = f"{label} " if label else ""
-        if event.status == "auto_allow":
-            self._print_rich(f"[auto] {prefix}{event.detail or event.tool_name}", style="green")
-            return
-        if event.status == "allow":
-            return
         await self._write(f"[deny] {prefix}{event.detail or event.tool_name}\n")
 
     async def on_tool_call_started(self, event: ToolCallStarted) -> None:
-        """工具开始：记录当前 agent，状态条切到该工具名，并打印 `● <工具> <详情>` 行。
+        """工具开始：记录当前 agent、状态条切到该工具名；TTY 下入本轮缓冲（由本轮面板/定稿块呈现），非 TTY 逐行打印 `● <工具> <详情>`。
 
         Args:
             event: 工具调用开始事件，含 caller_agent_type / caller_uuid。
         """
         self._set_current_agent(event.caller_agent_type, event.caller_uuid)
         self._set_activity(event.tool_name)
+        if self._tty:
+            self._round_append_start(event)
+            return
         agent = self._agent_label(event.caller_agent_type, event.caller_uuid)
         detail = event.detail.strip()
         line = Text("● ", style="bold")
@@ -274,11 +278,14 @@ class OutputActions:
         self._print_rich(line)
 
     async def on_tool_call_completed(self, event: ToolCallCompleted) -> None:
-        """工具完成：打印 `  ⎿ <预览首行> (<耗时>s)` 子行；成功绿、失败红且保留完整预览。
+        """工具完成：TTY 下把结果落定进本轮缓冲（轮边界统一 flush），非 TTY 逐行打印 `  ⎿ <预览首行> (<耗时>s)`。
 
         Args:
             event: 工具调用完成事件，含 status / result_preview / duration_seconds。
         """
+        if self._tty:
+            self._round_settle(event)
+            return
         ok = event.status == "success"
         preview = (event.result_preview or "").strip()
         preview_lines = preview.splitlines()

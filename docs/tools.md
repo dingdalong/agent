@@ -92,7 +92,7 @@ else:
 | `kind` | `None` | `"readonly"`=只读（所有模式自动放行且始终可见）；`"edit"`=文件编辑（acceptEdits 模式自动放行）；`None`=其他（如 shell）。 |
 | `plan_visible` | `False` | 非只读工具默认在 plan 模式隐藏；`True` 使其在 plan 模式仍可见（plan 专用文件工具用）。 |
 | `specifier_arg` | `None` | 内容级规则匹配的参数名；`check()` 提取该参数值做 fnmatch 匹配，也用于构建 "always allow" 会话规则。 |
-| `tips` | `None` | 权限提示模板（如 `写入文件：{path}`），用于向用户展示操作详情。 |
+| `tips` | `None` | 权限提示模板（如 `写入文件：{path}`、`task_delegator` 的 `委托 {agent_type}`），用工具参数格式化后作为事件 `detail`；缺省时回退工具描述。 |
 | `check_permissions` | `None` | 工具自身安全逻辑检查函数 `(tool_input, ctx) -> PermissionCheckResult`；只处理工具特有安全逻辑（shell 危险命令、file 敏感路径），不做规则匹配。 |
 | `mcp_server` | `None` | 该工具所属的 MCP server 名（仅 MCP 工具非空），供 ask 弹窗提供「信任整个 server」选项。 |
 

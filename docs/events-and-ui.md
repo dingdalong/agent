@@ -34,7 +34,7 @@
 
 `EventLevel` 三级：`PROGRESS=1`、`DETAIL=2`、`TRACE=3`。交互、状态和 token 事件均为 PROGRESS；`ThinkingDelta` 与 `AgentStateChanged` 为 DETAIL。
 
-`caller_agent_type`/`caller_uuid` 是 `Event` 基类的**一等属性**（`types.py`），标识发起该事件的 agent（主 Agent 为「main」，子智能体为各自类型；None 表示用户/应用发起）：所有事件——含下表菜单类与 `CompactDelta`/`PermissionNotice`——统一继承。取值口径唯一：`caller_identity(agent)`（`types.py`）。用途有二：`OutputRouter._is_background` 据 `caller_uuid` 做前台/后台分流；UI 经 `_agent_label` 统一标注是哪个 agent（工具行、回复/思考前缀、菜单 banner、`[compact]`/`[auto]`/`[deny]` 行）。下表「关键 payload」仅列各事件**特有**字段，不再重复 `caller_*`。
+`caller_agent_type`/`caller_uuid` 是 `Event` 基类的**一等属性**（`types.py`），标识发起该事件的 agent（主 Agent 为「main」，子智能体为各自类型；None 表示用户/应用发起）：所有事件——含下表菜单类与 `CompactDelta`/`PermissionNotice`——统一继承。取值口径唯一：`caller_identity(agent)`（`types.py`）。用途有二：`OutputRouter._is_background` 据 `caller_uuid` 做前台/后台分流；UI 经 `_agent_label` 统一标注是哪个 agent（本轮定稿块头行、回复/思考前缀、菜单 banner、`[compact]`/`[deny]` 行）。下表「关键 payload」仅列各事件**特有**字段，不再重复 `caller_*`。
 
 | 类名 | `type` | 关键 payload |
 |---|---|---|
@@ -47,7 +47,7 @@
 | `LLMCallCompleted` | `llm_call_completed` | 输入/输出/cache token、速度 |
 | `OutputRequested` | `output_requested` | `content`、`markdown` |
 | `InterruptRequested` | `interrupt_requested` | 无 |
-| `PermissionNotice` | `permission_notice` | 状态、工具名、detail |
+| `PermissionNotice` | `permission_notice` | 状态、工具名、detail（UI 仅渲染 `deny` 行；`allow`/`auto_allow` 静默，工具本身由本轮面板/定稿块呈现） |
 | `AgentStateChanged` | `agent_state_changed` | agent、前后状态 |
 | `SubagentLifecycle` | `subagent_lifecycle` | UUID、类型、start/end、结束 messages |
 | `PermissionModeChanged` | `permission_mode_changed` | 无 payload，仅通知重读权限模式 |
@@ -68,13 +68,13 @@
 
 - `TokenUsage(input_tokens, output_tokens, cache_read_tokens)`
 - `ContextUsage(used_tokens, limit_tokens)`
-- `AgentSnapshot(uuid, agent_type, is_main, running, usage, context, elapsed_seconds)`
+- `AgentSnapshot(uuid, agent_type, is_main, running, usage, context, elapsed_seconds, activity)`（`activity` 为该 agent 最新活动文案：思考中/回应中/工具名，驱动底部列表实时显示）
 - `SessionSnapshot(usage, foreground_context)`
 
 Store 的职责：
 
 - `register_foreground()` 登记入口主 agent（`agent_view_store.py:111`）。
-- `record(event)` 处理 usage、context、lifecycle 和转录（`:135`）。
+- `record(event)` 处理 usage、context、lifecycle、转录与每 agent 当前活动（`activity`：LLM 开始→思考中、response 增量→回应中、工具开始→工具名）（`:135`）。
 - `flush_completed()` 把结束的子 agent 移入最多 50 项的历史（`:159`）。
 - `session_snapshot()` 返回全会话 token 总量和主 agent 当前上下文（`:181`）。
 - `active_agent_snapshots()` / `subagent_snapshots()` 分别服务实时面板与 `/agents`（`:205`、`:217`）。
@@ -97,7 +97,7 @@ Store 的职责：
 
 token 统一按数量级显示：小于 1000 保留原整数；达到 1000 后先按 100 token 精度 half-up 取整，取整结果不足 100 万时显示一位小数 `k`，达到 100 万时显示整数 `m` 加一位小数 `k` 余量。取整先于 `m`/`k` 拆段，跨百万的进位进入 `m`，不会出现 `1000.0k`，例如 `999950 → 1m0.0k`、`1234567 → 1m234.6k`、`1999950 → 2m0.0k`。超过十亿仍沿用整数 `m` 加 `k` 余量，不新增 `b`。
 
-elapsed 统一先把负数夹到零，再按最近整秒 half-up 取整（`0.5s → 1s`），随后拆为小写 `h/m/s`；不补零，但高位出现后保留全部低位，例如 `3s`、`2m3s`、`2m0s`、`1h2m3s`、`1h0m0s`。小时不再拆为天。活动行的本步耗时复用同一格式，可显示 `(...1h2m3s)`，不再显示小数秒。该变化仅统一展示格式，不改变 token 统计或计时语义。
+elapsed 统一先把负数夹到零，再按最近整秒 half-up 取整（`0.5s → 1s`），随后拆为小写 `h/m/s`；不补零，但高位出现后保留全部低位，例如 `3s`、`2m3s`、`2m0s`、`1h2m3s`、`1h0m0s`。小时不再拆为天。活动区的实时耗时复用同一格式，可显示 `(...1h2m3s)`，不再显示小数秒。该变化仅统一展示格式，不改变 token 统计或计时语义。
 
 主会话状态的 `elapsed` 为**全会话累计有效耗时**（已完成回合累计 `_session_elapsed_accumulated` + 本回合实时段），与会话 token 累计语义一致：跨回合只增不减，`/clear`（`controller.reload`）随会话 token 一同归零。每个回合的有效耗时 = 自然墙钟剔除纯人工等待；回合边界（`_read_input`）把本回合有效耗时并入累计，随后 `_reset_turn_status` 清零本回合起点与时钟。输入态只显示累计值（冻结，本回合段为 0），处理/弹窗态叠加本回合实时段。查看子 agent 时不使用该值，而显示其生命周期开始至当前或结束时的耗时。
 
@@ -120,6 +120,15 @@ elapsed 统一先把负数夹到零，再按最近整秒 half-up 取整（`0.5s 
 
 Router 不持有 agent 视图、不格式化摘要，也不提供 UI 数据 provider。`AgentApp._browse_subagents()` 直接读取 Store，并用共享 Presenter 生成非 TTY 摘要和 TTY 选择标签。
 
+## 工具调用的一轮呈现（TTY）
+
+一轮 LLM 响应里的多个工具调用整合为一体，消除逐工具的冗余打印。`StatusBarActions` 维护一份**本轮工具缓冲**（`_round_entries`，元素为 `_RoundEntry`），只跟踪**前台 agent**当前这一轮的工具；委托出去的子 agent 进展改由底部 agent 列表的 `· 当前活动` 呈现（`AgentSnapshot.activity`）。同一份缓冲服务两处渲染：
+
+- **实时区「本轮面板」**（`_render_activity`）：取代旧单行 spinner。缓冲非空时渲染头行 `本轮 · N 工具（M 完成 · K 进行中）` + 每工具一行（运行中逐条 spinner + 实时耗时，已落定 `✔`/`✘` + 耗时），超 `_ROUND_PANEL_MAX_ROWS` 折叠为 `… 还有 N 个`；缓冲为空但有活动（思考中/回应中/压缩上下文）时回退单行 `spinner + agent · 活动 (耗时)`。
+- **scrollback 定稿块**（`_round_flush`）：在轮边界一次性输出 `● {agent} · 本轮 N 工具` 头行 + 每工具一行 `✔/✘ {工具} {detail} ⎿ {结果首行} (耗时)`（失败附剩余预览行；中断残留项标 `⋯ … 已中断`），随后清空缓冲。
+
+轮边界有两个触发点：**Trigger A** = 前台新一轮的 `on_llm_call_started`（早于本轮任何正文流），保证 scrollback 顺序为 `[轮1正文][轮1工具块][轮2正文]`；**Trigger B** = 回到输入态时 `_read_input` 顶部（最后一轮无后续 `LLMCallStarted`，含 Ctrl+C 中断残留）。缓冲空时两者均为 no-op。`_reset_turn_status` 与 `reload()` 另做防御性清空。非 TTY 下工具事件从不入缓冲，仍逐行打印 `●`/`⎿`。
+
 ## Inline UI 组件
 
 `src/interfaces/inline_ui.py` 是薄 `UserInterface` 门面；完整实现由 `src/interfaces/inline/` 下的组合根和职责组件完成：
@@ -128,11 +137,11 @@ Router 不持有 agent 视图、不格式化摘要，也不提供 UI 数据 prov
 |---|---|
 | `controller.py` | 组装 Runtime、控制器和 prompt-toolkit 布局，协调普通输入 |
 | `runtime.py` | 唯一持有 Application、Buffer、Layout、future、焦点引用和 stdout 代理；`interaction()` 排他管理 future 生命周期 |
-| `status_bar.py` | 活动状态、会话/查看中 agent 状态栏切换和共享 Presenter |
-| `agent_panel.py` | agent 列表、转录渲染、滚动、缓存、独立覆盖层状态 |
+| `status_bar.py` | 活动状态、会话/查看中 agent 状态栏切换、本轮工具缓冲（`_round_*`）与共享 Presenter |
+| `agent_panel.py` | agent 列表（含运行中子 agent 的 `· 当前活动`）、转录渲染、滚动、缓存、独立覆盖层状态 |
 | `menus.py` | 选择菜单、权限菜单、ChoiceInput 状态与动作 |
 | `form.py` | 表单状态、渲染、导航和 JSON wire payload |
-| `output.py` | TTY Rich/流式 Markdown 输出与进度事件 |
+| `output.py` | TTY Rich/流式 Markdown 输出与进度事件（TTY 下工具事件入本轮缓冲，非 TTY 逐行打印） |
 | `plain.py` | 非 TTY 输入和保证无 ANSI 的输出 |
 | `keymap.py` | 全部快捷键声明与优先级判断 |
 
