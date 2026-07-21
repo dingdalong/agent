@@ -41,12 +41,14 @@ class LLMMgr:
     _default_concurrency: int = field(init=False)
     _default_max_retries: int = field(init=False)
     _page_token_rate: float = field(init=False)
+    _user_agent: str = field(init=False)
 
     def __post_init__(self) -> None:
         llm_cfg = self.config_mgr.get_config("llm")
         self._default_concurrency = llm_cfg.get("concurrency", 5)
         self._default_max_retries = llm_cfg.get("max_retries", 3)
         self._page_token_rate = self.config_mgr.get_config("tool.page_token_rate")
+        self._user_agent = llm_cfg.get("user_agent", "")
 
     async def load_models(self) -> None:
         providers_cfg: dict = self.config_mgr.get_config("llm_provider")
@@ -57,6 +59,7 @@ class LLMMgr:
                 models = await ProviderClass.list_models(
                     api_key=provider_cfg.get("api_key", ""),
                     base_url=provider_cfg["base_url"],
+                    user_agent=self._user_agent,
                 )
             except Exception as e:
                 models = provider_cfg.get("models", [])
@@ -172,6 +175,7 @@ class LLMMgr:
             context_limit=provider_cfg.get("context_limit", 0),
             page_token_rate=self._page_token_rate,
             event_bus=self.event_bus,
+            user_agent=self._user_agent,
         )
 
     def list_models(self) -> list[str]:

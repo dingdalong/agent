@@ -43,16 +43,32 @@ class LLMProvider(ABC):
     supports_native_structured_output: bool = False
     reasoning_effort: str = "max"
     preserve_thinking: bool = False
+    user_agent: str = ""
 
     def __post_init__(self):
         self._semaphore = asyncio.Semaphore(self.concurrency)
         self.page_token_budget = max(1, math.floor(self.context_limit * self.page_token_rate))
 
+    @staticmethod
+    def _ua_headers(user_agent: str) -> dict[str, str] | None:
+        """构造传给底层 SDK 客户端的自定义请求头。
+
+        Args:
+            user_agent: 自定义 User-Agent 字符串。
+
+        Returns:
+            user_agent 非空时返回 {"User-Agent": user_agent}，否则返回 None（沿用 SDK 默认 UA）。
+        """
+        return {"User-Agent": user_agent} if user_agent else None
+
     def clear_reasoning_content(self, message): ...
 
     @classmethod
-    async def list_models(cls, api_key: str, base_url: str, timeout: float = 3.0) -> list[str]:
-        client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=3.0, max_retries=0)
+    async def list_models(cls, api_key: str, base_url: str, timeout: float = 3.0, user_agent: str = "") -> list[str]:
+        client = openai.AsyncOpenAI(
+            api_key=api_key, base_url=base_url, timeout=3.0, max_retries=0,
+            default_headers=cls._ua_headers(user_agent),
+        )
         try:
             response = await asyncio.wait_for(client.models.list(), timeout=timeout)
             return [m.id for m in response.data]

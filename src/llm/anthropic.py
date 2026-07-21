@@ -16,8 +16,11 @@ class AnthropicProvider(LLMProvider):
     """Anthropic Provider (Messages API)"""
 
     @classmethod
-    async def list_models(cls, api_key: str, base_url: str, timeout: float = 3.0) -> list[str]:
-        client = AsyncAnthropic(api_key=api_key, base_url=base_url, timeout=3.0, max_retries=0)
+    async def list_models(cls, api_key: str, base_url: str, timeout: float = 3.0, user_agent: str = "") -> list[str]:
+        client = AsyncAnthropic(
+            api_key=api_key, base_url=base_url, timeout=3.0, max_retries=0,
+            default_headers=cls._ua_headers(user_agent),
+        )
         try:
             async def _fetch() -> list[str]:
                 models = []
@@ -39,6 +42,7 @@ class AnthropicProvider(LLMProvider):
             base_url=self.base_url,
             timeout=self.timeout,
             max_retries=0,
+            default_headers=self._ua_headers(self.user_agent),
         )
 
     def estimate_tokens(

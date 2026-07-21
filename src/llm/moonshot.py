@@ -31,6 +31,7 @@ class MoonshotProvider(LLMProvider):
             base_url=self.base_url,
             timeout=self.timeout,
             max_retries=0,
+            default_headers=self._ua_headers(self.user_agent),
         )
 
     # 有意不覆写基类的 clear_reasoning_content（无操作）：

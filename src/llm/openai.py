@@ -21,6 +21,7 @@ class OpenAIProvider(LLMProvider):
             base_url=self.base_url,
             timeout=self.timeout,
             max_retries=0,
+            default_headers=self._ua_headers(self.user_agent),
         )
 
     def estimate_tokens(
