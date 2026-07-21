@@ -10,12 +10,34 @@ from src.events.levels import EventLevel
 
 @dataclass
 class Event:
-    """事件基类。"""
+    """事件基类。
+
+    caller_agent_type / caller_uuid 标识发起该事件的 agent（主 Agent 的 agent_type 为「main」，
+    子智能体为各自类型；None 表示无 agent 身份，如用户/应用发起的事件）。作为所有事件的一等属性，
+    供 OutputRouter 前台/后台分流与 UI 统一标注「是哪个 agent」使用。
+    """
 
     timestamp: float
     source: str
     level: EventLevel
     type: str = ""
+    caller_agent_type: str | None = None
+    caller_uuid: str | None = None
+
+
+def caller_identity(agent: object | None) -> tuple[str | None, str | None]:
+    """从 agent 实例提取事件 caller 身份，作为所有 emit 点的唯一取值口径。
+
+    Args:
+        agent: Agent 实例；None 或缺失对应字段时该项返回 None。
+    Returns:
+        (caller_agent_type, caller_uuid)：agent_type 取自 agent.agent_type，
+        caller_uuid 取 str(agent.uuid)（uuid 缺失时为 None）。
+    """
+    if agent is None:
+        return None, None
+    uuid = getattr(agent, "uuid", None)
+    return getattr(agent, "agent_type", None), str(uuid) if uuid is not None else None
 
 
 # 交互式菜单事件（PermissionMenu/InputMenu/ChoiceMenu/FormMenu 及基类 MenuRequest、
@@ -28,8 +50,6 @@ class Event:
 class ResponseDelta(Event):
     """流式回应 — 默认可见。"""
     content: str = ""
-    caller_agent_type: str | None = None
-    caller_uuid: str | None = None
     level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
     type: Literal["token_delta"] = field(default="token_delta", init=False)
 
@@ -38,8 +58,6 @@ class ResponseDelta(Event):
 class ThinkingDelta(Event):
     """思考过程 — 仅 DETAIL 级别投递/渲染（progress 级别下由总线门控丢弃，状态栏「思考中」由 LLMCallStarted 维持）。"""
     content: str = ""
-    caller_agent_type: str | None = None
-    caller_uuid: str | None = None
     level: EventLevel = field(default=EventLevel.DETAIL, init=False)
     type: Literal["thinking_delta"] = field(default="thinking_delta", init=False)
 
@@ -56,8 +74,6 @@ class ToolCallStarted(Event):
     tool_name: str = ""
     tool_call_id: str = ""
     detail: str = ""
-    caller_agent_type: str | None = None
-    caller_uuid: str | None = None
     level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
     type: Literal["tool_call_started"] = field(default="tool_call_started", init=False)
 
@@ -70,8 +86,6 @@ class ToolCallCompleted(Event):
     status: Literal["success", "error"] = "success"
     duration_seconds: float = 0.0
     result_preview: str = ""
-    caller_agent_type: str | None = None
-    caller_uuid: str | None = None
     level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
     type: Literal["tool_call_completed"] = field(default="tool_call_completed", init=False)
 
@@ -88,8 +102,6 @@ class LLMCallStarted(Event):
     estimated_input_tokens: int = 0
     message_count: int = 0
     tool_count: int = 0
-    caller_agent_type: str | None = None  # 发起本次调用的 agent 类型（主 Agent 为 None），供 UI 活动行显示当前 agent
-    caller_uuid: str | None = None  # 发起本次调用的 agent 实例 uuid
     level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
     type: Literal["llm_call_started"] = field(default="llm_call_started", init=False)
 
@@ -110,7 +122,6 @@ class LLMCallCompleted(Event):
     duration_seconds: float | None = None
     output_tokens_per_second: float | None = None
     total_tokens_per_second: float | None = None
-    caller_uuid: str | None = None  # 发起本次调用的 agent 实例 uuid，供 AgentViewStore 按 agent 累计 token
     level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
     type: Literal["llm_call_completed"] = field(default="llm_call_completed", init=False)
 

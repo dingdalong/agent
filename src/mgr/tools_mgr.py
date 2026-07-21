@@ -4,7 +4,7 @@ import logging
 import time
 from typing import Any, Dict, TYPE_CHECKING
 
-from src.events.types import ToolCallCompleted, ToolCallStarted
+from src.events.types import ToolCallCompleted, ToolCallStarted, caller_identity
 from src.mgr.permission_mgr import tool_sort_order
 from src.tools import ToolDict, ToolEntry
 from src.tools.decorator import format_tool_tips
@@ -204,14 +204,15 @@ class ToolsMgr:
         event_bus = getattr(deps, "event_bus", None) if deps is not None else None
         if event_bus is None or not hasattr(event_bus, "emit"):
             return
+        caller_agent_type, caller_uuid = caller_identity(agent)
         await event_bus.emit(ToolCallStarted(
             timestamp=time.time(),
             source="tools",
             tool_name=tool.name,
             tool_call_id=current_tool_call_id,
             detail=format_tool_tips(tool.permission.tips if tool.permission else None, arguments, tool.description),
-            caller_agent_type=getattr(agent, "agent_type", None),
-            caller_uuid=str(agent.uuid) if agent is not None and hasattr(agent, "uuid") else None,
+            caller_agent_type=caller_agent_type,
+            caller_uuid=caller_uuid,
         ))
 
     async def _emit_tool_completed(
@@ -228,6 +229,7 @@ class ToolsMgr:
         event_bus = getattr(deps, "event_bus", None) if deps is not None else None
         if event_bus is None or not hasattr(event_bus, "emit"):
             return
+        caller_agent_type, caller_uuid = caller_identity(agent)
         await event_bus.emit(ToolCallCompleted(
             timestamp=time.time(),
             source="tools",
@@ -236,8 +238,8 @@ class ToolsMgr:
             status=status,
             duration_seconds=duration_seconds,
             result_preview=self._result_preview(result),
-            caller_agent_type=getattr(agent, "agent_type", None),
-            caller_uuid=str(agent.uuid) if agent is not None and hasattr(agent, "uuid") else None,
+            caller_agent_type=caller_agent_type,
+            caller_uuid=caller_uuid,
         ))
 
     async def execute(
@@ -305,19 +307,19 @@ class ToolsMgr:
             )
 
             if decision == "deny":
-                await permission_mgr.notify_decision(tool_name, arguments, deps, "deny")
+                await permission_mgr.notify_decision(tool_name, arguments, deps, "deny", agent=agent)
                 return f"权限拒绝：{reason}"
 
             if decision == "ask" or hook_has_ask:
                 resolved_decision, resolved_reason = await permission_mgr.resolve_ask(
-                    tool_name, arguments, deps,
+                    tool_name, arguments, deps, agent=agent,
                 )
                 if resolved_decision == "deny":
-                    await permission_mgr.notify_decision(tool_name, arguments, deps, "deny")
+                    await permission_mgr.notify_decision(tool_name, arguments, deps, "deny", agent=agent)
                     return f"权限拒绝：{resolved_reason}"
             else:
                 # allow 或 auto_allow
-                await permission_mgr.notify_decision(tool_name, arguments, deps, decision)
+                await permission_mgr.notify_decision(tool_name, arguments, deps, decision, agent=agent)
 
         await self._emit_tool_started(deps, agent, tool, arguments, current_tool_call_id)
         started_at = time.time()

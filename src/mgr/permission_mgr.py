@@ -22,6 +22,7 @@ from typing import Any, Callable, Iterable, Literal, TYPE_CHECKING
 if TYPE_CHECKING:
     from src.tools.decorator import ToolEntry
 
+from src.events.types import caller_identity
 from src.tools.decorator import format_tool_tips
 
 logger = logging.getLogger(__name__)
@@ -626,6 +627,7 @@ class PermissionManager:
         tool_name: str,
         tool_input: dict[str, Any],
         deps: Any,
+        agent: Any = None,
     ) -> PermissionDecision:
         """通过 UI 提示用户确认权限。
 
@@ -633,6 +635,7 @@ class PermissionManager:
             tool_name: 工具名。
             tool_input: 工具调用参数。
             deps: AgentDeps 依赖对象。
+            agent: 发起该工具调用的 Agent 实例，用于标注是哪个 agent 请求授权（None 时不标注）。
 
         Returns:
             (decision, reason) 元组。
@@ -657,11 +660,14 @@ class PermissionManager:
             if server else None
         )
 
+        caller_agent_type, caller_uuid = caller_identity(agent)
         answer = await deps.event_bus.request_permission(
             tool_name=tool_name,
             detail=detail,
             suggested_rules=suggested_rules,
             mcp_server_rule=str(mcp_server_rule) if mcp_server_rule else None,
+            caller_agent_type=caller_agent_type,
+            caller_uuid=caller_uuid,
         )
         normalized = answer.strip().lower()
         if normalized == "session":
@@ -850,6 +856,7 @@ class PermissionManager:
         tool_input: dict[str, Any],
         deps: Any,
         decision: str,
+        agent: Any = None,
     ) -> None:
         """向 UI 发送权限决策通知。
 
@@ -858,6 +865,7 @@ class PermissionManager:
             tool_input: 工具调用参数。
             deps: AgentDeps 依赖对象。
             decision: 权限决策（allow|deny|auto_allow）。
+            agent: 发起该工具调用的 Agent 实例，用于标注是哪个 agent 的决策（None 时不标注）。
         """
         event_bus = getattr(deps, "event_bus", None) if deps is not None else None
         if event_bus is None:
@@ -867,8 +875,11 @@ class PermissionManager:
             return
 
         detail = format_tool_tips(self._tool_tips.get(tool_name), tool_input, tool_name)
+        caller_agent_type, caller_uuid = caller_identity(agent)
         await event_bus.notify_permission(
             status=decision,
             tool_name=tool_name,
             detail=detail,
+            caller_agent_type=caller_agent_type,
+            caller_uuid=caller_uuid,
         )

@@ -168,6 +168,8 @@ class EventBus:
         prompt: str = "",
         source: str = "ui",
         markdown: bool = False,
+        caller_agent_type: str | None = None,
+        caller_uuid: str | None = None,
     ) -> tuple[list[str], str]:
         """通过事件队列请求 UI 以单屏表单读取多个问题的作答与讨论。
 
@@ -179,6 +181,8 @@ class EventBus:
             prompt: 表单上文提示（打印到 scrollback）。
             source: 事件来源标识。
             markdown: 上文提示与问题/选项标签是否按 Markdown 渲染。
+            caller_agent_type: 发起本次表单的 agent 类型（主 agent 为「main」），供 UI 标注是哪个 agent 提问。
+            caller_uuid: 发起本次表单的 agent 实例 uuid。
 
         Returns:
             (answers, discussion)：answers 为与 questions 顺序对齐的答案列表，discussion 为讨论栏文本；
@@ -191,6 +195,8 @@ class EventBus:
                 prompt=prompt,
                 questions=questions,
                 markdown=markdown,
+                caller_agent_type=caller_agent_type,
+                caller_uuid=caller_uuid,
             ),
             "form",
         )
@@ -208,6 +214,8 @@ class EventBus:
         default_index: int = 0,
         source: str = "ui",
         markdown: bool = False,
+        caller_agent_type: str | None = None,
+        caller_uuid: str | None = None,
     ) -> tuple[str, str]:
         """通过事件队列请求 UI 以「选项列表 + 一行可编辑输入」读取一次作答。
 
@@ -222,6 +230,8 @@ class EventBus:
             default_index: 初始选中项下标。
             source: 事件来源标识。
             markdown: 上文提示与选项标签是否按 Markdown 渲染。
+            caller_agent_type: 发起本次菜单的 agent 类型（主 agent 为「main」），供 UI 标注是哪个 agent 请求。
+            caller_uuid: 发起本次菜单的 agent 实例 uuid。
 
         Returns:
             (choice, text)：选项行提交时 choice=所选 value、text=""；输入行提交时 choice=""、
@@ -237,6 +247,8 @@ class EventBus:
                 input_placeholder=input_placeholder,
                 default_index=default_index,
                 markdown=markdown,
+                caller_agent_type=caller_agent_type,
+                caller_uuid=caller_uuid,
             ),
             "choice_input",
         )
@@ -270,14 +282,27 @@ class EventBus:
         tool_name: str,
         detail: str = "",
         source: str = "permission",
+        caller_agent_type: str | None = None,
+        caller_uuid: str | None = None,
     ) -> None:
-        """通过事件队列发布工具权限状态通知。"""
+        """通过事件队列发布工具权限状态通知。
+
+        Args:
+            status: 权限决策结果（allow 静默 / deny / auto_allow）。
+            tool_name: 工具名。
+            detail: 通知详情文本。
+            source: 事件来源标识。
+            caller_agent_type: 发起该工具调用的 agent 类型（主 agent 为「main」），供 UI 标注是哪个 agent。
+            caller_uuid: 发起该工具调用的 agent 实例 uuid。
+        """
         await self.emit(PermissionNotice(
             timestamp=time.time(),
             source=source,
             status=status,
             tool_name=tool_name,
             detail=detail,
+            caller_agent_type=caller_agent_type,
+            caller_uuid=caller_uuid,
         ))
 
     async def request_permission(
@@ -287,6 +312,8 @@ class EventBus:
         source: str = "permission",
         suggested_rules: list[str] | None = None,
         mcp_server_rule: str | None = None,
+        caller_agent_type: str | None = None,
+        caller_uuid: str | None = None,
     ) -> str:
         """通过事件队列请求 UI 读取工具权限确认。
 
@@ -296,6 +323,8 @@ class EventBus:
             source: 事件来源标识。
             suggested_rules: 建议的 allow 规则列表，供 UI 展示给用户。
             mcp_server_rule: MCP 工具的 server 级通配规则（mcp__<server>__*）；非空时 UI 提供"信任整个 server"选项。
+            caller_agent_type: 发起该工具调用的 agent 类型（主 agent 为「main」），供 UI 标注是哪个 agent 请求授权。
+            caller_uuid: 发起该工具调用的 agent 实例 uuid。
 
         Returns:
             用户的确认结果（yes/session/always/session_server/always_server/deny）。
@@ -308,6 +337,8 @@ class EventBus:
                 detail=detail,
                 suggested_rules=suggested_rules or [],
                 mcp_server_rule=mcp_server_rule,
+                caller_agent_type=caller_agent_type,
+                caller_uuid=caller_uuid,
             ),
             "permission",
         )

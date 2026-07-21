@@ -308,18 +308,18 @@ class AgentViewStore:
         """Find or defensively create state for an identified agent event.
 
         Args:
-            event: Event that may carry caller UUID and type.
+            event: Event carrying caller identity（caller_uuid/caller_agent_type 为 Event 基类字段）。
 
         Returns:
             Mutable state, or None for an event without UUID.
         """
-        uuid = getattr(event, "caller_uuid", None)
+        uuid = event.caller_uuid
         if not uuid:
             return None
         existing = self._find(uuid)
         if existing is not None:
             return existing
-        agent_type = getattr(event, "caller_agent_type", None) or "?"
+        agent_type = event.caller_agent_type or "?"
         state = self._new_state(
             agent_type=agent_type,
             is_main=uuid == self._foreground_uuid,

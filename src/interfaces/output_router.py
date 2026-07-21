@@ -86,13 +86,12 @@ class OutputRouter:
         """Return whether an identified event belongs to a non-foreground agent.
 
         Args:
-            event: Event that may carry a caller UUID.
+            event: Event carrying a caller UUID (caller_uuid 现为 Event 基类一等属性)。
 
         Returns:
             True only for events identified as a different agent.
         """
-        caller_uuid = getattr(event, "caller_uuid", None)
-        return caller_uuid is not None and caller_uuid != self.store.foreground_uuid
+        return event.caller_uuid is not None and event.caller_uuid != self.store.foreground_uuid
 
 
 _CONTROL_EVENTS = (

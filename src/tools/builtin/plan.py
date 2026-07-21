@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
+from src.events.types import caller_identity
 from src.tools.decorator import ToolPermission, tool
 
 if TYPE_CHECKING:
@@ -128,6 +129,7 @@ async def exit_plan_mode(file_path: str, agent: Agent, deps: AgentDeps) -> str:
 
     # choice_input 语义：选项行提交→choice=该项 value（auto/manual）、feedback 为空；
     # 输入行提交→choice 为空、feedback=修改意见；Esc 取消→两者皆空。三者互斥、以光标所在行为准。
+    caller_agent_type, caller_uuid = caller_identity(agent)
     choice, feedback = await deps.event_bus.request_choice_input(
         prompt="计划审核",
         options=[("auto", "自动执行"), ("manual", "手动执行")],
@@ -135,6 +137,8 @@ async def exit_plan_mode(file_path: str, agent: Agent, deps: AgentDeps) -> str:
         input_placeholder="输入修改意见…",
         default_index=0,
         markdown=False,
+        caller_agent_type=caller_agent_type,
+        caller_uuid=caller_uuid,
     )
     feedback = feedback.strip()
 

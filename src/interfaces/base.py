@@ -275,6 +275,14 @@ class UserInterface(ABC):
     async def _end_response_if_needed(self) -> None:
         """收尾回应流（若有未结束的流）。由具体 UI 覆盖实现，默认无操作。"""
 
+    async def _emit_caller_banner(self, caller_agent_type: str | None, caller_uuid: str | None) -> None:
+        """在交互菜单弹出前标注发起该请求的 agent 身份。由具体 UI 覆盖实现，默认无操作。
+
+        Args:
+            caller_agent_type: 发起菜单的 agent 类型（主 agent 为「main」；None 表示无身份，不标注）。
+            caller_uuid: 发起菜单的 agent 实例 uuid。
+        """
+
     async def _end_streams_for(self, event: Event) -> None:
         """在事件类型切换前收尾不匹配的流式输出。
 
@@ -336,6 +344,7 @@ class UserInterface(ABC):
             case FormMenu(prompt=prompt, questions=questions, markdown=markdown):
                 # 表单允许空答案（Esc 取消），与 ChoiceMenu 同样单次读取、不走非空重读循环。
                 self._active_user_request = event
+                await self._emit_caller_banner(event.caller_agent_type, event.caller_uuid)
                 try:
                     answer = await self._read_form(prompt, questions, markdown)
                     event.complete(answer)
@@ -350,6 +359,7 @@ class UserInterface(ABC):
                                  input_placeholder=input_placeholder, default_index=default_index, markdown=markdown):
                 # 选项+输入允许空答案（Esc 取消），与 ChoiceMenu 同样单次读取、不走非空重读循环。
                 self._active_user_request = event
+                await self._emit_caller_banner(event.caller_agent_type, event.caller_uuid)
                 try:
                     answer = await self._read_choice_input(
                         prompt, options, descriptions, input_placeholder, default_index, markdown
@@ -379,6 +389,7 @@ class UserInterface(ABC):
                 await self.on_permission_notice(event)
             case PermissionMenu(tool_name=tool_name, detail=detail, suggested_rules=suggested_rules, mcp_server_rule=mcp_server_rule):
                 self._active_user_request = event
+                await self._emit_caller_banner(event.caller_agent_type, event.caller_uuid)
                 try:
                     await self._complete_user_request(
                         event,

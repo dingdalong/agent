@@ -185,6 +185,23 @@ class OutputActions:
         agent = self._agent_label(event.caller_agent_type, event.caller_uuid)
         return f"思考({agent})：" if agent else "思考"
 
+    async def _emit_caller_banner(self, caller_agent_type: str | None, caller_uuid: str | None) -> None:
+        """交互菜单弹出前，若能识别发起 agent 则单独成行打印「彩色 › + agent 标签」。
+
+        与 _write_stream_prefix 的 agent 归属前缀同源，让权限/表单/计划审核等弹窗一眼看出是哪个 agent 发起；
+        标签为空（无 agent 身份，如用户/应用发起）时不打印。
+
+        Args:
+            caller_agent_type: 发起菜单的 agent 类型（主 agent 为「main」；空表示无身份，不打印）。
+            caller_uuid: 发起菜单的 agent 实例 uuid。
+        """
+        label = self._agent_label(caller_agent_type, caller_uuid)
+        if not label:
+            return
+        banner = Text("\n› ", style="bold cyan")
+        banner.append(label, style="bold cyan")
+        self._print_rich(banner)
+
     def _agent_label(self, agent_type: str | None, agent_uuid: str | None) -> str:
         """返回 agent 标签：「<agent_type> <uuid首段8位>」，便于区分同类型的多个并发实例。
 
@@ -212,27 +229,31 @@ class OutputActions:
         self._set_activity("思考中")
 
     async def on_compact_delta(self, event: CompactDelta) -> None:
-        """上下文压缩进度：状态条切到「压缩上下文」，并输出一行进度。
+        """上下文压缩进度：状态条切到「压缩上下文」，并输出一行带发起 agent 标签的进度。
 
         Args:
-            event: 压缩进度事件。
+            event: 压缩进度事件，含 caller_agent_type / caller_uuid。
         """
         self._set_activity("压缩上下文")
         detail = event.content.strip() or "context"
-        self._print_rich(f"[compact] {detail}", style="bright_black")
+        label = self._agent_label(event.caller_agent_type, event.caller_uuid)
+        prefix = f"{label} " if label else ""
+        self._print_rich(f"[compact] {prefix}{detail}", style="bright_black")
 
     async def on_permission_notice(self, event: PermissionNotice) -> None:
-        """工具权限状态通知：auto_allow 打印绿色 [auto] 行，deny 打印 [deny] 行，allow 静默。
+        """工具权限状态通知：auto_allow 打印绿色 [auto] 行，deny 打印 [deny] 行，allow 静默；均带发起 agent 标签。
 
         Args:
-            event: 权限状态通知事件。
+            event: 权限状态通知事件，含 caller_agent_type / caller_uuid。
         """
+        label = self._agent_label(event.caller_agent_type, event.caller_uuid)
+        prefix = f"{label} " if label else ""
         if event.status == "auto_allow":
-            self._print_rich(f"[auto] {event.detail or event.tool_name}", style="green")
+            self._print_rich(f"[auto] {prefix}{event.detail or event.tool_name}", style="green")
             return
         if event.status == "allow":
             return
-        await self._write(f"[deny] {event.detail or event.tool_name}\n")
+        await self._write(f"[deny] {prefix}{event.detail or event.tool_name}\n")
 
     async def on_tool_call_started(self, event: ToolCallStarted) -> None:
         """工具开始：记录当前 agent，状态条切到该工具名，并打印 `● <工具> <详情>` 行。

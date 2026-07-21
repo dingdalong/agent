@@ -5,10 +5,11 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, Field
 
 from src.events.menu import FormQuestion
+from src.events.types import caller_identity
 from src.tools.decorator import ToolPermission, tool
 
 if TYPE_CHECKING:
-    from src.agent import AgentDeps
+    from src.agent import Agent, AgentDeps
 
 
 class Option(BaseModel):
@@ -56,12 +57,13 @@ class AskUser(BaseModel):
           "返回逐题配对的「问题 + 回答」；用户取消或漏答的项以哨兵串标注。"
       ),
       permission=ToolPermission(kind="readonly"), subagent=False, counts_as_work=False)
-async def ask_user(questions: list[dict], deps: AgentDeps) -> str:
+async def ask_user(questions: list[dict], deps: AgentDeps, agent: Agent) -> str:
     """向用户提出一个或多个问题并返回逐题作答。
 
     Args:
         questions: 问题列表，字段结构见 Question/Option 模型。
         deps: Agent 依赖容器，提供事件总线。
+        agent: 发起提问的 Agent 实例，用于在表单上标注是哪个 agent 提问。
     Returns:
         逐题配对的「问题 + 回答」文本，末尾附用户在讨论栏填写的「讨论：…」（若有）；
         用户取消或未作答的项以哨兵串标注，便于 LLM 察觉残缺。
@@ -76,7 +78,11 @@ async def ask_user(questions: list[dict], deps: AgentDeps) -> str:
         )
         for q in questions
     ]
-    answers, discussion = await deps.event_bus.request_form(form_questions, prompt="🤖 **提问**", markdown=True)
+    caller_agent_type, caller_uuid = caller_identity(agent)
+    answers, discussion = await deps.event_bus.request_form(
+        form_questions, prompt="🤖 **提问**", markdown=True,
+        caller_agent_type=caller_agent_type, caller_uuid=caller_uuid,
+    )
     if not answers and not discussion.strip():
         return "[用户取消了作答，未回答任何问题]"
     lines: list[str] = []

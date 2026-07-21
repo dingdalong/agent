@@ -6,7 +6,7 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any, Callable, TYPE_CHECKING
 from src.tools import ToolDict
-from src.events.types import AgentStateChanged, CompactDelta, PermissionModeChanged
+from src.events.types import AgentStateChanged, CompactDelta, PermissionModeChanged, caller_identity
 from src.agent.states import AgentState, RunContext, RunResult, parse_command
 from src.events import NoEventSubscribers
 from src.mgr import FileMgr, TaskManager, CompactMgr, CompactResult, PromptMgr, SkillMgr, SubAgentMgr, ReminderMgr
@@ -639,10 +639,13 @@ class Agent:
         Returns:
             CHECK_COMPACT，以便立即重新估算 compact 后的完整输入。
         """
+        caller_agent_type, caller_uuid = caller_identity(self)
         await self.deps.event_bus.emit(CompactDelta(
             timestamp=time.time(),
             source=self.agent_type,
             content="auto compact",
+            caller_agent_type=caller_agent_type,
+            caller_uuid=caller_uuid,
         ))
         result = await self._compact_mgr.compact_history(ctx.messages)
         ctx.messages[:] = result.messages
@@ -786,10 +789,13 @@ class Agent:
             ctx.messages.append(msg)
 
         if ctx.manual_compact:
+            caller_agent_type, caller_uuid = caller_identity(self)
             await self.deps.event_bus.emit(CompactDelta(
                 timestamp=time.time(),
                 source=self.agent_type,
                 content="llm manual",
+                caller_agent_type=caller_agent_type,
+                caller_uuid=caller_uuid,
             ))
             result = await self._compact_mgr.compact_history(
                 ctx.messages, focus=ctx.compact_focus,

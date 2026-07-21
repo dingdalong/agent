@@ -26,21 +26,25 @@
 
 需要应答的请求统一继承 `MenuRequest`，内部 future 由 `complete/cancel/fail` 落定；无订阅者时抛 `NoEventSubscribers`。转录请求只携带 UUID（`bus.py:248`、`menu.py:171`），标题在渲染时从当前 agent 快照生成。
 
+`request_permission`/`request_form`/`request_choice_input`/`notify_permission` 均接收可选 `caller_agent_type`/`caller_uuid`，由发起方（`tools_mgr.execute`→`permission_mgr.resolve_ask`/`notify_decision`、`ask_user`、`exit_plan_mode`）经 `caller_identity(agent)` 传入，落到事件的基类 caller 字段，供 UI 标注是哪个 agent 发起该弹窗/通知。
+
 消费者使用 `subscribe(event_types)` 获取 async iterator，`join()` 等待队列处理完毕，`close()` 通过 sentinel 结束全部订阅。
 
 ## 事件目录
 
 `EventLevel` 三级：`PROGRESS=1`、`DETAIL=2`、`TRACE=3`。交互、状态和 token 事件均为 PROGRESS；`ThinkingDelta` 与 `AgentStateChanged` 为 DETAIL。
 
+`caller_agent_type`/`caller_uuid` 是 `Event` 基类的**一等属性**（`types.py`），标识发起该事件的 agent（主 Agent 为「main」，子智能体为各自类型；None 表示用户/应用发起）：所有事件——含下表菜单类与 `CompactDelta`/`PermissionNotice`——统一继承。取值口径唯一：`caller_identity(agent)`（`types.py`）。用途有二：`OutputRouter._is_background` 据 `caller_uuid` 做前台/后台分流；UI 经 `_agent_label` 统一标注是哪个 agent（工具行、回复/思考前缀、菜单 banner、`[compact]`/`[auto]`/`[deny]` 行）。下表「关键 payload」仅列各事件**特有**字段，不再重复 `caller_*`。
+
 | 类名 | `type` | 关键 payload |
 |---|---|---|
-| `ResponseDelta` | `token_delta` | `content`、`caller_agent_type`、`caller_uuid` |
-| `ThinkingDelta` | `thinking_delta` | `content`、`caller_*` |
+| `ResponseDelta` | `token_delta` | `content` |
+| `ThinkingDelta` | `thinking_delta` | `content` |
 | `CompactDelta` | `compact_delta` | `content` |
-| `ToolCallStarted` | `tool_call_started` | 工具名、调用 ID、detail、`caller_*` |
-| `ToolCallCompleted` | `tool_call_completed` | 状态、耗时、结果预览、`caller_*` |
-| `LLMCallStarted` | `llm_call_started` | 模型、`context_limit`、输入估算、`caller_*` |
-| `LLMCallCompleted` | `llm_call_completed` | 输入/输出/cache token、速度、`caller_uuid` |
+| `ToolCallStarted` | `tool_call_started` | 工具名、调用 ID、detail |
+| `ToolCallCompleted` | `tool_call_completed` | 状态、耗时、结果预览 |
+| `LLMCallStarted` | `llm_call_started` | 模型、`context_limit`、输入估算 |
+| `LLMCallCompleted` | `llm_call_completed` | 输入/输出/cache token、速度 |
 | `OutputRequested` | `output_requested` | `content`、`markdown` |
 | `InterruptRequested` | `interrupt_requested` | 无 |
 | `PermissionNotice` | `permission_notice` | 状态、工具名、detail |
