@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import Callable
 from enum import StrEnum
 
-from prompt_toolkit.document import Document
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.key_binding import KeyBindings
 
@@ -39,7 +38,7 @@ def resolve_key_scope(
     Returns:
         Highest-priority active key scope.
     """
-    if transcript_visible or mode is InteractionMode.TRANSCRIPT:
+    if transcript_visible:
         return KeyScope.TRANSCRIPT
     if completion_visible:
         return KeyScope.COMPLETION
@@ -109,7 +108,7 @@ class KeymapActions:
         - 补全态（斜杠命令下拉）：↓/Tab 下一项、↑ 上一项、Esc 关闭。
         - 方向键（↓↑）：从输入框进入 agent 列表 / 列表内导航 / 返回输入框（查看面板/选择菜单/补全时不进列表）。
         - 列表聚焦时 Enter：在输入框上方打开选中子 agent 的转录覆盖面板（焦点回输入框）；Esc：返回输入框。
-        - 查看面板时：↑/↓ 整页上下滚动（暂停/恢复贴底实时跟随）；Esc：关闭面板还原主对话。
+        - 查看面板时：↑/↓ 整页上下滚动（暂停/恢复贴底实时跟随）；Esc：关闭只读覆盖层。
 
         Returns:
             供常驻 Application 使用的 KeyBindings。
@@ -125,20 +124,20 @@ class KeymapActions:
         )
         # 转录面板可见性条件：查看子 agent 转录时为真。
         _cond_viewing = Condition(lambda: self._viewing_uuid is not None)
-        # 选择菜单激活条件：select 态时为真。
-        _cond_select = Condition(lambda: self._mode == "select")
-        # 表单激活条件：form 态为真。派生条件按焦点区（答题/讨论）与标签类型细分，供各表单键位专用。
-        _cond_form = Condition(lambda: self._mode == "form")
-        _cond_form_answer = Condition(lambda: self._mode == "form" and self._form_zone == "answer")  # 答题区（←→↑↓ 导航）
-        _cond_form_submit = Condition(lambda: self._mode == "form" and self._form_zone == "answer" and self._form_on_submit_tab())  # 答题区且聚焦「提交」标签
-        _cond_form_opt = Condition(lambda: self._mode == "form" and self._form_zone == "answer" and self._current_form_question() is not None and self._current_form_question().options is not None and not self._form_cursor_on_custom())  # 答题区有选项题且光标在选项行（空格/数字选中）
-        _cond_form_single_opt = Condition(lambda: self._mode == "form" and self._form_zone == "answer" and self._form_focused_single() and not self._form_cursor_on_custom())  # 答题区单选题且光标在选项行（Enter 选中，就地不推进）
-        _cond_form_confirm = Condition(lambda: self._mode == "form" and self._form_zone == "answer" and not self._form_on_submit_tab() and not (self._form_focused_single() and not self._form_cursor_on_custom()))  # 答题区问题标签且非单选选项行（Enter 确认推进：多选题/自由文本题/单选自定义行）
-        _cond_form_discuss = Condition(lambda: self._mode == "form" and self._form_zone == "discuss")  # 底部讨论栏
-        # choice_input 激活条件：choice_input 态为真。派生条件按光标是否在输入行细分，供各键位专用。
-        _cond_choice_input = Condition(lambda: self._mode == "choice_input")
-        _cond_choice_input_opt = Condition(lambda: self._mode == "choice_input" and not self._choice_input_on_input_row())  # 光标在选项行（数字/Enter 直选）
-        _cond_choice_input_row = Condition(lambda: self._mode == "choice_input" and self._choice_input_on_input_row())  # 光标在输入行（Enter 提交输入）
+        # 主流程组件只在未被转录覆盖时接收快捷键。
+        _cond_select = ~_cond_viewing & Condition(lambda: self._mode == "select")
+        # 表单派生条件按焦点区（答题/讨论）与标签类型细分，供各表单键位专用。
+        _cond_form = ~_cond_viewing & Condition(lambda: self._mode == "form")
+        _cond_form_answer = _cond_form & Condition(lambda: self._form_zone == "answer")  # 答题区（←→↑↓ 导航）
+        _cond_form_submit = _cond_form_answer & Condition(lambda: self._form_on_submit_tab())  # 答题区且聚焦「提交」标签
+        _cond_form_opt = _cond_form_answer & Condition(lambda: self._current_form_question() is not None and self._current_form_question().options is not None and not self._form_cursor_on_custom())  # 答题区有选项题且光标在选项行（空格/数字选中）
+        _cond_form_single_opt = _cond_form_answer & Condition(lambda: self._form_focused_single() and not self._form_cursor_on_custom())  # 答题区单选题且光标在选项行（Enter 选中，就地不推进）
+        _cond_form_confirm = _cond_form_answer & Condition(lambda: not self._form_on_submit_tab() and not (self._form_focused_single() and not self._form_cursor_on_custom()))  # 答题区问题标签且非单选选项行（Enter 确认推进：多选题/自由文本题/单选自定义行）
+        _cond_form_discuss = _cond_form & Condition(lambda: self._form_zone == "discuss")  # 底部讨论栏
+        # choice_input 派生条件按光标是否在输入行细分，供各键位专用。
+        _cond_choice_input = ~_cond_viewing & Condition(lambda: self._mode == "choice_input")
+        _cond_choice_input_opt = _cond_choice_input & Condition(lambda: not self._choice_input_on_input_row())  # 光标在选项行（数字/Enter 直选）
+        _cond_choice_input_row = _cond_choice_input & Condition(lambda: self._choice_input_on_input_row())  # 光标在输入行（Enter 提交输入）
         # 斜杠命令补全激活条件：缓冲存在补全候选时为真。
         _cond_completing = Condition(
             lambda: self._viewing_uuid is None
@@ -371,23 +370,24 @@ class KeymapActions:
             if self._agent_selected_index < max_idx:
                 self._agent_selected_index += 1
 
-        # Enter：列表聚焦时在输入框上方打开选中子 agent 的转录覆盖面板（焦点回输入框，仍可输入）
+        # Enter：列表聚焦时在输入框上方打开选中子 agent 的只读转录覆盖层（焦点回输入框以接收覆盖层快捷键）
         @bindings.add("enter", filter=_cond_list_focused)
         def _(event) -> None:
+            """Open the selected subagent transcript overlay.
+
+            Args:
+                event: prompt-toolkit key event.
+
+            Returns:
+                None.
+            """
             rows = self._agent_view_store.active_agent_snapshots()
             if self._agent_selected_index >= len(rows):
                 return
             row = rows[self._agent_selected_index]
             if not row.is_main:
-                document = self._buffer.document
                 self._buffer.cancel_completion()
-                self._agent_panel.open_live(
-                    row.uuid,
-                    self._mode,
-                    document.text,
-                    document.cursor_position,
-                )
-                self._mode = InteractionMode.TRANSCRIPT
+                self._agent_panel.open_live(row.uuid)
             event.app.layout.focus(self._input_window)
             event.app.invalidate()
 
@@ -399,32 +399,34 @@ class KeymapActions:
         # ---- 转录面板：滚动 / 关闭（输入框聚焦下仍全局响应；查看时 ↑/↓ 占用于整页滚动，Esc 关闭后恢复输入框方向键）----
 
         # ↑：面板上滚一整页（暂停贴底跟随）；越界由 _render_transcript_panel 就地夹取
-        @bindings.add("up", filter=_cond_viewing & ~_cond_select, eager=True)
+        @bindings.add("up", filter=_cond_viewing, eager=True)
         def _(event) -> None:
             self._view_scroll += _TRANSCRIPT_PANEL_ROWS - 1
             event.app.invalidate()
 
         # ↓：面板下滚一整页；回到 0 即恢复贴底实时跟随
-        @bindings.add("down", filter=_cond_viewing & ~_cond_select, eager=True)
+        @bindings.add("down", filter=_cond_viewing, eager=True)
         def _(event) -> None:
             self._view_scroll = max(0, self._view_scroll - (_TRANSCRIPT_PANEL_ROWS - 1))
             event.app.invalidate()
 
-        # Esc：关闭转录面板（select 态优先归选择菜单处理）
+        # Esc：关闭转录覆盖层（始终优先于被遮挡的主流程组件）
         # - 调起态（/agents）：解开 request_transcript_view 的 future，令 app 循环回到列表（收尾由 _await_transcript_view finally 做）
-        # - 实时态（列表 Enter）：就地清面板，主对话原样恢复
-        @bindings.add("escape", filter=_cond_viewing & ~_cond_select, eager=True)
+        # - 实时态（列表 Enter）：只清理覆盖层，保留最新主流程 mode 与 Buffer
+        @bindings.add("escape", filter=_cond_viewing, eager=True)
         def _(event) -> None:
+            """Resolve a modal transcript or close a live overlay.
+
+            Args:
+                event: prompt-toolkit key event.
+
+            Returns:
+                None.
+            """
             if self._viewing_invoked:
                 self._resolve_input("")
             else:
-                restore = self._agent_panel.close_live()
-                if restore is not None:
-                    self._mode = restore.mode
-                    self._buffer.set_document(
-                        Document(restore.text, restore.cursor_position),
-                        bypass_readonly=True,
-                    )
+                self._agent_panel.close_live()
                 event.app.invalidate()
 
         return bindings
@@ -483,5 +485,3 @@ class KeymapActions:
             bindings.add(key)(handler)
         except ValueError:
             pass
-
-

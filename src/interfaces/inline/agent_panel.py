@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 
 from prompt_toolkit.formatted_text import ANSI
 from rich.text import Text
@@ -12,20 +11,10 @@ from src.interfaces.markdown_renderer import render_markdown
 from src.interfaces.status_presenter import present_agent
 
 from src.interfaces.agent_view_store import AgentSnapshot, AgentViewStore
-from src.interfaces.inline.runtime import InteractionMode
-
-
-@dataclass(frozen=True, slots=True)
-class TranscriptRestore:
-    """Input state restored after closing a live transcript."""
-
-    mode: InteractionMode
-    text: str
-    cursor_position: int
 
 
 class AgentPanelController:
-    """Own agent selection, transcript scroll, and live-view restoration."""
+    """Own agent selection and read-only transcript overlay state."""
 
     def __init__(self, store: AgentViewStore) -> None:
         """Initialize empty agent-panel interaction state.
@@ -43,7 +32,6 @@ class AgentPanelController:
         self.invoked = False
         self.transcript_cache: tuple[tuple, list[str]] | None = None
         self.message_cache: tuple[tuple, list[str]] | None = None
-        self._restore: TranscriptRestore | None = None
 
     def active_snapshots(self) -> list[AgentSnapshot]:
         """Return active list rows from the shared Store.
@@ -53,20 +41,11 @@ class AgentPanelController:
         """
         return self.store.active_agent_snapshots()
 
-    def open_live(
-        self,
-        uuid: str,
-        mode: InteractionMode,
-        text: str,
-        cursor_position: int,
-    ) -> None:
-        """Open a read-only live transcript and save exact input state.
+    def open_live(self, uuid: str) -> None:
+        """Open one read-only live transcript overlay.
 
         Args:
             uuid: Viewed agent UUID.
-            mode: Interaction mode restored on close.
-            text: Buffer text restored on close.
-            cursor_position: Buffer cursor restored on close.
 
         Returns:
             None.
@@ -74,19 +53,16 @@ class AgentPanelController:
         self.viewing_uuid = uuid
         self.scroll = 0
         self.invoked = False
-        self._restore = TranscriptRestore(mode, text, cursor_position)
 
-    def close_live(self) -> TranscriptRestore | None:
-        """Close a live transcript and return its saved input state.
+    def close_live(self) -> None:
+        """Close the transcript overlay and reset its owned state.
 
         Returns:
-            Saved input state, or None when no live view was opened.
+            None.
         """
-        restore = self._restore
         self.viewing_uuid = None
         self.scroll = 0
-        self._restore = None
-        return restore
+        self.invoked = False
 
 
 _AGENT_LIST_MAX_ROWS = 8
@@ -359,4 +335,3 @@ class AgentPanelActions:
             )
         except Exception:
             return False
-

@@ -117,14 +117,14 @@ Router 不持有 agent 视图、不格式化摘要，也不提供 UI 数据 prov
 | `controller.py` | 组装 Runtime、控制器和 prompt-toolkit 布局，协调普通输入 |
 | `runtime.py` | 唯一持有 Application、Buffer、Layout、future、焦点引用和 stdout 代理；`interaction()` 排他管理 future 生命周期 |
 | `status_bar.py` | 活动状态、主状态栏和共享 Presenter |
-| `agent_panel.py` | agent 列表、转录渲染、滚动、缓存、实时查看恢复状态 |
+| `agent_panel.py` | agent 列表、转录渲染、滚动、缓存、独立覆盖层状态 |
 | `menus.py` | 选择菜单、权限菜单、ChoiceInput 状态与动作 |
 | `form.py` | 表单状态、渲染、导航和 JSON wire payload |
 | `output.py` | TTY Rich/流式 Markdown 输出与进度事件 |
 | `plain.py` | 非 TTY 输入和保证无 ANSI 的输出 |
 | `keymap.py` | 全部快捷键声明与优先级判断 |
 
-`InteractionMode`（`runtime.py:10`）包含 `PROCESSING/INPUT/SELECT/FORM/CHOICE_INPUT/TRANSCRIPT`。快捷键冲突优先级固定为：
+`InteractionMode`（`runtime.py:10`）只描述互斥的主流程状态：`PROCESSING/INPUT/SELECT/FORM/CHOICE_INPUT`。转录由 `AgentPanelController.viewing_uuid` 表示为独立只读覆盖层，可与 `PROCESSING` 或 `INPUT` 并存。快捷键冲突优先级固定为：
 
 ```text
 转录 → 补全 → 模态组件 → agent 列表 → 普通输入
@@ -137,8 +137,9 @@ Router 不持有 agent 视图、不格式化摘要，也不提供 UI 数据 prov
 - select：↑↓、1–9、Enter、Esc。
 - form：左右切题、上下移行、空格/数字选择、Tab 切讨论区、Enter 确认/提交、Esc 取消。
 - ChoiceInput：上下切选项/输入行、Enter/数字提交、Esc 取消。
-- agent 列表 Enter 打开只读实时转录；打开时保存 mode、Buffer 文本和光标，Esc 完整恢复。
-- `/agents` 历史转录同样只读，事件只传 UUID，标题每帧从 Store 当前快照生成。
+- agent 列表 Enter 打开只读实时转录覆盖层；打开和关闭均不修改主流程 mode 或 Buffer。
+- 覆盖层可见时 Buffer 只读，↑/↓/Esc 由转录处理；关闭后按最新主流程 mode 恢复交互。因此查看期间总控进入 `INPUT` 时，关闭面板直接回到最新输入态，耗时保持冻结。
+- `/agents` 历史转录复用同一覆盖层状态，事件只传 UUID，标题每帧从 Store 当前快照生成。
 - 所有通过 future 等待结果的 TTY 交互都必须在 `InlineRuntime.interaction()` 上下文中完成；上下文从 future 创建、组件初始化和等待覆盖到组件清理，期间排他持有其所有权。退出时若 future 尚未完成则取消，随后释放所有权引用。
 - 非 TTY 由 `PlainFrontend` 去除 ANSI，仍保留菜单/form/ChoiceInput 的既有返回 wire shape。
 

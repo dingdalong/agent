@@ -10,14 +10,13 @@ from typing import Any
 
 
 class InteractionMode(StrEnum):
-    """Mutually exclusive top-level Inline UI interaction modes."""
+    """Mutually exclusive main-workflow interaction modes."""
 
     PROCESSING = "processing"
     INPUT = "input"
     SELECT = "select"
     FORM = "form"
     CHOICE_INPUT = "choice_input"
-    TRANSCRIPT = "transcript"
 
 
 class InlineRuntime:

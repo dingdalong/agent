@@ -286,11 +286,12 @@ class InlineController(
 
     @property
     def _accepting(self) -> bool:
-        """是否处于可编辑文本输入态（input）：缓冲可编辑、› 醒目、Enter 提交。
+        """Return whether unobscured normal text input is editable.
 
-        注：权限/选择改用只读菜单（select 态），不属于可编辑态。
+        Returns:
+            True only while INPUT is active and no transcript overlays it.
         """
-        return self._mode == "input"
+        return self._mode == "input" and self._viewing_uuid is None
 
     @property
     def _app_running(self) -> bool:
@@ -558,8 +559,7 @@ class InlineController(
             None.
         """
         self._agent_selected_index = 0
-        self._viewing_uuid = None
-        self._view_scroll = 0
+        self._agent_panel.close_live()
         if (
             self._app_running
             and self._agent_list_inner is not None
@@ -652,7 +652,6 @@ class InlineController(
                 self._viewing_uuid = uuid
                 self._viewing_invoked = True
                 self._view_scroll = 0
-                self._mode = InteractionMode.TRANSCRIPT
                 if self._buffer is not None:
                     self._buffer.cancel_completion()
                 if (
@@ -664,18 +663,19 @@ class InlineController(
                 self._app.invalidate()
                 return await future
             finally:
-                self._viewing_uuid = None
-                self._viewing_invoked = False
-                self._view_scroll = 0
-                self._enter_processing_idle()
+                self._agent_panel.close_live()
 
     def _buffer_editable(self) -> bool:
-        """输入缓冲当前是否可编辑：input 态恒可编辑；form 态讨论区或答题区光标落在自定义输入行时可编辑；
-        choice_input 态光标落在输入行时可编辑；其余只读。
+        """返回输入缓冲是否可编辑。
+
+        转录覆盖层可见时恒为只读；否则 input 态可编辑，form 态讨论区或答题区光标落在
+        自定义输入行时可编辑，choice_input 态光标落在输入行时可编辑。
 
         Returns:
             缓冲是否可编辑。
         """
+        if self._viewing_uuid is not None:
+            return False
         if self._mode == "input":
             return True
         if self._mode == "form":
@@ -837,8 +837,6 @@ class InlineController(
         if not self._tty:
             return ""
         return await self._await_transcript_view(uuid)
-
-
 
 
 
