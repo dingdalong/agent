@@ -49,8 +49,23 @@ def present_session_metrics(
     )
 
 
+def present_agent_identity(snapshot: AgentSnapshot, base_style: str = "") -> Text:
+    """Present one agent identity and lifecycle state.
+
+    Args:
+        snapshot: Immutable agent view snapshot.
+        base_style: Optional Rich style applied to the whole line.
+
+    Returns:
+        Rich text containing identity and lifecycle state.
+    """
+    status = "运行中" if snapshot.running else "已完成"
+    short_uuid = snapshot.uuid.split("-")[0] if snapshot.uuid else ""
+    return Text(f"◯ {snapshot.agent_type}  {short_uuid}  {status}", style=base_style)
+
+
 def present_agent(snapshot: AgentSnapshot, base_style: str = "") -> Text:
-    """Present one agent summary for live, history, and transcript-title use.
+    """Present one agent summary for live, history, and status use.
 
     Args:
         snapshot: Immutable agent view snapshot.
@@ -59,10 +74,8 @@ def present_agent(snapshot: AgentSnapshot, base_style: str = "") -> Text:
     Returns:
         Rich text containing identity, lifecycle state, and canonical metrics.
     """
-    status = "运行中" if snapshot.running else "已完成"
-    short_uuid = snapshot.uuid.split("-")[0] if snapshot.uuid else ""
-    line = Text(style=base_style)
-    line.append(f"◯ {snapshot.agent_type}  {short_uuid}  {status}  ")
+    line = present_agent_identity(snapshot, base_style)
+    line.append("  ", style=base_style)
     line.append_text(_present_metrics(
         snapshot.usage,
         snapshot.context,
@@ -70,6 +83,20 @@ def present_agent(snapshot: AgentSnapshot, base_style: str = "") -> Text:
         base_style,
     ))
     return line
+
+
+def present_ended_agent(agent_uuid: str, base_style: str = "") -> Text:
+    """Present a retained-view fallback for an unavailable agent snapshot.
+
+    Args:
+        agent_uuid: Agent UUID whose snapshot is no longer retained.
+        base_style: Optional Rich style applied to the whole line.
+
+    Returns:
+        Rich text containing the short UUID and ended state.
+    """
+    short_uuid = agent_uuid.split("-")[0] if agent_uuid else ""
+    return Text(f"◯ {short_uuid}  已结束", style=base_style)
 
 
 def _present_metrics(

@@ -89,9 +89,9 @@ Store 的职责：
 ↑输入(缓存%) ↓输出 · 上下文 used(pct%) · elapsed
 ```
 
-百分比取整数，括号前无空格；context 达 80% 显示黄、达 90% 显示红；窗口未知时只显示 used。主状态栏使用“全会话 token + 主 agent context”，子 agent 实时行、历史行和转录标题均调用 `present_agent()`（`status_presenter.py:52`）。
+百分比取整数，括号前无空格；context 达 80% 显示黄、达 90% 显示红；窗口未知时只显示 used。未查看转录时，主状态栏使用“入口权限模式 + 全会话 token + 主 agent context + 全会话累计有效耗时”；打开实时或历史转录后，底部状态栏改用当前 `AgentSnapshot`，与子 agent 实时行、历史行共同调用 `present_agent()`，显示该 agent 的身份、运行状态、累计 token、当前 context 与生命周期耗时。转录标题调用 `present_agent_identity()`，只显示身份和运行状态，避免与底部指标重复。快照已被历史淘汰时，各详情表面共同调用 `present_ended_agent()` 显示短 UUID 与“已结束”，不会回退到主会话信息。
 
-`elapsed` 为**全会话累计有效耗时**（已完成回合累计 `_session_elapsed_accumulated` + 本回合实时段），与会话 token 累计语义一致：跨回合只增不减，`/clear`（`controller.reload`）随会话 token 一同归零。每个回合的有效耗时 = 自然墙钟剔除纯人工等待；回合边界（`_read_input`）把本回合有效耗时并入累计，随后 `_reset_turn_status` 清零本回合起点与时钟。输入态只显示累计值（冻结，本回合段为 0），处理/弹窗态叠加本回合实时段。
+主会话状态的 `elapsed` 为**全会话累计有效耗时**（已完成回合累计 `_session_elapsed_accumulated` + 本回合实时段），与会话 token 累计语义一致：跨回合只增不减，`/clear`（`controller.reload`）随会话 token 一同归零。每个回合的有效耗时 = 自然墙钟剔除纯人工等待；回合边界（`_read_input`）把本回合有效耗时并入累计，随后 `_reset_turn_status` 清零本回合起点与时钟。输入态只显示累计值（冻结，本回合段为 0），处理/弹窗态叠加本回合实时段。查看子 agent 时不使用该值，而显示其生命周期开始至当前或结束时的耗时。
 
 单回合的「剔除人工等待」由跨层共享的 `TurnClock`（`src/interfaces/turn_clock.py`）实现，维护 `work_depth`（工具执行层 `ToolsManager.execute` 围绕叶子工具本体成对增减，委派型 `task_delegator` 与纯等待型 `ask_user` 标 `counts_as_work=False` 不计）与 `human_wait_depth`（UI 交互层 `StatusBarActions._human_interaction` 包裹三处模态弹窗——权限/选择、计划确认、ask_user 表单——成对增减）。**当且仅当 `human_wait_depth > 0 且 work_depth == 0`（整轮只在等人工、无叶子工具在算）时暂停累计**：并发多工具同轮时按最长墙钟走、不累加；某工具弹窗等待时若另有工具在后台计算则时钟继续走，仅当无人在算时才暂停。暂停期间 `_turn_elapsed` 天然与 `now` 无关，状态栏冻结显示暂停起点值（非 `0.0s`），批准后从该值继续。
 
@@ -120,7 +120,7 @@ Router 不持有 agent 视图、不格式化摘要，也不提供 UI 数据 prov
 |---|---|
 | `controller.py` | 组装 Runtime、控制器和 prompt-toolkit 布局，协调普通输入 |
 | `runtime.py` | 唯一持有 Application、Buffer、Layout、future、焦点引用和 stdout 代理；`interaction()` 排他管理 future 生命周期 |
-| `status_bar.py` | 活动状态、主状态栏和共享 Presenter |
+| `status_bar.py` | 活动状态、会话/查看中 agent 状态栏切换和共享 Presenter |
 | `agent_panel.py` | agent 列表、转录渲染、滚动、缓存、独立覆盖层状态 |
 | `menus.py` | 选择菜单、权限菜单、ChoiceInput 状态与动作 |
 | `form.py` | 表单状态、渲染、导航和 JSON wire payload |
@@ -142,8 +142,10 @@ Router 不持有 agent 视图、不格式化摘要，也不提供 UI 数据 prov
 - form：左右切题、上下移行、空格/数字选择、Tab 切讨论区、Enter 确认/提交、Esc 取消。
 - ChoiceInput：上下切选项/输入行、Enter/数字提交、Esc 取消。
 - agent 列表 Enter 打开只读实时转录覆盖层；打开和关闭均不修改主流程 mode 或 Buffer。
+- 转录标题根据终端宽度自然换行并自适应增加高度，上下各有一条全宽暗色分隔线；小窗口不会因固定单行高度裁掉滚动或退出提示。
 - 覆盖层可见时 Buffer 只读，↑/↓/Esc 由转录处理；关闭后按最新主流程 mode 恢复交互。因此查看期间总控进入 `INPUT` 时，关闭面板直接回到最新输入态，耗时保持冻结。
 - `/agents` 历史转录复用同一覆盖层状态，事件只传 UUID，标题每帧从 Store 当前快照生成。
+- 实时和历史转录覆盖层均以 `viewing_uuid` 驱动底部状态栏切换；详情态只显示当前子 agent 快照，并隐藏入口权限模式、Shift+Tab、`Ctrl+C 中断` 与 `↓查看 agent`，关闭后恢复最新主会话状态。
 - 所有通过 future 等待结果的 TTY 交互都必须在 `InlineRuntime.interaction()` 上下文中完成；上下文从 future 创建、组件初始化和等待覆盖到组件清理，期间排他持有其所有权。退出时若 future 尚未完成则取消，随后释放所有权引用。
 - 非 TTY 由 `PlainFrontend` 去除 ANSI，仍保留菜单/form/ChoiceInput 的既有返回 wire shape。
 

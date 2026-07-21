@@ -395,7 +395,7 @@ class InlineController(
         input: Input | None = None,
         output: Output | None = None,
     ) -> Application[None]:
-        """构建常驻非全屏 Application：转录覆盖面板（查看子 agent 时置顶覆盖主对话）+ 活动行（spinner，仅处理态可见）+ 分割线 + 输入框 + 分割线 + 核心状态行 + agent 列表（有子 agent 且未查看时）+ 权重填充窗口。
+        """构建常驻非全屏 Application：带分隔线和折行标题的转录覆盖面板（查看子 agent 时置顶覆盖主对话）+ 活动行（spinner，仅处理态可见）+ 分割线 + 输入框 + 分割线 + 核心状态行 + agent 列表（有子 agent 且未查看时）+ 权重填充窗口。
 
         Args:
             input: 可选 prompt-toolkit 输入；None 使用终端默认输入。
@@ -413,10 +413,17 @@ class InlineController(
         )
         # 转录面板可见性条件：查看子 agent 转录时为真，驱动面板显隐并隐藏 spinner / agent 列表。
         cond_viewing = Condition(lambda: self._viewing_uuid is not None)
-        # 转录覆盖面板：header（1 行）+ 内容（max=_TRANSCRIPT_PANEL_ROWS），仅查看时可见，置于 root 顶部覆盖主对话。
+        # 转录覆盖面板：分隔线框住自适应折行标题，下接内容（max=_TRANSCRIPT_PANEL_ROWS）。
         transcript_panel = ConditionalContainer(
             HSplit([
-                Window(FormattedTextControl(self._render_transcript_header), dont_extend_height=True, height=Dimension.exact(1)),
+                self._make_separator_window(),
+                Window(
+                    FormattedTextControl(self._render_transcript_header),
+                    dont_extend_height=True,
+                    height=Dimension(min=1),
+                    wrap_lines=True,
+                ),
+                self._make_separator_window(),
                 Window(FormattedTextControl(self._render_transcript_panel), dont_extend_height=True, height=Dimension(max=_TRANSCRIPT_PANEL_ROWS), wrap_lines=False),
             ]),
             filter=cond_viewing,
@@ -506,7 +513,7 @@ class InlineController(
         return app
 
     def _make_separator_window(self) -> Window:
-        """构造一行占满终端宽度的暗色分割线窗口，用于框住输入框（其上、下各放一条）。
+        """构造一行占满终端宽度的暗色分割线窗口。
 
         Returns:
             渲染单行分割线的 Window。
@@ -847,9 +854,6 @@ class InlineController(
         if not self._tty:
             return ""
         return await self._await_transcript_view(uuid)
-
-
-
 
 
 

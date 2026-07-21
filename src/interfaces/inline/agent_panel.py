@@ -7,10 +7,13 @@ import json
 from prompt_toolkit.formatted_text import ANSI
 from rich.text import Text
 
-from src.interfaces.markdown_renderer import render_markdown
-from src.interfaces.status_presenter import present_agent
-
 from src.interfaces.agent_view_store import AgentSnapshot, AgentViewStore
+from src.interfaces.markdown_renderer import render_markdown
+from src.interfaces.status_presenter import (
+    present_agent,
+    present_agent_identity,
+    present_ended_agent,
+)
 
 
 class AgentPanelController:
@@ -132,7 +135,7 @@ class AgentPanelActions:
                 # 主 agent 行只显示标记 + 类型（其输出已在滚动区实时可见）
                 line.append(row.agent_type, style=style)
             else:
-                # 子 agent 行使用共享 Presenter，与历史摘要和转录标题同源。
+                # 子 agent 行使用共享完整 Presenter，与历史摘要同源。
                 line = present_agent(row, base_style=style)
 
             lines.append(line)
@@ -165,18 +168,17 @@ class AgentPanelActions:
     def _render_transcript_header(self) -> ANSI:
         """渲染转录面板顶部标题行：「── <标题>（状态）── <跟随态> · ↑/↓ 滚动 · <退出提示>」。
 
-        标题始终从当前 AgentSnapshot 经共享 Presenter 现场生成；历史与实时使用同一指标文本。
+        标题始终从当前 AgentSnapshot 经共享身份 Presenter 现场生成；指标由底部状态栏显示。
         跟随态：_view_scroll==0 显示「实时」，否则显示「已上滚 N 行」。
 
         Returns:
-            可作为 Window 内容的 ANSI（单行标题）。
+            可作为 Window 内容的 ANSI（按终端宽度自然折行）。
         """
         row = self._viewing_row()
         if row is not None:
-            label = present_agent(row).plain
+            label = present_agent_identity(row).plain
         else:
-            uid8 = self._viewing_uuid.split("-")[0] if self._viewing_uuid else ""
-            label = f"◯ {uid8}  已结束"
+            label = present_ended_agent(self._viewing_uuid or "").plain
         exit_hint = "Esc 返回列表" if self._viewing_invoked else "Esc 关闭"
         follow = "实时" if self._view_scroll == 0 else f"已上滚 {self._view_scroll} 行"
         header = Text()

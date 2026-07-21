@@ -12,11 +12,15 @@ from prompt_toolkit.formatted_text import ANSI
 from rich.text import Text
 
 from src.interfaces.agent_view_store import AgentViewStore
-from src.interfaces.status_presenter import present_session_metrics
+from src.interfaces.status_presenter import (
+    present_agent,
+    present_ended_agent,
+    present_session_metrics,
+)
 
 
 class StatusBarController:
-    """Present permission mode and Store-backed session metrics."""
+    """Present Store-backed session or viewed-agent status."""
 
     def __init__(
         self,
@@ -35,16 +39,27 @@ class StatusBarController:
         self._store = store
         self._permission_mode = permission_mode
 
-    def present(self, elapsed_seconds: float, toggle_available: bool) -> Text:
-        """Build the core status line.
+    def present(
+        self,
+        elapsed_seconds: float,
+        toggle_available: bool,
+        agent_uuid: str | None = None,
+    ) -> Text:
+        """Build the session or viewed-agent core status line.
 
         Args:
             elapsed_seconds: Current or last-turn elapsed time.
             toggle_available: Whether to show the Shift+Tab hint.
+            agent_uuid: Viewed subagent UUID, or None for session status.
 
         Returns:
             Rich status text.
         """
+        if agent_uuid is not None:
+            snapshot = self._store.agent_snapshot(agent_uuid)
+            if snapshot is not None:
+                return present_agent(snapshot)
+            return present_ended_agent(agent_uuid)
         line = Text(self._permission_mode())
         if toggle_available:
             line.append(" (Shift+Tab 切换)", style="bright_black")
@@ -81,7 +96,7 @@ class StatusBarActions:
         return ANSI(capture.get())
 
     def _render_separator(self) -> ANSI:
-        """构建一行占满终端宽度的暗色分割线 ANSI（框住输入框，其上、下各一条）。
+        """构建一行占满终端宽度的暗色分割线 ANSI。
 
         Returns:
             可作为 Window 内容的 ANSI（单行分割线）。
@@ -92,16 +107,22 @@ class StatusBarActions:
         return ANSI(capture.get())
 
     def _render_core_status(self) -> ANSI:
-        """构建底部核心状态行的 ANSI：「<权限模式> · ↑输入 ↓输出 · 上下文 XXk(N%) · 耗时 [· 操作提示]」。
+        """构建底部会话状态或查看中子 agent 状态的 ANSI。
 
         耗时为全会话累计有效耗时（已完成回合的累计 + 本回合实时，均剔除纯人工等待），与会话 token 累计一致。
         处理态与中途弹窗态（回合计时中且非输入态）叠加本回合实时段：有工具在算时走动、纯人工等待时冻结；
         处理态另追加「Ctrl+C 中断」提示。输入态只显示已完成回合的累计值（冻结），不带中断提示。
+        查看子 agent 时改用其快照并隐藏全部主流程操作提示。
 
         Returns:
             可作为 Window 内容的 ANSI（单行核心状态）。
         """
-        processing = self._mode == "processing" and bool(self._activity)  # 仅用于「Ctrl+C 中断」提示
+        viewing_agent = self._viewing_uuid is not None
+        processing = (
+            not viewing_agent
+            and self._mode == "processing"
+            and bool(self._activity)
+        )
         now = time.monotonic()
         if self._turn_started_monotonic is not None and self._mode != "input":
             elapsed = self._session_elapsed_accumulated + self._turn_elapsed(now)
@@ -112,7 +133,7 @@ class StatusBarActions:
         if processing:
             status.append("  ·  ", style="bright_black")
             status.append("Ctrl+C 中断", style="bright_black")
-        if self._has_sub_agents():
+        if not viewing_agent and self._has_sub_agents():
             status.append("  ·  ", style="bright_black")
             status.append("↓查看 agent", style="bright_black")
         with self._status_console.capture() as capture:
@@ -120,15 +141,19 @@ class StatusBarActions:
         return ANSI(capture.get())
 
     def _append_core_status(self, line: Text, elapsed: float) -> None:
-        """把核心状态段「<权限模式> (Shift+Tab 切换) · ↑总输入 (缓存命中%) ↓输出 · 上下文 XXk(N%) · <耗时>s」原地追加。
+        """把当前会话或查看中子 agent 的核心状态段原地追加。
 
         Args:
             line: 目标 Rich Text，原地追加内容。
-            elapsed: 要显示的耗时秒数。处理态传本回合实时累计耗时，可输入态传上一回合的最终耗时。
+            elapsed: 主会话累计有效耗时；查看子 agent 时由其生命周期耗时取代。
+
+        Returns:
+            None.
         """
         line.append_text(self._status_bar.present(
             elapsed,
             self._permission_mode_toggle_handler is not None,
+            self._viewing_uuid,
         ))
 
     def _turn_elapsed(self, now: float) -> float:
