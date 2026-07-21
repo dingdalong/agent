@@ -322,7 +322,17 @@ class ToolsMgr:
         await self._emit_tool_started(deps, agent, tool, arguments, current_tool_call_id)
         started_at = time.time()
         context = {"current_tool_call_id": current_tool_call_id, "deps": deps, "agent": agent}
-        result = await tool(context, **arguments)
+        # 叶子工具执行期间计入回合「活跃计算」，供状态栏耗时判定是否处于纯人工等待（暂停）。
+        # 委派型/纯人工等待型工具（counts_as_work=False）不计，避免其嵌套的人工等待被误判为在计算。
+        turn_clock = getattr(deps, "turn_clock", None) if deps is not None else None
+        track_work = turn_clock is not None and tool.counts_as_work
+        if track_work:
+            turn_clock.enter_work()
+        try:
+            result = await tool(context, **arguments)
+        finally:
+            if track_work:
+                turn_clock.exit_work()
         if hooks_mgr is not None:
             post_hook_result = await hooks_mgr.run_event(
                 "PostToolUse",

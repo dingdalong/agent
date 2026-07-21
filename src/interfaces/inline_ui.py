@@ -10,6 +10,7 @@ from src.events.types import Event
 from src.interfaces.agent_view_store import AgentViewStore
 from src.interfaces.base import UserInterface
 from src.interfaces.inline.controller import InlineController
+from src.interfaces.turn_clock import TurnClock
 
 
 class InlineInterface(UserInterface):
@@ -19,18 +20,25 @@ class InlineInterface(UserInterface):
         self,
         agent_view_store: AgentViewStore,
         slash_commands: list[tuple[str, str]] | None = None,
+        turn_clock: TurnClock | None = None,
     ) -> None:
         """Initialize the composable Inline UI.
 
         Args:
             agent_view_store: Shared source for session, agent, and transcript views.
             slash_commands: Slash-command names and descriptions for completion.
+            turn_clock: Shared turn clock driving human-wait-aware elapsed time; a
+                standalone instance is created when omitted (e.g. in tests).
 
         Returns:
             None.
         """
         super().__init__()
-        self._controller = InlineController(agent_view_store, slash_commands)
+        self._controller = InlineController(
+            agent_view_store,
+            slash_commands,
+            turn_clock or TurnClock(),
+        )
         self.is_tty = self._controller.is_tty
 
     def __getattr__(self, name: str):

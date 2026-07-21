@@ -31,6 +31,7 @@ from rich.text import Text
 
 from src.interfaces.base import UserInterface
 from src.interfaces.agent_view_store import AgentViewStore
+from src.interfaces.turn_clock import TurnClock
 from src.interfaces.completer import SlashCommandCompleter
 from src.interfaces.inline.agent_panel import AgentPanelActions, AgentPanelController
 from src.interfaces.inline.form import FormActions, FormState
@@ -198,15 +199,18 @@ class InlineController(
         self,
         agent_view_store: AgentViewStore,
         slash_commands: list[tuple[str, str]] | None = None,
+        turn_clock: TurnClock | None = None,
     ) -> None:
         """初始化内联 UI：Rich Console、双流 markdown 渲染器、常驻 App 句柄与底部状态条运行时状态。
 
         Args:
             agent_view_store: 全部状态栏、agent 行和转录共用的唯一读模型。
             slash_commands: 斜杠命令列表，每项为 (命令名, 描述)，由组装层注入供补全器使用。
+            turn_clock: 与工具执行层共享的回合时钟，用于耗时剔除纯人工等待；缺省自建独立实例。
         """
         super().__init__()
         self._runtime = InlineRuntime()
+        self._turn_clock = turn_clock or TurnClock()
         self._agent_view_store = agent_view_store
         self._agent_panel = AgentPanelController(agent_view_store)
         self._selection = SelectionState()
@@ -267,7 +271,8 @@ class InlineController(
         self._current_agent_uuid: str | None = None  # 当前正在工作的 agent 实例 uuid
         self._activity_started_monotonic: float | None = None  # 本步骤（当前活动）处理起点（monotonic 秒）
         self._turn_started_monotonic: float | None = None  # 本回合处理起点（monotonic 秒）
-        self._last_elapsed: float = 0.0  # 上一回合最终耗时（秒），供输入态状态行显示
+        self._activity_paused_baseline: float = 0.0  # 本步起始时的累计暂停基线（本步耗时只剔除其后的暂停）
+        self._session_elapsed_accumulated: float = 0.0  # 全会话已完成回合的累计有效耗时（秒），跨回合累加、剔除人工等待；/clear 归零
 
         # ---- agent 列表（方向键导航，仅在有子 agent 时显示）----
         self._transcript_cache = None
@@ -553,11 +558,14 @@ class InlineController(
         return ANSI(capture.get())
 
     def reload(self) -> None:
-        """/clear 重置 UI 的 agent 列表选中态与转录面板查看态。
+        """/clear 重置 UI 的 agent 列表选中态、转录面板查看态与全会话累计耗时。
+
+        与 Store 会话 token 归零同步：新会话耗时从 0 重新累计。
 
         Returns:
             None.
         """
+        self._session_elapsed_accumulated = 0.0
         self._agent_selected_index = 0
         self._agent_panel.close_live()
         if (
@@ -582,7 +590,9 @@ class InlineController(
         """
         if not self._tty:
             return await self._read_input_plain(prompt, default)
-        self._last_elapsed = self._elapsed(self._turn_started_monotonic, time.monotonic())
+        # 回合边界：把刚结束回合的有效耗时并入全会话累计，随后 finally 里 _reset_turn_status
+        # 清零本回合起点与时钟；输入态显示该累计值（冻结），下一回合在此基础上继续增长。
+        self._session_elapsed_accumulated += self._turn_elapsed(time.monotonic())
         self._render_input_context(prompt, markdown)
         try:
             text = await self._await_submission(default)

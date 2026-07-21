@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from src.mgr.session_mgr import SessionMgr
     from src.mgr.mcp_mgr import McpMgr
     from src.mgr.role_mgr import RoleMgr, AgentManifest
+    from src.interfaces.turn_clock import TurnClock
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,7 @@ class AgentDeps:
     session_mgr: SessionMgr | None = None
     mcp_mgr: McpMgr | None = None
     role_mgr: RoleMgr | None = None
+    turn_clock: TurnClock | None = None
     permission_mode_controller: Any = None
     session_context: list[str] = field(default_factory=list)
     session_id: str = ""

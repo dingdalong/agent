@@ -123,7 +123,7 @@ class MenuActions:
         Returns:
             所选项的 value，或 Esc 取消时的 cancel_value。
         """
-        with self._runtime.interaction() as future:
+        with self._human_interaction() as future:
             try:
                 self._select_options = options
                 self._select_index = max(0, min(default_index, len(options) - 1)) if options else 0
@@ -174,7 +174,7 @@ class MenuActions:
         Returns:
             JSON 编码的 {"choice": ..., "text": ...} 对象串；Esc 取消时为空串。
         """
-        with self._runtime.interaction() as future:
+        with self._human_interaction() as future:
             try:
                 self._choice_input_options = options
                 self._choice_input_descriptions = descriptions

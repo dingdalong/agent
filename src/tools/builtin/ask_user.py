@@ -55,7 +55,7 @@ class AskUser(BaseModel):
           "表单底部有讨论栏，用户的疑问或补充会以「讨论：…」附在返回末尾。"
           "返回逐题配对的「问题 + 回答」；用户取消或漏答的项以哨兵串标注。"
       ),
-      permission=ToolPermission(kind="readonly"), subagent=False)
+      permission=ToolPermission(kind="readonly"), subagent=False, counts_as_work=False)
 async def ask_user(questions: list[dict], deps: AgentDeps) -> str:
     """向用户提出一个或多个问题并返回逐题作答。
 

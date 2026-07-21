@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 
 from prompt_toolkit.formatted_text import ANSI
 
@@ -70,7 +72,7 @@ class StatusBarActions:
         """
         now = time.monotonic()
         frame = _SPINNER_FRAMES[int(now * 10) % len(_SPINNER_FRAMES)]
-        step_elapsed = self._elapsed(self._activity_started_monotonic, now)
+        step_elapsed = self._activity_elapsed(now)
         status = Text("\n")
         status.append(f"{frame} ", style="cyan")
         status.append(f"{self._active_agent_name()} · {self._activity} ({step_elapsed:.1f}s)", style="cyan")
@@ -92,14 +94,19 @@ class StatusBarActions:
     def _render_core_status(self) -> ANSI:
         """构建底部核心状态行的 ANSI：「<权限模式> · ↑输入 ↓输出 · 上下文 XXk(N%) · 耗时 [· 操作提示]」。
 
-        处理态（有活动）显示本回合实时累计耗时并追加「Ctrl+C 中断」提示；
-        其余（可输入态、或提交后首个处理事件前的空闲）显示上一回合最终耗时、不带中断提示。
+        耗时为全会话累计有效耗时（已完成回合的累计 + 本回合实时，均剔除纯人工等待），与会话 token 累计一致。
+        处理态与中途弹窗态（回合计时中且非输入态）叠加本回合实时段：有工具在算时走动、纯人工等待时冻结；
+        处理态另追加「Ctrl+C 中断」提示。输入态只显示已完成回合的累计值（冻结），不带中断提示。
 
         Returns:
             可作为 Window 内容的 ANSI（单行核心状态）。
         """
-        processing = self._mode == "processing" and bool(self._activity)
-        elapsed = self._elapsed(self._turn_started_monotonic, time.monotonic()) if processing else self._last_elapsed
+        processing = self._mode == "processing" and bool(self._activity)  # 仅用于「Ctrl+C 中断」提示
+        now = time.monotonic()
+        if self._turn_started_monotonic is not None and self._mode != "input":
+            elapsed = self._session_elapsed_accumulated + self._turn_elapsed(now)
+        else:
+            elapsed = self._session_elapsed_accumulated
         status = Text()
         self._append_core_status(status, elapsed)
         if processing:
@@ -124,17 +131,47 @@ class StatusBarActions:
             self._permission_mode_toggle_handler is not None,
         ))
 
-    @staticmethod
-    def _elapsed(start: float | None, now: float) -> float:
-        """计算从 start 到 now 的耗时秒数；start 为 None（未开始计时）时返回 0.0。
+    def _turn_elapsed(self, now: float) -> float:
+        """本回合有效耗时：自起点到 now、扣除本回合累计纯人工等待暂停；回合未开始返回 0.0。
 
         Args:
-            start: 起点 monotonic 秒，None 表示尚未开始。
             now: 当前 monotonic 秒。
         Returns:
-            耗时秒数（start 为 None 时为 0.0）。
+            有效耗时秒数（暂停中该值与 now 无关，天然冻结在暂停起点值）。
         """
-        return now - start if start is not None else 0.0
+        if self._turn_started_monotonic is None:
+            return 0.0
+        return max(0.0, now - self._turn_started_monotonic - self._turn_clock.paused_seconds(now))
+
+    def _activity_elapsed(self, now: float) -> float:
+        """本步（当前活动）有效耗时：自本步起点到 now、扣除本步开始后新增的纯人工等待暂停；未开始返回 0.0。
+
+        Args:
+            now: 当前 monotonic 秒。
+        Returns:
+            本步有效耗时秒数。
+        """
+        if self._activity_started_monotonic is None:
+            return 0.0
+        paused_since = self._turn_clock.paused_seconds(now) - self._activity_paused_baseline
+        return max(0.0, now - self._activity_started_monotonic - paused_since)
+
+    @contextmanager
+    def _human_interaction(self) -> Iterator[asyncio.Future[str]]:
+        """包装中途弹窗的交互上下文，在等待期间标记回合处于人工等待（供耗时暂停）。
+
+        进入 runtime.interaction() 成功后才 enter_human_wait，避免嵌套 backstop 抛错时误增计数；
+        退出时无论正常或中断都 exit_human_wait。
+
+        Yields:
+            由输入/菜单/表单流程落定的交互 future。
+        """
+        with self._runtime.interaction() as future:
+            self._turn_clock.enter_human_wait()
+            try:
+                yield future
+            finally:
+                self._turn_clock.exit_human_wait()
 
     def _set_activity(self, activity: str) -> None:
         """进入处理态并设置当前活动文案，驱动底部状态条 spinner / 活动显示。
@@ -152,14 +189,20 @@ class StatusBarActions:
             self._turn_started_monotonic = now
         if activity_changed:
             self._activity_started_monotonic = now  # 活动切换时重置本步耗时起点
+            # 记录本步起始时的累计暂停基线，本步耗时只剔除其后的暂停；
+            # 弹窗期间消费者阻塞、不会触发活动切换，故此刻必不在暂停中。
+            self._activity_paused_baseline = self._turn_clock.paused_seconds(now)
 
     def _reset_turn_status(self) -> None:
-        """清零单回合状态：整轮/本步耗时起点、活动文案与当前 agent。在每次进入输入阶段时调用。
+        """清零单回合状态：整轮/本步耗时起点、暂停累计、活动文案与当前 agent。在每次进入输入阶段时调用。
 
-        token 统计由 AgentViewStore 按会话累计，并由 /clear 的 Store reset 清零，不属于单回合状态。
+        全会话累计耗时 `_session_elapsed_accumulated` 与 token 统计同为会话级、跨回合保留，
+        仅由 /clear（controller.reload / Store reset）归零，均不属于单回合状态。
         """
         self._turn_started_monotonic = None
         self._activity_started_monotonic = None
+        self._activity_paused_baseline = 0.0
+        self._turn_clock.reset()
         self._activity = ""
         self._current_agent_type = None
         self._current_agent_uuid = None

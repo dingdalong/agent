@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from src.interfaces import AgentViewStore, InlineInterface, OutputRouter
+from src.interfaces import AgentViewStore, InlineInterface, OutputRouter, TurnClock
 from src.events import EventBus, EventLevel
 from src.mgr import ConfigManager, HooksMgr, LLMMgr, McpMgr, MemoryMgr, PermissionManager, PlanMgr, PluginMgr, RoleMgr, SessionMgr, ToolsMgr, resolve_features
 from src.mgr.paths import global_data_dir, workdir as resolve_workdir
@@ -35,9 +35,11 @@ async def create_app(
     role_mgr = RoleMgr(config_mgr=config_mgr, workdir=work_dir, global_dir=global_dir)
     event_bus = EventBus(level=EventLevel.from_str(config_mgr.get_config("events").get("level", "progress")))
     agent_view_store = AgentViewStore()
+    turn_clock = TurnClock()  # 工具执行层与 UI 交互层共享，用于耗时剔除纯人工等待时段
     ui = InlineInterface(
         agent_view_store=agent_view_store,
         slash_commands=SLASH_COMMANDS,
+        turn_clock=turn_clock,
     )
     output_router = OutputRouter(
         ui=ui,
@@ -81,6 +83,7 @@ async def create_app(
         session_mgr=session_mgr,
         mcp_mgr=mcp_mgr,
         role_mgr=role_mgr,
+        turn_clock=turn_clock,
         session_context=[],
         workdir=work_dir,
         global_dir=global_dir,

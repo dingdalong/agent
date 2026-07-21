@@ -328,7 +328,7 @@ class FormActions:
         Returns:
             JSON 编码的 {"answers": [...], "discussion": "..."} 对象串；Esc 取消时为空串。
         """
-        with self._runtime.interaction() as future:
+        with self._human_interaction() as future:
             try:
                 self._form_questions = questions
                 self._form_row = [0] * len(questions)

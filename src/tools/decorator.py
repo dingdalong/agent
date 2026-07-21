@@ -58,6 +58,9 @@ class ToolEntry:
                   False=强制排除（即使 agent 定义为全量）；None=按 agent 的 tools 集合决定。
         feature: 所属可插拔 feature 名（如 "task"、"file"）。None 表示无归属、恒可用；
                  非 None 时，仅当该 feature 被角色启用才注入，否则从 schema 排除并在调用时拒绝。
+        counts_as_work: 工具执行期间是否代表实际计算（占用本地 CPU/IO），用于状态栏耗时的人工等待暂停判定。
+                        委派型（task，实际计算在子 agent）与纯人工等待型（ask_user，只等用户输入无计算）设 False，
+                        其执行不计入回合活跃计算；其余工具默认 True。
     """
     name: str
     func: Callable
@@ -68,6 +71,7 @@ class ToolEntry:
     raw_output: bool = False
     subagent: bool | None = None
     feature: str | None = None
+    counts_as_work: bool = True
 
     async def __call__(self, context: Dict[str, Any], **kwds: Any) -> Any:
         """验证参数并执行工具函数。
@@ -137,6 +141,7 @@ def tool(
     raw_output: bool = False,
     subagent: bool | None = None,
     feature: str | None = None,
+    counts_as_work: bool = True,
 ) -> Callable:
     """工具注册装饰器。
 
@@ -148,6 +153,7 @@ def tool(
         raw_output: 是否跳过结果分页。
         subagent: 子 agent 可见性。True=自动注入；False=强制排除；None=按 agent 定义决定。
         feature: 所属可插拔 feature 名。None 表示无归属、恒可用；非 None 时随该 feature 的启用与否注入或排除。
+        counts_as_work: 工具执行期间是否代表实际计算。委派型与纯人工等待型设 False，不计入回合活跃计算；默认 True。
 
     Returns:
         装饰后的原函数。
@@ -176,6 +182,7 @@ def tool(
             raw_output=raw_output,
             subagent=subagent,
             feature=feature,
+            counts_as_work=counts_as_work,
         )
         _registry.append(entry)
         return func

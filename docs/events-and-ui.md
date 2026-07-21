@@ -91,6 +91,10 @@ Store 的职责：
 
 百分比取整数，括号前无空格；context 达 80% 显示黄、达 90% 显示红；窗口未知时只显示 used。主状态栏使用“全会话 token + 主 agent context”，子 agent 实时行、历史行和转录标题均调用 `present_agent()`（`status_presenter.py:52`）。
 
+`elapsed` 为**全会话累计有效耗时**（已完成回合累计 `_session_elapsed_accumulated` + 本回合实时段），与会话 token 累计语义一致：跨回合只增不减，`/clear`（`controller.reload`）随会话 token 一同归零。每个回合的有效耗时 = 自然墙钟剔除纯人工等待；回合边界（`_read_input`）把本回合有效耗时并入累计，随后 `_reset_turn_status` 清零本回合起点与时钟。输入态只显示累计值（冻结，本回合段为 0），处理/弹窗态叠加本回合实时段。
+
+单回合的「剔除人工等待」由跨层共享的 `TurnClock`（`src/interfaces/turn_clock.py`）实现，维护 `work_depth`（工具执行层 `ToolsManager.execute` 围绕叶子工具本体成对增减，委派型 `task_delegator` 与纯等待型 `ask_user` 标 `counts_as_work=False` 不计）与 `human_wait_depth`（UI 交互层 `StatusBarActions._human_interaction` 包裹三处模态弹窗——权限/选择、计划确认、ask_user 表单——成对增减）。**当且仅当 `human_wait_depth > 0 且 work_depth == 0`（整轮只在等人工、无叶子工具在算）时暂停累计**：并发多工具同轮时按最长墙钟走、不累加；某工具弹窗等待时若另有工具在后台计算则时钟继续走，仅当无人在算时才暂停。暂停期间 `_turn_elapsed` 天然与 `now` 无关，状态栏冻结显示暂停起点值（非 `0.0s`），批准后从该值继续。
+
 ## OutputRouter
 
 `OutputRouter.dispatch()`（`src/interfaces/output_router.py:48`）始终先调用 `store.record(event)`，再决定可见性：
