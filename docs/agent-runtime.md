@@ -18,7 +18,7 @@
 
 1. `await self.deps.ui.start()` 启动 UI。
 2. `asyncio.create_task(self._consume_events())` 创建事件消费任务，并 `await asyncio.sleep(0)` 让其先运行一步。
-3. `event_bus.request_output(self._startup_banner())` 打印启动横幅（含 model、permission mode、workdir、快捷键提示，见 `app.py:277-293`）。
+3. `await self.deps.event_bus.request_output(self._startup_banner())` 打印启动横幅（含 model、role、permission mode、workdir、快捷键提示，见 `app.py:277-304`）；role 使用 `RoleMgr` 实际激活的角色名与清单描述，无可用角色时显示 `unavailable`。
 4. `agent = await self._reset_session(source="startup")` 初始化会话与主 agent。
 5. `while True` 循环调用 `_run_agent_turn(agent)`，按返回的 `RunResult` 处理：
    - `result is None` → 被中断，`continue` 继续下一轮（`app.py:45-47`）。
