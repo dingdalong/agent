@@ -95,6 +95,10 @@ Store 的职责：
 
 百分比取整数，括号前无空格；context 达 80% 显示黄、达 90% 显示红；窗口未知时只显示 used。未查看转录时，主状态栏使用“入口权限模式 + 全会话 token + 主 agent context + 全会话累计有效耗时”；打开实时或历史转录后，底部状态栏改用当前 `AgentSnapshot`，与子 agent 实时行、历史行共同调用 `present_agent()`，显示该 agent 的身份、运行状态、累计 token、当前 context 与生命周期耗时。转录标题调用 `present_agent_identity()`，只显示身份和运行状态，避免与底部指标重复。快照已被历史淘汰时，各详情表面共同调用 `present_ended_agent()` 显示短 UUID 与“已结束”，不会回退到主会话信息。
 
+token 统一按数量级显示：小于 1000 保留原整数；达到 1000 后先按 100 token 精度 half-up 取整，取整结果不足 100 万时显示一位小数 `k`，达到 100 万时显示整数 `m` 加一位小数 `k` 余量。取整先于 `m`/`k` 拆段，跨百万的进位进入 `m`，不会出现 `1000.0k`，例如 `999950 → 1m0.0k`、`1234567 → 1m234.6k`、`1999950 → 2m0.0k`。超过十亿仍沿用整数 `m` 加 `k` 余量，不新增 `b`。
+
+elapsed 统一先把负数夹到零，再按最近整秒 half-up 取整（`0.5s → 1s`），随后拆为小写 `h/m/s`；不补零，但高位出现后保留全部低位，例如 `3s`、`2m3s`、`2m0s`、`1h2m3s`、`1h0m0s`。小时不再拆为天。活动行的本步耗时复用同一格式，可显示 `(...1h2m3s)`，不再显示小数秒。该变化仅统一展示格式，不改变 token 统计或计时语义。
+
 主会话状态的 `elapsed` 为**全会话累计有效耗时**（已完成回合累计 `_session_elapsed_accumulated` + 本回合实时段），与会话 token 累计语义一致：跨回合只增不减，`/clear`（`controller.reload`）随会话 token 一同归零。每个回合的有效耗时 = 自然墙钟剔除纯人工等待；回合边界（`_read_input`）把本回合有效耗时并入累计，随后 `_reset_turn_status` 清零本回合起点与时钟。输入态只显示累计值（冻结，本回合段为 0），处理/弹窗态叠加本回合实时段。查看子 agent 时不使用该值，而显示其生命周期开始至当前或结束时的耗时。
 
 单回合的「剔除人工等待」由跨层共享的 `TurnClock`（`src/interfaces/turn_clock.py`）实现，维护 `work_depth`（工具执行层 `ToolsManager.execute` 围绕叶子工具本体成对增减，委派型 `task_delegator` 与纯等待型 `ask_user` 标 `counts_as_work=False` 不计）与 `human_wait_depth`（UI 交互层 `StatusBarActions._human_interaction` 包裹三处模态弹窗——权限/选择、计划确认、ask_user 表单——成对增减）。**当且仅当 `human_wait_depth > 0 且 work_depth == 0`（整轮只在等人工、无叶子工具在算）时暂停累计**：并发多工具同轮时按最长墙钟走、不累加；某工具弹窗等待时若另有工具在后台计算则时钟继续走，仅当无人在算时才暂停。暂停期间 `_turn_elapsed` 天然与 `now` 无关，状态栏冻结显示暂停起点值（非 `0.0s`），批准后从该值继续。

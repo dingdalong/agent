@@ -13,17 +13,45 @@ from src.interfaces.agent_view_store import (
 
 
 def format_token_count(count: int) -> str:
-    """Format a token count in the compact shared representation.
+    """把 token 数量格式化为共享的紧凑表示。
 
     Args:
-        count: Nonnegative token count.
+        count: 非负 token 数量。
 
     Returns:
-        Decimal text below 1000, otherwise one-decimal ``k`` text.
+        小于 1000 时返回精确整数，否则返回按 half-up 取整的 ``m`` 与 ``k`` 文本。
     """
     if count < 1000:
         return str(count)
-    return f"{count / 1000:.1f}k"
+    rounded_count = ((count + 50) // 100) * 100
+    millions, remainder = divmod(rounded_count, 1_000_000)
+    remainder_tenths = remainder // 100
+    remainder_text = f"{remainder_tenths // 10}.{remainder_tenths % 10}k"
+    if millions:
+        return f"{millions}m{remainder_text}"
+    return remainder_text
+
+
+def format_elapsed_time(elapsed_seconds: float) -> str:
+    """把耗时秒数格式化为整数 ``h``、``m``、``s`` 分段。
+
+    Args:
+        elapsed_seconds: 原始耗时秒数，负数按零处理。
+
+    Returns:
+        按 half-up 取整，并在出现高位单位后保留低位单位的耗时文本。
+    """
+    nonnegative_seconds = max(0.0, elapsed_seconds)
+    whole_seconds = int(nonnegative_seconds)
+    fraction = nonnegative_seconds - whole_seconds
+    rounded_seconds = whole_seconds + int(fraction >= 0.5)
+    hours, remainder = divmod(rounded_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h{minutes}m{seconds}s"
+    if minutes:
+        return f"{minutes}m{seconds}s"
+    return f"{seconds}s"
 
 
 def present_session_metrics(
@@ -105,16 +133,16 @@ def _present_metrics(
     elapsed_seconds: float,
     base_style: str,
 ) -> Text:
-    """Build the canonical metrics segment shared by all status surfaces.
+    """构建所有状态展示共用的规范指标段。
 
     Args:
-        usage: Cumulative token usage for the displayed scope.
-        context: Latest exact context use for the displayed agent.
-        elapsed_seconds: Elapsed time shown in seconds.
-        base_style: Optional Rich style applied to the whole segment.
+        usage: 当前展示范围的累计 token 用量。
+        context: 当前展示 agent 最新的精确上下文用量。
+        elapsed_seconds: 将被格式化为整数时间分段的耗时秒数。
+        base_style: 应用于整个指标段的可选 Rich 样式。
 
     Returns:
-        Rich text metrics segment.
+        Rich Text 指标段。
     """
     line = Text(style=base_style)
     cache_pct = (
@@ -128,7 +156,7 @@ def _present_metrics(
     line.append(" · ", style=_combine_styles(base_style, "bright_black"))
     _append_context(line, context, base_style)
     line.append(" · ", style=_combine_styles(base_style, "bright_black"))
-    line.append(f"{max(0.0, elapsed_seconds):.1f}s")
+    line.append(format_elapsed_time(elapsed_seconds))
     return line
 
 

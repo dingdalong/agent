@@ -79,7 +79,7 @@ class AgentPanelActions:
         """渲染 agent 列表（每 agent 一行），供 agent_list_window 使用。
 
         主 agent 行置顶，其余子 agent 按插入序。每行格式：
-        <标记> <agent_type> <uuid8> <状态> <token> · 上下文 <used>(<pct>%) · <elapsed>s
+        <标记> <agent_type> <uuid8> <状态> <token> · 上下文 <used>(<pct>%) · <elapsed h/m/s>
         选中行反显（列表聚焦时）。行数 > _AGENT_LIST_MAX_ROWS 时按选中项裁出可视窗口段，
         并在上/下方按需补一行「↑/↓ 还有 N 个」滚动指示（聚焦与否都显示）。
 

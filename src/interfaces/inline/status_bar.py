@@ -13,6 +13,7 @@ from rich.text import Text
 
 from src.interfaces.agent_view_store import AgentViewStore
 from src.interfaces.status_presenter import (
+    format_elapsed_time,
     present_agent,
     present_ended_agent,
     present_session_metrics,
@@ -78,7 +79,7 @@ class StatusBarActions:
     """Render and update activity and core status state."""
 
     def _render_activity(self) -> ANSI:
-        """构建活动行「spinner + 当前 agent · 活动 (本步耗时)」的 ANSI；仅处理态且有活动时由其窗口显示。
+        """构建活动行「spinner + 当前 agent · 活动 (分段整数耗时)」的 ANSI；仅处理态且有活动时由其窗口显示。
 
         首行留空，与上方滚动正文（messages 区）分隔。
 
@@ -90,7 +91,11 @@ class StatusBarActions:
         step_elapsed = self._activity_elapsed(now)
         status = Text("\n")
         status.append(f"{frame} ", style="cyan")
-        status.append(f"{self._active_agent_name()} · {self._activity} ({step_elapsed:.1f}s)", style="cyan")
+        status.append(
+            f"{self._active_agent_name()} · {self._activity} "
+            f"({format_elapsed_time(step_elapsed)})",
+            style="cyan",
+        )
         with self._status_console.capture() as capture:
             self._status_console.print(status, end="")
         return ANSI(capture.get())
