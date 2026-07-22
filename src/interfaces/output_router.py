@@ -13,6 +13,7 @@ from src.events.menu import (
 from src.events.types import (
     CompactDelta,
     Event,
+    LLMCallFailed,
     LLMCallStarted,
     LLMRetrying,
     OutputRequested,
@@ -60,6 +61,14 @@ class OutputRouter:
         if isinstance(event, SubagentLifecycle):
             return
 
+        if isinstance(event, _LLM_BOUNDARY_EVENTS):
+            foreground_uuid = self.store.foreground_uuid
+            if foreground_uuid is not None and event.caller_uuid == foreground_uuid:
+                if isinstance(event, LLMCallStarted):
+                    self.store.flush_completed()
+                await self.ui.on_event(event)
+            return
+
         if self.passthrough:
             await self.ui.on_event(event)
             return
@@ -70,18 +79,6 @@ class OutputRouter:
 
         if isinstance(event, CompactDelta):
             await self.ui.on_event(event)
-            return
-
-        if isinstance(event, LLMCallStarted):
-            if event.caller_uuid == self.store.foreground_uuid:
-                self.store.flush_completed()
-                await self.ui.on_event(event)
-            return
-
-        if isinstance(event, LLMRetrying):
-            # 只在前台 agent 重试时驱动主状态条倒计时；后台 agent 的重试静默。
-            if event.caller_uuid == self.store.foreground_uuid:
-                await self.ui.on_event(event)
             return
 
         if self._is_background(event):
@@ -111,3 +108,5 @@ _CONTROL_EVENTS = (
     PermissionNotice,
     OutputRequested,
 )
+
+_LLM_BOUNDARY_EVENTS = (LLMCallStarted, LLMRetrying, LLMCallFailed)

@@ -7,6 +7,7 @@ import sys
 
 from src.events.types import (
     CompactDelta,
+    LLMCallFailed,
     LLMCallStarted,
     LLMRetrying,
     PermissionNotice,
@@ -233,27 +234,68 @@ class OutputActions:
         """
         self._round_flush()
         self._set_current_agent(event.caller_agent_type, event.caller_uuid)
-        self._set_activity("等待响应")
+        activity = (
+            f"等待响应 {event.attempt}/{event.max_attempts}"
+            if event.attempt > 1 and event.max_attempts > 0
+            else "等待响应"
+        )
+        self._set_activity(activity)
 
     async def on_llm_retrying(self, event: LLMRetrying) -> None:
-        """LLM 重试等待：TTY 下驱动活动区实时倒计时；非 TTY 打印一行静态告警（剩余秒向上取整）。
+        """展示安全 LLM 重试边界并在 TTY 下驱动实时倒计时。
+
+        TTY 已产生残片时先把尝试失败分隔永久写入 scrollback；无残片时只保留活动区倒计时。
+        非 TTY 每次重试都打印静态行，剩余秒向上取整。
 
         路由已保证只转发前台 agent 的 LLMRetrying。
 
         Args:
-            event: LLM 重试事件，含 error_type / attempt / max_attempts / wait_seconds。
+            event: 携带错误类别、安全摘要、残片状态与等待秒数的重试事件。
         """
         self._set_current_agent(event.caller_agent_type, event.caller_uuid)
         if self._tty:
+            if event.partial:
+                self._print_rich(
+                    f"⚠ 尝试 {event.attempt}/{event.max_attempts} 失败，将重试 "
+                    f"[{event.error_kind}] {event.safe_message} "
+                    f"(partial=true, tool={event.tool_fragment_state})",
+                    style="yellow",
+                )
             self._begin_retry_countdown(
-                event.error_type, event.attempt, event.max_attempts, event.wait_seconds
+                event.error_kind,
+                event.safe_message,
+                event.attempt,
+                event.max_attempts,
+                event.wait_seconds,
             )
             return
         remaining = max(0, math.ceil(event.wait_seconds))
         self._print_rich(
-            f"⚠ API错误 ({event.error_type})，{remaining}秒后重试 "
-            f"({event.attempt}/{event.max_attempts})",
+            f"⚠ LLM 调用失败 [{event.error_kind}] {event.safe_message}；"
+            f"{remaining}秒后重试 ({event.attempt}/{event.max_attempts})",
             style="yellow",
+        )
+
+    async def on_llm_call_failed(self, event: LLMCallFailed) -> None:
+        """永久展示安全 LLM 终态失败并清除可能残留的重试倒计时。
+
+        Args:
+            event: 携带安全错误摘要与关联 ID 的终态失败事件。
+
+        Returns:
+            None。
+        """
+        self._set_current_agent(event.caller_agent_type, event.caller_uuid)
+        self._set_activity("失败")
+        identifiers: list[str] = []
+        if event.request_id:
+            identifiers.append(f"request_id={event.request_id}")
+        if event.diagnostic_id:
+            identifiers.append(f"diagnostic_id={event.diagnostic_id}")
+        suffix = f" ({', '.join(identifiers)})" if identifiers else ""
+        self._print_rich(
+            f"✘ LLM 调用失败 [{event.error_kind}] {event.safe_message}{suffix}",
+            style="red",
         )
 
     async def on_compact_delta(self, event: CompactDelta) -> None:

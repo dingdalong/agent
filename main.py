@@ -5,6 +5,7 @@ import asyncio
 import sys
 
 from app.bootstrap import create_app
+from src.llm import LLMConfigurationError
 from src.mgr import ModelUnavailableError
 
 
@@ -43,15 +44,19 @@ async def main(args: argparse.Namespace) -> None:
 
 
 def cli() -> None:
-    """CLI 入口点。"""
+    """运行 CLI 并把可预期的 LLM 启动错误转换为非零退出。
+
+    Returns:
+        None。
+    """
     args = parse_args()
     try:
         # debug=True 启用 asyncio 慢回调告警（阈值默认 0.1s），暴露阻塞事件循环的协程。
         asyncio.run(main(args), debug=args.debug)
     except KeyboardInterrupt:
         pass
-    except ModelUnavailableError as exc:
-        # 默认模型不可用：打印可操作提示并以非零码退出，不抛堆栈。
+    except (LLMConfigurationError, ModelUnavailableError) as exc:
+        # LLM 配置或默认模型不可用：打印可操作提示并以非零码退出，不抛堆栈。
         print(f"\n启动失败：{exc}", file=sys.stderr)
         sys.exit(1)
 

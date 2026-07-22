@@ -10,6 +10,7 @@ from src.events.types import (
     CompactDelta,
     Event,
     LLMCallCompleted,
+    LLMCallFailed,
     LLMCallStarted,
     LLMRetrying,
     OutputRequested,
@@ -411,6 +412,8 @@ class UserInterface(ABC):
                 await self.on_llm_call_completed(event)
             case LLMRetrying():
                 await self.on_llm_retrying(event)
+            case LLMCallFailed():
+                await self.on_llm_call_failed(event)
             case ResponseDelta(content=content):
                 await self.on_response_delta(event, content)
             case ThinkingDelta(content=content):
@@ -449,3 +452,13 @@ class UserInterface(ABC):
 
     async def on_llm_retrying(self, event: LLMRetrying) -> None:
         pass
+
+    async def on_llm_call_failed(self, event: LLMCallFailed) -> None:
+        """处理 LLM 安全终态失败事件，默认无操作。
+
+        Args:
+            event: 终态失败事件。
+
+        Returns:
+            None。
+        """

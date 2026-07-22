@@ -97,64 +97,69 @@
 
 ### 3.1 `llm_provider.<name>` — LLM provider 连接与推理配置
 
-`LLMMgr` 在 `load_models()`（`llm_mgr.py:51`）和 `_create_provider()`（`llm_mgr.py:161`）消费。`<name>` 必须是框架已知的 provider（由 `get_provider(name)` 解析，见 [llm.md](llm.md)）。
+`LLMMgr` 在 `load_models()`（`llm_mgr.py:122`）和 `_create_provider()`（`llm_mgr.py:355-387`）消费。`<name>` 必须是框架已知的 provider（由 `get_provider(name)` 解析，见 [llm.md](llm.md)）。provider 顶层必须是 mapping；名称必须是非空字符串；每项必须是 mapping，且 `base_url` 必须是非空字符串。`models` 必须是 `list[str]`，元素必须非空，加载时按首次出现顺序去重（`llm_mgr.py:414-507`）。
 
 | 键 | 类型 | 默认值 | 可选值 | 效果 |
 |----|------|--------|--------|------|
-| `llm_provider.<name>.base_url` | str | 见下方各 provider | 任意 URL | provider API 端点；`_create_provider` 直接读取（必填，缺失会 KeyError）。可被 `{NAME}_API_URL` 覆盖 |
+| `llm_provider.<name>.base_url` | str | 见下方各 provider | 非空字符串 | provider API 端点；加载模型前严格校验。可被 `{NAME}_API_URL` 覆盖 |
 | `llm_provider.<name>.api_key` | str | 无（通常来自 `.env`） | — | API key；`_create_provider` 读取，默认 `""`。通常经 `{NAME}_API_KEY` 注入 |
-| `llm_provider.<name>.reasoning_effort` | str | 见下方 | provider 相关（如 `low`/`high`/`max`/`xhigh`） | 推理力度，传给 provider；缺省回退 `"max"`（`llm_mgr.py:168`） |
-| `llm_provider.<name>.context_limit` | int | 见下方 | 正整数 | 上下文窗口 token 上限；缺省 `0`（`llm_mgr.py:172`）。**压缩阈值由此换算**（见 3.4） |
-| `llm_provider.<name>.preserve_thinking` | bool | `ollama` 为 `true`，其余无 | `true`/`false` | 是否在历史中保留 reasoning 内容；缺省 `false`（`llm_mgr.py:169`）。Qwen 类 agent 场景需保留 |
-| `llm_provider.<name>.models` | list[str] | `openai` 为 `[gpt-5.5]`，其余无 | 模型名列表 | provider API 拉取模型列表失败时的回退清单（`llm_mgr.py:62`） |
+| `llm_provider.<name>.reasoning_effort` | str | 见下方 | provider 相关（如 `low`/`medium`/`high`/`max`/`xhigh`） | 推理力度，传给 provider；缺省回退 `"max"`（`llm_mgr.py:376`） |
+| `llm_provider.<name>.context_limit` | int | 见下方 | 正整数 | 上下文窗口 token 上限；缺省 `0`（`llm_mgr.py:383`）。**压缩阈值由此换算**（见 3.4） |
+| `llm_provider.<name>.preserve_thinking` | bool | `ollama` 为 `true`，其余无 | `true`/`false` | 是否在历史中保留 reasoning 内容；缺省 `false`（`llm_mgr.py:377`）。Qwen 类 agent 场景需保留 |
+| `llm_provider.anthropic.max_pause_turn_continuations` | int | `5` | 非 bool 正整数 | Anthropic 单个响应恢复链允许的 `pause_turn` 自动续接次数；其他 provider 强制归一为 `0`，不支持该协议续接（`llm_mgr.py:447-465`） |
+| `llm_provider.<name>.models` | list[str] | `openai` 为 `[gpt-5.5]`，`anthropic` 为 `[k3]` | 模型 ID 列表（可为空） | provider API 拉取失败时的静态回退清单；空列表表示发现失败后不注册该 provider 模型 |
 
 `src/config.yaml` 现有的五个 provider 默认值：
 
 | provider | base_url | reasoning_effort | context_limit | 其他 |
 |----------|----------|------------------|---------------|------|
-| `deepseek` | `https://api.deepseek.com` | `max` | `400000` | — |
-| `openai` | `https://api.openai.com/v1` | `xhigh` | `262144` | `models: [gpt-5.5]` |
-| `anthropic` | `https://api.anthropic.com` | `high` | `262144` | — |
+| `deepseek` | `https://api.deepseek.com` | `high` | `400000` | — |
+| `openai` | `https://api.openai.com/v1` | `medium` | `262144` | `models: [gpt-5.5]` |
+| `anthropic` | `https://api.anthropic.com` | `high` | `262144` | `models: [k3]`；`max_pause_turn_continuations: 5` |
 | `ollama` | `http://127.0.0.1:8001/v1` | `high` | `262144` | `preserve_thinking: true` |
-| `moonshot` | `https://api.moonshot.cn/v1` | `max` | `262144` | `models: [kimi-k2.6, kimi-k2.7-code]`；恒思考、无 `temperature`（见 [llm.md](llm.md)） |
+| `moonshot` | `https://api.moonshot.cn/v1` | `max` | `262144` | 恒思考、无 `temperature`（见 [llm.md](llm.md)） |
 
 ### 3.2 `llm` — 模型别名与调用参数
 
-`LLMMgr.__post_init__`（`llm_mgr.py:45`）、`resolve_model`（`llm_mgr.py:80`）、`ensure_default_available`（`llm_mgr.py:118`）消费。
+`LLMMgr.__post_init__`（`llm_mgr.py:60-120`）、`resolve_model`（`llm_mgr.py:270-306`）、`ensure_default_available`（`llm_mgr.py:308-335`）消费。`llm` 和 `llm.retry` 都必须是 mapping；`max_attempts` 必须是非 bool 的正整数，timeout 和两项延迟必须是非 bool 的有限正数。错误类型、字符串、NaN、Infinity、零、负数，以及小于基础延迟的最大延迟都会在启动时拒绝（`llm_mgr.py:77-118`）；`RetryConfig` 构造时还会执行相同的独立校验（`src/llm/retry.py:15-52`）。
 
 | 键 | 类型 | 默认值 | 可选值 | 效果 |
 |----|------|--------|--------|------|
-| `llm.default` | str | `deepseek-v4-flash`（本仓库） | 任一可用模型名 | **必填**。默认模型别名 `default` 解析目标；子 agent `model: inherit` 或省略时用它。启动前经 `ensure_default_available()` 校验，不可用则报 `ModelUnavailableError` 退出 |
+| `llm.default` | str | `k3`（本仓库） | 任一可用模型名 | **必填**。默认模型别名 `default` 解析目标；子 agent 省略模型时使用它。启动前按精确 ID 校验，不可用则报 `ModelUnavailableError` 退出 |
 | `llm.best` | str | 不填时回退 `default` | 任一可用模型名 | 别名 `best` 的解析目标（Claude Code 别名 `opus` 映射到此，`llm_mgr.py:17`） |
 | `llm.fast` | str | 不填时回退 `default` | 任一可用模型名 | 别名 `fast` 的解析目标（Claude Code 别名 `haiku` 映射到此） |
-| `llm.concurrency` | int | `5` | 正整数 | provider 并发上限，传给每个 provider 实例（`llm_mgr.py:47`、`:170`） |
-| `llm.max_retries` | int | `3` | 非负整数 | provider 调用重试次数（`llm_mgr.py:48`、`:171`） |
+| `llm.concurrency` | int | `5` | `>= 1` 的整数 | provider 并发上限 |
+| `llm.timeout_seconds` | int \| float | `120` | 有限正数 | 每次 provider 请求与模型发现的 SDK/外层超时秒数 |
+| `llm.retry.max_attempts` | int | `3` | `>= 1` 的整数 | 最大尝试次数，包含首次调用；`1` 表示不自动重试 |
+| `llm.retry.base_delay_seconds` | int \| float | `2` | 有限正数 | 无有效等待响应头时的指数退避基础秒数 |
+| `llm.retry.max_delay_seconds` | int \| float | `60` | 有限正数，且不小于基础延迟 | 单次退避等待封顶秒数 |
+| `llm.user_agent` | str | `claude-cli/2.1.201 (external, cli)` | 任意字符串 | 非空时作为五个 provider 及模型发现请求的自定义 User-Agent；空串沿用 SDK 默认值 |
 
-**别名体系**：`default`/`best`/`fast` 是框架三个通用别名，子 agent 在其 `*.md` frontmatter 的 `model:` 字段通过这些别名引用（`model: inherit` 表示继承父 agent 已解析的真实模型 ID）。`resolve_model`（`llm_mgr.py:80`）解析顺序：`None → "default" → Claude Code 兼容映射（opus/sonnet/haiku → best/default/fast）→ 配置别名 → 精确匹配 → 模糊匹配 → 回退默认`。别名细节与模型加载见 [llm.md](llm.md)。
+**别名体系**：`default`/`best`/`fast` 是框架三个通用别名，子 agent 在其 `*.md` frontmatter 的 `model:` 字段通过这些别名引用（`model: inherit` 表示委派时继承父 agent 已解析的真实模型 ID）。`resolve_model`（`llm_mgr.py:270-306`）解析顺序：`None → "default" → Claude Code 映射（opus/sonnet/haiku → best/default/fast）→ 配置别名 → 精确匹配 → 唯一或最短子串匹配 → 回退默认`。启动期会精确验证配置的 `llm.default`，不会切换到其他可用 provider。
 
 ### 3.3 `tool` — 工具结果分页
 
 | 键 | 类型 | 默认值 | 可选值 | 效果 |
 |----|------|--------|--------|------|
-| `tool.page_token_rate` | float | `0.03` | `0`~`1` | 单个工具调用结果每页最多占上下文窗口的比例；`LLMMgr.__post_init__` 读取（`llm_mgr.py:49`）后传给每个 provider（`llm_mgr.py:173`）用于分页。分页机制见 [llm.md](llm.md) |
+| `tool.page_token_rate` | float | `0.03` | `0`~`1` | 单个工具调用结果每页最多占上下文窗口的比例；`LLMMgr.__post_init__` 读取（`llm_mgr.py:119`）后传给每个 provider（`llm_mgr.py:384`）用于分页。分页机制见 [llm.md](llm.md) |
 
 ### 3.4 `compact` — 上下文压缩
 
-`Agent.__post_init__`（`agent.py:129-137`）读取整个 `compact` 段，按 provider 的 `context_limit` 换算为**绝对 token 数**后构造 `CompactMgr`：
+`Agent.__post_init__`（`agent.py:202-212`）读取整个 `compact` 段，按 provider 的 `context_limit` 换算为**绝对 token 数**后构造 `CompactMgr`：
 
 | 键 | 类型 | 默认值 | 可选值 | 效果 |
 |----|------|--------|--------|------|
-| `compact.auto_compact_rate` | float | `0.8` | `0`~`1` | 输入估算超过 `context_limit × auto_compact_rate` 时触发自动压缩。换算为 `auto_compact_size = int(context_limit * auto_compact_rate)`（`agent.py:134`）；`context_limit <= 0` 时自动压缩禁用 |
-| `compact.keep_recent_user_turns` | int | `3` | 非负整数 | 定义优先保留原文的最近 N 个用户轮次范围；直接传给 `CompactMgr`（`agent.py:135`），不覆盖近期原文硬预算 |
-| `compact.keep_recent_messages_token_rate` | float | `0.25` | `0`~`1` | 近期原文的硬预算比例；换算为 `recent_messages_token_limit = int(context_limit * keep_recent_messages_token_rate)`（`agent.py:136`）。优先轮次超限时会在其内部按 assistant/tool 原子块移动切分点 |
+| `compact.auto_compact_rate` | float | `0.8` | `0`~`1` | 输入估算超过 `context_limit × auto_compact_rate` 时触发自动压缩。换算为 `auto_compact_size = int(context_limit * auto_compact_rate)`（`agent.py:209`）；`context_limit <= 0` 时自动压缩禁用 |
+| `compact.keep_recent_user_turns` | int | `3` | 非负整数 | 定义优先保留原文的最近 N 个用户轮次范围；直接传给 `CompactMgr`（`agent.py:210`），不覆盖近期原文硬预算 |
+| `compact.keep_recent_messages_token_rate` | float | `0.25` | `0`~`1` | 近期原文的硬预算比例；换算为 `recent_messages_token_limit = int(context_limit * keep_recent_messages_token_rate)`（`agent.py:211`）。优先轮次超限时会在其内部按 assistant/tool 原子块移动切分点 |
 
-> **换算说明**：`config.yaml` 里存的是**比例**，`Agent` 在构造 `CompactMgr` 时用当前 agent 所用模型的 `context_limit`（`self.llm.context_limit`，`agent.py:130`）乘以比例得到绝对 token 数。不同 agent 若用不同 `context_limit` 的模型，绝对阈值也不同；窗口未知（非正数）时不会自动压缩。`CompactMgr` 细节见 [managers.md](managers.md)。
+> **换算说明**：`config.yaml` 里存的是**比例**，`Agent` 在构造 `CompactMgr` 时用当前 agent 所用模型的 `context_limit`（`self.llm.context_limit`，`agent.py:203`）乘以比例得到绝对 token 数。不同 agent 若用不同 `context_limit` 的模型，绝对阈值也不同；窗口未知（非正数）时不会自动压缩。`CompactMgr` 细节见 [managers.md](managers.md)。
 
 ### 3.5 `role` — 激活角色
 
 | 键 | 类型 | 默认值 | 可选值 | 效果 |
 |----|------|--------|--------|------|
-| `role` | str | 缺省回退 `coding`（本仓库设为 `mijia`） | 已发现的角色名 | 指定激活角色；`RoleMgr._resolve()` 读取（`role_mgr.py:228`）。未指定或角色不存在时回退 `coding`（`role_mgr.py:28`、`:234`）。角色决定主 agent 身份提示词、可用子 agent、技能、MCP server 与 feature 集 |
+| `role` | str | 缺省回退 `coding`（本仓库设为 `onboard`） | 已发现的角色名 | 指定激活角色；`RoleMgr._resolve()` 读取（`role_mgr.py:228`）。未指定或角色不存在时回退 `coding`（`role_mgr.py:28`、`:234`）。角色决定主 agent 身份提示词、可用子 agent、技能、MCP server 与 feature 集 |
 
 角色发现与结构见 [roles-subagents-skills.md](roles-subagents-skills.md) 与 [architecture.md](architecture.md)。
 
@@ -162,7 +167,7 @@
 
 | 键 | 类型 | 默认值 | 可选值 | 效果 |
 |----|------|--------|--------|------|
-| `events.level` | str | `detail`（本仓库；`bootstrap` 内 `.get` 回退为 `progress`） | `progress` \| `detail` \| `trace` | 事件总线的输出详细度；`bootstrap.create_app()` 读取（`bootstrap.py:33`）经 `EventLevel.from_str` 构造 `EventBus`。`detail` 及以上会展示模型思考过程等更细粒度事件 |
+| `events.level` | str | `detail`（本仓库；`bootstrap` 内 `.get` 回退为 `progress`） | `progress` \| `detail` \| `trace` | 事件总线的输出详细度；`bootstrap.create_app()` 读取（`bootstrap.py:36`）经 `EventLevel.from_str` 构造 `EventBus`。`detail` 及以上会展示模型思考过程等更细粒度事件 |
 
 > `src/config.yaml` 内置值为 `detail`；`bootstrap` 读取时 `config_mgr.get_config("events").get("level", "progress")` 的 `"progress"` 只在整个 `events.level` 键缺失时才生效。事件级别语义见 [events-and-ui.md](events-and-ui.md)。
 
@@ -174,19 +179,22 @@
 llm_provider:
   deepseek:
     base_url: https://api.deepseek.com   # API 端点，可被 DEEPSEEK_API_URL 覆盖
-    reasoning_effort: max                # 推理力度
+    reasoning_effort: high               # 推理力度
     context_limit: 400000                # 上下文窗口 token 上限（压缩阈值据此换算）
     # api_key: 通常放 .env：DEEPSEEK_API_KEY=sk-...
   openai:
     models:                              # API 拉取失败时的回退模型清单
       - gpt-5.5
     base_url: https://api.openai.com/v1
-    reasoning_effort: xhigh
-    context_limit: 200000
+    reasoning_effort: medium
+    context_limit: 262144
   anthropic:
     base_url: https://api.anthropic.com
+    max_pause_turn_continuations: 5      # pause_turn 协议终态的单轮最大自动续接次数
     reasoning_effort: high
-    context_limit: 200000
+    context_limit: 262144
+    models:
+      - k3
   ollama:
     base_url: http://127.0.0.1:8001/v1
     reasoning_effort: high
@@ -196,17 +204,19 @@ llm_provider:
     base_url: https://api.moonshot.cn/v1 # 可被 MOONSHOT_API_URL 覆盖
     reasoning_effort: max                # 恒开思考，当前仅支持 max
     context_limit: 262144
-    models:                              # list_models 失败时的兜底，须含 llm.default
-      - kimi-k2.6
-      - kimi-k2.7-code
 
 # ── 模型别名与调用参数 ──────────────────────────────────
 llm:
-  default: deepseek-v4-flash             # 必填：默认模型，子 agent 通过别名 default 引用
+  default: k3                            # 必填：默认模型，启动时精确校验
   # best: ...                            # 可选：最强模型（别名 best / Claude Code opus）
   # fast: ...                            # 可选：最快/最省模型（别名 fast / Claude Code haiku）
   concurrency: 5                         # provider 并发上限
-  max_retries: 3                         # provider 调用重试次数
+  timeout_seconds: 120                   # 单次请求与模型发现超时秒数
+  retry:
+    max_attempts: 3                      # 最大尝试次数，包含首次调用
+    base_delay_seconds: 2                # 指数退避基础秒数
+    max_delay_seconds: 60                # 单次等待封顶秒数
+  user_agent: "claude-cli/2.1.201 (external, cli)"
 
 # ── 工具结果分页 ────────────────────────────────────────
 tool:
@@ -219,7 +229,7 @@ compact:
   keep_recent_messages_token_rate: 0.25  # 近期原文硬预算占上下文窗口的比例
 
 # ── 激活角色 ────────────────────────────────────────────
-role: mijia                              # 缺省回退 coding
+role: onboard                            # 缺省回退 coding
 
 # ── 事件级别 ────────────────────────────────────────────
 events:
@@ -434,6 +444,10 @@ OPENAI_API_KEY=sk-yyyyyyyyyyyyyyyy
 | 压缩后多保留近期对话 | `config.yaml` `compact.keep_recent_user_turns` / `keep_recent_messages_token_rate` | 调大 |
 | 加大 / 减小模型上下文窗口 | `config.yaml` `llm_provider.<name>.context_limit` | 设为目标 token 数（同时影响压缩绝对阈值） |
 | 提高 provider 并发 | `config.yaml` `llm.concurrency` | 调大 |
+| 调整单次 LLM/模型发现超时 | `config.yaml` `llm.timeout_seconds` | 设为有限正秒数 |
+| 调整自动尝试次数 | `config.yaml` `llm.retry.max_attempts` | 设为包含首次的正整数 |
+| 调整重试等待 | `config.yaml` `llm.retry.base_delay_seconds` / `max_delay_seconds` | 设为有限正秒数，且最大值不小于基础值 |
+| 调整 Anthropic 协议续接上限 | `config.yaml` `llm_provider.anthropic.max_pause_turn_continuations` | 设为非 bool 正整数；网络重试次数仍由 `llm.retry.max_attempts` 独立控制 |
 | 换激活角色 | `config.yaml` `role` | 设为目标角色名 |
 | 看模型思考过程 | `config.yaml` `events.level` | 设为 `detail`（或 `trace`） |
 | 减少权限弹窗 | `settings.json` `permissions.defaultMode` 或 `permissions.allow` | 设更宽松模式（如 `acceptEdits`/`auto`）或加 allow 规则 |

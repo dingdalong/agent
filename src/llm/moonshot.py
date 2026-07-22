@@ -9,15 +9,28 @@ Kimi K3（model id `k3(1M)`）与普通 OpenAI 兼容模型的关键差异：
 - 支持上下文缓存，usage 走 OpenAI 口径 + prompt_tokens_details.cached_tokens。
 """
 
+from __future__ import annotations
+
 import logging
+from typing import TYPE_CHECKING, Any, AsyncIterable
 from openai import AsyncOpenAI
-from src.llm.base import LLMProvider, LLMResponse
-from src.tools import ToolDict
+from src.llm.base import (
+    LLMCallContext,
+    LLMProvider,
+    LLMResponse,
+    iter_llm_stream,
+    validate_chat_completion_stream,
+)
+from src.llm.errors import LLMStreamResponseError
+
+if TYPE_CHECKING:
+    from src.tools import ToolDict
 
 logger = logging.getLogger(__name__)
 
 # Kimi 思考模型要求 max_tokens 足够大，以免 reasoning_content 与 content 被截断。
 _MOONSHOT_MAX_TOKENS = 32768
+_MOONSHOT_FINISH_REASONS = frozenset({"stop", "length", "tool_calls"})
 
 
 class MoonshotProvider(LLMProvider):
@@ -125,9 +138,9 @@ class MoonshotProvider(LLMProvider):
         tools: list[ToolDict] | None = None,
         temperature: float = 0.6,
         tool_choice: str | dict | None = None,
-        caller_agent_type: str | None = None,
-        caller_uuid: str | None = None,
         enable_thinking: bool = True,
+        *,
+        call: LLMCallContext,
     ) -> LLMResponse:
         """向 Moonshot Chat Completions 发起一次流式调用。
 
@@ -140,9 +153,8 @@ class MoonshotProvider(LLMProvider):
             tools: 工具 schema 列表，可为 None。
             temperature: 采样温度（K3 忽略，不下发）。
             tool_choice: 工具选择策略。
-            caller_agent_type: 发起调用的 agent 类型。
-            caller_uuid: 发起调用的 agent 实例 uuid。
             enable_thinking: 是否开启思考（K3 恒思考，关闭时仅不传 reasoning_effort）。
+            call: 当前独立调用尝试上下文。
 
         Returns:
             归一化后的 LLMResponse。
@@ -161,20 +173,19 @@ class MoonshotProvider(LLMProvider):
             kwargs["reasoning_effort"] = self.reasoning_effort
 
         response = await self._client.chat.completions.create(**kwargs)
-        return await self._parse_stream(response, caller_agent_type, caller_uuid)
+        return await self._parse_stream(response, call=call)
 
     async def _parse_stream(
         self,
-        stream,
-        caller_agent_type: str | None = None,
-        caller_uuid: str | None = None,
+        stream: AsyncIterable[Any],
+        *,
+        call: LLMCallContext,
     ) -> LLMResponse:
         """解析 Chat Completions 流式响应。
 
         Args:
             stream: OpenAI SDK 的异步流。
-            caller_agent_type: 发起调用的 agent 类型。
-            caller_uuid: 发起调用的 agent 实例 uuid。
+            call: 当前独立调用尝试上下文。
 
         Returns:
             归一化后的 LLMResponse，assistant_message 携带 reasoning_content。
@@ -185,7 +196,7 @@ class MoonshotProvider(LLMProvider):
         finish_reason = None
         usage = None
 
-        async for chunk in stream:
+        async for chunk in iter_llm_stream(stream):
             chunk_usage = getattr(chunk, "usage", None)
             if chunk_usage is not None:
                 usage = chunk_usage
@@ -193,35 +204,61 @@ class MoonshotProvider(LLMProvider):
             if not getattr(chunk, "choices", None):
                 continue
 
-            delta = chunk.choices[0].delta
+            if finish_reason is not None:
+                raise LLMStreamResponseError(
+                    "业务终态后收到额外 choice",
+                    code="invalid_response",
+                )
+
+            choice = chunk.choices[0]
+            delta = choice.delta
 
             reasoning = getattr(delta, "reasoning_content", None)
             if reasoning is not None:
                 reasoning_parts.append(reasoning)
-                await self.emit_thinking_delta(reasoning, caller_agent_type, caller_uuid)
+                await self.emit_thinking_delta(reasoning, call=call)
 
             if delta.content:
                 if not (delta.tool_calls and delta.content.isspace()):
                     content_parts.append(delta.content)
-                    await self.emit_response_delta(delta.content, caller_agent_type, caller_uuid)
+                    await self.emit_response_delta(delta.content, call=call)
 
             if delta.tool_calls:
                 for tool_chunk in delta.tool_calls:
                     idx = tool_chunk.index
+                    call_id = tool_chunk.id or ""
+                    name = tool_chunk.function.name or ""
+                    arguments = tool_chunk.function.arguments or ""
+                    call.record_tool_fragment(
+                        idx,
+                        call_id=call_id,
+                        name=name,
+                        arguments=arguments,
+                    )
                     if idx not in tool_calls:
                         tool_calls[idx] = {"id": "", "name": "", "arguments": ""}
-                    if tool_chunk.id:
-                        tool_calls[idx]["id"] = tool_chunk.id
-                    if tool_chunk.function.name:
-                        tool_calls[idx]["name"] += tool_chunk.function.name
-                    if tool_chunk.function.arguments:
-                        tool_calls[idx]["arguments"] += tool_chunk.function.arguments
+                    if call_id:
+                        tool_calls[idx]["id"] = call_id
+                    tool_calls[idx]["name"] += name
+                    tool_calls[idx]["arguments"] += arguments
 
-            if chunk.choices[0].finish_reason:
-                finish_reason = chunk.choices[0].finish_reason
+            if choice.finish_reason:
+                finish_reason = choice.finish_reason
+                validate_chat_completion_stream(
+                    finish_reason,
+                    tool_calls,
+                    valid_finish_reasons=_MOONSHOT_FINISH_REASONS,
+                )
 
+        validate_chat_completion_stream(
+            finish_reason,
+            tool_calls,
+            valid_finish_reasons=_MOONSHOT_FINISH_REASONS,
+        )
         content = "".join(content_parts) or ""
         reasoning_content = "".join(reasoning_parts) or ""
+        if finish_reason != "length":
+            call.mark_tool_fragments_complete()
 
         assistant_message: dict = {
             "role": "assistant",

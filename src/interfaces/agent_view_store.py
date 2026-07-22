@@ -10,7 +10,9 @@ from dataclasses import dataclass, field
 from src.events.types import (
     Event,
     LLMCallCompleted,
+    LLMCallFailed,
     LLMCallStarted,
+    LLMRetrying,
     ResponseDelta,
     SubagentLifecycle,
     ThinkingDelta,
@@ -147,6 +149,10 @@ class AgentViewStore:
             self._record_completion(event)
         elif isinstance(event, LLMCallStarted):
             self._record_call_start(event)
+        elif isinstance(event, LLMRetrying):
+            self._record_retry(event)
+        elif isinstance(event, LLMCallFailed):
+            self._record_failure(event)
         elif isinstance(event, SubagentLifecycle):
             self._record_lifecycle(event)
         elif isinstance(event, ResponseDelta):
@@ -366,13 +372,69 @@ class AgentViewStore:
         state = self._ensure_event_state(event)
         if state is None:
             return
-        state.activity = "等待响应"
+        state.activity = (
+            f"等待响应 {event.attempt}/{event.max_attempts}"
+            if event.attempt > 1 and event.max_attempts > 0
+            else "等待响应"
+        )
         if event.context_limit <= 0:
             return
         state.context = ContextUsage(
             used_tokens=state.context.used_tokens,
             limit_tokens=event.context_limit,
         )
+
+    def _record_retry(self, event: LLMRetrying) -> None:
+        """记录一次安全重试边界并阻断前后正文分段合并。
+
+        Args:
+            event: 携带安全错误类别、摘要与残片状态的重试事件。
+
+        Returns:
+            None.
+        """
+        state = self._ensure_event_state(event)
+        if state is None:
+            return
+        state.activity = "重试中"
+        state.transcript.append((
+            "retry",
+            f"⚠ 尝试 {event.attempt}/{event.max_attempts} 失败，将重试 "
+            f"[{event.error_kind}] {event.safe_message} "
+            f"(partial={str(event.partial).lower()}, tool={event.tool_fragment_state})\n",
+        ))
+
+    def _record_failure(self, event: LLMCallFailed) -> None:
+        """记录一次安全终态错误并把 agent 活动更新为失败。
+
+        Args:
+            event: 携带安全错误与诊断关联字段的终态失败事件。
+
+        Returns:
+            None.
+        """
+        state = self._ensure_event_state(event)
+        if state is None:
+            return
+        state.activity = "失败"
+        metadata = [
+            f"attempts={event.attempts}",
+            f"partial={str(event.partial).lower()}",
+            f"tool={event.tool_fragment_state}",
+        ]
+        if event.status_code is not None:
+            metadata.append(f"status={event.status_code}")
+        if event.provider_code:
+            metadata.append(f"code={event.provider_code}")
+        if event.request_id:
+            metadata.append(f"request_id={event.request_id}")
+        if event.diagnostic_id:
+            metadata.append(f"diagnostic_id={event.diagnostic_id}")
+        state.transcript.append((
+            "error",
+            f"✘ LLM 调用失败 [{event.error_kind}] {event.safe_message} "
+            f"({', '.join(metadata)})\n",
+        ))
 
     def _record_lifecycle(self, event: SubagentLifecycle) -> None:
         """Apply start/end lifecycle information in an order-stable manner.

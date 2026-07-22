@@ -20,7 +20,7 @@
 
 **应用主循环层** — `src/app/app.py` 的 `AgentApp` 管理外层 REPL：启动 UI、创建事件消费任务、打印启动横幅、重置会话、循环驱动 Agent 轮次、处理中断、退出时收尾（`app.py:30-76`）。
 
-**Agent 状态机层** — `src/agent/agent.py` 的 `Agent` 是由 `_handlers: dict[AgentState, Callable]` 驱动的有限状态机（`agent.py:161-174`），枚举定义在 `src/agent/states.py:39-51`。每轮的可变状态封装在 `RunContext`（`states.py:54-100`）中，避免异步冲突。
+**Agent 状态机层** — `src/agent/agent.py` 的 `Agent` 是由 `_handlers: dict[AgentState, Callable]` 驱动的有限状态机（`agent.py:236-249`），枚举定义在 `src/agent/states.py:42-55`。每轮的可变状态封装在 `RunContext`（`states.py:58-106`）中；终态 LLM 错误由 `LLM_FAILURE` 承接，上下文超限仍进入 `CONTEXT_OVERFLOW`。
 
 **Manager 服务层** — `src/mgr/` 下各 Manager 各司其职（`RoleMgr`、`LLMMgr`、`ToolsMgr`、`PermissionManager`、`CompactMgr`、`PromptMgr`、`SubAgentMgr`、`SkillMgr` 等）。部分 Manager 受 feature 门控，未启用时在 `create_app()` 注入 `None`。
 
@@ -46,6 +46,7 @@
 │   REQUEST_INPUT → CHECK_COMPACT → [COMPACT → CHECK_COMPACT]    │
 │   → LLM_CALL                                                   │
 │   → PROCESS_RESPONSE → [EXECUTE_TOOLS → POST_ROUND] → …→ DONE  │
+│   任一 handler 的终态 LLM 错误 → CONTEXT_OVERFLOW/LLM_FAILURE  │
 └───────────────────────────────┬─────────────────────────────┘
                                  │ 调用 Manager 方法
                                  ▼
@@ -58,7 +59,7 @@
 └─────────────────────────────────────────────────────────────┘
 ```
 
-事件流是横切各层的：所有输出与输入都通过 `EventBus`（`src/events/bus.py`）以类型化事件流转，不直接调用 UI。详见 [events-and-ui.md](./events-and-ui.md)。
+事件流是横切各层的：所有输出与输入都通过 `EventBus`（`src/events/bus.py`）以类型化事件流转，不直接调用 UI。每次 LLM 尝试由 provider 发出 `LLMCallStarted`，可重试失败发出 `LLMRetrying`，成功发出 `LLMCallCompleted`，终态失败发出 `LLMCallFailed`；发布使用安全遥测入口，随后由 `OutputRouter` 先写 `AgentViewStore`，再按前后台身份决定是否交给 UI（`events/bus.py:34-63`、`interfaces/output_router.py:50-87`）。详见 [events-and-ui.md](./events-and-ui.md)。
 
 ---
 
@@ -85,18 +86,20 @@
 | 15 | `McpMgr` + `await start()` | `bootstrap.py:55-56` | 连接 MCP server 并将其工具注册进 `tools_mgr` |
 | 16 | `PermissionManager` | `bootstrap.py:57-63` | 从 `tools_mgr.list_entries()` 收集工具权限元数据 |
 | 17 | `SessionMgr` | `bootstrap.py:64` | 会话历史持久化与恢复 |
-| 18 | `LLMMgr` + `await load_models()` | `bootstrap.py:65-66` | 加载模型清单 |
-| 19 | `ensure_default_available()` | `bootstrap.py:69` | 启动前置校验，默认模型不可用时抛错 |
-| 20 | `AgentDeps` | `bootstrap.py:70-87` | 组装业务依赖容器 |
-| 21 | `AgentApp` | `bootstrap.py:88-92` | 注入同一 Store 与 Router，返回应用实例 |
+| 18 | `LLMMgr` + `await load_models()` | `bootstrap.py:67-68` | 严格校验调用配置并并发发现模型；单个 provider 失败可记录错误并使用非空静态模型清单 |
+| 19 | `ensure_default_available()` | `bootstrap.py:71` | 精确校验默认模型，不可用时抛错且不切换 provider |
+| 20 | `AgentDeps` | `bootstrap.py:72-90` | 组装业务依赖容器 |
+| 21 | `AgentApp` | `bootstrap.py:91-95` | 注入同一 Store 与 Router，返回应用实例 |
 
 ### 为何 `McpMgr.start()` 必须在 `PermissionManager` 之前
 
 `McpMgr.start()`（`bootstrap.py:55-56`）在连接 MCP server 后会把每个 server 的上游工具注册进 `tools_mgr`。`PermissionManager` 构造时（`bootstrap.py:57-63`）通过 `tools=tools_mgr.list_entries()` 一次性收集**所有已注册工具**的权限元数据。若权限层先于 MCP 启动构造，MCP 工具尚未进入 `tools_mgr`，其权限元数据就不会被收录——权限检查将无法识别 MCP 工具。因此二者顺序是硬约束。注释见 `bootstrap.py:54`。
 
-### 为何 `ensure_default_available()` 在 UI 启动前
+### LLM 启动错误链
 
-`llm_mgr.ensure_default_available()`（`bootstrap.py:69`）在 `load_models()` 之后、返回 `AgentApp` 之前执行前置校验：默认模型不可用时抛 `ModelUnavailableError`。此时 UI（`AgentApp.run()` 里的 `ui.start()`）尚未启动，异常直接冒泡到 `main.cli()`，被捕获后打印可操作提示并以非零码干净退出，而非在 UI 已接管终端后抛出深层堆栈（`main.py:53-56`，注释见 `bootstrap.py:67-68`）。
+`LLMMgr` 构造时严格校验 `llm` 调用配置，非法值抛 `LLMConfigurationError`。`load_models()` 并发发现模型，网络或 SDK 异常以及非法模型列表响应都作为单个 provider 的发现失败：后者归类为 `response_protocol`，错误经安全分类后写入 `provider_errors`；只有配置了非空静态 `models` 才回退注册，否则该 provider 不提供模型。只有 provider 配置非法或跨 provider 模型归属冲突才抛 `LLMConfigurationError`（`llm_mgr.py:59-223,443-504`）。
+
+`llm_mgr.ensure_default_available()`（`bootstrap.py:71`）随后按精确模型 ID 校验默认模型；不可用时将安全化的发现失败摘要加入 `ModelUnavailableError`，不会选择其他 provider（`llm_mgr.py:308-335`）。两类错误都在 UI 启动前冒泡到 `main.cli()`，由其打印“启动失败”并以状态码 1 退出，不输出深层堆栈（`main.py:46-61`）。
 
 ---
 

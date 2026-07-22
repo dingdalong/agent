@@ -1,11 +1,25 @@
 """Ollama LLM Provider — OpenAI 兼容接口。"""
 
+from __future__ import annotations
+
 import logging
+from typing import TYPE_CHECKING, Any, AsyncIterable
 from openai import AsyncOpenAI
-from src.llm.base import LLMProvider, LLMResponse
-from src.tools import ToolDict
+from src.llm.base import (
+    LLMCallContext,
+    LLMProvider,
+    LLMResponse,
+    iter_llm_stream,
+    validate_chat_completion_stream,
+)
+from src.llm.errors import LLMStreamResponseError
+
+if TYPE_CHECKING:
+    from src.tools import ToolDict
 
 logger = logging.getLogger(__name__)
+
+_OLLAMA_FINISH_REASONS = frozenset({"stop", "length", "tool_calls"})
 
 
 class OllamaProvider(LLMProvider):
@@ -83,10 +97,24 @@ class OllamaProvider(LLMProvider):
         tools: list[ToolDict] | None = None,
         temperature: float = 0.6,
         tool_choice: str | dict | None = None,
-        caller_agent_type: str | None = None,
-        caller_uuid: str | None = None,
         enable_thinking: bool = True,
+        *,
+        call: LLMCallContext,
     ) -> LLMResponse:
+        """向 Ollama 兼容接口发起一次流式调用。
+
+        Args:
+            messages: 会话消息列表。
+            prompt: 可选系统提示词列表。
+            tools: 可选工具 schema 列表。
+            temperature: 采样温度。
+            tool_choice: 工具选择策略。
+            enable_thinking: 是否启用思考。
+            call: 当前独立调用尝试上下文。
+
+        Returns:
+            归一化后的 LLM 响应。
+        """
         kwargs: dict = {
             "model": self.model,
             "messages": prompt + messages if prompt else messages,
@@ -117,15 +145,23 @@ class OllamaProvider(LLMProvider):
             }
 
         response = await self._client.chat.completions.create(**kwargs)
-        return await self._parse_stream(response, caller_agent_type, caller_uuid)
+        return await self._parse_stream(response, call=call)
 
     async def _parse_stream(
         self,
-        stream,
-        caller_agent_type: str | None = None,
-        caller_uuid: str | None = None,
+        stream: AsyncIterable[Any],
+        *,
+        call: LLMCallContext,
     ) -> LLMResponse:
-        """解析 Chat Completions 流式响应。"""
+        """解析 Chat Completions 响应并即时记录工具片段。
+
+        Args:
+            stream: OpenAI 兼容异步响应流。
+            call: 当前独立调用尝试上下文。
+
+        Returns:
+            归一化后的 LLM 响应。
+        """
         tool_calls: dict[int, dict[str, str]] = {}
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
@@ -133,7 +169,7 @@ class OllamaProvider(LLMProvider):
         finish_reason = None
         usage = None
 
-        async for chunk in stream:
+        async for chunk in iter_llm_stream(stream):
             chunk_usage = getattr(chunk, "usage", None)
             if chunk_usage is not None:
                 usage = chunk_usage
@@ -141,42 +177,66 @@ class OllamaProvider(LLMProvider):
             if not getattr(chunk, "choices", None):
                 continue
 
-            delta = chunk.choices[0].delta
+            if finish_reason is not None:
+                raise LLMStreamResponseError(
+                    "业务终态后收到额外 choice",
+                    code="invalid_response",
+                )
+
+            choice = chunk.choices[0]
+            delta = choice.delta
 
             reasoning = getattr(delta, "reasoning", None)
             if reasoning:
                 reasoning_parts.append(reasoning)
-                await self.emit_thinking_delta(reasoning, caller_agent_type, caller_uuid)
+                await self.emit_thinking_delta(reasoning, call=call)
             reasoning_content = getattr(delta, "reasoning_content", None)
             if reasoning_content:
                 reasoning_content_parts.append(reasoning_content)
-                await self.emit_thinking_delta(reasoning_content, caller_agent_type, caller_uuid)
+                await self.emit_thinking_delta(reasoning_content, call=call)
 
             if delta.content:
                 content_parts.append(delta.content)
+                await self.emit_response_delta(delta.content, call=call)
 
             if delta.tool_calls:
                 for tool_chunk in delta.tool_calls:
                     idx = tool_chunk.index
+                    call_id = tool_chunk.id or ""
+                    name = tool_chunk.function.name or ""
+                    arguments = tool_chunk.function.arguments or ""
+                    call.record_tool_fragment(
+                        idx,
+                        call_id=call_id,
+                        name=name,
+                        arguments=arguments,
+                    )
                     if idx not in tool_calls:
                         tool_calls[idx] = {"id": "", "name": "", "arguments": ""}
-                    if tool_chunk.id:
-                        tool_calls[idx]["id"] = tool_chunk.id
-                    if tool_chunk.function.name:
-                        tool_calls[idx]["name"] += tool_chunk.function.name
-                    if tool_chunk.function.arguments:
-                        tool_calls[idx]["arguments"] += tool_chunk.function.arguments
+                    if call_id:
+                        tool_calls[idx]["id"] = call_id
+                    tool_calls[idx]["name"] += name
+                    tool_calls[idx]["arguments"] += arguments
 
-            if chunk.choices[0].finish_reason:
-                finish_reason = chunk.choices[0].finish_reason
+            if choice.finish_reason:
+                finish_reason = choice.finish_reason
+                validate_chat_completion_stream(
+                    finish_reason,
+                    tool_calls,
+                    valid_finish_reasons=_OLLAMA_FINISH_REASONS,
+                )
 
+        validate_chat_completion_stream(
+            finish_reason,
+            tool_calls,
+            valid_finish_reasons=_OLLAMA_FINISH_REASONS,
+        )
         raw_content = "".join(content_parts)
         content = raw_content.strip() if tool_calls else raw_content
         reasoning = "".join(reasoning_parts)
         reasoning_content = "".join(reasoning_content_parts)
-
-        if content:
-            await self.emit_response_delta(content, caller_agent_type, caller_uuid)
+        if finish_reason != "length":
+            call.mark_tool_fragments_complete()
 
         assistant_message: dict = {
             "role": "assistant",

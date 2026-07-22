@@ -1,22 +1,169 @@
 """LLM Provider 抽象基类与结构化输出支持。"""
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Optional
 import json
-import logging
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    AsyncIterable,
+    AsyncIterator,
+    Collection,
+    Mapping,
+    Optional,
+)
 import asyncio
+from contextvars import ContextVar
+import logging
 import math
 import time
-import random
-import httpx
+import uuid
 import openai
-import anthropic
-from src.events import EventBus
-from src.events.types import LLMCallCompleted, LLMCallStarted, LLMRetrying, ResponseDelta, ThinkingDelta
-from src.tools import ToolDict
+from src.events import EventBus, emit_telemetry_safely
+from src.events.types import (
+    LLMCallCompleted,
+    LLMCallFailed,
+    LLMCallStarted,
+    LLMRetrying,
+    ResponseDelta,
+    ThinkingDelta,
+)
+from src.llm.errors import (
+    LLMCallError,
+    LLMErrorInfo,
+    LLMErrorKind,
+    LLMStreamResponseError,
+    classify_llm_error,
+    safe_exception_traceback,
+)
+from src.llm.retry import RetryConfig, RetryPolicy
+
+if TYPE_CHECKING:
+    from src.tools import ToolDict
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class LLMCallContext:
+    """单次 chat 尝试独占的流式输出与调用方状态。"""
+
+    attempt: int
+    caller_agent_type: str | None = None
+    caller_uuid: str | None = None
+    response_displayed: bool = False
+    thinking_displayed: bool = False
+    tool_fragment_state: str = "none"
+    response_parts: list[str] = field(default_factory=list)
+    thinking_parts: list[str] = field(default_factory=list)
+    tool_fragments: dict[int, dict[str, str]] = field(default_factory=dict)
+
+    @property
+    def partial_output(self) -> str:
+        """返回当前尝试已接收的正文片段。
+
+        Returns:
+            按到达顺序拼接的正文。
+        """
+        return "".join(self.response_parts)
+
+    @property
+    def partial_thinking(self) -> str:
+        """返回当前尝试已接收的思考片段。
+
+        Returns:
+            按到达顺序拼接的思考文本。
+        """
+        return "".join(self.thinking_parts)
+
+    @property
+    def has_partial_data(self) -> bool:
+        """返回当前尝试是否已收到任何流式残片。
+
+        Returns:
+            已收到正文、思考或工具片段时为 True。
+        """
+        return bool(
+            self.response_parts
+            or self.thinking_parts
+            or self.tool_fragment_state != "none"
+        )
+
+    def record_response_delta(self, content: str) -> None:
+        """记录当前尝试的正文增量。
+
+        Args:
+            content: 新收到的正文片段。
+
+        Returns:
+            None。
+        """
+        if not content:
+            return
+        self.response_parts.append(content)
+        self.response_displayed = True
+
+    def record_thinking_delta(self, content: str) -> None:
+        """记录当前尝试的思考增量。
+
+        Args:
+            content: 新收到的思考片段。
+
+        Returns:
+            None。
+        """
+        if not content:
+            return
+        self.thinking_parts.append(content)
+        self.thinking_displayed = True
+
+    def record_tool_fragment(
+        self,
+        index: int,
+        *,
+        call_id: str = "",
+        name: str = "",
+        arguments: str = "",
+        complete: bool = False,
+    ) -> None:
+        """记录当前尝试的工具调用流片段状态。
+
+        Args:
+            index: provider 流中的工具调用索引。
+            call_id: 本片段携带的调用 ID。
+            name: 本片段携带的工具名。
+            arguments: 本片段携带的参数文本。
+            complete: 工具片段序列是否已完整结束。
+
+        Returns:
+            None。
+        """
+        fragment = self.tool_fragments.setdefault(
+            index,
+            {"id": "", "name": "", "arguments": ""},
+        )
+        if call_id:
+            fragment["id"] = call_id
+        fragment["name"] += name
+        fragment["arguments"] += arguments
+        self.tool_fragment_state = "complete" if complete else "partial"
+
+    def mark_tool_fragments_complete(self) -> None:
+        """把已收到的工具片段序列标记为完整。
+
+        Returns:
+            None。
+        """
+        if self.tool_fragments:
+            self.tool_fragment_state = "complete"
+
+
+_ACTIVE_LLM_CALL: ContextVar[LLMCallContext | None] = ContextVar(
+    "active_llm_call",
+    default=None,
+)
 
 @dataclass
 class LLMResponse:
@@ -26,6 +173,136 @@ class LLMResponse:
     finish_reason: Optional[str] = None
     assistant_message: Optional[dict] = None
     token_usage: dict[str, int | None] | None = None
+    has_partial_data: bool = False
+
+
+def validate_chat_completion_stream(
+    finish_reason: str | None,
+    tool_calls: Mapping[int, Mapping[str, str]],
+    *,
+    valid_finish_reasons: Collection[str],
+) -> None:
+    """校验 Chat Completions 流终态与完整工具调用。
+
+    Args:
+        finish_reason: 流末尾收到的终止原因。
+        tool_calls: 按流索引合并后的工具调用。
+        valid_finish_reasons: 当前 provider 允许正常返回的终止原因集合。
+
+    Returns:
+        None。
+
+    Raises:
+        LLMStreamResponseError: 终态缺失、非法、触发内容政策或工具调用畸形。
+    """
+    if finish_reason is None:
+        raise LLMStreamResponseError(
+            "流式响应在合法终态前结束",
+            code="invalid_response",
+        )
+    if finish_reason == "content_filter":
+        raise LLMStreamResponseError(
+            "响应被内容政策过滤",
+            code="content_filter",
+        )
+    if finish_reason not in valid_finish_reasons:
+        raise LLMStreamResponseError(
+            "流式响应包含未知 finish_reason",
+            code="invalid_response",
+        )
+    if finish_reason == "length":
+        return
+
+    if finish_reason == "tool_calls" and not tool_calls:
+        raise LLMStreamResponseError(
+            "tool_calls 终态未包含工具调用",
+            code="invalid_response",
+        )
+    if finish_reason == "stop" and tool_calls:
+        raise LLMStreamResponseError(
+            "stop 终态不得包含工具调用",
+            code="invalid_response",
+        )
+
+    validate_tool_calls(tool_calls)
+
+
+def validate_tool_calls(
+    tool_calls: Mapping[int, Mapping[str, str]],
+) -> None:
+    """校验完整工具调用的字段、JSON object 参数与 ID 唯一性。
+
+    Args:
+        tool_calls: 按流索引合并后的完整工具调用。
+
+    Returns:
+        None。
+
+    Raises:
+        LLMStreamResponseError: 任一工具调用字段、参数或 ID 唯一性非法。
+    """
+    call_ids: set[str] = set()
+
+    for tool_call in tool_calls.values():
+        call_id = tool_call.get("id")
+        name = tool_call.get("name")
+        arguments = tool_call.get("arguments")
+        if not isinstance(call_id, str) or not call_id.strip():
+            raise LLMStreamResponseError(
+                "工具调用 ID 为空或类型非法",
+                code="invalid_response",
+            )
+        if call_id in call_ids:
+            raise LLMStreamResponseError(
+                "工具调用 ID 重复",
+                code="invalid_response",
+            )
+        call_ids.add(call_id)
+        if not isinstance(name, str) or not name.strip():
+            raise LLMStreamResponseError(
+                "工具调用名称为空或类型非法",
+                code="invalid_response",
+            )
+        if not isinstance(arguments, str):
+            raise LLMStreamResponseError(
+                "工具调用参数不是 JSON 文本",
+                code="invalid_response",
+            )
+        try:
+            parsed_arguments = json.loads(arguments)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise LLMStreamResponseError(
+                "工具调用参数不是合法 JSON",
+                code="invalid_response",
+            ) from exc
+        if not isinstance(parsed_arguments, dict):
+            raise LLMStreamResponseError(
+                "工具调用参数必须是 JSON object",
+                code="invalid_response",
+            )
+
+
+async def iter_llm_stream(stream: AsyncIterable[Any]) -> AsyncIterator[Any]:
+    """迭代 provider 流并把显式半截 EOF 转为响应协议错误。
+
+    Args:
+        stream: provider SDK 返回的异步事件流。
+
+    Yields:
+        provider 流中的下一个事件或数据块。
+
+    Raises:
+        LLMStreamResponseError: 流在数据帧中途抛出 EOFError。
+        BaseException: 其他 SDK、网络或控制流异常原样传播。
+    """
+    try:
+        async for event in stream:
+            yield event
+    except EOFError as exc:
+        raise LLMStreamResponseError(
+            "流式响应在数据帧中途结束",
+            code="invalid_response",
+        ) from exc
 
 @dataclass
 class LLMProvider(ABC):
@@ -35,7 +312,9 @@ class LLMProvider(ABC):
     model: str
     event_bus: EventBus
     concurrency: int = 5
-    max_retries: int = 6
+    max_attempts: int = 3
+    base_delay_seconds: float = 2.0
+    max_delay_seconds: float = 60.0
     timeout: float = 120.0
     context_limit: int = 0
     page_token_rate: float = 0.03
@@ -44,10 +323,32 @@ class LLMProvider(ABC):
     reasoning_effort: str = "max"
     preserve_thinking: bool = False
     user_agent: str = ""
+    max_pause_turn_continuations: int = 0
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
+        """初始化并发限制、分页预算与统一重试策略。
+
+        Returns:
+            None。
+        """
         self._semaphore = asyncio.Semaphore(self.concurrency)
         self.page_token_budget = max(1, math.floor(self.context_limit * self.page_token_rate))
+        self._retry_policy = RetryPolicy(RetryConfig(
+            max_attempts=self.max_attempts,
+            base_delay_seconds=self.base_delay_seconds,
+            max_delay_seconds=self.max_delay_seconds,
+        ))
+
+    def protocol_continuation_limit(self, finish_reason: str) -> int:
+        """查询指定协议终态允许的自动续接次数。
+
+        Args:
+            finish_reason: provider 归一化后的终态原因。
+
+        Returns:
+            非协议续接 provider 固定返回 0。
+        """
+        return 0
 
     @staticmethod
     def _ua_headers(user_agent: str) -> dict[str, str] | None:
@@ -64,9 +365,26 @@ class LLMProvider(ABC):
     def clear_reasoning_content(self, message): ...
 
     @classmethod
-    async def list_models(cls, api_key: str, base_url: str, timeout: float = 3.0, user_agent: str = "") -> list[str]:
+    async def list_models(
+        cls,
+        api_key: str,
+        base_url: str,
+        timeout: float = 120.0,
+        user_agent: str = "",
+    ) -> list[str]:
+        """从 OpenAI 兼容 Models API 获取模型列表。
+
+        Args:
+            api_key: provider API 密钥。
+            base_url: provider API 根地址。
+            timeout: SDK 请求与外层等待的超时秒数。
+            user_agent: 可选自定义 User-Agent。
+
+        Returns:
+            provider 返回的模型 ID 列表。
+        """
         client = openai.AsyncOpenAI(
-            api_key=api_key, base_url=base_url, timeout=3.0, max_retries=0,
+            api_key=api_key, base_url=base_url, timeout=timeout, max_retries=0,
             default_headers=cls._ua_headers(user_agent),
         )
         try:
@@ -121,106 +439,16 @@ class LLMProvider(ABC):
             pages.append(page)
         return pages or [""]
 
-    def _exception_status_code(self, exc: BaseException) -> int | None:
-        status_code = getattr(exc, "status_code", None)
-        if isinstance(status_code, int):
-            return status_code
-        response = getattr(exc, "response", None)
-        response_status = getattr(response, "status_code", None)
-        return response_status if isinstance(response_status, int) else None
-
-    def _exception_text(self, exc: BaseException) -> str:
-        parts = [str(exc)]
-        body = getattr(exc, "body", None)
-        if body is not None:
-            try:
-                parts.append(json.dumps(body, ensure_ascii=False, default=str))
-            except TypeError:
-                parts.append(str(body))
-        response = getattr(exc, "response", None)
-        response_text = getattr(response, "text", None)
-        if response_text:
-            parts.append(str(response_text))
-        return "\n".join(part for part in parts if part).lower()
-
-    def is_context_too_long_error(self, exc: BaseException) -> bool:
-        text = self._exception_text(exc)
-        patterns = (
-            "context length",
-            "maximum context",
-            "prompt too long",
-            "overlong_prompt",
-            "input is too long",
-            "tokens exceed",
-            "too many tokens",
-        )
-        return any(pattern in text for pattern in patterns)
-
-    def is_retryable_error(self, exc: BaseException) -> bool:
-        if self.is_context_too_long_error(exc):
-            return False
-
-        non_retryable_types = (
-            openai.AuthenticationError,
-            openai.PermissionDeniedError,
-            openai.NotFoundError,
-            openai.BadRequestError,
-            openai.UnprocessableEntityError,
-            openai.APIResponseValidationError,
-            openai.ContentFilterFinishReasonError,
-            openai.LengthFinishReasonError,
-            anthropic.AuthenticationError,
-            anthropic.PermissionDeniedError,
-            anthropic.NotFoundError,
-            anthropic.BadRequestError,
-            anthropic.UnprocessableEntityError,
-            anthropic.APIResponseValidationError,
-        )
-        if isinstance(exc, non_retryable_types):
-            return False
-
-        retryable_types = (
-            openai.APIConnectionError,
-            openai.APITimeoutError,
-            openai.RateLimitError,
-            openai.InternalServerError,
-            openai.ConflictError,
-            anthropic.APIConnectionError,
-            anthropic.APITimeoutError,
-            anthropic.RateLimitError,
-            anthropic.InternalServerError,
-            anthropic.ConflictError,
-            httpx.TimeoutException,
-            httpx.TransportError,
-            asyncio.TimeoutError,
-            TimeoutError,
-            ConnectionError,
-        )
-        if isinstance(exc, retryable_types):
-            return True
-
-        status_code = self._exception_status_code(exc)
-        if status_code in {408, 409, 429}:
-            return True
-        if status_code is not None and status_code >= 500:
-            return True
-
-        if isinstance(exc, OSError) and not isinstance(
-            exc,
-            (FileNotFoundError, PermissionError, IsADirectoryError, NotADirectoryError),
-        ):
-            return True
-
-        return False
-
     async def _sleep(self, delay: float) -> None:
+        """等待指定秒数后继续重试。
+
+        Args:
+            delay: 等待秒数。
+
+        Returns:
+            None。
+        """
         await asyncio.sleep(delay)
-
-    def _retry_jitter(self) -> float:
-        return random.uniform(0, 1)
-
-    def _retry_delay(self, attempt: int) -> float:
-        return min(2 ** attempt * 5, 60) + self._retry_jitter()
 
     def normalize_messages(
         self,
@@ -283,10 +511,6 @@ class LLMProvider(ABC):
 
             content = self._normalize_content(msg.get("content", ""))
             has_tool_calls = bool(msg.get("tool_calls"))
-
-            if not content and not has_tool_calls and role != "tool":
-                continue
-
             norm_msg: dict = {"role": role, "content": content}
 
             if role == "assistant" and has_tool_calls and allow_tool_calls:
@@ -303,10 +527,19 @@ class LLMProvider(ABC):
                     norm_msg["role"] = "user"
                     norm_msg.pop("tool_call_id", None)
 
+            standard_keys = set(norm_msg)
+            self._normalize_assistant_extra(msg, norm_msg, role)
+            has_provider_extra = bool(set(norm_msg) - standard_keys)
+            if (
+                not content
+                and not has_tool_calls
+                and not has_provider_extra
+                and role != "tool"
+            ):
+                continue
+
             if "name" in msg and isinstance(msg["name"], str):
                 norm_msg["name"] = msg["name"]
-
-            self._normalize_assistant_extra(msg, norm_msg, role)
 
             normalized.append(norm_msg)
 
@@ -463,51 +696,174 @@ class LLMProvider(ABC):
         caller_uuid: str | None = None,
         enable_thinking: bool = True,
     ) -> LLMResponse:
+        """执行带统一分类、退避和尝试级隔离的 LLM 调用。
+
+        Args:
+            messages: 会话消息列表。
+            prompt: 可选系统提示词消息列表。
+            tools: 可选工具 schema 列表。
+            temperature: 采样温度。
+            tool_choice: 工具选择策略。
+            caller_agent_type: 发起调用的 agent 类型。
+            caller_uuid: 发起调用的 agent 实例 UUID。
+            enable_thinking: 是否启用思考。
+
+        Returns:
+            最终成功尝试产生的 LLM 响应。
+
+        Raises:
+            LLMCallError: 不可重试或重试耗尽时的结构化终态错误。
+            asyncio.CancelledError: 调用被取消时原样传播。
+            KeyboardInterrupt: 收到键盘中断时原样传播。
+            SystemExit: 进程退出时原样传播。
+        """
         async with self._semaphore:
-            max_attempts = max(1, self.max_retries)
-            for attempt in range(max_attempts):
+            for attempt in range(1, self.max_attempts + 1):
+                call = LLMCallContext(
+                    attempt=attempt,
+                    caller_agent_type=caller_agent_type,
+                    caller_uuid=caller_uuid,
+                )
                 try:
-                    started_at = await self._emit_llm_call_started(messages, prompt, tools, caller_agent_type, caller_uuid)
-                    response = await self._do_chat(
+                    started_at = await self._emit_llm_call_started(
                         messages,
                         prompt,
                         tools,
-                        temperature,
-                        tool_choice,
-                        caller_agent_type,
-                        caller_uuid,
-                        enable_thinking,
+                        call,
                     )
+                    call_token = _ACTIVE_LLM_CALL.set(call)
+                    try:
+                        response = await self._do_chat(
+                            messages=messages,
+                            prompt=prompt,
+                            tools=tools,
+                            temperature=temperature,
+                            tool_choice=tool_choice,
+                            enable_thinking=enable_thinking,
+                            call=call,
+                        )
+                        response.has_partial_data = call.has_partial_data
+                    finally:
+                        _ACTIVE_LLM_CALL.reset(call_token)
+                    if response.finish_reason != "length":
+                        for index, tool_call in response.tool_calls.items():
+                            if index not in call.tool_fragments:
+                                call.record_tool_fragment(
+                                    index,
+                                    call_id=tool_call.get("id", ""),
+                                    name=tool_call.get("name", ""),
+                                    arguments=tool_call.get("arguments", ""),
+                                    complete=True,
+                                )
+                        call.mark_tool_fragments_complete()
                     await self._emit_llm_call_completed(
                         started_at=started_at,
                         usage=response.token_usage,
                         caller_uuid=caller_uuid,
                     )
                     return response
-                except Exception as e:
-                    if not self.is_retryable_error(e) or attempt >= max_attempts - 1:
-                        raise
-                    wait_time = self._retry_delay(attempt)
+                except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
+                    raise
+                except Exception as exc:
+                    info = classify_llm_error(exc)
+                    diagnostic_id = f"llm_{uuid.uuid4().hex[:12]}"
+                    self._log_llm_failure(
+                        info=info,
+                        attempt=attempt,
+                        diagnostic_id=diagnostic_id,
+                        exc=exc,
+                    )
+                    if not self._retry_policy.should_retry(info, attempt):
+                        terminal = LLMCallError(
+                            info=info,
+                            attempts=attempt,
+                            partial_output=call.partial_output,
+                            diagnostic_id=diagnostic_id,
+                        )
+                        await self._emit_llm_call_failed(terminal=terminal, call=call)
+                        raise terminal from exc
+                    wait_time = self._retry_policy.delay(info, attempt=attempt)
                     await self._emit_llm_retrying(
-                        error_type=type(e).__name__,
-                        attempt=attempt + 1,
-                        max_attempts=max_attempts,
+                        info=info,
+                        call=call,
+                        attempt=attempt,
+                        max_attempts=self.max_attempts,
                         wait_seconds=wait_time,
-                        caller_agent_type=caller_agent_type,
-                        caller_uuid=caller_uuid,
                     )
                     await self._sleep(wait_time)
-            raise RuntimeError("LLM chat: 所有重试均失败")
+            raise AssertionError("重试循环应在成功返回或终态异常处结束")
+
+    def _log_llm_failure(
+        self,
+        *,
+        info: LLMErrorInfo,
+        attempt: int,
+        diagnostic_id: str,
+        exc: Exception,
+    ) -> None:
+        """记录不含请求体、响应体和凭据的失败诊断。
+
+        Args:
+            info: 已安全化的结构化错误信息。
+            attempt: 已失败的 1 基尝试序号。
+            diagnostic_id: 本次失败的日志关联 ID。
+            exc: 原始底层异常，仅未知类别保留安全化堆栈。
+
+        Returns:
+            None。
+        """
+        fields = (
+            "LLM 调用失败 kind=%s retryable=%s status=%s provider_code=%s "
+            "request_id=%s exception_type=%s attempt=%d/%d diagnostic_id=%s message=%r"
+        )
+        args = (
+            info.kind.value,
+            info.retryable,
+            info.status_code,
+            info.provider_code,
+            info.request_id,
+            info.original_exception_type,
+            attempt,
+            self.max_attempts,
+            diagnostic_id,
+            info.message,
+        )
+        if info.kind is not LLMErrorKind.UNKNOWN:
+            logger.warning(fields, *args)
+            return
+        traceback = safe_exception_traceback(exc)
+        safe_exception = RuntimeError(info.message).with_traceback(traceback)
+        logger.error(
+            fields,
+            *args,
+            exc_info=(type(safe_exception), safe_exception, traceback),
+        )
 
     async def emit_response_delta(
         self,
         content: str,
         caller_agent_type: str | None = None,
         caller_uuid: str | None = None,
+        *,
+        call: LLMCallContext | None = None,
     ) -> None:
-        if self.event_bus is None:
-            return
-        await self.event_bus.emit(ResponseDelta(
+        """记录并发出正文流增量。
+
+        Args:
+            content: 新收到的正文片段。
+            caller_agent_type: 兼容调用方 agent 类型；call 存在时忽略。
+            caller_uuid: 兼容调用方实例 UUID；call 存在时忽略。
+            call: 当前独立调用尝试上下文。
+
+        Returns:
+            None。
+        """
+        call = call or _ACTIVE_LLM_CALL.get()
+        if call is not None:
+            call.record_response_delta(content)
+            caller_agent_type = call.caller_agent_type
+            caller_uuid = call.caller_uuid
+        await emit_telemetry_safely(self.event_bus, ResponseDelta(
             timestamp=time.time(),
             source=self.model,
             content=content,
@@ -520,10 +876,26 @@ class LLMProvider(ABC):
         content: str,
         caller_agent_type: str | None = None,
         caller_uuid: str | None = None,
+        *,
+        call: LLMCallContext | None = None,
     ) -> None:
-        if self.event_bus is None:
-            return
-        await self.event_bus.emit(ThinkingDelta(
+        """记录并发出思考流增量。
+
+        Args:
+            content: 新收到的思考片段。
+            caller_agent_type: 兼容调用方 agent 类型；call 存在时忽略。
+            caller_uuid: 兼容调用方实例 UUID；call 存在时忽略。
+            call: 当前独立调用尝试上下文。
+
+        Returns:
+            None。
+        """
+        call = call or _ACTIVE_LLM_CALL.get()
+        if call is not None:
+            call.record_thinking_delta(content)
+            caller_agent_type = call.caller_agent_type
+            caller_uuid = call.caller_uuid
+        await emit_telemetry_safely(self.event_bus, ThinkingDelta(
             timestamp=time.time(),
             source=self.model,
             content=content,
@@ -533,42 +905,68 @@ class LLMProvider(ABC):
 
     async def _emit_llm_retrying(
         self,
-        error_type: str,
+        info: LLMErrorInfo,
+        call: LLMCallContext,
         attempt: int,
         max_attempts: int,
         wait_seconds: float,
-        caller_agent_type: str | None = None,
-        caller_uuid: str | None = None,
     ) -> None:
-        """发出 LLMRetrying 事件，供状态条实时倒计时；无事件总线时降级为 stderr 告警。
+        """发出 LLMRetrying 事件供状态条实时倒计时。
 
         Args:
-            error_type: 触发重试的异常类名。
+            info: 触发重试的安全结构化错误信息。
+            call: 失败尝试的独立调用上下文。
             attempt: 已失败的尝试序号（1 基）。
             max_attempts: 允许的最大尝试次数。
             wait_seconds: 本次等待秒数（含抖动的原始浮点值）。
-            caller_agent_type: 发起本次调用的 agent 类型，透传给事件供 UI 标注当前 agent。
-            caller_uuid: 发起本次调用的 agent 实例 uuid，供路由器前台门控。
         """
         logger.debug(
             "API错误 (%s)，%.1f秒后重试 (%d/%d)...",
-            error_type, wait_seconds, attempt, max_attempts,
+            info.kind.value, wait_seconds, attempt, max_attempts,
         )
-        if self.event_bus is None:
-            logger.warning(
-                "API错误 (%s)，%.1f秒后重试 (%d/%d)...",
-                error_type, wait_seconds, attempt, max_attempts,
-            )
-            return
-        await self.event_bus.emit(LLMRetrying(
+        await emit_telemetry_safely(self.event_bus, LLMRetrying(
             timestamp=time.time(),
             source=self.model,
-            error_type=error_type,
+            error_kind=info.kind.value,
+            safe_message=info.message,
+            partial=call.has_partial_data,
+            tool_fragment_state=call.tool_fragment_state,
             attempt=attempt,
             max_attempts=max_attempts,
             wait_seconds=wait_seconds,
-            caller_agent_type=caller_agent_type,
-            caller_uuid=caller_uuid,
+            caller_agent_type=call.caller_agent_type,
+            caller_uuid=call.caller_uuid,
+        ))
+
+    async def _emit_llm_call_failed(
+        self,
+        terminal: LLMCallError,
+        call: LLMCallContext,
+    ) -> None:
+        """发出一次不含原始异常或请求响应内容的 LLM 终态失败事件。
+
+        Args:
+            terminal: 即将抛给调用方的结构化终态错误。
+            call: 最后一轮失败尝试的独立调用上下文。
+
+        Returns:
+            None。
+        """
+        info = terminal.info
+        await emit_telemetry_safely(self.event_bus, LLMCallFailed(
+            timestamp=time.time(),
+            source=self.model,
+            error_kind=info.kind.value,
+            safe_message=info.message,
+            attempts=terminal.attempts,
+            partial=call.has_partial_data,
+            tool_fragment_state=call.tool_fragment_state,
+            status_code=info.status_code,
+            provider_code=info.provider_code,
+            request_id=info.request_id,
+            diagnostic_id=terminal.diagnostic_id,
+            caller_agent_type=call.caller_agent_type,
+            caller_uuid=call.caller_uuid,
         ))
 
     async def _emit_llm_call_started(
@@ -576,8 +974,7 @@ class LLMProvider(ABC):
         messages: list[dict],
         prompt: list[dict] | None,
         tools: list[ToolDict] | None,
-        caller_agent_type: str | None = None,
-        caller_uuid: str | None = None,
+        call: LLMCallContext,
     ) -> float:
         """发出 LLMCallStarted 事件并返回起始时间戳。
 
@@ -585,15 +982,11 @@ class LLMProvider(ABC):
             messages: 本次提交的消息列表。
             prompt: 系统提示词消息列表（可为 None）。
             tools: 本次可用工具列表（可为 None）。
-            caller_agent_type: 发起本次调用的 agent 类型（主 agent 为其 agent_type，如「main」），透传给事件供 UI 活动行显示当前 agent。
-            caller_uuid: 发起本次调用的 agent 实例 uuid。
+            call: 当前尝试序号与调用方身份。
         Returns:
             本次调用的起始时间戳（time.time()），供完成事件计算耗时。
         """
         started_at = time.time()
-        if self.event_bus is None:
-            return started_at
-
         all_messages = (prompt or []) + messages
         estimated_input_tokens = await asyncio.to_thread(
             self.estimate_tokens,
@@ -601,7 +994,7 @@ class LLMProvider(ABC):
             prompt,
             tools,
         )
-        await self.event_bus.emit(LLMCallStarted(
+        await emit_telemetry_safely(self.event_bus, LLMCallStarted(
             timestamp=started_at,
             source=self.model,
             model=self.model,
@@ -609,8 +1002,10 @@ class LLMProvider(ABC):
             estimated_input_tokens=estimated_input_tokens,
             message_count=len(all_messages),
             tool_count=len(tools or []),
-            caller_agent_type=caller_agent_type,
-            caller_uuid=caller_uuid,
+            attempt=call.attempt,
+            max_attempts=self.max_attempts,
+            caller_agent_type=call.caller_agent_type,
+            caller_uuid=call.caller_uuid,
         ))
         return started_at
 
@@ -629,7 +1024,7 @@ class LLMProvider(ABC):
             usage: token 用量字典。
             caller_uuid: 发起本次调用的 agent 实例 uuid，供路由器按 agent 累计 token。
         """
-        if self.event_bus is None or started_at is None:
+        if started_at is None:
             return
 
         completed_at = ended_at if ended_at is not None else time.time()
@@ -638,7 +1033,7 @@ class LLMProvider(ABC):
         output_tokens = usage.get("output_tokens")
         total_tokens = usage.get("total_tokens")
 
-        await self.event_bus.emit(LLMCallCompleted(
+        await emit_telemetry_safely(self.event_bus, LLMCallCompleted(
             timestamp=completed_at,
             source=self.model,
             model=self.model,
@@ -661,7 +1056,22 @@ class LLMProvider(ABC):
         tools: list[ToolDict] | None = None,
         temperature: float = 1.0,
         tool_choice: str | dict | None = None,
-        caller_agent_type: str | None = None,
-        caller_uuid: str | None = None,
         enable_thinking: bool = True,
-    ) -> LLMResponse: ...
+        *,
+        call: LLMCallContext,
+    ) -> LLMResponse:
+        """执行单次 provider 调用且不在内部自动重试。
+
+        Args:
+            messages: 会话消息列表。
+            prompt: 可选系统提示词列表。
+            tools: 可选工具 schema 列表。
+            temperature: 采样温度。
+            tool_choice: 工具选择策略。
+            enable_thinking: 是否启用思考。
+            call: 当前独立调用尝试上下文。
+
+        Returns:
+            归一化后的 LLM 响应。
+        """
+        ...

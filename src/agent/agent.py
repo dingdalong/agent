@@ -6,9 +6,16 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any, Callable, TYPE_CHECKING
 from src.tools import ToolDict
-from src.events.types import AgentStateChanged, CompactDelta, PermissionModeChanged, caller_identity
+from src.events.types import (
+    AgentStateChanged,
+    CompactDelta,
+    LLMCallFailed,
+    PermissionModeChanged,
+    caller_identity,
+)
 from src.agent.states import AgentState, RunContext, RunResult, parse_command
-from src.events import NoEventSubscribers
+from src.events import NoEventSubscribers, emit_telemetry_safely
+from src.llm.errors import LLMCallError, LLMErrorInfo, LLMErrorKind
 from src.mgr import FileMgr, TaskManager, CompactMgr, CompactResult, PromptMgr, SkillMgr, SubAgentMgr, ReminderMgr
 
 if TYPE_CHECKING:
@@ -28,6 +35,66 @@ if TYPE_CHECKING:
     from src.interfaces.turn_clock import TurnClock
 
 logger = logging.getLogger(__name__)
+
+
+_TRANSIENT_LLM_ERROR_KINDS = {
+    LLMErrorKind.NETWORK,
+    LLMErrorKind.TIMEOUT,
+    LLMErrorKind.RATE_LIMIT,
+    LLMErrorKind.SERVICE,
+    LLMErrorKind.RESPONSE_PROTOCOL,
+}
+_REQUEST_LLM_ERROR_KINDS = {
+    LLMErrorKind.BAD_REQUEST,
+    LLMErrorKind.NOT_FOUND,
+    LLMErrorKind.PAYLOAD_TOO_LARGE,
+    LLMErrorKind.UNPROCESSABLE,
+}
+
+
+def _llm_failure_advice(kind: LLMErrorKind) -> str:
+    """返回与 LLM 错误分类匹配的操作建议。
+
+    Args:
+        kind: 稳定 LLM 错误分类。
+
+    Returns:
+        面向用户的单句操作建议。
+    """
+    if kind is LLMErrorKind.CONTEXT_LIMIT:
+        return "请缩小任务范围或重新开始较短的会话后重试。"
+    if kind is LLMErrorKind.OUTPUT_LIMIT:
+        return "请缩小输出范围后重试。"
+    if kind is LLMErrorKind.CONTENT_POLICY:
+        return "请调整请求内容后重试。"
+    if kind is LLMErrorKind.AUTHENTICATION:
+        return "请检查 API 凭据和模型配置后重试。"
+    if kind in {LLMErrorKind.PERMISSION, LLMErrorKind.BILLING_QUOTA}:
+        return "请检查账号权限、额度和模型配置后重试。"
+    if kind in _REQUEST_LLM_ERROR_KINDS:
+        return "请检查模型配置和请求内容后重试。"
+    if kind in _TRANSIENT_LLM_ERROR_KINDS:
+        return "请稍后重试。"
+    return "请检查错误信息和模型配置后重试。"
+
+
+def _format_llm_failure_text(error: LLMErrorInfo) -> str:
+    """组合不重复标点或操作建议的安全失败文本。
+
+    Args:
+        error: 已安全化的结构化 LLM 错误。
+
+    Returns:
+        包含错误分类、摘要和准确操作建议的文本。
+    """
+    message = error.message.strip() or "LLM 调用失败"
+    if message[-1] not in "。.!！?？":
+        message += "。"
+    advice = _llm_failure_advice(error.kind)
+    advice_core = advice.rstrip("。.!！?？")
+    if advice_core not in message:
+        message += advice
+    return f"错误：LLM 调用失败（{error.kind.value}）：{message}"
 
 
 def _resolve_memory_scope(manifest_memory: str | None, is_subagent: bool) -> str | None:
@@ -112,7 +179,12 @@ class Agent:
     _pending_input: str = field(init=False, default="")
     _handlers: dict[AgentState, Callable] = field(init=False, repr=False)
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
+        """解析依赖并初始化本 Agent 的 Manager、工具与状态 handler。
+
+        Returns:
+            None。
+        """
         self.uuid = uuid.uuid4()
         # 主、子 agent 均以单实例 UUID 关联生命周期、usage 与转录事件，
         # 供 AgentViewStore 汇聚成一致快照。
@@ -132,6 +204,8 @@ class Agent:
         self._compact_mgr = CompactMgr(
             llm=self.llm,
             workdir=self.deps.workdir,
+            caller_agent_type=self.agent_type,
+            caller_uuid=str(self.uuid),
             auto_compact_size=int(context_limit * compact_cfg["auto_compact_rate"]),
             keep_recent_user_turns=compact_cfg.get("keep_recent_user_turns", 3),
             recent_messages_token_limit=int(context_limit * compact_cfg.get("keep_recent_messages_token_rate", 0.25)),
@@ -166,11 +240,13 @@ class Agent:
             AgentState.LLM_CALL:         self._on_llm_call,
             AgentState.PROCESS_RESPONSE: self._on_process_response,
             AgentState.LENGTH_RETRY:     self._on_length_retry,
+            AgentState.PAUSE_TURN:       self._on_pause_turn,
             AgentState.EXECUTE_TOOLS:    self._on_execute_tools,
             AgentState.CHECK_STOP:       self._on_check_stop,
             AgentState.POST_ROUND:       self._on_post_round,
             AgentState.SUMMARIZE_EXIT:   self._on_summarize_exit,
             AgentState.CONTEXT_OVERFLOW: self._on_context_overflow,
+            AgentState.LLM_FAILURE:      self._on_llm_failure,
         }
 
     @classmethod
@@ -274,10 +350,14 @@ class Agent:
                    不为 None 时从 CHECK_COMPACT 开始执行单轮（子智能体路径）。
 
         Returns:
-            RunResult，包含最终文本、斜杠命令、退出请求等信息。
+            RunResult，包含最终文本、斜杠命令、退出请求和终态 LLM 错误。
         """
         if input is not None:
-            ctx = RunContext(messages=self.history, round_start_idx=len(self.history))
+            ctx = RunContext(
+                messages=self.history,
+                turn_start_messages=list(self.history),
+                round_start_idx=len(self.history),
+            )
             turn_instr = self._reminder_mgr.build_turn_start_instructions(self.permission_mode)
             if turn_instr:
                 input = f"{turn_instr}\n\n{input}"
@@ -306,24 +386,104 @@ class Agent:
             start_state: 起始状态。
 
         Returns:
-            RunResult，包含本轮结果。
+            RunResult，包含本轮结果和安全结构化的终态 LLM 错误。
         """
         state = start_state
         try:
             while state != AgentState.DONE:
                 prev = state
-                state = await self._handlers[state](ctx)
+                try:
+                    state = await self._handlers[state](ctx)
+                except LLMCallError as exc:
+                    self._rollback_response_recovery(ctx)
+                    ctx.llm_error = exc.info
+                    state = (
+                        AgentState.CONTEXT_OVERFLOW
+                        if exc.info.kind is LLMErrorKind.CONTEXT_LIMIT
+                        else AgentState.LLM_FAILURE
+                    )
                 await self._emit_state_changed(prev, state)
             return RunResult(
                 final_text=ctx.final_text,
                 command=ctx.command,
                 exit_requested=ctx.exit_requested,
                 user_input=ctx.user_input,
+                llm_error=ctx.llm_error,
             )
         except (asyncio.CancelledError, KeyboardInterrupt):
-            del self.history[ctx.round_start_idx:]
+            self._rollback_response_recovery(ctx)
+            if ctx.turn_start_messages is not None:
+                self.history[:] = ctx.turn_start_messages
+            else:
+                del self.history[ctx.round_start_idx:]
             self._pending_input = ctx.user_input
             raise
+
+    @staticmethod
+    def _rollback_response_recovery(ctx: RunContext) -> None:
+        """移除当前响应恢复链写入的临时消息并清空恢复状态。
+
+        Args:
+            ctx: 当前运行上下文；存在恢复 checkpoint 时原地回滚消息并清空恢复状态。
+
+        Returns:
+            None。
+        """
+        if ctx.response_recovery_start_idx is not None:
+            del ctx.messages[ctx.response_recovery_start_idx:]
+        ctx.response_recovery_start_idx = None
+        ctx.response_recovery_response_count = 0
+        ctx.pause_turn_message_idx = None
+        ctx.pause_turn_continuations = 0
+
+    async def _fail_response_recovery(
+        self,
+        ctx: RunContext,
+        *,
+        message: str,
+        partial: bool,
+        tool_fragment_state: str,
+        original_exception_type: str,
+    ) -> AgentState:
+        """回滚响应恢复链并发出一次不可重试的输出上限事件。
+
+        Args:
+            ctx: 当前运行上下文。
+            message: 面向用户的安全错误摘要。
+            partial: 当前响应是否包含任何残片。
+            tool_fragment_state: 当前工具调用残片状态。
+            original_exception_type: 结构化错误中的内部类型名。
+
+        Returns:
+            LLM_FAILURE。
+        """
+        attempts = ctx.response_recovery_response_count
+        self._rollback_response_recovery(ctx)
+        ctx.llm_error = LLMErrorInfo(
+            kind=LLMErrorKind.OUTPUT_LIMIT,
+            message=message,
+            retryable=False,
+            original_exception_type=original_exception_type,
+        )
+        event_bus = getattr(getattr(self, "deps", None), "event_bus", None)
+        if event_bus is not None:
+            caller_agent_type, caller_uuid = caller_identity(self)
+            await emit_telemetry_safely(event_bus, LLMCallFailed(
+                timestamp=time.time(),
+                source=self.agent_type,
+                error_kind=ctx.llm_error.kind.value,
+                safe_message=ctx.llm_error.message,
+                attempts=attempts,
+                partial=partial,
+                tool_fragment_state=tool_fragment_state,
+                status_code=ctx.llm_error.status_code,
+                provider_code=ctx.llm_error.provider_code,
+                request_id=ctx.llm_error.request_id,
+                diagnostic_id=f"llm_{uuid.uuid4().hex[:12]}",
+                caller_agent_type=caller_agent_type,
+                caller_uuid=caller_uuid,
+            ))
+        return AgentState.LLM_FAILURE
 
     # ---- state handlers ----
 
@@ -400,6 +560,7 @@ class Agent:
         if turn_instr:
             user_input = f"{turn_instr}\n\n{user_input}"
 
+        ctx.turn_start_messages = list(self.history)
         ctx.round_start_idx = len(self.history)
         self.history.append({"role": "user", "content": user_input})
 
@@ -656,30 +817,52 @@ class Agent:
         return AgentState.CHECK_COMPACT
 
     async def _on_llm_call(self, ctx: RunContext) -> AgentState:
+        """调用 LLM 并保存响应。
+
+        Args:
+            ctx: 当前运行上下文。
+
+        Returns:
+            PROCESS_RESPONSE。
+
+        Raises:
+            LLMCallError: 调用不可继续时交由单轮状态机边界收口。
+        """
         ctx.messages[:] = self.llm.normalize_messages(ctx.messages)
-        try:
-            ctx.response = await self.llm.chat(
-                prompt=ctx.prompt,
-                messages=ctx.messages,
-                tools=self._tools_schemas,
-                caller_agent_type=self.agent_type,
-                caller_uuid=str(self.uuid),
-                enable_thinking=self.enable_thinking,
-            )
-        except Exception as exc:
-            if self.llm.is_context_too_long_error(exc):
-                return AgentState.CONTEXT_OVERFLOW
-            raise
+        ctx.response = await self.llm.chat(
+            prompt=ctx.prompt,
+            messages=ctx.messages,
+            tools=self._tools_schemas,
+            caller_agent_type=self.agent_type,
+            caller_uuid=str(self.uuid),
+            enable_thinking=self.enable_thinking,
+        )
         return AgentState.PROCESS_RESPONSE
 
     async def _on_process_response(self, ctx: RunContext) -> AgentState:
+        """处理已校验响应并选择协议恢复、工具执行或停止检查。
+
+        Args:
+            ctx: 当前运行上下文；读取最近响应并更新正文、历史与恢复段状态。
+
+        Returns:
+            与响应终态对应的下一个 Agent 状态。
+        """
         response = ctx.response
-        if response.content:
+        if ctx.response_recovery_start_idx is None:
             ctx.final_text = response.content
+        elif response.content:
+            ctx.final_text += response.content
 
         if response.finish_reason == "length":
             return AgentState.LENGTH_RETRY
+        if response.finish_reason == "pause_turn":
+            return AgentState.PAUSE_TURN
 
+        ctx.response_recovery_start_idx = None
+        ctx.response_recovery_response_count = 0
+        ctx.pause_turn_message_idx = None
+        ctx.pause_turn_continuations = 0
         ctx.messages.append(response.assistant_message)
 
         if response.tool_calls:
@@ -694,13 +877,17 @@ class Agent:
                 ctx.messages。
 
         Returns:
-            未达到恢复上限时返回 LLM_CALL，达到上限时返回 DONE。
+            未达到恢复上限时返回 LLM_CALL，达到上限时返回 LLM_FAILURE。
         """
         response = ctx.response
+        ctx.response_recovery_response_count += 1
         assistant_message = response.assistant_message or {}
         has_truncated_tool_call = bool(
             response.tool_calls or assistant_message.get("tool_calls")
         )
+        ctx.pause_turn_message_idx = None
+        if ctx.response_recovery_start_idx is None:
+            ctx.response_recovery_start_idx = len(ctx.messages)
 
         if has_truncated_tool_call:
             if response.content:
@@ -713,14 +900,26 @@ class Agent:
 
         if ctx.length_recoveries >= ctx.max_length_recoveries:
             if has_truncated_tool_call:
-                ctx.final_text = (
-                    "错误：模型工具调用连续被截断，未执行不完整调用，"
+                message = (
+                    "模型工具调用连续被截断，未执行不完整调用，"
                     "已达到自动恢复上限。请缩小参数范围后重试。"
                 )
             else:
-                ctx.final_text = "错误：模型输出连续被截断，已达到自动续写恢复上限。请缩小输出范围后重试。"
-            ctx.messages.append({"role": "assistant", "content": ctx.final_text})
-            return AgentState.DONE
+                message = "模型输出连续被截断，已达到自动续写恢复上限。请缩小输出范围后重试。"
+            return await self._fail_response_recovery(
+                ctx,
+                message=message,
+                partial=bool(
+                    response.has_partial_data
+                    or response.content
+                    or has_truncated_tool_call
+                    or assistant_message.get("reasoning_content")
+                ),
+                tool_fragment_state=(
+                    "partial" if has_truncated_tool_call else "none"
+                ),
+                original_exception_type="OutputLengthLimit",
+            )
 
         ctx.length_recoveries += 1
         if has_truncated_tool_call:
@@ -733,6 +932,60 @@ class Agent:
             retry_instruction = "输出达到长度上限。请从中断处直接继续，不要回顾、不要重复，必要时可以从半句话接续。"
         ctx.messages.append({"role": "user", "content": retry_instruction})
         ctx.messages[:] = self.llm.normalize_messages(ctx.messages)
+        return AgentState.LLM_CALL
+
+    async def _on_pause_turn(self, ctx: RunContext) -> AgentState:
+        """保存 pause_turn 原始载体并发起同参数协议续接。
+
+        Args:
+            ctx: 当前运行上下文；最近 pause_turn 响应取自 response。
+
+        Returns:
+            未达到协议上限时为 LLM_CALL，达到上限时为 LLM_FAILURE。
+        """
+        response = ctx.response
+        ctx.response_recovery_response_count += 1
+        if ctx.response_recovery_start_idx is None:
+            ctx.response_recovery_start_idx = len(ctx.messages)
+
+        limit = self.llm.protocol_continuation_limit("pause_turn")
+        if ctx.pause_turn_continuations >= limit:
+            assistant_message = response.assistant_message or {}
+            return await self._fail_response_recovery(
+                ctx,
+                message=(
+                    "模型 pause_turn 协议续接连续未完成，已达到自动恢复上限。"
+                    "请缩小任务范围后重试。"
+                ),
+                partial=bool(
+                    response.has_partial_data
+                    or response.content
+                    or assistant_message.get("reasoning_content")
+                    or assistant_message.get("_anthropic_content")
+                ),
+                tool_fragment_state="none",
+                original_exception_type="PauseTurnContinuationLimit",
+            )
+
+        carrier = (
+            response.assistant_message
+            or {"role": "assistant", "content": response.content or None}
+        )
+        pause_message_idx = ctx.pause_turn_message_idx
+        if (
+            pause_message_idx is None
+            or pause_message_idx < 0
+            or pause_message_idx >= len(ctx.messages)
+        ):
+            ctx.messages.append(carrier)
+        else:
+            ctx.messages[pause_message_idx] = carrier
+        ctx.pause_turn_continuations += 1
+        ctx.messages[:] = self.llm.normalize_messages(ctx.messages)
+        if ctx.messages and ctx.messages[-1].get("role") == "assistant":
+            ctx.pause_turn_message_idx = len(ctx.messages) - 1
+        else:
+            ctx.pause_turn_message_idx = None
         return AgentState.LLM_CALL
 
     async def _on_execute_tools(self, ctx: RunContext) -> AgentState:
@@ -840,32 +1093,76 @@ class Agent:
         return AgentState.CHECK_COMPACT
 
     async def _on_summarize_exit(self, ctx: RunContext) -> AgentState:
-        ctx.messages.append({"role": "user", "content": "由于对话上下文过长且多次压缩仍无法继续，请你基于当前已完成的工作做一个总结："
-            "1) 已经完成了什么；2) 还有什么未完成；3) 给出后续建议。"})
-        ctx.messages[:] = self.llm.normalize_messages(ctx.messages)
-        try:
-            response = await self.llm.chat(
-                prompt=ctx.prompt,
-                messages=ctx.messages,
-                tools=[],
-                caller_agent_type=self.agent_type,
-                caller_uuid=str(self.uuid),
-                enable_thinking=False,
-            )
-        except Exception as exc:
-            if self.llm.is_context_too_long_error(exc):
-                ctx.final_text = "错误：上下文过长，已多次压缩仍无法继续。请缩小任务范围或重新开始较短的会话。"
-                ctx.messages.append({"role": "assistant", "content": ctx.final_text})
-                return AgentState.DONE
-            raise
+        """生成多次压缩仍无法继续时的退出总结。
+
+        Args:
+            ctx: 当前运行上下文。
+
+        Returns:
+            DONE。
+
+        Raises:
+            LLMCallError: 总结调用失败时交由单轮状态机边界收口。
+        """
+        summary_instruction = {
+            "role": "user",
+            "content": "由于对话上下文过长且多次压缩仍无法继续，请你基于当前已完成的工作做一个总结："
+            "1) 已经完成了什么；2) 还有什么未完成；3) 给出后续建议。",
+        }
+        summary_messages = self.llm.normalize_messages([
+            *ctx.messages,
+            summary_instruction,
+        ])
+        response = await self.llm.chat(
+            prompt=ctx.prompt,
+            messages=summary_messages,
+            tools=[],
+            caller_agent_type=self.agent_type,
+            caller_uuid=str(self.uuid),
+            enable_thinking=False,
+        )
         if response.content:
             ctx.final_text = response.content
+        ctx.messages[:] = summary_messages
         ctx.messages.append(response.assistant_message)
         return AgentState.DONE
 
     async def _on_context_overflow(self, ctx: RunContext) -> AgentState:
-        ctx.final_text = "错误：上下文过长，已多次压缩仍无法继续。请缩小任务范围或重新开始较短的会话。"
-        ctx.messages.append({"role": "assistant", "content": ctx.final_text})
+        """生成上下文限制错误的安全可操作文本。
+
+        Args:
+            ctx: 当前运行上下文，包含 CONTEXT_LIMIT 错误信息。
+
+        Returns:
+            DONE。
+        """
+        error = ctx.llm_error or LLMErrorInfo(
+            kind=LLMErrorKind.CONTEXT_LIMIT,
+            message="输入超过模型上下文窗口",
+            retryable=False,
+            original_exception_type="ContextLimit",
+        )
+        ctx.final_text = _format_llm_failure_text(error)
+        return AgentState.DONE
+
+    async def _on_llm_failure(self, ctx: RunContext) -> AgentState:
+        """生成普通 LLM 终态错误的安全可操作文本。
+
+        Args:
+            ctx: 当前运行上下文，包含安全结构化错误信息。
+
+        Returns:
+            DONE。
+        """
+        error = ctx.llm_error
+        if error is None:
+            error = LLMErrorInfo(
+                kind=LLMErrorKind.UNKNOWN,
+                message="LLM 调用失败",
+                retryable=False,
+                original_exception_type="UnknownLLMError",
+            )
+        ctx.final_text = _format_llm_failure_text(error)
         return AgentState.DONE
 
     # ---- helpers ----

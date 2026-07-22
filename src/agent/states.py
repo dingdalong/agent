@@ -1,7 +1,10 @@
+from __future__ import annotations
+
 from enum import Enum
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from src.llm.base import LLMResponse
+from src.llm.errors import LLMErrorInfo
 
 
 # 斜杠命令元数据（名称, 描述）的唯一来源：供输入框自动补全展示，与 agent.py 的命令分发保持一致（仅列已实现命令）。
@@ -43,11 +46,13 @@ class AgentState(Enum):
     LLM_CALL = "llm_call"
     PROCESS_RESPONSE = "process_response"
     LENGTH_RETRY = "length_retry"
+    PAUSE_TURN = "pause_turn"
     EXECUTE_TOOLS = "execute_tools"
     CHECK_STOP = "check_stop"
     POST_ROUND = "post_round"
     SUMMARIZE_EXIT = "summarize_exit"
     CONTEXT_OVERFLOW = "context_overflow"
+    LLM_FAILURE = "llm_failure"
     DONE = "done"
 
 
@@ -57,6 +62,7 @@ class RunContext:
 
     Attributes:
         messages: 当前会话消息列表。
+        turn_start_messages: 本轮追加用户消息前的历史浅快照；没有快照时为 None。
         prompt: 当前完整系统提示词。
         final_text: 本轮最终输出文本。
         has_tool_calls: 本轮是否执行过工具调用。
@@ -72,14 +78,23 @@ class RunContext:
         stop_hook_used: 本轮 Stop hook 是否已阻止过一次停止。
         length_recoveries: 本轮长度截断恢复次数。
         max_length_recoveries: 本轮长度截断恢复上限。
+        response_recovery_start_idx: 当前响应恢复链在消息列表中的起始位置；
+            没有待回滚的恢复段时为 None。
+        response_recovery_response_count: 当前响应恢复链已收到的 length 或
+            pause_turn 成功响应数。
+        pause_turn_message_idx: 当前连续 pause_turn 载体在消息列表中的位置；
+            没有可替换载体时为 None。
+        pause_turn_continuations: 当前响应恢复链已执行的 pause_turn 续接次数。
         response: 最近一次 LLM 响应。
         manual_compact: 当前工具轮是否请求手动 compact。
         compact_focus: 手动 compact 的可选关注点。
         user_input: 本轮用户原始输入。
         command: 需要上抛应用层的斜杠命令。
         exit_requested: 用户是否请求退出。
+        llm_error: 本轮终态 LLM 错误的安全结构化信息。
     """
     messages: list[dict]
+    turn_start_messages: list[dict] | None = None
     prompt: list[dict] | None = None
     final_text: str = ""
     has_tool_calls: bool = False
@@ -92,12 +107,17 @@ class RunContext:
     stop_hook_used: bool = False
     length_recoveries: int = 0
     max_length_recoveries: int = 3
+    response_recovery_start_idx: int | None = None
+    response_recovery_response_count: int = 0
+    pause_turn_message_idx: int | None = None
+    pause_turn_continuations: int = 0
     response: LLMResponse | None = None
     manual_compact: bool = False
     compact_focus: str | None = None
     user_input: str = ""
     command: tuple[str, list[str]] | None = None
     exit_requested: bool = False
+    llm_error: LLMErrorInfo | None = None
 
 
 @dataclass
@@ -112,8 +132,10 @@ class RunResult:
         command: 需要 app 层处理的斜杠命令（/clear 或 /agents），无命令时为 None。
         exit_requested: 用户是否请求退出（输入 exit/quit 或输入被取消）。
         user_input: 用户原始输入文本。
+        llm_error: 本轮终态 LLM 错误的安全结构化信息。
     """
     final_text: str = ""
     command: tuple[str, list[str]] | None = None
     exit_requested: bool = False
     user_input: str = ""
+    llm_error: LLMErrorInfo | None = None

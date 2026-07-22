@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import AsyncIterator, Literal
@@ -27,6 +28,39 @@ from src.events.menu import (
 )
 
 _SENTINEL = object()
+logger = logging.getLogger(__name__)
+
+
+async def emit_telemetry_safely(
+    event_bus: EventBus | None,
+    event: Event,
+) -> None:
+    """发布非关键遥测事件，隔离普通发布故障并保留控制流异常。
+
+    Args:
+        event_bus: 接收事件的总线；None 表示无需发布。
+        event: 待发布的遥测事件。
+
+    Returns:
+        None。
+
+    Raises:
+        asyncio.CancelledError: 发布任务被取消时原样传播。
+        KeyboardInterrupt: 收到键盘中断时原样传播。
+        SystemExit: 进程退出时原样传播。
+    """
+    if event_bus is None:
+        return
+    try:
+        await event_bus.emit(event)
+    except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
+        raise
+    except Exception as exc:
+        logger.warning(
+            "遥测事件发布失败 event_type=%s exception_type=%s",
+            event.type,
+            type(exc).__name__,
+        )
 
 class NoEventSubscribers(RuntimeError):
     """需要 UI 响应的事件没有任何订阅者。"""

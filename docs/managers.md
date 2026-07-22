@@ -109,24 +109,26 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 **单一职责**：把模型名或别名解析为真实模型 ID，并返回对应的、按模型缓存的 `LLMProvider` 实例。
 
 **消费的配置**：
-- `llm`（`__post_init__` `llm_mgr.py:46-49`）：`default`（必填）、`best`/`fast`（可选，缺省回退 `default`）、`concurrency`（缺省 5）、`max_retries`（缺省 3）。
-- `tool.page_token_rate`（`llm_mgr.py:49`）——传给 provider 用于分页预算。
-- `llm_provider.*`（`load_models`/`_create_provider`）：各 provider 的 `base_url`、`api_key`、`models`、`reasoning_effort`、`preserve_thinking`、`context_limit`。
+- `llm`（`__post_init__`，`llm_mgr.py:59-119`）：顶层与 `retry` 必须是 mapping；`concurrency` 必须是非 bool 且 `>= 1` 的整数；`timeout_seconds`、`retry.base_delay_seconds`、`retry.max_delay_seconds` 必须是非 bool 的有限正数；`retry.max_attempts` 必须是非 bool 且 `>= 1` 的整数，最大延迟不得小于基础延迟。`default` 必填，`best`/`fast` 缺省回退 `default`。
+- `tool.page_token_rate`（`llm_mgr.py:118`）——传给 provider 用于分页预算。
+- `llm_provider.*`（`load_models`/`_create_provider`）：顶层与每个 provider 项必须是 mapping，provider 名和 `base_url` 必须是非空字符串；`models` 必须是仅含非空字符串的列表，并按首次出现顺序去重（`llm_mgr.py:407-478`）。其余字段包括 `api_key`、`reasoning_effort`、`preserve_thinking`、`context_limit`。
 - **Claude Code 兼容别名**（`_CLAUDECODE_ALIASES` `llm_mgr.py:17-21`）：`opus`→`best`、`sonnet`→`default`、`haiku`→`fast`。
 
 **公共方法**：
 
 | 方法 | 关键参数 | 返回 | 作用 |
 |---|---|---|---|
-| `load_models` (async) | — | `None` | 并发对各 provider 调 `list_models`，失败回退 `provider_cfg.models`，建立模型→provider 映射 |
+| `load_models` (async) | — | `None` | 并发发现模型；单个 provider 失败时记录 `provider_errors`，仅在静态 `models` 非空时回退；跨 provider 的同名模型归属冲突会抛配置错误 |
 | `resolve_model` | `model: str \| None` | `str` | 解析顺序：`None`→`"default"`→CC 别名→config 别名→精确匹配→子串模糊匹配（多个取最短）→回退 `default` |
-| `ensure_default_available` | — | `None` | 启动前置校验：默认模型解析后不在可用集则抛 `ModelUnavailableError` |
+| `ensure_default_available` | — | `None` | 启动前精确校验配置的默认模型；不可用时携安全化的 provider 发现错误抛 `ModelUnavailableError`，不切换到其他 provider |
 | `get` | `model: str \| None` | `LLMProvider` | 解析并返回缓存的 provider 实例（未知模型抛 `ValueError`） |
 | `list_models` | — | `list[str]` | 已加载可用模型名（排序） |
 
 **feature 门控**：否。 **reload**：无。
 
-**持有的关键状态**：`_model_to_provider`（模型→provider 名）、`_cache`（模型→provider 实例）、`_default_concurrency`、`_default_max_retries`、`_page_token_rate`。
+**模型发现规则**（`llm_mgr.py:121-223`）：每个 provider 独立调用 `list_models()`；发现响应同样执行严格模型列表校验。失败信息经统一分类后写入 `provider_errors`，静态 `models` 为空时该 provider 不注册模型。模型 ID 只能归属一个 provider，冲突会终止启动。
+
+**持有的关键状态**：`_model_to_provider`（模型→provider 名）、`_cache`（模型→provider 实例）、`provider_errors`（provider→安全结构化发现错误）、`_default_concurrency`、`_timeout_seconds`、`_retry_config`、`_page_token_rate`、`_user_agent`。
 
 模型解析、Provider 抽象与流式细节见 [llm.md](llm.md)。配置键见 [configuration-reference.md](configuration-reference.md)。
 
@@ -212,9 +214,10 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 
 **单一职责**：判断是否需要压缩，按原子消息块无损切分历史，用 LLM 滚动生成摘要，拼装压缩后的上下文前缀，并把完整原始历史写入 transcript。
 
-**构造参数**（每 agent 层，在 `Agent.__post_init__` `agent.py:129-137` 从 `compact` 配置换算）：
+**构造参数**（每 agent 层，在 `Agent.__post_init__` `agent.py:202-212` 从 `compact` 配置换算）：
 - `llm`：本 agent 的 provider（估算 token、生成摘要）。
 - `workdir`：transcript 落盘目录 `workdir/.agent/transcripts/`。
+- `caller_agent_type`、`caller_uuid`：摘要 LLM 调用沿用的 agent 类型与实例标识。
 - `auto_compact_size` = `context_limit * compact.auto_compact_rate`；非正数禁用自动压缩。
 - `keep_recent_user_turns` = `compact.keep_recent_user_turns`（缺省 3），定义优先保留近期原文的用户轮次范围。
 - `recent_messages_token_limit` = `context_limit * compact.keep_recent_messages_token_rate`（缺省率 0.25），是近期原文的硬预算。
@@ -287,7 +290,7 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 
 **`task_delegator` 关键行为**（`subagent_mgr.py:84-211`）：
 - 未知 `agent_type` 返回错误并列出已知；
-- 有 `task_id` 时委派前将任务置 `in_progress` 并设 `owner`，异常退出回滚为 `pending`（正常返回**不**自动标 `completed`，留给主 agent 评估）；
+- 有 `task_id` 时委派前将任务置 `in_progress` 并设 `owner`；异常退出或 `RunResult.llm_error` 非空时均回滚为无 owner 的 `pending`，其余正常返回**不**自动标 `completed`，留给主 agent 评估；
 - 工具集经 `tools_mgr.resolve_subagent_tools(manifest.tools)` 解析；`model == "inherit"` 继承父 agent 已解析的真实模型 ID；`enable_thinking`/`features` 未声明时继承父 agent；
 - 用 `Agent.from_manifest(is_subagent=True, ...)` 构造子 agent 实例；
 - 触发 `SubagentStart`/`SubagentStop` hook 与 `SubagentLifecycle`（start/end）事件（异常/取消也发 end）；`SubagentStop` hook 的 `blocked`/`additional_context` 可覆盖或追加结果。

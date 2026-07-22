@@ -1,285 +1,178 @@
 # Agent 运行时
 
-本文档详细说明应用主循环 `AgentApp`、Agent 状态机的全部状态、每轮的可变上下文 `RunContext`、逐个状态处理器（handler）的行为、边缘状态、`Agent.from_manifest` 工厂与 `PermissionModeController`。
-
-相关文档：
-- 四层架构与装配流程见 [architecture.md](./architecture.md)。
-- 权限模式与 plan 模式细节见 [permissions.md](./permissions.md)。
-- 上下文压缩 `CompactMgr` 见 [managers.md](./managers.md)。
-- 事件与 UI 见 [events-and-ui.md](./events-and-ui.md)。
-
----
+本文档说明 `AgentApp` 外层 REPL、`Agent` 状态机、`RunContext` / `RunResult`、终态 LLM 错误处理、响应恢复、上下文压缩和子 agent 返回语义。LLM 分类与重试见 [llm.md](llm.md)，事件展示见 [events-and-ui.md](events-and-ui.md)。
 
 ## 1. `AgentApp` 外层 REPL
 
-`AgentApp`（`src/app/app.py:20-28`）是一个 dataclass，持有 `deps: AgentDeps`、`agent_view_store` 与 `output_router`，管理外层 REPL 与会话生命周期。
+`AgentApp.run()`（`src/app/app.py:30-76`）先启动 UI 与事件消费者，输出启动信息并创建主 Agent，随后持续调用 `_run_agent_turn()`。Agent 内部可完成多轮输入；只有退出或上抛命令才返回给应用层。`/clear` 重建会话，`/agents` 复用当前 Agent 浏览子 agent 记录。
 
-### `run()` — 主 REPL 循环（`app.py:30-76`）
+`_consume_events()`（`app.py:120-132`）内联处理 `InterruptRequested`，其余事件统一交 `OutputRouter.dispatch()`，确保 Store 先记录再决定可见性。`_run_agent_turn()`（`app.py:134-155`）把 `agent.run()` 包成任务，取消或键盘中断时调用 `_handle_interrupted_turn()` 收束任务与输入。
 
-1. `await self.deps.ui.start()` 启动 UI。
-2. `asyncio.create_task(self._consume_events())` 创建事件消费任务，并 `await asyncio.sleep(0)` 让其先运行一步。
-3. `await self.deps.event_bus.request_output(self._startup_banner())` 打印启动横幅（含 model、role、permission mode、workdir、快捷键提示，见 `app.py:277-304`）；role 使用 `RoleMgr` 实际激活的角色名与清单描述，无可用角色时显示 `unavailable`。
-4. `agent = await self._reset_session(source="startup")` 初始化会话与主 agent。
-5. `while True` 循环调用 `_run_agent_turn(agent)`，按返回的 `RunResult` 处理：
-   - `result is None` → 被中断，`continue` 继续下一轮（`app.py:45-47`）。
-   - `result.exit_requested` → `break` 退出循环（`app.py:48-49`）。
-   - `result.command[0] == "clear"` → 调用 `_reset_session(source="clear")` 重建 agent，输出"上下文已清理"，`continue`（`app.py:50-55`）。
-   - `result.command[0] == "agents"` → 从 Store 浏览子 agent 快照与只读转录（`app.py:56-59`）。
-6. `finally` 收尾：运行 `SessionEnd` hook、关闭 `event_bus`、取消消费任务、`ui.stop()`（`app.py:60-76`）。
+`_reset_session()`（`app.py:182-220`）的顺序是：生成 `session_id`；对固定 Manager/UI 列表调用可用的 `reload()`；重置 `AgentViewStore` 和会话上下文；安装 `PermissionModeController`；从激活角色 manifest 构造新主 Agent；登记前台 UUID；安装权限快捷键；运行 `SessionStart` hook。
 
-### `_consume_events()`（`app.py:120-132`）
+## 2. 状态枚举与流转
 
-订阅 `event_bus.subscribe()` 异步迭代事件。`InterruptRequested` 事件**内联处理**（调用 `_handle_interrupt_requested`），其余事件统一交 `output_router.dispatch(event)` 先写 Store 再分流。
+`AgentState` 定义在 `src/agent/states.py:42-56`：
 
-### `_run_agent_turn()`（`app.py:134-155`）
+| 状态 | 职责 |
+|---|---|
+| `REQUEST_INPUT` | 读取用户输入、命令和 UserPromptSubmit hook |
+| `CHECK_COMPACT` | 构建提示词、估算完整输入、检查压缩进展 |
+| `COMPACT` | 执行一次自动压缩并返回复检 |
+| `LLM_CALL` | 调用统一 LLM 模板方法 |
+| `PROCESS_RESPONSE` | 分流普通、工具、长度和协议续接终态 |
+| `LENGTH_RETRY` | 保存可用文本、丢弃半截工具调用并请求恢复 |
+| `PAUSE_TURN` | 回填 Anthropic 原始响应载体并按协议自动续接 |
+| `EXECUTE_TOOLS` | 并行执行本轮工具调用 |
+| `POST_ROUND` | 注入 reminder，处理手动压缩 |
+| `CHECK_STOP` | 执行 Stop hook |
+| `SUMMARIZE_EXIT` | 压缩无法继续时生成退出总结 |
+| `CONTEXT_OVERFLOW` | 生成上下文限制的安全终态文本 |
+| `LLM_FAILURE` | 生成其他 LLM 终态错误的安全终态文本 |
+| `DONE` | 单轮状态机终态 |
 
-把 `agent.run()` 包成 task 存入 `self._work_task`，在 `ui.watch_interrupt(self._request_interrupt)` 上下文中 `await` 它：
+主流程：
 
-- 正常完成返回 `RunResult`。
-- 捕获 `asyncio.CancelledError` / `KeyboardInterrupt` → 调用 `_handle_interrupted_turn()` 并返回 `None`（表示被中断）。
-- `finally` 清空 `_work_task`。
-
-`_handle_interrupted_turn()`（`app.py:234-249`）先消化当前 task 的 cancelling 状态（`uncancel`），取消工作任务与活跃输入，等待工作任务收束，输出"已中断当前任务"。
-
-### `_reset_session()`（`app.py:182-220`）
-
-会话重置流程：
-
-1. 生成新 `session_id = str(uuid.uuid4())`（`app.py:198`），使新 agent 的 `TaskManager` 指向空目录（旧任务留在磁盘可 `/resume` 找回）。
-2. 遍历有状态 Manager 逐个 `reload()`（列表见 [architecture.md](./architecture.md) 第 5 节，`app.py:200-205`）。
-3. `AgentViewStore.reset()` 原子清空会话展示状态，再清空 `session_context`（`app.py:206-207`）。
-4. `_install_permission_mode_controller()` 创建 `PermissionModeController` 并注入 `deps.permission_mode_controller`（`app.py:208-209`）。
-5. `Agent.from_manifest(...)` 以激活角色 manifest 构造主 agent（`is_subagent=False`，`app.py:210-214`）。
-6. `AgentViewStore.register_foreground(...)` 登记新主 agent，再安装权限快捷键并通知重绘（`app.py:215-218`）。
-7. `_run_session_start_hooks(source)` 运行 `SessionStart` hook，其附加上下文追加到 `session_context`（`app.py:219`、`app.py:260-275`）。
-
-### `shutdown()`（`app.py:251-258`）
-
-断开 MCP server 连接（`mcp_mgr.stop()`）。与 `create_app()` 中的 `mcp_mgr.start()` 同处 `main` 任务，由 `main.py:41-42` 的 `finally` 保证调用。
-
----
-
-## 2. `AgentState` 全枚举
-
-状态枚举定义在 `src/agent/states.py:39-51`。
-
-| 状态 | 值 | 职责 |
-|---|---|---|
-| `REQUEST_INPUT` | `request_input` | 收集用户输入、解析斜杠命令、运行 UserPromptSubmit hook |
-| `CHECK_COMPACT` | `check_compact` | 构建系统提示词、估算完整 provider 输入、判断压缩进展 |
-| `COMPACT` | `compact` | 执行一次自动压缩，记录结果并立即返回复检 |
-| `LLM_CALL` | `llm_call` | 调用 LLM，捕获上下文超长错误 |
-| `PROCESS_RESPONSE` | `process_response` | 处理响应：length 截断 / 工具调用 / 结束 |
-| `LENGTH_RETRY` | `length_retry` | 文本截断时续写；工具调用截断时丢弃半截调用并要求重新生成 |
-| `EXECUTE_TOOLS` | `execute_tools` | 并行执行本轮所有工具调用 |
-| `CHECK_STOP` | `check_stop` | 运行 Stop hook，决定是否放行结束 |
-| `POST_ROUND` | `post_round` | 注入 reminder、执行手动 compact |
-| `SUMMARIZE_EXIT` | `summarize_exit` | 压缩连续失败后，退出前做一次总结 |
-| `CONTEXT_OVERFLOW` | `context_overflow` | LLM 报上下文超长，产出错误提示后退出 |
-| `DONE` | `done` | 单轮终态 |
-
-### Happy path 流转图
-
-```
+```text
 REQUEST_INPUT
-     │
-     ▼
-CHECK_COMPACT ──需压缩──▶ COMPACT ──┐
-     │                              │
-     │◀─────────────────────────────┘
-     ▼
-  LLM_CALL
-     │
-     ▼
-PROCESS_RESPONSE ──length──▶ LENGTH_RETRY ──▶ LLM_CALL
-     │                                   （上限后 → DONE）
-     │ 有 tool_calls
-     ▼
-EXECUTE_TOOLS ──▶ POST_ROUND ──▶ CHECK_COMPACT （循环下一轮）
-     │
-     │ 无 tool_calls（PROCESS_RESPONSE 分支）
-     ▼
- CHECK_STOP ──Stop hook 阻断──▶ CHECK_COMPACT
-     │
-     ▼
-   DONE
+    ↓
+CHECK_COMPACT ──需要压缩──→ COMPACT ──┐
+    │                                 │
+    └─────────────────────────────────┘
+    ↓
+LLM_CALL → PROCESS_RESPONSE ──length────→ LENGTH_RETRY ──可恢复──→ LLM_CALL
+               │                              └─耗尽──→ LLM_FAILURE → DONE
+               ├─pause_turn──→ PAUSE_TURN ───可恢复──→ LLM_CALL
+               │                              └─耗尽──→ LLM_FAILURE → DONE
+               ├─tool_calls──→ EXECUTE_TOOLS → POST_ROUND → CHECK_COMPACT
+               └─普通结束──→ CHECK_STOP ──Stop hook 阻断──→ CHECK_COMPACT
+                                      └─放行──→ DONE
 ```
 
-即文字描述：`REQUEST_INPUT → CHECK_COMPACT → [COMPACT → CHECK_COMPACT → …] → LLM_CALL → PROCESS_RESPONSE → [EXECUTE_TOOLS → POST_ROUND → CHECK_COMPACT] → CHECK_STOP → DONE`。
+所有 handler 还有统一失败边：
 
----
+```text
+任一 handler 抛 LLMCallError
+    ├─ context_limit → CONTEXT_OVERFLOW → DONE
+    └─ 其他类别      → LLM_FAILURE      → DONE
+```
+
+因此自动/手动 compact、退出总结和普通对话调用都遵循同一错误收口，不在各 handler 内复制异常判断。
 
 ## 3. `RunContext` 与 `RunResult`
 
-### `RunContext`（`states.py:54-100`）
+`RunContext`（`src/agent/states.py:59-120`）保存单轮全部可变状态：
 
-一次 `Agent.run()` 全部可变状态的载体。每轮新建一个实例，避免异步/多轮状态串扰。
-
-| 字段 | 类型 | 默认值 | 说明 |
-|---|---|---|---|
-| `messages` | `list[dict]` | 必填 | 对话消息列表（指向 `self.history`） |
-| `prompt` | `list[dict] \| None` | `None` | 系统提示词，`CHECK_COMPACT` 中由 `PromptMgr.build()` 填充 |
-| `final_text` | `str` | `""` | LLM 最终输出文本 |
-| `has_tool_calls` | `bool` | `False` | 本轮是否发生过工具调用 |
-| `round_start_idx` | `int` | `0` | 本轮在 history 中的起始下标（中断时回滚用） |
-| `compact_streak` | `int` | `0` | 连续“token 实际下降但仍超阈值”的自动压缩计数 |
-| `max_compact_streak` | `int` | `3` | 连续有效压缩保护上限，第三次仍超阈值时转 `SUMMARIZE_EXIT` |
-| `auto_compact_before_tokens` | `int \| None` | `None` | 待复检的自动压缩前完整输入 token 估算 |
-| `auto_compact_summarized_message_count` | `int \| None` | `None` | 最近一次自动压缩返回的摘要消息数 |
-| `auto_compact_has_summary` | `bool \| None` | `None` | 最近一次自动压缩是否返回非空摘要 |
-| `stop_hook_used` | `bool` | `False` | Stop hook 是否已阻断过一次（防止无限阻断） |
-| `length_recoveries` | `int` | `0` | 长度截断续写计数 |
-| `max_length_recoveries` | `int` | `3` | 续写上限 |
-| `response` | `LLMResponse \| None` | `None` | 最近一次 LLM 响应 |
-| `manual_compact` | `bool` | `False` | 本轮是否调用了 `compact` 工具 |
-| `compact_focus` | `str \| None` | `None` | 手动压缩的 focus 参数 |
-| `user_input` | `str` | `""` | 用户本轮原始输入 |
-| `command` | `tuple[str, list[str]] \| None` | `None` | 需 app 层处理的斜杠命令（仅 `/clear`） |
-| `exit_requested` | `bool` | `False` | 是否请求退出 |
-
-### `RunResult`（`states.py:103-119`）
-
-`Agent.run()` 返回值。`/plan`、`/mode`、`/resume` 在 agent 内部处理，不进入 `command`；仅 `/clear` 通过 `command` 传给 app 层。
-
-| 字段 | 类型 | 默认值 | 说明 |
-|---|---|---|---|
-| `final_text` | `str` | `""` | LLM 最终输出文本 |
-| `command` | `tuple[str, list[str]] \| None` | `None` | 需 app 层处理的斜杠命令（仅 `/clear`） |
-| `exit_requested` | `bool` | `False` | 用户请求退出（输入 exit/quit 或输入被取消） |
-| `user_input` | `str` | `""` | 用户原始输入文本 |
-
-### `SLASH_COMMANDS`（`states.py:8-14`）
-
-斜杠命令元数据的唯一来源，供输入框自动补全，与 `agent.py` 的命令分发保持一致（仅列已实现命令）：
-
-| 命令 | 描述 |
+| 字段组 | 字段 |
 |---|---|
-| `plan` | 进入计划模式 |
-| `mode` | 切换权限模式 |
-| `clear` | 清空会话 |
-| `resume` | 恢复历史会话 |
+| 消息与输出 | `messages`、`prompt`、`final_text`、`response` |
+| 轮次回滚 | `turn_start_messages`（追加本轮 user 前的浅快照）、`round_start_idx`（无快照上下文的兼容回退） |
+| 轮次与工具 | `has_tool_calls`、`manual_compact`、`compact_focus` |
+| 自动压缩 | `compact_streak`、`max_compact_streak=3`、压缩前 token、摘要消息数、摘要是否非空 |
+| 响应恢复 | `length_recoveries`、`max_length_recoveries=3`、`response_recovery_start_idx`、`response_recovery_response_count`、`pause_turn_message_idx`、`pause_turn_continuations` |
+| 交互终态 | `user_input`、`command`、`exit_requested`、`stop_hook_used` |
+| LLM 终态 | `llm_error: LLMErrorInfo | None` |
 
-`parse_command(user_input)`（`states.py:17-36`）将以 `/` 开头的输入解析为 `(命令名小写, 参数列表)`，否则返回 `None`。
+`RunResult`（`src/agent/states.py:123-141`）返回 `final_text`、`command`、`exit_requested`、`user_input` 和 `llm_error`。调用方无需从错误文本反向推断类别。`/plan`、`/mode`、`/resume` 在 Agent 内处理；`/clear` 与 `/agents` 通过 `command` 交给应用层。
 
----
+## 4. 单点 LLM 错误收口
 
-## 4. 逐个 handler 行为
+`_run_single_turn()`（`src/agent/agent.py:381-420`）是唯一捕获 `LLMCallError` 的状态机边界。每次执行 handler 时：
 
-状态到方法的映射由 `_handlers` dict 建立（`agent.py:161-174`）。状态机循环在 `_run_single_turn`（`agent.py:300-326`）中：反复取 `_handlers[state](ctx)` 得到下一状态，直至 `DONE`；每次转移 `emit` 一个 `AgentStateChanged` 事件。捕获 `CancelledError`/`KeyboardInterrupt` 时回滚 `history[round_start_idx:]` 并保存 `_pending_input` 后重新抛出。
+1. 成功则使用 handler 返回的下一状态；
+2. 捕获 `LLMCallError` 后把 `exc.info` 写入 `ctx.llm_error`；
+3. `context_limit` 转 `CONTEXT_OVERFLOW`，其余类别转 `LLM_FAILURE`；
+4. 仍发出本次状态变更事件；
+5. 到 `DONE` 后把结构化错误放进 `RunResult.llm_error`。
 
-| 状态 | 方法 | 关键行为与转移 |
+控制流取消不走 LLM 失败状态：`CancelledError` / `KeyboardInterrupt` 先回滚响应恢复链，再用 `turn_start_messages` 原地恢复本轮开始前的历史，把用户输入存入 `_pending_input` 后原样抛出；仅没有快照的兼容上下文才回退到 `round_start_idx`（`agent.py:413-420`）。因此即使 auto compact 已改写列表长度，取消也不会遗留当前 user 或协议载体。
+
+### 分类到状态与操作建议
+
+| 情况 | 状态 | 历史处理 |
 |---|---|---|
-| `REQUEST_INPUT` | `_on_request_input`（`agent.py:330-407`） | 见下方详解 |
-| `CHECK_COMPACT` | `_on_check_compact`（`agent.py:544-631`） | 见下方详解 |
-| `COMPACT` | `_on_compact`（`agent.py:633-656`） | emit `CompactDelta("auto compact")`，调用 `compact_history` 替换 `messages`，保存结果信号后转回 `CHECK_COMPACT` |
-| `LLM_CALL` | `_on_llm_call`（`agent.py:658-673`） | `normalize_messages` 后 `llm.chat(...)`；捕获 `is_context_too_long_error` 转 `CONTEXT_OVERFLOW`，否则转 `PROCESS_RESPONSE` |
-| `PROCESS_RESPONSE` | `_on_process_response`（`agent.py:675-687`） | `finish_reason == "length"` → `LENGTH_RETRY`；有 `tool_calls` → `EXECUTE_TOOLS`；否则 → `CHECK_STOP` |
-| `LENGTH_RETRY` | `_on_length_retry`（`agent.py:689-736`） | 见下方"边缘状态" |
-| `EXECUTE_TOOLS` | `_on_execute_tools`（`agent.py:738-798`） | 见下方详解 |
-| `CHECK_STOP` | `_on_check_stop`（`agent.py:800-818`） | 见下方详解 |
-| `POST_ROUND` | `_on_post_round`（`agent.py:820-840`） | 见下方详解 |
-| `SUMMARIZE_EXIT` | `_on_summarize_exit`（`agent.py:842-864`） | 见下方"边缘状态" |
-| `CONTEXT_OVERFLOW` | `_on_context_overflow`（`agent.py:866-869`） | 见下方"边缘状态" |
+| `context_limit` | `CONTEXT_OVERFLOW` | 保留本轮 user 消息，不追加错误 assistant |
+| provider 正常返回 `finish_reason="length"` | `LENGTH_RETRY` | 保存实际收到的 assistant 文本；半截工具调用不保存 |
+| Anthropic 正常返回 `finish_reason="pause_turn"` | `PAUSE_TURN` | 回填 provider 原始 blocks；连续 pause 只保留最新载体 |
+| 长度恢复耗尽 | `LLM_FAILURE`，`llm_error.kind=output_limit` | 回滚本轮截断正文和续写指令，只保留本轮原始 user 与此前合法历史 |
+| pause 协议续接耗尽 | `LLM_FAILURE`，`llm_error.kind=output_limit` | 回滚整个混合恢复链，不切换模型 |
+| `content_policy`、认证、权限、额度、请求、网络、服务、协议与未知错误 | `LLM_FAILURE` | 保留本轮 user 消息，不采用失败尝试的正文，不追加错误 assistant |
 
-### `_on_request_input`（`agent.py:330-407`）
+`_on_context_overflow()` 与 `_on_llm_failure()` 只设置 `ctx.final_text`，不改写 `ctx.messages`（`agent.py:1130-1166`）。`_format_llm_failure_text()` 按错误类别生成安全摘要和可操作建议：上下文/输出要求缩小范围，内容政策要求调整内容，认证/权限/额度要求检查凭据、权限或额度，瞬时错误建议稍后重试（`agent.py:40-97`）。
 
-1. `event_bus.request_input("\n\n你: ", default=self._pending_input)` 收集输入；被取消/无订阅者时置 `exit_requested=True` 转 `DONE`（`agent.py:338-349`）。
-2. 输入 `exit`/`quit`（小写）→ `exit_requested=True`，转 `DONE`（`agent.py:354-356`）。
-3. `parse_command` 解析斜杠命令并分派（`agent.py:358-378`）：
-   - `/plan` → `_handle_plan_command()` 进入计划模式，回到 `REQUEST_INPUT`。
-   - `/mode` → `_handle_mode_command()`（委托 `PermissionModeController.prompt_selection`），回到 `REQUEST_INPUT`。
-   - `/clear` → 写入 `ctx.command`，转 `DONE`（交 app 层处理）。
-   - `/resume` → `_handle_resume_command(args)`，回到 `REQUEST_INPUT`。
-   - 未知命令 → 输出提示，回到 `REQUEST_INPUT`。
-4. 运行 `UserPromptSubmit` hook（`agent.py:380-396`）：`blocked` 则输出原因回到 `REQUEST_INPUT`；`additional_context` 追加到 `user_input`。
-5. `build_turn_start_instructions(permission_mode)` 前缀注入（`agent.py:398-400`），记录 `round_start_idx`，追加 user 消息，转 `CHECK_COMPACT`。
+失败不会终止主 REPL。主 Agent 的当前单轮到 `DONE` 后，`Agent.run(input=None)` 持久化现有历史并继续下一次 `REQUEST_INPUT`；用户可在保留原请求的会话中继续输入（`agent.py:371-379`）。
 
-### `_on_check_compact`（`agent.py:544-631`）
+## 5. 主要 handler
 
-`prompt = PromptMgr.build()`，再在线程中按实际 provider 请求形态估算 `messages + prompt + tools`。首次超阈值时把估算写入 `auto_compact_before_tokens` 并转 `COMPACT`；`COMPACT` 完成后立即回到本状态重新估算。
+handler 映射在 `Agent.__post_init__` 建立（`src/agent/agent.py:236-250`）。
 
-复检时，摘要消息数为 0、摘要为空或 `after_tokens >= before_tokens` 都表示没有有效进展，记录 agent 类型、前后 token 和原因后立即转 `SUMMARIZE_EXIT`。只有 token 实际下降但仍超阈值才增加 `compact_streak`；第三次连续有效压缩后仍超阈值时记录“连续 3 次有效 compact 后仍需压缩”并退出总结。降到阈值内则清零 streak 后转 `LLM_CALL`。`context_limit <= 0` 换算出的阈值非正，自动压缩禁用。
+### 输入与命令
 
-### `_on_execute_tools`（`agent.py:738-798`）
+`_on_request_input()`（`agent.py:490-567`）读取输入；处理 `exit` / `quit`；分派 `/plan`、`/mode`、`/clear`、`/agents`、`/resume`；运行 `UserPromptSubmit` hook；注入 turn-start reminder；最后保存 `turn_start_messages`、记录兼容下标并追加 user 消息。
 
-- 置 `has_tool_calls=True`，重置 `manual_compact`/`compact_focus`。
-- 内嵌 `_run_one(tc)` 对每个工具调用做校验与执行：被排除工具返回错误文本（`tool_name=None`）；未知工具返回错误；解析 `arguments`，若工具名为 `compact` 则特判置 `manual_compact=True` 并记录 `focus`（`agent.py:769-775`）；调用 `tools_mgr.execute(...)`，异常包成错误文本。
-- **`asyncio.gather` 并行执行**同一轮所有工具调用（`agent.py:787`），结果按原始顺序追加为 `role: tool` 消息。
-- `reminder_mgr.notify_tool_round(called_tools)`，转 `POST_ROUND`。
+### 压缩检查
 
-### `_on_check_stop`（`agent.py:800-818`）
+`_on_check_compact()`（`agent.py:705-792`）构建当前系统提示词，并在线程中按 provider 的真实请求形态估算 `messages + prompt + tools`。超阈值转 `COMPACT`；压缩后立即复检：摘要消息数为 0、摘要为空、token 未下降都视为无进展并转 `SUMMARIZE_EXIT`；token 下降但连续三次仍超阈值也转退出总结。
 
-若有 `hooks_mgr` 且本轮尚未用过 Stop hook：运行 `Stop` hook。若 `blocked` → 置 `stop_hook_used=True`，追加 `<reminder>{reason}</reminder>` user 消息，转回 `CHECK_COMPACT`（让 LLM 继续）。否则转 `DONE`。
+`_on_compact()`（`agent.py:794-817`）发 `CompactDelta`，调用当前 Agent 独占的 `CompactMgr`，替换历史并保存压缩进展信号。LLM 摘要调用携当前 Agent 的类型和 UUID，事件仍归属正确调用方。
 
-### `_on_post_round`（`agent.py:820-840`）
+### LLM 调用与正常响应
 
-- 收集 `reminder_mgr.collect_post_round_messages(permission_mode)` 追加到 `messages`。
-- 若 `ctx.manual_compact`（本轮调用了 `compact` 工具）→ emit `CompactDelta("llm manual")`，用 `focus` 执行与自动压缩相同的切分/摘要流水线并替换 `messages`（`agent.py:824-838`）；无待摘要消息时原历史不变，且不写入自动压缩进展标记。
-- 转 `CHECK_COMPACT`（进入下一轮）。
+`_on_llm_call()`（`agent.py:819-840`）先 `normalize_messages()`，再调用 `llm.chat()`，传递 prompt、工具 schema、agent 身份与思考开关。它不捕获 LLM 异常。
 
----
+`_on_process_response()`（`agent.py:842-870`）在普通调用中用当前正文替换 `final_text`（包括空串，避免旧工具前言残留），在已建立恢复 checkpoint 时只累加非空正文；`length` 与 `pause_turn` 分别转专用恢复状态。普通终态或完整工具调用会清空恢复状态、追加真实 `assistant_message`，再转 `EXECUTE_TOOLS` 或 `CHECK_STOP`。因此恢复链能给 `RunResult` 与 Stop hook 完整拼接正文，后续普通工具轮仍只返回最后一份完整回答。
 
-## 5. 边缘状态
+### 工具与 Stop hook
 
-### `LENGTH_RETRY`（`_on_length_retry`，`agent.py:689-736`）
+`_on_execute_tools()`（`agent.py:991-1051`）用 `asyncio.gather` 并行执行同一回复的所有工具调用，结果按原顺序追加为 tool 消息。禁用/未知工具与执行异常都转换为对应工具结果文本。`POST_ROUND` 注入提醒；如本轮调用 `compact` 工具，则执行带 focus 的手动压缩，再回 `CHECK_COMPACT`（`agent.py:1073-1093`）。
 
-响应因 `finish_reason == "length"` 被截断时进入，并按响应是否携带工具调用分流：
+`_on_check_stop()`（`agent.py:1053-1071`）只允许 Stop hook 阻断一次；阻断时追加 reminder user 消息并回 `CHECK_COMPACT`，否则结束本轮。
 
-- 普通文本截断保留完整的 provider assistant 消息，追加“从中断处直接继续，不要回顾、不要重复”的 user 指令后重试，原有续写语义不变（`agent.py:708-712,733-735`）。
-- 工具调用截断绝不执行或保存半截调用，只把非空 `content` 重建为纯文本 assistant；`tool_calls`、调用 ID、参数、推理字段和 provider 原始调用载体均不进入历史。随后明确告知模型该调用已丢弃且未执行，要求重新生成完整调用；长参数拆成较小调用，写大文件使用分块能力（`agent.py:699-707,726-735`）。
+## 6. 响应恢复链
 
-若 `length_recoveries >= max_length_recoveries`（达到 3 次恢复上限），追加不含工具调用的错误 assistant 并转 `DONE`；否则计数加一，经 `normalize_messages` 后转回 `LLM_CALL`。上限来自 `RunContext.max_length_recoveries = 3`（`states.py:94`），达到上限时历史仍满足消息协议（`agent.py:714-736`）。
+`length` 与 Anthropic `pause_turn` 共用 `response_recovery_start_idx`，checkpoint 在第一份待恢复响应写入历史前建立，不依赖可能被 compact 改写的 `round_start_idx`。`response_recovery_response_count` 只统计当前链成功返回的恢复响应，供合成的 `LLMCallFailed.attempts` 使用；provider 请求内部的网络重试仍由 `LLMProvider.chat()` 独立计数（`src/agent/states.py:79-113`、`src/agent/agent.py:872-989`）。
 
-### `CONTEXT_OVERFLOW`（`_on_context_overflow`，`agent.py:866-869`）
+### `length`
 
-`LLM_CALL` 捕获到 `llm.is_context_too_long_error(exc)` 时进入。写入固定错误文本"上下文过长，已多次压缩仍无法继续……"追加为 assistant 消息，转 `DONE`。
+`_on_length_retry()`（`src/agent/agent.py:872-935`）处理 provider 已合法返回的 `finish_reason="length"`：
 
-### `SUMMARIZE_EXIT`（`_on_summarize_exit`，`agent.py:842-864`）
+- 普通文本截断：保存真实 assistant 消息，追加“从中断处继续”的 user 指令，经归一化后再调 LLM。
+- 工具调用截断：不执行、不保存半截调用 ID、名称、参数或 provider 原始工具载体；仅保存非空正文为纯文本 assistant，再要求模型生成完整且更小的工具调用。
+- 从 pause 转入 length 时清除 `pause_turn_message_idx`，停止替换旧 pause 载体，但保留整条恢复链 checkpoint。
 
-自动压缩无有效进展，或连续 3 次有效压缩后仍需压缩时进入。追加一条 user 消息要求 LLM 总结（1 已完成 / 2 未完成 / 3 后续建议），以 `tools=[]`、`enable_thinking=False` 调用 `llm.chat`。若此次调用又报上下文超长 → 写入错误文本转 `DONE`；否则记录总结文本、追加 assistant 消息，转 `DONE`。上限来自 `RunContext.max_compact_streak = 3`（`states.py:88`）。
+### `pause_turn`
 
----
+`_on_pause_turn()`（`src/agent/agent.py:937-989`）从 provider 查询 `protocol_continuation_limit("pause_turn")`。未达上限时不添加合成 user，而是把 Anthropic `assistant_message` 中的原始 blocks 回填历史，以完全相同的 prompt、messages 和 tools 发起下一次独立调用。连续 pause 用最新载体替换上一份；若中间经过 length，则新 pause 追加新载体。归一化后会重新校验实际载体位置，避免空载体被删除后留下越界索引。
 
-## 6. `Agent.from_manifest` 工厂与 `__post_init__`
+默认上限由 Anthropic provider 配置决定。达到上限时不切换模型，统一生成非重试 `output_limit`；网络、超时等错误仍只消耗 provider 自己的重试次数。
 
-### `from_manifest(manifest, deps, *, is_subagent=False, **overrides)`（`agent.py:176-226`）
+### 收口与回滚
 
-将 `AgentManifest` 各字段映射为 `Agent` 构造参数：`agent_type`、`description`、`role_prompt`（= `manifest.prompt`）、`tools`、`memory`（经 `_resolve_memory_scope` 解析）、`model`、`permission_mode`、`enable_thinking`（默认 `True`）、`features`。`**overrides` 允许覆盖任意字段。`manifest is None` 时创建最小回退 Agent（`agent.py:199-207`）。
+普通终态或完整工具调用会清 checkpoint、响应计数和 pause 状态并提交历史。恢复耗尽由 `_fail_response_recovery()` 统一构造一次安全 `LLMCallFailed`；续接调用抛出的终态 `LLMCallError` 则已由 provider 发出失败事件，Agent 只调用 `_rollback_response_recovery()`，不会重复遥测（`src/agent/agent.py:381-486`）。两条路径都会删除 checkpoint 之后的全部 length/pause 临时消息，保留原始 user 与此前合法历史。
 
-`_resolve_memory_scope`（`agent.py:32-45`）：manifest 显式声明则用其值；未声明时主 agent 默认 `"project"`（加载项目记忆），子 agent 默认 `None`（不加载）。
+恢复期间已显示的正文是真实模型输出，不是错误占位消息；若最终失败，这些残片只保留在 UI/Store 转录中。取消或键盘中断还会用本轮开始快照恢复 compact 前历史，防止重复 user 与孤立载体（`src/agent/agent.py:413-437`）。
 
-### `__post_init__` 关键副作用（`agent.py:113-174`）
+## 7. 退出总结与 compact 错误
 
-1. 生成 `uuid`。
-2. 解析权限模式：`permission_mode is None` 时回退 `permission_mgr.default_mode`（缺失则全局 `DEFAULT_MODE`）（`agent.py:119-122`）。
-3. `self.llm = deps.llm_mgr.get(self.model)`（`agent.py:123`）；`model="inherit"` 由 LLMMgr 解析为父 agent 真实模型 ID。
-4. `resolve_features(self.features)` 解析 feature 集，`excluded_tool_names(features)` 算出 `_excluded_tools`，`refresh_tools_schemas()` 构建工具 schema（`agent.py:125-128`）。
-5. 创建 `CompactMgr`：`auto_compact_size = context_limit * compact_cfg["auto_compact_rate"]`（`agent.py:129-137`）。
-6. feature 门控创建 agent 级 Manager：`FileMgr`（`file`）、`SkillMgr`（`skill`）、`SubAgentMgr`（`subagent`）（`agent.py:138-148`）。
-7. `PromptMgr`（`agent.py:149`）。
-8. `TaskManager`（`task` feature）：主 agent 持久化到磁盘（`global_dir / "tasks" / session_id`），子 agent 为纯内存独立实例（`agent.py:151-157`）。
-9. `ReminderMgr`，若有 `_task_mgr` 则注册它（`agent.py:158-160`）。
-10. 构建 `_handlers` dict（`agent.py:161-174`）。
+`_on_summarize_exit()`（`src/agent/agent.py:1095-1128`）在自动压缩无进展或连续压缩仍超阈值时构造一份临时 `summary_messages`，以 `tools=[]`、`enable_thinking=False` 调用同一 `llm.chat()`。成功时才把临时消息和真实 assistant 总结写回历史。
 
-### `run(input)` 双模式（`agent.py:265-298`）
+如果 compact 的内部摘要调用或退出总结调用失败，`LLMCallError` 都由 `_run_single_turn()` 捕获。失败的临时总结 user 指令不会写回 `ctx.messages`；原用户历史保持可继续使用。上下文类别进入 `CONTEXT_OVERFLOW`，其他类别进入 `LLM_FAILURE`。
 
-- **子 agent 模式**（`input is not None`）：从 `CHECK_COMPACT` 开始执行**单轮**，追加 user 输入（含 turn-start 指令前缀），返回后清理 reasoning 内容（`agent.py:278-288`）。
-- **主 agent 模式**（`input is None`）：`while True` 交互循环，每轮从 `REQUEST_INPUT` 开始，轮末 `_persist_session(user_input)` 持久化会话历史与元数据（`agent.py:290-298`）；`exit_requested` 或有 `command` 时返回。
+`CompactMgr._call_summary_request()` 透传所属 Agent 的 `caller_agent_type` / `caller_uuid`（`src/mgr/compact_mgr.py:454-469`），因此压缩调用的开始、重试、失败和流增量都进入正确 agent 的 Store 视图。
 
-权限模式切换（`set_permission_mode`）与 plan 模式进入/退出逻辑见 [permissions.md](./permissions.md)（`agent.py:238-263`）。
+## 8. 主 Agent 与子 Agent
 
----
+`Agent.from_manifest()`（`src/agent/agent.py:252-303`）映射 manifest 的身份、提示词、工具、记忆、模型、权限、思考与 feature。主 Agent 未声明 memory 时默认 `project`，子 Agent 默认不加载；`**overrides` 供委派时注入已解析设置。
 
-## 7. `PermissionModeController`
+`Agent.__post_init__()`（`agent.py:182-250`）解析权限模式与模型，解析 feature、过滤工具，创建带调用方身份的 `CompactMgr`，再按 feature 创建 `FileMgr`、`SkillMgr`、`SubAgentMgr`、`TaskManager`，并构造 `PromptMgr`、`ReminderMgr` 与 handler 表。
 
-`src/app/permission_mode_controller.py` 协调权限模式交互、UI 状态条与 agent 工具 schema 刷新。**仅作用于入口主 agent**——子 agent 权限模式构造后固定不变。
+`Agent.run()` 有两种模式（`agent.py:342-379`）：
 
-| 成员 | 源码 | 行为 |
-|---|---|---|
-| `install_mode_provider()` | `permission_mode_controller.py:44-58` | 向 UI 注册明确的权限模式 provider；主 agent 未绑定时回退 `default_mode` |
-| `prompt_selection()` | `permission_mode_controller.py:60-86` | `/mode` 命令：以 `MENU_MODES` 构建方向键选择菜单，选中后 `agent.set_permission_mode(mode)`，变化则 `_refresh_agent()` |
-| `install_shortcut(agent)` | `permission_mode_controller.py:88-98` | 绑定主 agent 并注册 Shift+Tab 轮转回调（`cycle_mode`） |
-| `cycle_mode()` | `permission_mode_controller.py:108-124` | Shift+Tab：在 `CAROUSEL_MODES` 中循环切换主 agent 权限模式，变化则 `_refresh_agent()` |
-| `_refresh_agent()` | `permission_mode_controller.py:126-132` | 刷新 agent 工具 schema（`refresh_tools_schemas`）并发出权限模式重绘通知 |
+- 主 Agent `input=None`：持续多轮 REPL；终态 LLM 错误结束当前轮但不退出会话。
+- 子 Agent `input` 非空：从 `CHECK_COMPACT` 执行一个任务，立即返回含 `llm_error` 的 `RunResult`。
 
-`CAROUSEL_MODES`（Shift+Tab 轮换集）与 `MENU_MODES`（`/mode` 菜单集）定义在 `src/mgr/permission_mgr.py`，详见 [permissions.md](./permissions.md)。控制器由 `AgentApp._install_permission_mode_controller()` 在每次 `_reset_session` 时创建并注入 `deps.permission_mode_controller`。
+`SubAgentMgr.task_delegator()` 检查 `run_result.llm_error`；子 agent 以 LLM 终态失败返回时，关联 task 回滚为无 owner 的 `pending`，与异常/取消路径一致，最终错误文本仍返回父 Agent（`src/mgr/subagent_mgr.py:197-205`）。生命周期 end 事件照常携当时的真实 history，便于 `/agents` 诊断。
+
+## 9. 权限模式协调
+
+`PermissionModeController` 只作用于入口主 Agent。`prompt_selection()` 驱动 `/mode` 菜单，`cycle_mode()` 驱动 Shift+Tab，变化后统一刷新工具 schema 和 UI（`src/app/permission_mode_controller.py:59-85,107-132`）。子 agent 权限模式在构造时确定，生命周期内不被主 Agent 的切换影响。

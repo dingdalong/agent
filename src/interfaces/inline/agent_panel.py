@@ -210,8 +210,13 @@ class AgentPanelActions:
             return ANSI("")
         uuid = self._viewing_uuid
         messages = self._agent_view_store.transcript_messages(uuid)
-        if messages:  # 已完成：完整原始消息
-            lines = self._message_lines(uuid, messages)
+        if messages:  # 已完成：完整原始消息 + 不进入 Agent.history 的错误诊断
+            diagnostics = [
+                segment
+                for segment in self._agent_view_store.transcript_segments(uuid)
+                if segment[0] in {"retry", "error"}
+            ]
+            lines = self._message_lines(uuid, messages, diagnostics)
         else:  # 运行中：实时增量分段
             lines = self._transcript_lines(
                 uuid,
@@ -251,26 +256,44 @@ class AgentPanelActions:
         self._transcript_cache = (signature, lines)
         return lines
 
-    def _message_lines(self, uuid: str, messages: list[dict]) -> list[str]:
+    def _message_lines(
+        self,
+        uuid: str,
+        messages: list[dict],
+        diagnostics: list[tuple[str, str]] | None = None,
+    ) -> list[str]:
         """把某子 agent 的完整原始消息（Agent.history）渲染为可滚动的 ANSI 行列表（已完成 agent 查看用）。
 
         逐条按 role 完整渲染、不截断：user→「▶ 用户」+原文；assistant→「● 助手」+思考(dim)+正文+
         每个工具调用「⚙ <工具名>」+美化 JSON 参数；tool→「⚙ 结果 (<tool_call_id 末段>)」+返回原文。
-        带缓存：签名 = (uuid, 消息条数, 内容总长, 渲染宽度)；签名不变直接复用，避免每帧重渲大 history。
+        retry/error 诊断从 Store 转录单独追加，不写入 Agent.history，也不重复实时正文。
+        带缓存：签名包含消息与诊断长度；签名不变直接复用，避免每帧重渲大 history。
 
         Args:
             uuid: 目标子 agent 的 uuid（参与缓存签名，切换 agent 即失效）。
             messages: 该 agent 的完整原始消息列表（调用方已保证非空）。
+            diagnostics: Store 中保留的 retry/error 诊断分段。
         Returns:
             渲染后的 ANSI 文本按 "\\n" 切分的行列表。
         """
         content_len = sum(len(str(m.get("content") or "")) for m in messages)
-        signature = (uuid, len(messages), content_len, self._render_width)
+        diagnostic_segments = diagnostics or []
+        diagnostic_len = sum(len(segment_text) for _, segment_text in diagnostic_segments)
+        signature = (
+            uuid,
+            len(messages),
+            content_len,
+            len(diagnostic_segments),
+            diagnostic_len,
+            self._render_width,
+        )
         if self._message_cache is not None and self._message_cache[0] == signature:
             return self._message_cache[1]
         text = Text()
         for msg in messages:
             self._append_message(text, msg)
+        for kind, segment_text in diagnostic_segments:
+            text.append(segment_text, style="yellow" if kind == "retry" else "red")
         with self._status_console.capture() as capture:
             self._status_console.print(text, end="")
         lines = capture.get().split("\n")

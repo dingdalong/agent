@@ -3,14 +3,16 @@
 from typing import Union
 
 from src.events.levels import EventLevel
-from src.events.bus import EventBus, NoEventSubscribers
+from src.events.bus import EventBus, NoEventSubscribers, emit_telemetry_safely
 from src.events.types import (
     AgentStateChanged,
     CompactDelta,
     Event,
     InterruptRequested,
     LLMCallCompleted,
+    LLMCallFailed,
     LLMCallStarted,
+    LLMRetrying,
     OutputRequested,
     PermissionNotice,
     ResponseDelta,
@@ -37,7 +39,7 @@ AgentEvent = Union[
     InputMenu, OutputRequested, InterruptRequested,
     PermissionNotice, PermissionMenu, ChoiceMenu, ChoiceInputMenu, FormMenu,
     CompactDelta, ToolCallCompleted, ToolCallStarted,
-    LLMCallCompleted, LLMCallStarted,
+    LLMCallCompleted, LLMCallStarted, LLMRetrying, LLMCallFailed,
     ResponseDelta, ThinkingDelta,
     AgentStateChanged, SubagentLifecycle, PermissionModeChanged,
 ]
@@ -46,6 +48,7 @@ __all__ = [
     "EventLevel",
     "EventBus",
     "NoEventSubscribers",
+    "emit_telemetry_safely",
     "Event",
     "AgentEvent",
     "CompactDelta",
@@ -54,6 +57,10 @@ __all__ = [
     "PermissionNotice",
     "ToolCallCompleted",
     "ToolCallStarted",
+    "LLMCallCompleted",
+    "LLMCallStarted",
+    "LLMRetrying",
+    "LLMCallFailed",
     # 菜单/交互事件
     "MenuRequest",
     "PermissionMenu",

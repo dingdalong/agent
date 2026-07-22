@@ -2,7 +2,7 @@
 
 本目录是本框架**面向人类开发者与运维者**的系统技术参考：既讲清每个模块/Manager 的职责与关键方法（开发者视角），又讲清每个配置项能填什么、有什么效果（运维视角）。所有事实以源码为准，涉及源码处给出 `文件:行` 引用。
 
-> 与根目录文档的分工：`README.md`（面向使用者的简介）、`CLAUDE.md`（面向 AI 助手的精简工作指引）、本 `docs/`（面向人的完整参考）。
+> 与根目录文档的分工：`README.md`（面向使用者的简介）、`AGENTS.md`（面向 AI 助手的精简工作指引）、本 `docs/`（面向人的完整参考）。
 
 ## 快速开始
 
@@ -40,7 +40,7 @@ uv run pytest                            # 运行全部测试
 | [architecture.md](architecture.md) | 四层架构、`create_app()` 装配顺序、`AgentDeps` 字段、feature 门控总览、`reload()` 协议、路径解析（`paths.py`） |
 | [agent-runtime.md](agent-runtime.md) | `AgentApp` 外层 REPL、`AgentState` 全枚举与边缘状态、`RunContext`、逐个 handler、`Agent.from_manifest`、`PermissionModeController` |
 | [managers.md](managers.md) | Manager 服务层参考：逐个 Manager 的职责/公共方法/消费配置/reload/feature 门控 |
-| [llm.md](llm.md) | `LLMProvider` 基类与 `LLMResponse`、`chat()` 并发与重试、分页、四个 provider（Anthropic/OpenAI/DeepSeek/Ollama）差异 |
+| [llm.md](llm.md) | `LLMProvider` 调用模板、统一错误分类与重试、流式协议、模型发现及五个 provider（Anthropic/OpenAI/DeepSeek/Ollama/Moonshot）差异 |
 | [tools.md](tools.md) | `@tool` 装饰器、`ToolEntry`/`ToolPermission`、`subagent`/`feature` 门控、`ToolsMgr.execute` 流水线、内置工具清单 |
 | [roles-subagents-skills.md](roles-subagents-skills.md) | 角色系统（三层发现、`role.md`、`common/`）、子智能体（四层扫描、frontmatter、委派）、技能系统、内置 agent 清单 |
 | [permissions.md](permissions.md) | 6 种权限模式、6 步评估顺序、`PermissionRule` 规则格式、`resolve_ask` 选项、按 agent 独立模式、工具可见性 |

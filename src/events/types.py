@@ -96,16 +96,19 @@ class ToolCallCompleted(Event):
 
 @dataclass
 class LLMCallStarted(Event):
-    """LLM 调用开始时的 token 估算信息。
+    """LLM 单次尝试开始时的序号与 token 估算信息。
 
     级别为 PROGRESS：内联状态条在 LLM 调用一开始（首个增量到达前）就需要据此点亮 spinner；
-    context_limit 携带当前 provider 的上下文窗口上限，供 UI 按 agent 计算占用比例。
+    context_limit 携带当前 provider 的上下文窗口上限，供 UI 按 agent 计算占用比例；attempt 与
+    max_attempts 标识本次调用在统一自动重试流程中的位置。
     """
     model: str = ""
     context_limit: int = 0
     estimated_input_tokens: int = 0
     message_count: int = 0
     tool_count: int = 0
+    attempt: int = 1
+    max_attempts: int = 1
     level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
     type: Literal["llm_call_started"] = field(default="llm_call_started", init=False)
 
@@ -137,17 +140,55 @@ class LLMRetrying(Event):
     级别为 PROGRESS：状态条要据此在实时重绘区显示倒计时，必须不被级别门控丢弃。
 
     Attributes:
-        error_type: 触发重试的异常类名（如「InternalServerError」）。
+        error_kind: 稳定的 LLM 错误类别。
+        safe_message: 不含请求体、响应体和凭据的错误摘要。
+        partial: 失败尝试是否已收到正文、思考或工具片段。
+        tool_fragment_state: 工具片段状态，取 none、partial 或 complete。
         attempt: 已失败的尝试序号（1 基）。
         max_attempts: 允许的最大尝试次数。
         wait_seconds: 本次等待秒数（含随机抖动，为原始浮点值，展示时由 UI 向上取整）。
     """
-    error_type: str = ""
+    error_kind: str = ""
+    safe_message: str = ""
+    partial: bool = False
+    tool_fragment_state: str = "none"
     attempt: int = 0
     max_attempts: int = 0
     wait_seconds: float = 0.0
     level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
     type: Literal["llm_retrying"] = field(default="llm_retrying", init=False)
+
+
+@dataclass
+class LLMCallFailed(Event):
+    """LLM 调用不可继续后的安全终态信息。
+
+    级别为 PROGRESS：前台 UI 必须永久展示终态，后台调用则由 AgentViewStore 记录但不直接输出。
+    事件只携带分类器生成的安全摘要、有限 provider 元数据与诊断关联 ID，不包含请求体、响应体、
+    凭据或原始异常文本。
+
+    Attributes:
+        error_kind: 稳定的 LLM 错误类别。
+        safe_message: 不含请求体、响应体和凭据的错误摘要。
+        attempts: 本次调用实际执行的尝试次数。
+        partial: 终态尝试是否已收到正文、思考或工具片段。
+        tool_fragment_state: 工具片段状态，取 none、partial 或 complete。
+        status_code: 安全提取的 HTTP 状态码。
+        provider_code: 安全提取的 provider 错误码。
+        request_id: 安全提取的 provider 请求 ID。
+        diagnostic_id: 本地安全诊断关联 ID。
+    """
+    error_kind: str = ""
+    safe_message: str = ""
+    attempts: int = 0
+    partial: bool = False
+    tool_fragment_state: str = "none"
+    status_code: int | None = None
+    provider_code: str | None = None
+    request_id: str | None = None
+    diagnostic_id: str = ""
+    level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
+    type: Literal["llm_call_failed"] = field(default="llm_call_failed", init=False)
 
 
 @dataclass

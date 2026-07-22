@@ -1,13 +1,97 @@
 """OpenAI SDK 实现的 LLM Provider — Responses API。"""
 
+from __future__ import annotations
+
 import logging
 import time
+from typing import TYPE_CHECKING, Any, AsyncIterable
 import tiktoken
 from openai import AsyncOpenAI
-from src.llm.base import LLMProvider, LLMResponse
-from src.tools import ToolDict
+from src.llm.base import (
+    LLMCallContext,
+    LLMProvider,
+    LLMResponse,
+    iter_llm_stream,
+    validate_chat_completion_stream,
+)
+from src.llm.errors import LLMStreamResponseError
+
+if TYPE_CHECKING:
+    from src.tools import ToolDict
 
 logger = logging.getLogger(__name__)
+
+_OPENAI_RESPONSE_FINISH_REASONS = frozenset({"stop", "tool_calls"})
+
+
+def _openai_stream_error(
+    source: Any,
+    *,
+    fallback_message: str,
+) -> LLMStreamResponseError:
+    """从 Responses API 事件或响应提取有限错误元数据。
+
+    Args:
+        source: 携带 error、状态码或请求 ID 的事件或响应对象。
+        fallback_message: provider 未提供 message 时使用的协议摘要。
+
+    Returns:
+        不携带完整响应对象的流响应异常。
+    """
+    error = getattr(source, "error", None) or source
+    message = getattr(error, "message", None)
+    code = getattr(error, "code", None) or getattr(error, "type", None)
+    request_id = getattr(source, "request_id", None) or getattr(
+        source,
+        "_request_id",
+        None,
+    )
+    status_code = getattr(source, "status_code", None)
+    return LLMStreamResponseError(
+        message if isinstance(message, str) and message else fallback_message,
+        code=code if isinstance(code, str) else None,
+        status_code=status_code if isinstance(status_code, int) else None,
+        request_id=request_id if isinstance(request_id, str) else None,
+    )
+
+
+def _openai_refusal_error(source: Any) -> LLMStreamResponseError:
+    """构造不包含拒绝正文的 Responses API 内容政策异常。
+
+    Args:
+        source: 可选携带请求 ID 的流事件或终态响应。
+
+    Returns:
+        provider code 固定为 refusal 的安全流响应异常。
+    """
+    request_id = getattr(source, "request_id", None) or getattr(
+        source,
+        "_request_id",
+        None,
+    )
+    return LLMStreamResponseError(
+        "Responses API 响应被拒绝",
+        code="refusal",
+        request_id=request_id if isinstance(request_id, str) else None,
+    )
+
+
+def _contains_refusal_block(value: Any) -> bool:
+    """递归判断 Responses API 最终输出是否含 refusal block。
+
+    Args:
+        value: model_dump 后的输出项、嵌套字段或标量值。
+
+    Returns:
+        任一嵌套字典的 type 为 refusal 时返回 True，否则返回 False。
+    """
+    if isinstance(value, dict):
+        if value.get("type") == "refusal":
+            return True
+        return any(_contains_refusal_block(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_refusal_block(item) for item in value)
+    return False
 
 
 class OpenAIProvider(LLMProvider):
@@ -170,10 +254,25 @@ class OpenAIProvider(LLMProvider):
         tools: list[ToolDict] | None = None,
         temperature: float = 0.6,
         tool_choice: str | dict | None = None,
-        caller_agent_type: str | None = None,
-        caller_uuid: str | None = None,
         enable_thinking: bool = True,
+        *,
+        call: LLMCallContext,
     ) -> LLMResponse:
+        """向 Responses API 发起一次流式调用。
+
+        Args:
+            messages: 会话消息列表。
+            prompt: 可选系统提示词列表。
+            tools: 可选工具 schema 列表。
+            temperature: 采样温度。
+            tool_choice: 工具选择策略。
+            enable_thinking: 是否启用思考。
+            call: 当前独立调用尝试上下文。
+
+        Returns:
+            归一化后的 LLM 响应。
+        """
+        caller_agent_type = call.caller_agent_type
         input_items = self._convert_to_input(messages, prompt)
         converted_tools = self._convert_tools(tools)
 
@@ -196,35 +295,50 @@ class OpenAIProvider(LLMProvider):
             kwargs["tool_choice"] = tool_choice or "auto"
 
         stream = await self._client.responses.create(**kwargs)
-        return await self._parse_stream(stream, caller_agent_type, caller_uuid)
+        return await self._parse_stream(stream, call=call)
 
     async def _parse_stream(
         self,
-        stream,
-        caller_agent_type: str | None = None,
-        caller_uuid: str | None = None,
+        stream: AsyncIterable[Any],
+        *,
+        call: LLMCallContext,
     ) -> LLMResponse:
-        """解析 Responses API 流式事件。"""
+        """解析 Responses API 事件并即时记录工具片段。
+
+        Args:
+            stream: Responses API 异步事件流。
+            call: 当前独立调用尝试上下文。
+
+        Returns:
+            归一化后的 LLM 响应。
+        """
         tool_calls: dict[int, dict[str, str]] = {}
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
-        finish_reason = None
+        finish_reason: str | None = None
         usage = None
         output_items: list[dict] = []
+        terminal_response: Any | None = None
+        terminal_event_type: str | None = None
 
         func_call_map: dict[str, int] = {}
         next_idx = 0
 
-        async for event in stream:
+        async for event in iter_llm_stream(stream):
             et = event.type
+            if terminal_event_type is not None:
+                raise LLMStreamResponseError(
+                    "Responses API 终态后出现额外事件",
+                    code="invalid_response",
+                )
 
             if et == "response.output_text.delta":
                 content_parts.append(event.delta)
-                await self.emit_response_delta(event.delta, caller_agent_type, caller_uuid)
+                await self.emit_response_delta(event.delta, call=call)
 
             elif et == "response.reasoning_summary_text.delta":
                 reasoning_parts.append(event.delta)
-                await self.emit_thinking_delta(event.delta, caller_agent_type, caller_uuid)
+                await self.emit_thinking_delta(event.delta, call=call)
 
             elif et == "response.output_item.added":
                 item = event.item
@@ -237,26 +351,93 @@ class OpenAIProvider(LLMProvider):
                         "name": item.name or "",
                         "arguments": "",
                     }
+                    call.record_tool_fragment(
+                        idx,
+                        call_id=item.call_id or "",
+                        name=item.name or "",
+                    )
 
             elif et == "response.function_call_arguments.delta":
                 idx = func_call_map.get(event.item_id)
-                if idx is not None:
-                    tool_calls[idx]["arguments"] += event.delta
+                if idx is None:
+                    raise LLMStreamResponseError(
+                        "工具参数增量引用了未知输出项",
+                        code="invalid_response",
+                    )
+                tool_calls[idx]["arguments"] += event.delta
+                call.record_tool_fragment(idx, arguments=event.delta)
+
+            elif et in {"response.refusal.delta", "response.refusal.done"}:
+                raise _openai_refusal_error(event)
+
+            elif et in {"error", "response.error"}:
+                terminal_event_type = et
+                raise _openai_stream_error(
+                    event,
+                    fallback_message="Responses API 返回流错误事件",
+                )
+
+            elif et == "response.failed":
+                terminal_event_type = et
+                raise _openai_stream_error(
+                    event.response,
+                    fallback_message="Responses API 响应失败",
+                )
+
+            elif et == "response.incomplete":
+                terminal_event_type = et
+                terminal_response = event.response
+                details = getattr(terminal_response, "incomplete_details", None)
+                reason = getattr(details, "reason", None)
+                if reason == "max_output_tokens":
+                    finish_reason = "length"
+                elif reason == "content_filter":
+                    raise LLMStreamResponseError(
+                        "响应被内容政策过滤",
+                        code="content_filter",
+                        request_id=getattr(terminal_response, "_request_id", None),
+                    )
+                else:
+                    raise LLMStreamResponseError(
+                        "Responses API 返回未知 incomplete 原因",
+                        code="invalid_response",
+                        request_id=getattr(terminal_response, "_request_id", None),
+                    )
 
             elif et == "response.completed":
-                resp = event.response
-                usage = getattr(resp, "usage", None)
-                if resp.status == "completed":
-                    finish_reason = "stop"
-                elif resp.status == "incomplete":
-                    finish_reason = "length"
-                else:
-                    finish_reason = resp.status
-                for item in getattr(resp, "output", []) or []:
-                    if hasattr(item, "model_dump"):
-                        output_items.append(item.model_dump(exclude_none=True))
-                    elif isinstance(item, dict):
-                        output_items.append(item)
+                terminal_event_type = et
+                terminal_response = event.response
+                if getattr(terminal_response, "status", None) != "completed":
+                    raise LLMStreamResponseError(
+                        "Responses API completed 事件状态非法",
+                        code="invalid_response",
+                        request_id=getattr(terminal_response, "_request_id", None),
+                    )
+                finish_reason = "tool_calls" if tool_calls else "stop"
+
+        if finish_reason is None or terminal_response is None:
+            raise LLMStreamResponseError(
+                "Responses API 流在合法终态前结束",
+                code="invalid_response",
+            )
+
+        usage = getattr(terminal_response, "usage", None)
+        for item in getattr(terminal_response, "output", []) or []:
+            if hasattr(item, "model_dump"):
+                output_items.append(item.model_dump(exclude_none=True))
+            elif isinstance(item, dict):
+                output_items.append(item)
+
+        if any(_contains_refusal_block(item) for item in output_items):
+            raise _openai_refusal_error(terminal_response)
+
+        if finish_reason != "length":
+            validate_chat_completion_stream(
+                finish_reason,
+                tool_calls,
+                valid_finish_reasons=_OPENAI_RESPONSE_FINISH_REASONS,
+            )
+            call.mark_tool_fragments_complete()
 
         content = "".join(content_parts)
 
@@ -275,8 +456,6 @@ class OpenAIProvider(LLMProvider):
                 }
                 for tc in tool_calls.values()
             ]
-            if not finish_reason:
-                finish_reason = "tool_calls"
 
         return LLMResponse(
             content=content,

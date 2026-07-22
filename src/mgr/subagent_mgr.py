@@ -111,61 +111,79 @@ class SubAgentMgr:
 
         # —— 自动标记任务为 in_progress ——
         task_mgr = getattr(parent_agent, '_task_mgr', None) if parent_agent else None
+        task_rolled_back = False
+
+        def _rollback_task() -> None:
+            """把关联任务恢复为无负责人的 pending 状态。
+
+            Returns:
+                None。
+            """
+            nonlocal task_rolled_back
+            if task_rolled_back or not task_id or not task_mgr:
+                return
+            task_rolled_back = True
+            try:
+                task_mgr.update(task_id, status="pending", owner="")
+            except ValueError:
+                pass
+
         if task_id and task_mgr:
             try:
                 task_mgr.update(task_id, status="in_progress", owner=agent_type)
             except ValueError:
                 pass
 
-        # 解析子 agent 的最终工具集（自动注入 subagent=True、排除 subagent=False）
-        tools = self.deps.tools_mgr.resolve_subagent_tools(manifest.tools)
-
-        # 解析模型：inherit 表示继承父 agent 已解析的真实模型 ID
-        model_value = manifest.model
-        if model_value == "inherit" and parent_agent is not None:
-            model_value = parent_agent.llm.model
-
-        # 思考模式：显式设置则用设置值，否则继承父 agent
-        enable_thinking = manifest.enable_thinking
-        if enable_thinking is None:
-            enable_thinking = getattr(parent_agent, "enable_thinking", True)
-
-        # feature 集：子 agent 自身 manifest 声明则用其值，否则继承父 agent 已解析的 feature 集
-        features = manifest.features
-        if features is None:
-            features = getattr(parent_agent, "features", None)
-
-        from src.agent import Agent
-        agent = Agent.from_manifest(
-            manifest=manifest,
-            deps=self.deps,
-            is_subagent=True,
-            tools=tools,
-            model=model_value,
-            enable_thinking=enable_thinking,
-            features=features,
-        )
-
-        hooks_mgr = self.deps.hooks_mgr
-        fire_hooks = hooks_mgr is not None and parent_agent is not None
-        hook_kwargs = {}
-        if fire_hooks:
-            hook_kwargs = {
-                "session_id": self.deps.session_id,
-                "agent_id": str(getattr(parent_agent, "uuid", "")),
-                "agent_type": getattr(parent_agent, "agent_type", ""),
-            }
-            await hooks_mgr.run_event(
-                "SubagentStart",
-                agent_type,
-                {"subagent_type": agent_type, "subagent_id": str(agent.uuid), "prompt": prompt},
-                **hook_kwargs,
-            )
-
-        # 获取 event_bus（用于发射 SubagentLifecycle），异常/取消时 finally 也需引用
         event_bus = getattr(self.deps, "event_bus", None)
+        agent: Any = None
+        primary_error: BaseException | None = None
 
         try:
+            # 解析子 agent 的最终工具集（自动注入 subagent=True、排除 subagent=False）
+            tools = self.deps.tools_mgr.resolve_subagent_tools(manifest.tools)
+
+            # 解析模型：inherit 表示继承父 agent 已解析的真实模型 ID
+            model_value = manifest.model
+            if model_value == "inherit" and parent_agent is not None:
+                model_value = parent_agent.llm.model
+
+            # 思考模式：显式设置则用设置值，否则继承父 agent
+            enable_thinking = manifest.enable_thinking
+            if enable_thinking is None:
+                enable_thinking = getattr(parent_agent, "enable_thinking", True)
+
+            # feature 集：子 agent 自身 manifest 声明则用其值，否则继承父 agent 已解析的 feature 集
+            features = manifest.features
+            if features is None:
+                features = getattr(parent_agent, "features", None)
+
+            from src.agent import Agent
+            agent = Agent.from_manifest(
+                manifest=manifest,
+                deps=self.deps,
+                is_subagent=True,
+                tools=tools,
+                model=model_value,
+                enable_thinking=enable_thinking,
+                features=features,
+            )
+
+            hooks_mgr = self.deps.hooks_mgr
+            fire_hooks = hooks_mgr is not None and parent_agent is not None
+            hook_kwargs = {}
+            if fire_hooks:
+                hook_kwargs = {
+                    "session_id": self.deps.session_id,
+                    "agent_id": str(getattr(parent_agent, "uuid", "")),
+                    "agent_type": getattr(parent_agent, "agent_type", ""),
+                }
+                await hooks_mgr.run_event(
+                    "SubagentStart",
+                    agent_type,
+                    {"subagent_type": agent_type, "subagent_id": str(agent.uuid), "prompt": prompt},
+                    **hook_kwargs,
+                )
+
             # 发射子 agent 生命周期开始事件
             if event_bus is not None:
                 await event_bus.emit(SubagentLifecycle(
@@ -176,38 +194,47 @@ class SubAgentMgr:
                     phase="start",
                 ))
 
-            result = (await agent.run(prompt)).final_text
-        except Exception:
+            run_result = await agent.run(prompt)
+            result = run_result.final_text
+            if run_result.llm_error is not None:
+                _rollback_task()
+        except BaseException as exc:
             # —— 子智能体异常退出，回滚任务状态 ——
-            if task_id and task_mgr:
-                try:
-                    task_mgr.update(task_id, status="pending", owner="")
-                except ValueError:
-                    pass
+            primary_error = exc
+            _rollback_task()
             raise
         finally:
             # 发射子 agent 生命周期结束事件（异常/取消也发）；携完整原始消息记录供 /agents 回看。
             # list(...) 浅拷贝快照：结束后 history 内各 dict 不再被改写。异常/取消路径捕获到当时的部分 history。
-            if event_bus is not None:
-                await event_bus.emit(SubagentLifecycle(
-                    timestamp=time.time(),
-                    source="subagent_mgr",
-                    agent_uuid=str(agent.uuid),
-                    agent_type=agent_type,
-                    phase="end",
-                    messages=list(agent.history),
-                ))
+            if agent is not None and event_bus is not None:
+                try:
+                    await event_bus.emit(SubagentLifecycle(
+                        timestamp=time.time(),
+                        source="subagent_mgr",
+                        agent_uuid=str(agent.uuid),
+                        agent_type=agent_type,
+                        phase="end",
+                        messages=list(agent.history),
+                    ))
+                except BaseException:
+                    if primary_error is None:
+                        _rollback_task()
+                        raise
 
-        if fire_hooks:
-            stop_result = await hooks_mgr.run_event(
-                "SubagentStop",
-                agent_type,
-                {"subagent_type": agent_type, "subagent_id": str(agent.uuid), "result": result},
-                **hook_kwargs,
-            )
-            if stop_result.blocked:
-                result = stop_result.block_reason or result
-            elif stop_result.additional_context:
-                result = result + "\n\n" + "\n\n".join(str(c) for c in stop_result.additional_context)
+        try:
+            if fire_hooks:
+                stop_result = await hooks_mgr.run_event(
+                    "SubagentStop",
+                    agent_type,
+                    {"subagent_type": agent_type, "subagent_id": str(agent.uuid), "result": result},
+                    **hook_kwargs,
+                )
+                if stop_result.blocked:
+                    result = stop_result.block_reason or result
+                elif stop_result.additional_context:
+                    result = result + "\n\n" + "\n\n".join(str(c) for c in stop_result.additional_context)
+        except BaseException:
+            _rollback_task()
+            raise
 
         return result

@@ -139,7 +139,8 @@ class StatusBarActions:
         remaining = max(0, math.ceil(self._retry_deadline - now))
         status.append(f"{frame} ", style="yellow")
         status.append(
-            f"{self._active_agent_name()} · API错误({self._retry_error_type})，"
+            f"{self._active_agent_name()} · LLM错误[{self._retry_error_kind}] "
+            f"{self._retry_safe_message}，"
             f"{remaining}秒后重试 ({self._retry_attempt}/{self._retry_max})",
             style="yellow",
         )
@@ -376,26 +377,29 @@ class StatusBarActions:
 
     def _begin_retry_countdown(
         self,
-        error_type: str,
+        error_kind: str,
+        safe_message: str,
         attempt: int,
         max_attempts: int,
         wait_seconds: float,
     ) -> None:
         """进入处理态并开始 API 重试倒计时，驱动活动区实时倒计时行。
 
-        记录截止 monotonic（now + wait_seconds）与错误信息；首次记录本回合处理起点。
+        记录截止 monotonic（now + wait_seconds）与安全错误信息；首次记录本回合处理起点。
         倒计时期间保持既有 `_activity` 文案不变，收到下一轮 LLMCallStarted 的 `_set_activity`
         时倒计时被清除。
 
         Args:
-            error_type: 触发重试的异常类名。
+            error_kind: 稳定的 LLM 错误类别。
+            safe_message: 不含请求体、响应体和凭据的错误摘要。
             attempt: 已失败的尝试序号（1 基）。
             max_attempts: 允许的最大尝试次数。
             wait_seconds: 本次等待秒数（含抖动的原始浮点值）。
         """
         now = time.monotonic()
         self._retry_deadline = now + wait_seconds
-        self._retry_error_type = error_type
+        self._retry_error_kind = error_kind
+        self._retry_safe_message = safe_message
         self._retry_attempt = attempt
         self._retry_max = max_attempts
         self._mode = "processing"
@@ -411,7 +415,7 @@ class StatusBarActions:
             activity: 当前活动文案（如"思考中"、"回应中"、工具名；空串为提交后的空闲态）。
         """
         left_retry = self._retry_deadline is not None
-        self._retry_deadline = None  # 任何活动开始都结束重试等待
+        self._clear_retry_status()
         activity_changed = activity != self._activity
         self._activity = activity
         self._mode = "processing"
@@ -424,6 +428,18 @@ class StatusBarActions:
             # 弹窗期间消费者阻塞、不会触发活动切换，故此刻必不在暂停中。
             self._activity_paused_baseline = self._turn_clock.paused_seconds(now)
 
+    def _clear_retry_status(self) -> None:
+        """清空重试倒计时、安全错误摘要与尝试序号。
+
+        Returns:
+            None。
+        """
+        self._retry_deadline = None
+        self._retry_error_kind = ""
+        self._retry_safe_message = ""
+        self._retry_attempt = 0
+        self._retry_max = 0
+
     def _reset_turn_status(self) -> None:
         """清零单回合状态：整轮/本步耗时起点、暂停累计、活动文案与当前 agent。在每次进入输入阶段时调用。
 
@@ -435,7 +451,7 @@ class StatusBarActions:
         self._activity_paused_baseline = 0.0
         self._turn_clock.reset()
         self._activity = ""
-        self._retry_deadline = None
+        self._clear_retry_status()
         self._current_agent_type = None
         self._current_agent_uuid = None
         # 防御性清空本轮缓冲：正常流程下 Trigger B 已在进入输入态前 flush，此处兜底避免残留跨回合。

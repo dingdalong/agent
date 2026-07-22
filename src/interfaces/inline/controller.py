@@ -276,7 +276,8 @@ class InlineController(
 
         # ---- API 重试倒计时（前台 agent 指数退避等待，驱动活动区黄色倒计时行）----
         self._retry_deadline: float | None = None  # 本次重试等待的截止 monotonic 秒（None 表示不在重试等待）
-        self._retry_error_type: str = ""  # 触发重试的异常类名
+        self._retry_error_kind: str = ""  # 稳定的 LLM 错误类别
+        self._retry_safe_message: str = ""  # 不含请求响应正文或凭据的安全错误摘要
         self._retry_attempt: int = 0  # 已失败的尝试序号（1 基）
         self._retry_max: int = 0  # 允许的最大尝试次数
 
@@ -584,7 +585,7 @@ class InlineController(
             None.
         """
         self._session_elapsed_accumulated = 0.0
-        self._retry_deadline = None
+        self._clear_retry_status()
         self._round_entries = []
         self._round_agent_type = None
         self._round_agent_uuid = None
@@ -873,8 +874,6 @@ class InlineController(
         if not self._tty:
             return ""
         return await self._await_transcript_view(uuid)
-
-
 
 
 

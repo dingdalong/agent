@@ -202,6 +202,8 @@ class CompactMgr:
     Args:
         llm: LLM 提供方实例，用于估算 token 和生成摘要。
         workdir: 用户工作目录，对话记录存放在 workdir/.agent/transcripts/。
+        caller_agent_type: 所属 agent 类型，透传给内部摘要调用事件。
+        caller_uuid: 所属 agent UUID，透传给内部摘要调用事件。
         auto_compact_size: 自动压缩的绝对输入 token 阈值；非正数表示禁用。
         keep_recent_user_turns: 优先保留原文的近期用户轮数。
         recent_messages_token_limit: 保留近期原文的绝对 token 上限。
@@ -209,6 +211,8 @@ class CompactMgr:
 
     llm: LLMProvider = field(repr=False)
     workdir: Path = field(repr=False)
+    caller_agent_type: str | None = None
+    caller_uuid: str | None = None
     auto_compact_size: int = 0
     keep_recent_user_turns: int = 3
     recent_messages_token_limit: int = 0
@@ -458,6 +462,8 @@ class CompactMgr:
         """
         response = await self.llm.chat(
             messages=[{"role": "user", "content": request.prompt}],
+            caller_agent_type=self.caller_agent_type,
+            caller_uuid=self.caller_uuid,
             enable_thinking=False,
         )
         return (response.content or "").strip()
