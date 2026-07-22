@@ -229,6 +229,21 @@ class LLMProvider(ABC):
         allow_tool_calls: bool = True,
         strict: bool = False,
     ) -> list[dict]:
+        """把消息清洗为 provider 可安全接收的通用序列。
+
+        Args:
+            messages: 单条消息字典或消息字典列表。
+            allow_developer_role: 是否允许 developer 角色保留在结果中。
+            allow_tool_calls: 是否保留 assistant/tool 的工具调用协议字段。
+            strict: 是否在发现非法消息或工具调用序列时抛出异常。
+
+        Returns:
+            字段已规范化、工具调用与响应严格配对的消息列表。
+
+        Raises:
+            TypeError: messages 类型非法，或严格模式下消息元素类型非法。
+            ValueError: 严格模式下消息字段或工具调用序列非法。
+        """
         VALID_ROLES = {"system", "user", "assistant", "tool"}
         if allow_developer_role:
             VALID_ROLES.add("developer")
@@ -276,8 +291,8 @@ class LLMProvider(ABC):
 
             if role == "assistant" and has_tool_calls and allow_tool_calls:
                 tool_calls = self._normalize_tool_calls(msg.get("tool_calls"))
-                if tool_calls:
-                    norm_msg["tool_calls"] = tool_calls
+                # 空列表仅作为序列校验的内部非法标记，最终不会进入返回值。
+                norm_msg["tool_calls"] = tool_calls or []
 
             if role == "tool":
                 tool_call_id = msg.get("tool_call_id", "")
@@ -295,7 +310,121 @@ class LLMProvider(ABC):
 
             normalized.append(norm_msg)
 
-        return normalized
+        if not allow_tool_calls:
+            return normalized
+        return self._normalize_tool_message_sequence(normalized, strict)
+
+    def _normalize_tool_message_sequence(
+        self,
+        messages: list[dict],
+        strict: bool,
+    ) -> list[dict]:
+        """校验并修复 assistant 工具调用与紧随其后的 tool 响应。
+
+        Args:
+            messages: 已完成单条字段规范化的消息列表。
+            strict: 非法工具序列是否直接抛出 ValueError。
+
+        Returns:
+            仅包含完整工具往返的消息列表；默认模式会删除非法工具载体。
+
+        Raises:
+            ValueError: strict 为 True 且消息中存在非法工具调用序列。
+        """
+        repaired: list[dict] = []
+        idx = 0
+
+        while idx < len(messages):
+            message = messages[idx]
+            if message.get("role") == "assistant" and "tool_calls" in message:
+                end_idx = idx + 1
+                while (
+                    end_idx < len(messages)
+                    and messages[end_idx].get("role") == "tool"
+                ):
+                    end_idx += 1
+
+                tool_messages = messages[idx + 1:end_idx]
+                error = self._tool_message_sequence_error(message, tool_messages)
+                if error is None:
+                    repaired.extend(messages[idx:end_idx])
+                elif strict:
+                    raise ValueError(f"messages[{idx}] 工具调用序列非法：{error}")
+                else:
+                    logger.warning(
+                        "删除非法工具调用消息组: assistant_index=%d, "
+                        "tool_message_count=%d, reason=%s",
+                        idx,
+                        len(tool_messages),
+                        error,
+                    )
+                    content = message.get("content")
+                    if content:
+                        repaired.append({"role": "assistant", "content": content})
+                idx = end_idx
+                continue
+
+            if message.get("role") == "tool":
+                end_idx = idx + 1
+                while (
+                    end_idx < len(messages)
+                    and messages[end_idx].get("role") == "tool"
+                ):
+                    end_idx += 1
+                orphan_count = end_idx - idx
+                if strict:
+                    raise ValueError(f"messages[{idx}] 存在游离的 tool 消息")
+                logger.warning(
+                    "删除游离的 tool 消息: start_index=%d, tool_message_count=%d",
+                    idx,
+                    orphan_count,
+                )
+                idx = end_idx
+                continue
+
+            repaired.append(message)
+            idx += 1
+
+        return repaired
+
+    def _tool_message_sequence_error(
+        self,
+        assistant_message: dict,
+        tool_messages: list[dict],
+    ) -> str | None:
+        """返回单个工具调用消息组的结构错误。
+
+        Args:
+            assistant_message: 携带 tool_calls 的 assistant 消息。
+            tool_messages: 紧随 assistant 的连续 tool 消息。
+
+        Returns:
+            序列合法时返回 None，否则返回不含工具参数内容的错误说明。
+        """
+        tool_calls = assistant_message.get("tool_calls")
+        if not isinstance(tool_calls, list) or not tool_calls:
+            return "assistant 未包含有效工具调用"
+
+        call_ids = [
+            call.get("id") if isinstance(call, dict) else None
+            for call in tool_calls
+        ]
+        if any(not isinstance(call_id, str) or not call_id for call_id in call_ids):
+            return "assistant 工具调用 ID 为空或类型非法"
+        if len(set(call_ids)) != len(call_ids):
+            return "assistant 工具调用 ID 重复"
+
+        response_ids = [message.get("tool_call_id") for message in tool_messages]
+        if any(
+            not isinstance(response_id, str) or not response_id
+            for response_id in response_ids
+        ):
+            return "tool 消息的工具调用 ID 为空或类型非法"
+        if len(set(response_ids)) != len(response_ids):
+            return "同一工具调用存在重复 tool 响应"
+        if set(response_ids) != set(call_ids):
+            return "工具调用与紧随其后的 tool 响应不完整或不匹配"
+        return None
 
     def _normalize_role(self, role: str) -> str:
         return role

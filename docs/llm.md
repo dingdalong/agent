@@ -134,7 +134,11 @@ LLM 层位于 `src/llm/`，职责是把「一段消息 + 工具 schema」转换�
 
 ### normalize_messages
 
-`normalize_messages`（`src/llm/base.py:209`）把上层传入的松散消息列表清洗为合法结构：校验并规范 `role`（合法集 `system`/`user`/`assistant`/`tool`，可选 `developer`）、规整 `content`、过滤空消息、规范 assistant 的 `tool_calls` 与 tool 消息的 `tool_call_id`，并通过可覆写的钩子 `_normalize_role` / `_normalize_content` / `_normalize_assistant_extra` 让各 provider 注入自己的转换逻辑（如 Ollama 把 `developer` 归为 `system`、DeepSeek 保留 `prefix` 字段等）。`strict=True` 时对非法输入抛异常而非静默修正。
+`normalize_messages`（`src/llm/base.py:225-315`）先清洗单条消息：校验并规范 `role`（合法集 `system`/`user`/`assistant`/`tool`，可选 `developer`）、规整 `content`、过滤空消息、规范 assistant 的 `tool_calls` 与 tool 消息的 `tool_call_id`。可覆写钩子 `_normalize_role` / `_normalize_content` / `_normalize_assistant_extra` 继续负责 provider 转换（如 Ollama 把 `developer` 归为 `system`、DeepSeek 保留 `prefix`、OpenAI/Anthropic 保留原始调用载体）。
+
+随后执行序列级工具协议校验（`src/llm/base.py:317-427`）：每条带 `tool_calls` 的 assistant 消息中，调用 ID 必须是非空且组内唯一的字符串；紧随其后的连续 tool 消息必须按 ID 对每个调用恰好响应一次，不能缺失、重复或混入未知 ID。完整单工具和多工具往返连同 provider 额外字段原样保留。
+
+默认模式会安全修复非法序列：有可见 `content` 的非法工具 assistant 降级为只含 `role/content` 的纯文本消息，无文本则删除；同组 tool 消息、`tool_calls`、推理字段、OpenAI `_response_output` / Anthropic `_anthropic_content` 等 provider 原始调用载体一并删除。游离或重复 tool 消息同样删除，并只记录结构原因和消息数量，不记录工具参数内容。`strict=True` 时上述非法序列直接抛出 `ValueError`，不静默修复。`allow_tool_calls=False` 时保持原有的禁用工具字段转换路径，不执行工具序列配对（`src/llm/base.py:297-315`）。
 
 ---
 

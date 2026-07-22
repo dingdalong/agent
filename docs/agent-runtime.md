@@ -70,7 +70,7 @@
 | `COMPACT` | `compact` | 执行一次自动压缩，记录结果并立即返回复检 |
 | `LLM_CALL` | `llm_call` | 调用 LLM，捕获上下文超长错误 |
 | `PROCESS_RESPONSE` | `process_response` | 处理响应：length 截断 / 工具调用 / 结束 |
-| `LENGTH_RETRY` | `length_retry` | 响应因长度截断时续写重试 |
+| `LENGTH_RETRY` | `length_retry` | 文本截断时续写；工具调用截断时丢弃半截调用并要求重新生成 |
 | `EXECUTE_TOOLS` | `execute_tools` | 并行执行本轮所有工具调用 |
 | `CHECK_STOP` | `check_stop` | 运行 Stop hook，决定是否放行结束 |
 | `POST_ROUND` | `post_round` | 注入 reminder、执行手动 compact |
@@ -169,19 +169,19 @@ EXECUTE_TOOLS ──▶ POST_ROUND ──▶ CHECK_COMPACT （循环下一轮）
 
 | 状态 | 方法 | 关键行为与转移 |
 |---|---|---|
-| `REQUEST_INPUT` | `_on_request_input`（`agent.py:329-406`） | 见下方详解 |
-| `CHECK_COMPACT` | `_on_check_compact`（`agent.py:543-631`） | 见下方详解 |
-| `COMPACT` | `_on_compact`（`agent.py:632-653`） | emit `CompactDelta("auto compact")`，调用 `compact_history` 替换 `messages`，保存结果信号后转回 `CHECK_COMPACT` |
-| `LLM_CALL` | `_on_llm_call`（`agent.py:654-675`） | `normalize_messages` 后 `llm.chat(...)`；捕获 `is_context_too_long_error` 转 `CONTEXT_OVERFLOW`，否则转 `PROCESS_RESPONSE` |
-| `PROCESS_RESPONSE` | `_on_process_response`（`agent.py:676-689`） | `finish_reason == "length"` → `LENGTH_RETRY`；有 `tool_calls` → `EXECUTE_TOOLS`；否则 → `CHECK_STOP` |
-| `LENGTH_RETRY` | `_on_length_retry`（`agent.py:690-705`） | 见下方"边缘状态" |
-| `EXECUTE_TOOLS` | `_on_execute_tools`（`agent.py:706-767`） | 见下方详解 |
-| `CHECK_STOP` | `_on_check_stop`（`agent.py:768-787`） | 见下方详解 |
-| `POST_ROUND` | `_on_post_round`（`agent.py:788-806`） | 见下方详解 |
-| `SUMMARIZE_EXIT` | `_on_summarize_exit`（`agent.py:807-830`） | 见下方"边缘状态" |
-| `CONTEXT_OVERFLOW` | `_on_context_overflow`（`agent.py:831-834`） | 见下方"边缘状态" |
+| `REQUEST_INPUT` | `_on_request_input`（`agent.py:330-407`） | 见下方详解 |
+| `CHECK_COMPACT` | `_on_check_compact`（`agent.py:544-631`） | 见下方详解 |
+| `COMPACT` | `_on_compact`（`agent.py:633-656`） | emit `CompactDelta("auto compact")`，调用 `compact_history` 替换 `messages`，保存结果信号后转回 `CHECK_COMPACT` |
+| `LLM_CALL` | `_on_llm_call`（`agent.py:658-673`） | `normalize_messages` 后 `llm.chat(...)`；捕获 `is_context_too_long_error` 转 `CONTEXT_OVERFLOW`，否则转 `PROCESS_RESPONSE` |
+| `PROCESS_RESPONSE` | `_on_process_response`（`agent.py:675-687`） | `finish_reason == "length"` → `LENGTH_RETRY`；有 `tool_calls` → `EXECUTE_TOOLS`；否则 → `CHECK_STOP` |
+| `LENGTH_RETRY` | `_on_length_retry`（`agent.py:689-736`） | 见下方"边缘状态" |
+| `EXECUTE_TOOLS` | `_on_execute_tools`（`agent.py:738-798`） | 见下方详解 |
+| `CHECK_STOP` | `_on_check_stop`（`agent.py:800-818`） | 见下方详解 |
+| `POST_ROUND` | `_on_post_round`（`agent.py:820-840`） | 见下方详解 |
+| `SUMMARIZE_EXIT` | `_on_summarize_exit`（`agent.py:842-864`） | 见下方"边缘状态" |
+| `CONTEXT_OVERFLOW` | `_on_context_overflow`（`agent.py:866-869`） | 见下方"边缘状态" |
 
-### `_on_request_input`（`agent.py:329-406`）
+### `_on_request_input`（`agent.py:330-407`）
 
 1. `event_bus.request_input("\n\n你: ", default=self._pending_input)` 收集输入；被取消/无订阅者时置 `exit_requested=True` 转 `DONE`（`agent.py:338-349`）。
 2. 输入 `exit`/`quit`（小写）→ `exit_requested=True`，转 `DONE`（`agent.py:354-356`）。
@@ -194,42 +194,47 @@ EXECUTE_TOOLS ──▶ POST_ROUND ──▶ CHECK_COMPACT （循环下一轮）
 4. 运行 `UserPromptSubmit` hook（`agent.py:380-396`）：`blocked` 则输出原因回到 `REQUEST_INPUT`；`additional_context` 追加到 `user_input`。
 5. `build_turn_start_instructions(permission_mode)` 前缀注入（`agent.py:398-400`），记录 `round_start_idx`，追加 user 消息，转 `CHECK_COMPACT`。
 
-### `_on_check_compact`（`agent.py:543-631`）
+### `_on_check_compact`（`agent.py:544-631`）
 
 `prompt = PromptMgr.build()`，再在线程中按实际 provider 请求形态估算 `messages + prompt + tools`。首次超阈值时把估算写入 `auto_compact_before_tokens` 并转 `COMPACT`；`COMPACT` 完成后立即回到本状态重新估算。
 
 复检时，摘要消息数为 0、摘要为空或 `after_tokens >= before_tokens` 都表示没有有效进展，记录 agent 类型、前后 token 和原因后立即转 `SUMMARIZE_EXIT`。只有 token 实际下降但仍超阈值才增加 `compact_streak`；第三次连续有效压缩后仍超阈值时记录“连续 3 次有效 compact 后仍需压缩”并退出总结。降到阈值内则清零 streak 后转 `LLM_CALL`。`context_limit <= 0` 换算出的阈值非正，自动压缩禁用。
 
-### `_on_execute_tools`（`agent.py:706-767`）
+### `_on_execute_tools`（`agent.py:738-798`）
 
 - 置 `has_tool_calls=True`，重置 `manual_compact`/`compact_focus`。
-- 内嵌 `_run_one(tc)` 对每个工具调用做校验与执行：被排除工具返回错误文本（`tool_name=None`）；未知工具返回错误；解析 `arguments`，若工具名为 `compact` 则特判置 `manual_compact=True` 并记录 `focus`（`agent.py:739-741`）；调用 `tools_mgr.execute(...)`，异常包成错误文本。
-- **`asyncio.gather` 并行执行**同一轮所有工具调用（`agent.py:755`），结果按原始顺序追加为 `role: tool` 消息。
+- 内嵌 `_run_one(tc)` 对每个工具调用做校验与执行：被排除工具返回错误文本（`tool_name=None`）；未知工具返回错误；解析 `arguments`，若工具名为 `compact` 则特判置 `manual_compact=True` 并记录 `focus`（`agent.py:769-775`）；调用 `tools_mgr.execute(...)`，异常包成错误文本。
+- **`asyncio.gather` 并行执行**同一轮所有工具调用（`agent.py:787`），结果按原始顺序追加为 `role: tool` 消息。
 - `reminder_mgr.notify_tool_round(called_tools)`，转 `POST_ROUND`。
 
-### `_on_check_stop`（`agent.py:768-787`）
+### `_on_check_stop`（`agent.py:800-818`）
 
 若有 `hooks_mgr` 且本轮尚未用过 Stop hook：运行 `Stop` hook。若 `blocked` → 置 `stop_hook_used=True`，追加 `<reminder>{reason}</reminder>` user 消息，转回 `CHECK_COMPACT`（让 LLM 继续）。否则转 `DONE`。
 
-### `_on_post_round`（`agent.py:788-806`）
+### `_on_post_round`（`agent.py:820-840`）
 
 - 收集 `reminder_mgr.collect_post_round_messages(permission_mode)` 追加到 `messages`。
-- 若 `ctx.manual_compact`（本轮调用了 `compact` 工具）→ emit `CompactDelta("llm manual")`，用 `focus` 执行与自动压缩相同的切分/摘要流水线并替换 `messages`（`agent.py:792-803`）；无待摘要消息时原历史不变，且不写入自动压缩进展标记。
+- 若 `ctx.manual_compact`（本轮调用了 `compact` 工具）→ emit `CompactDelta("llm manual")`，用 `focus` 执行与自动压缩相同的切分/摘要流水线并替换 `messages`（`agent.py:824-838`）；无待摘要消息时原历史不变，且不写入自动压缩进展标记。
 - 转 `CHECK_COMPACT`（进入下一轮）。
 
 ---
 
 ## 5. 边缘状态
 
-### `LENGTH_RETRY`（`_on_length_retry`，`agent.py:690-705`）
+### `LENGTH_RETRY`（`_on_length_retry`，`agent.py:689-736`）
 
-响应因 `finish_reason == "length"` 被截断时进入。追加已生成的 assistant 消息，若 `length_recoveries >= max_length_recoveries`（达到 3）→ 写入"已达到自动续写恢复上限"错误文本，转 `DONE`。否则 `length_recoveries += 1`，追加一条 user 续写指令（"从中断处直接继续，不要回顾、不要重复"），`normalize_messages` 后转回 `LLM_CALL`。上限来自 `RunContext.max_length_recoveries = 3`（`states.py:94`）。
+响应因 `finish_reason == "length"` 被截断时进入，并按响应是否携带工具调用分流：
 
-### `CONTEXT_OVERFLOW`（`_on_context_overflow`，`agent.py:831-834`）
+- 普通文本截断保留完整的 provider assistant 消息，追加“从中断处直接继续，不要回顾、不要重复”的 user 指令后重试，原有续写语义不变（`agent.py:708-712,733-735`）。
+- 工具调用截断绝不执行或保存半截调用，只把非空 `content` 重建为纯文本 assistant；`tool_calls`、调用 ID、参数、推理字段和 provider 原始调用载体均不进入历史。随后明确告知模型该调用已丢弃且未执行，要求重新生成完整调用；长参数拆成较小调用，写大文件使用分块能力（`agent.py:699-707,726-735`）。
+
+若 `length_recoveries >= max_length_recoveries`（达到 3 次恢复上限），追加不含工具调用的错误 assistant 并转 `DONE`；否则计数加一，经 `normalize_messages` 后转回 `LLM_CALL`。上限来自 `RunContext.max_length_recoveries = 3`（`states.py:94`），达到上限时历史仍满足消息协议（`agent.py:714-736`）。
+
+### `CONTEXT_OVERFLOW`（`_on_context_overflow`，`agent.py:866-869`）
 
 `LLM_CALL` 捕获到 `llm.is_context_too_long_error(exc)` 时进入。写入固定错误文本"上下文过长，已多次压缩仍无法继续……"追加为 assistant 消息，转 `DONE`。
 
-### `SUMMARIZE_EXIT`（`_on_summarize_exit`，`agent.py:807-830`）
+### `SUMMARIZE_EXIT`（`_on_summarize_exit`，`agent.py:842-864`）
 
 自动压缩无有效进展，或连续 3 次有效压缩后仍需压缩时进入。追加一条 user 消息要求 LLM 总结（1 已完成 / 2 未完成 / 3 后续建议），以 `tools=[]`、`enable_thinking=False` 调用 `llm.chat`。若此次调用又报上下文超长 → 写入错误文本转 `DONE`；否则记录总结文本、追加 assistant 消息，转 `DONE`。上限来自 `RunContext.max_compact_streak = 3`（`states.py:88`）。
 

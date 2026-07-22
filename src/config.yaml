@@ -1,18 +1,20 @@
 llm_provider:
   deepseek:
     base_url: https://api.deepseek.com
-    reasoning_effort: max # 推理力度
+    reasoning_effort: high # 推理力度
     context_limit: 400000 # 上下文限制
   openai:
     models:
       - gpt-5.5
     base_url: https://api.openai.com/v1
-    reasoning_effort: xhigh # 推理力度
+    reasoning_effort: medium # 推理力度
     context_limit: 262144 # 上下文限制
   anthropic:
     base_url: https://api.anthropic.com
     reasoning_effort: high # 推理力度
     context_limit: 262144 # 上下文限制
+    models:
+      - k3
   ollama:
     base_url: http://127.0.0.1:8001/v1
     reasoning_effort: high
@@ -24,12 +26,12 @@ llm_provider:
     context_limit: 262144 # 上下文限制
 
 llm:
-  default: deepseek-v4-flash # 必填，默认模型，子agent通过别名引用
+  default: k3 # 必填，默认模型，子agent通过别名引用
   # best: ...                   # 可选，最强模型，不填时使用 default
   # fast: ...                   # 可选，最快/最便宜模型，不填时使用 default
   concurrency: 5 # 最大并发数量
   max_retries: 3 # 重试次数
-  user_agent: "" # 自定义所有 LLM 请求的 User-Agent；留空则沿用各 SDK 默认 UA
+  user_agent: "claude-cli/2.1.201 (external, cli)" # 自定义所有 LLM 请求的 User-Agent；留空则沿用各 SDK 默认 UA
 
 tool:
   page_token_rate: 0.03 # 工具调用结果每页最多占上下文比例
@@ -40,7 +42,7 @@ compact:
   keep_recent_messages_token_rate: 0.25 # 近期原文的硬预算比例；超限时可在优先轮次内部按原子消息块切分
 
 # 激活的角色名。coding = 编程助手（默认），可切换为自定义角色。
-role: coding
+role: onboard
 
 events:
   level: detail   # progress | detail | trace

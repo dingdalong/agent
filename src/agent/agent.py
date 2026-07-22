@@ -687,18 +687,51 @@ class Agent:
         return AgentState.CHECK_STOP
 
     async def _on_length_retry(self, ctx: RunContext) -> AgentState:
+        """处理因长度上限截断的响应并决定是否继续恢复。
+
+        Args:
+            ctx: 当前运行上下文；截断响应取自 ctx.response，恢复消息写入
+                ctx.messages。
+
+        Returns:
+            未达到恢复上限时返回 LLM_CALL，达到上限时返回 DONE。
+        """
         response = ctx.response
-        ctx.messages.append(
-            response.assistant_message
-            or {"role": "assistant", "content": response.content or None}
+        assistant_message = response.assistant_message or {}
+        has_truncated_tool_call = bool(
+            response.tool_calls or assistant_message.get("tool_calls")
         )
+
+        if has_truncated_tool_call:
+            if response.content:
+                ctx.messages.append({"role": "assistant", "content": response.content})
+        else:
+            ctx.messages.append(
+                response.assistant_message
+                or {"role": "assistant", "content": response.content or None}
+            )
+
         if ctx.length_recoveries >= ctx.max_length_recoveries:
-            ctx.final_text = "错误：模型输出连续被截断，已达到自动续写恢复上限。请缩小输出范围后重试。"
+            if has_truncated_tool_call:
+                ctx.final_text = (
+                    "错误：模型工具调用连续被截断，未执行不完整调用，"
+                    "已达到自动恢复上限。请缩小参数范围后重试。"
+                )
+            else:
+                ctx.final_text = "错误：模型输出连续被截断，已达到自动续写恢复上限。请缩小输出范围后重试。"
             ctx.messages.append({"role": "assistant", "content": ctx.final_text})
             return AgentState.DONE
 
         ctx.length_recoveries += 1
-        ctx.messages.append({"role": "user", "content": "输出达到长度上限。请从中断处直接继续，不要回顾、不要重复，必要时可以从半句话接续。"})
+        if has_truncated_tool_call:
+            retry_instruction = (
+                "上一次工具调用因输出长度限制而不完整，已丢弃且未执行。"
+                "请重新生成完整、有效的工具调用；若参数较长，请拆分为多个较小调用。"
+                "写入大文件时请使用现有的分块能力。"
+            )
+        else:
+            retry_instruction = "输出达到长度上限。请从中断处直接继续，不要回顾、不要重复，必要时可以从半句话接续。"
+        ctx.messages.append({"role": "user", "content": retry_instruction})
         ctx.messages[:] = self.llm.normalize_messages(ctx.messages)
         return AgentState.LLM_CALL
 
