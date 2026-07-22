@@ -77,19 +77,41 @@ def present_session_metrics(
     )
 
 
-def present_agent_identity(snapshot: AgentSnapshot, base_style: str = "") -> Text:
-    """Present one agent identity and lifecycle state.
+def _agent_status_label(snapshot: AgentSnapshot) -> str:
+    """构建 agent 状态槽文案：运行中显示实时活动，已结束显示「已完成」。
+
+    Args:
+        snapshot: 不可变 agent 视图快照。
+
+    Returns:
+        运行中返回其实时活动（思考中/回应中/工具名），无活动时回退「运行中」；
+        非运行中返回「已完成」（先判 running，避免显示结束后残留的陈旧活动）。
+    """
+    if not snapshot.running:
+        return "已完成"
+    return snapshot.activity or "运行中"
+
+
+def present_agent_identity(
+    snapshot: AgentSnapshot,
+    base_style: str = "",
+    show_status: bool = True,
+) -> Text:
+    """Present one agent identity and its status slot.
 
     Args:
         snapshot: Immutable agent view snapshot.
         base_style: Optional Rich style applied to the whole line.
+        show_status: 为真时在身份后追加状态槽（实时活动 / 已完成）；为假时仅身份，不含任何状态词。
 
     Returns:
-        Rich text containing identity and lifecycle state.
+        Rich text containing identity, optionally followed by the status slot.
     """
-    status = "运行中" if snapshot.running else "已完成"
     short_uuid = snapshot.uuid.split("-")[0] if snapshot.uuid else ""
-    return Text(f"◯ {snapshot.agent_type}  {short_uuid}  {status}", style=base_style)
+    text = Text(f"◯ {snapshot.agent_type}  {short_uuid}", style=base_style)
+    if show_status:
+        text.append(f"  {_agent_status_label(snapshot)}", style=base_style)
+    return text
 
 
 def present_agent(snapshot: AgentSnapshot, base_style: str = "") -> Text:
@@ -100,7 +122,7 @@ def present_agent(snapshot: AgentSnapshot, base_style: str = "") -> Text:
         base_style: Optional Rich style applied to the whole line.
 
     Returns:
-        Rich text containing identity, lifecycle state, and canonical metrics.
+        Rich text containing identity, the status slot（实时活动 / 已完成）, and canonical metrics.
     """
     line = present_agent_identity(snapshot, base_style)
     line.append("  ", style=base_style)

@@ -80,6 +80,7 @@ class AgentPanelActions:
 
         主 agent 行置顶，其余子 agent 按插入序。每行格式：
         <标记> <agent_type> <uuid8> <状态> <token> · 上下文 <used>(<pct>%) · <elapsed h/m/s>
+        其中 <状态> 运行中为实时活动（思考中/回应中/工具名），完成后为「已完成」。
         选中行反显（列表聚焦时）。行数 > _AGENT_LIST_MAX_ROWS 时按选中项裁出可视窗口段，
         并在上/下方按需补一行「↑/↓ 还有 N 个」滚动指示（聚焦与否都显示）。
 
@@ -135,11 +136,9 @@ class AgentPanelActions:
                 # 主 agent 行只显示标记 + 类型（其输出已在滚动区实时可见）
                 line.append(row.agent_type, style=style)
             else:
-                # 子 agent 行使用共享完整 Presenter，与历史摘要同源。
+                # 子 agent 行使用共享完整 Presenter，与历史摘要同源；
+                # 其状态槽运行中即为实时活动（思考中/回应中/工具名），完成后为「已完成」。
                 line = present_agent(row, base_style=style)
-                # 运行中的子 agent 追加「· 当前活动」，让并发委托的实时进展一目了然。
-                if row.running and row.activity:
-                    line.append(f"  · {row.activity}", style=style)
 
             lines.append(line)
 
@@ -169,9 +168,10 @@ class AgentPanelActions:
         return self._agent_view_store.agent_snapshot(self._viewing_uuid)
 
     def _render_transcript_header(self) -> ANSI:
-        """渲染转录面板顶部标题行：「── <标题>（状态）── <跟随态> · ↑/↓ 滚动 · <退出提示>」。
+        """渲染转录面板顶部标题行：「── <标题> ── <跟随态> · ↑/↓ 滚动 · <退出提示>」。
 
-        标题始终从当前 AgentSnapshot 经共享身份 Presenter 现场生成；指标由底部状态栏显示。
+        标题始终从当前 AgentSnapshot 经共享身份 Presenter 现场生成，不含生命周期状态词
+        （运行中/已完成统一由底部状态栏承载，且跟随态已表明是否实时）；指标由底部状态栏显示。
         跟随态：_view_scroll==0 显示「实时」，否则显示「已上滚 N 行」。
 
         Returns:
@@ -179,7 +179,7 @@ class AgentPanelActions:
         """
         row = self._viewing_row()
         if row is not None:
-            label = present_agent_identity(row).plain
+            label = present_agent_identity(row, show_status=False).plain
         else:
             label = present_ended_agent(self._viewing_uuid or "").plain
         exit_hint = "Esc 返回列表" if self._viewing_invoked else "Esc 关闭"
