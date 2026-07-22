@@ -56,7 +56,11 @@ class ResponseDelta(Event):
 
 @dataclass
 class ThinkingDelta(Event):
-    """思考过程 — 仅 DETAIL 级别投递/渲染（progress 级别下由总线门控丢弃，状态栏「思考中」由 LLMCallStarted 维持）。"""
+    """思考过程 — 仅 DETAIL 级别投递/渲染（progress 级别下由总线门控丢弃）。
+
+    DETAIL 级别下状态栏「思考中」由本事件维持；连接/等待首个增量的窗口由 LLMCallStarted
+    维持为「等待响应」。progress 级别下本事件被丢弃，「等待响应」持续到首个回应增量。
+    """
     content: str = ""
     level: EventLevel = field(default=EventLevel.DETAIL, init=False)
     type: Literal["thinking_delta"] = field(default="thinking_delta", init=False)
@@ -124,6 +128,26 @@ class LLMCallCompleted(Event):
     total_tokens_per_second: float | None = None
     level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
     type: Literal["llm_call_completed"] = field(default="llm_call_completed", init=False)
+
+
+@dataclass
+class LLMRetrying(Event):
+    """LLM 调用失败、进入指数退避等待重试时发射，供状态条实时倒计时展示。
+
+    级别为 PROGRESS：状态条要据此在实时重绘区显示倒计时，必须不被级别门控丢弃。
+
+    Attributes:
+        error_type: 触发重试的异常类名（如「InternalServerError」）。
+        attempt: 已失败的尝试序号（1 基）。
+        max_attempts: 允许的最大尝试次数。
+        wait_seconds: 本次等待秒数（含随机抖动，为原始浮点值，展示时由 UI 向上取整）。
+    """
+    error_type: str = ""
+    attempt: int = 0
+    max_attempts: int = 0
+    wait_seconds: float = 0.0
+    level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
+    type: Literal["llm_retrying"] = field(default="llm_retrying", init=False)
 
 
 @dataclass

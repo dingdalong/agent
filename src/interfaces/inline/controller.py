@@ -274,6 +274,12 @@ class InlineController(
         self._activity_paused_baseline: float = 0.0  # 本步起始时的累计暂停基线（本步耗时只剔除其后的暂停）
         self._session_elapsed_accumulated: float = 0.0  # 全会话已完成回合的累计有效耗时（秒），跨回合累加、剔除人工等待；/clear 归零
 
+        # ---- API 重试倒计时（前台 agent 指数退避等待，驱动活动区黄色倒计时行）----
+        self._retry_deadline: float | None = None  # 本次重试等待的截止 monotonic 秒（None 表示不在重试等待）
+        self._retry_error_type: str = ""  # 触发重试的异常类名
+        self._retry_attempt: int = 0  # 已失败的尝试序号（1 基）
+        self._retry_max: int = 0  # 允许的最大尝试次数
+
         # ---- 本轮工具缓冲（前台 agent 当前这一轮的工具调用，驱动顶部「本轮面板」并在轮边界 flush 成 scrollback 定稿块）----
         self._round_entries: list[_RoundEntry] = []
         self._round_agent_type: str | None = None  # 本轮工具所属 agent 类型（缓冲空转非空时记录）
@@ -435,7 +441,7 @@ class InlineController(
         )
         activity_window = ConditionalContainer(
             Window(FormattedTextControl(self._render_activity), dont_extend_height=True, height=Dimension(min=1)),
-            filter=Condition(lambda: self._mode == "processing" and (bool(self._activity) or bool(self._round_entries)) and self._viewing_uuid is None),
+            filter=Condition(lambda: self._mode == "processing" and (bool(self._activity) or bool(self._round_entries) or self._retry_deadline is not None) and self._viewing_uuid is None),
         )
         # 选择菜单窗口：select 态可见，只画可重绘的选项（上文已先打到 scrollback），置于输入框上方。
         select_window = ConditionalContainer(
@@ -578,6 +584,7 @@ class InlineController(
             None.
         """
         self._session_elapsed_accumulated = 0.0
+        self._retry_deadline = None
         self._round_entries = []
         self._round_agent_type = None
         self._round_agent_uuid = None

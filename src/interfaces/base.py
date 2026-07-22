@@ -11,6 +11,7 @@ from src.events.types import (
     Event,
     LLMCallCompleted,
     LLMCallStarted,
+    LLMRetrying,
     OutputRequested,
     PermissionNotice,
     ResponseDelta,
@@ -408,6 +409,8 @@ class UserInterface(ABC):
                 await self.on_llm_call_started(event)
             case LLMCallCompleted():
                 await self.on_llm_call_completed(event)
+            case LLMRetrying():
+                await self.on_llm_retrying(event)
             case ResponseDelta(content=content):
                 await self.on_response_delta(event, content)
             case ThinkingDelta(content=content):
@@ -442,4 +445,7 @@ class UserInterface(ABC):
         pass
 
     async def on_llm_call_completed(self, event: LLMCallCompleted) -> None:
+        pass
+
+    async def on_llm_retrying(self, event: LLMRetrying) -> None:
         pass

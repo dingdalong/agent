@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import math
 import sys
 
 from src.events.types import (
     CompactDelta,
     LLMCallStarted,
+    LLMRetrying,
     PermissionNotice,
     ResponseDelta,
     ThinkingDelta,
@@ -220,17 +222,39 @@ class OutputActions:
         return f"{agent_type} {uid}" if uid else agent_type
 
     async def on_llm_call_started(self, event: LLMCallStarted) -> None:
-        """LLM 调用开始：轮边界先 flush 上一轮工具缓冲成 scrollback 定稿块，再记录当前 agent、进入「思考中」。
+        """LLM 调用开始：轮边界先 flush 上一轮工具缓冲成 scrollback 定稿块，再记录当前 agent、进入「等待响应」。
 
         路由已保证只转发前台 agent 的 LLMCallStarted，故此处即前台新一轮的起点（Trigger A）；
-        缓冲空时 flush 为 no-op（含非 TTY 从不入缓冲的情形）。
+        缓冲空时 flush 为 no-op（含非 TTY 从不入缓冲的情形）。「等待响应」覆盖请求已发出、尚未收到
+        首个增量的窗口；随后 detail 级别下由思考增量切「思考中」、回应增量切「回应中」。
 
         Args:
             event: LLM 调用开始事件，含 caller_agent_type / caller_uuid。
         """
         self._round_flush()
         self._set_current_agent(event.caller_agent_type, event.caller_uuid)
-        self._set_activity("思考中")
+        self._set_activity("等待响应")
+
+    async def on_llm_retrying(self, event: LLMRetrying) -> None:
+        """LLM 重试等待：TTY 下驱动活动区实时倒计时；非 TTY 打印一行静态告警（剩余秒向上取整）。
+
+        路由已保证只转发前台 agent 的 LLMRetrying。
+
+        Args:
+            event: LLM 重试事件，含 error_type / attempt / max_attempts / wait_seconds。
+        """
+        self._set_current_agent(event.caller_agent_type, event.caller_uuid)
+        if self._tty:
+            self._begin_retry_countdown(
+                event.error_type, event.attempt, event.max_attempts, event.wait_seconds
+            )
+            return
+        remaining = max(0, math.ceil(event.wait_seconds))
+        self._print_rich(
+            f"⚠ API错误 ({event.error_type})，{remaining}秒后重试 "
+            f"({event.attempt}/{event.max_attempts})",
+            style="yellow",
+        )
 
     async def on_compact_delta(self, event: CompactDelta) -> None:
         """上下文压缩进度：状态条切到「压缩上下文」，并输出一行带发起 agent 标签的进度。

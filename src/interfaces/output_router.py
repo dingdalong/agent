@@ -14,6 +14,7 @@ from src.events.types import (
     CompactDelta,
     Event,
     LLMCallStarted,
+    LLMRetrying,
     OutputRequested,
     PermissionNotice,
     SubagentLifecycle,
@@ -74,6 +75,12 @@ class OutputRouter:
         if isinstance(event, LLMCallStarted):
             if event.caller_uuid == self.store.foreground_uuid:
                 self.store.flush_completed()
+                await self.ui.on_event(event)
+            return
+
+        if isinstance(event, LLMRetrying):
+            # 只在前台 agent 重试时驱动主状态条倒计时；后台 agent 的重试静默。
+            if event.caller_uuid == self.store.foreground_uuid:
                 await self.ui.on_event(event)
             return
 

@@ -45,6 +45,7 @@
 | `ToolCallCompleted` | `tool_call_completed` | 状态、耗时、结果预览 |
 | `LLMCallStarted` | `llm_call_started` | 模型、`context_limit`、输入估算 |
 | `LLMCallCompleted` | `llm_call_completed` | 输入/输出/cache token、速度 |
+| `LLMRetrying` | `llm_retrying` | `error_type`、`attempt`、`max_attempts`、`wait_seconds`（含抖动的原始浮点，展示向上取整） |
 | `OutputRequested` | `output_requested` | `content`、`markdown` |
 | `InterruptRequested` | `interrupt_requested` | 无 |
 | `PermissionNotice` | `permission_notice` | 状态、工具名、detail（UI 仅渲染 `deny` 行；`allow`/`auto_allow` 静默，工具本身由本轮面板/定稿块呈现） |
@@ -68,13 +69,13 @@
 
 - `TokenUsage(input_tokens, output_tokens, cache_read_tokens)`
 - `ContextUsage(used_tokens, limit_tokens)`
-- `AgentSnapshot(uuid, agent_type, is_main, running, usage, context, elapsed_seconds, activity)`（`activity` 为该 agent 最新活动文案：思考中/回应中/工具名，驱动底部列表实时显示）
+- `AgentSnapshot(uuid, agent_type, is_main, running, usage, context, elapsed_seconds, activity)`（`activity` 为该 agent 最新活动文案：等待响应/思考中/回应中/工具名，驱动底部列表实时显示）
 - `SessionSnapshot(usage, foreground_context)`
 
 Store 的职责：
 
 - `register_foreground()` 登记入口主 agent（`agent_view_store.py:111`）。
-- `record(event)` 处理 usage、context、lifecycle、转录与每 agent 当前活动（`activity`：LLM 开始→思考中、response 增量→回应中、工具开始→工具名）（`:135`）。
+- `record(event)` 处理 usage、context、lifecycle、转录与每 agent 当前活动（`activity`：LLM 开始→等待响应、response 增量→回应中、工具开始→工具名）（`:135`）。
 - `flush_completed()` 把结束的子 agent 移入最多 50 项的历史（`:159`）。
 - `session_snapshot()` 返回全会话 token 总量和主 agent 当前上下文（`:181`）。
 - `active_agent_snapshots()` / `subagent_snapshots()` 分别服务实时面板与 `/agents`（`:205`、`:217`）。
@@ -115,6 +116,7 @@ elapsed 统一先把负数夹到零，再按最近整秒 half-up 取整（`0.5s 
 | `CompactDelta` | 始终转发 |
 | 前台 `LLMCallStarted` | 迁移已完成子 agent 后转发 |
 | 后台 `LLMCallStarted` | 静默 |
+| 前台 `LLMRetrying` | 转发 UI 驱动活动区倒计时；后台静默 |
 | TTY 后台正文、工具、`LLMCallCompleted` | Store 记录后静默，避免结束前台 Markdown 流 |
 | 其余前台事件 | 转发 UI |
 
@@ -124,7 +126,9 @@ Router 不持有 agent 视图、不格式化摘要，也不提供 UI 数据 prov
 
 一轮 LLM 响应里的多个工具调用整合为一体，消除逐工具的冗余打印。`StatusBarActions` 维护一份**本轮工具缓冲**（`_round_entries`，元素为 `_RoundEntry`），只跟踪**前台 agent**当前这一轮的工具；委托出去的子 agent 进展改由底部 agent 列表的 `· 当前活动` 呈现（`AgentSnapshot.activity`）。同一份缓冲服务两处渲染：
 
-- **实时区「本轮面板」**（`_render_activity`）：取代旧单行 spinner。缓冲非空时渲染头行 `本轮 · N 工具（M 完成 · K 进行中）` + 每工具一行（运行中逐条 spinner + 实时耗时，已落定 `✔`/`✘` + 耗时），超 `_ROUND_PANEL_MAX_ROWS` 折叠为 `… 还有 N 个`；缓冲为空但有活动（思考中/回应中/压缩上下文）时回退单行 `spinner + agent · 活动 (耗时)`。
+- **实时区「本轮面板」**（`_render_activity`）：取代旧单行 spinner。渲染优先级为 **重试倒计时 > 本轮面板 > 单行活动**。重试等待中（`_retry_deadline` 非空）渲染黄色单行 `spinner + agent · API错误({error_type})，{剩余秒}秒后重试 ({attempt}/{max})`，剩余秒 = `ceil(截止 monotonic − now)` 下限 0，随 100ms 重绘逐秒递减且恒为整数；否则缓冲非空时渲染头行 `本轮 · N 工具（M 完成 · K 进行中）` + 每工具一行（运行中逐条 spinner + 实时耗时，已落定 `✔`/`✘` + 耗时），超 `_ROUND_PANEL_MAX_ROWS` 折叠为 `… 还有 N 个`；缓冲为空但有活动（等待响应/思考中/回应中/压缩上下文）时回退单行 `spinner + agent · 活动 (耗时)`。
+
+活动文案随一次 LLM 调用推进：`on_llm_call_started` 先置 **等待响应**（请求已发出、首个增量到达前）；DETAIL 级别下思考增量切 **思考中**、回应增量切 **回应中**，得到三段式 `等待响应 → 思考中 → 回应中`；PROGRESS 级别思考增量被总线丢弃，「等待响应」持续到首个回应增量。重试由 `LLMRetrying` 事件经 `_begin_retry_countdown` 设 `_retry_deadline` 触发倒计时；下一次 `_set_activity`（新一轮 `LLMCallStarted` → 等待响应）清除倒计时。`_retry_delay`（`base.py`）保留随机抖动，小数只在计算层，展示层统一向上取整。
 - **scrollback 定稿块**（`_round_flush`）：在轮边界一次性输出 `● {agent} · 本轮 N 工具` 头行 + 每工具一行 `✔/✘ {工具} {detail} ⎿ {结果首行} (耗时)`（失败附剩余预览行；中断残留项标 `⋯ … 已中断`），随后清空缓冲。
 
 轮边界有两个触发点：**Trigger A** = 前台新一轮的 `on_llm_call_started`（早于本轮任何正文流），保证 scrollback 顺序为 `[轮1正文][轮1工具块][轮2正文]`；**Trigger B** = 回到输入态时 `_read_input` 顶部（最后一轮无后续 `LLMCallStarted`，含 Ctrl+C 中断残留）。缓冲空时两者均为 no-op。`_reset_turn_status` 与 `reload()` 另做防御性清空。非 TTY 下工具事件从不入缓冲，仍逐行打印 `●`/`⎿`。

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -97,18 +98,20 @@ class StatusBarActions:
     """Render and update activity and core status state."""
 
     def _render_activity(self) -> ANSI:
-        """构建实时区活动内容的 ANSI；仅处理态且有活动/本轮工具时由其窗口显示。
+        """构建实时区活动内容的 ANSI；仅处理态且有活动/本轮工具/重试等待时由其窗口显示。
 
-        首行留空，与上方滚动正文（messages 区）分隔。本轮缓冲非空时渲染「本轮面板」
-        （头行统计 + 每工具一行，各自 spinner/✔/✘ + 计时）；否则回退单行
+        首行留空，与上方滚动正文（messages 区）分隔。重试等待中优先渲染倒计时行；否则本轮缓冲
+        非空时渲染「本轮面板」（头行统计 + 每工具一行，各自 spinner/✔/✘ + 计时）；否则回退单行
         「spinner + 当前 agent · 活动 (分段整数耗时)」（思考中/回应中/压缩上下文等非工具阶段）。
 
         Returns:
-            可作为 Window 内容的 ANSI（空行 + 面板多行或单行活动文案）。
+            可作为 Window 内容的 ANSI（空行 + 倒计时行 / 面板多行 / 单行活动文案）。
         """
         now = time.monotonic()
         status = Text("\n")
-        if self._round_entries:
+        if self._retry_deadline is not None:
+            self._append_retry_countdown(status, now)
+        elif self._round_entries:
             self._append_round_panel(status, now)
         else:
             frame = _SPINNER_FRAMES[int(now * 10) % len(_SPINNER_FRAMES)]
@@ -122,6 +125,24 @@ class StatusBarActions:
         with self._status_console.capture() as capture:
             self._status_console.print(status, end="")
         return ANSI(capture.get())
+
+    def _append_retry_countdown(self, status: Text, now: float) -> None:
+        """把 API 重试倒计时行渲染进给定 Rich Text（黄色，剩余秒向上取整）。
+
+        剩余秒 = 截止 monotonic 减 now 后向上取整并下限为 0，随 100ms 重绘逐秒递减。
+
+        Args:
+            status: 目标 Rich Text，原地追加倒计时行。
+            now: 当前 monotonic 秒，用于计算剩余秒与 spinner 帧。
+        """
+        frame = _SPINNER_FRAMES[int(now * 10) % len(_SPINNER_FRAMES)]
+        remaining = max(0, math.ceil(self._retry_deadline - now))
+        status.append(f"{frame} ", style="yellow")
+        status.append(
+            f"{self._active_agent_name()} · API错误({self._retry_error_type})，"
+            f"{remaining}秒后重试 ({self._retry_attempt}/{self._retry_max})",
+            style="yellow",
+        )
 
     def _append_round_panel(self, status: Text, now: float) -> None:
         """把「本轮面板」渲染进给定 Rich Text：头行统计 + 每工具一行（超限折叠）。
@@ -276,7 +297,7 @@ class StatusBarActions:
         processing = (
             not viewing_agent
             and self._mode == "processing"
-            and bool(self._activity)
+            and (bool(self._activity) or self._retry_deadline is not None)
         )
         now = time.monotonic()
         if self._turn_started_monotonic is not None and self._mode != "input":
@@ -353,22 +374,52 @@ class StatusBarActions:
             finally:
                 self._turn_clock.exit_human_wait()
 
+    def _begin_retry_countdown(
+        self,
+        error_type: str,
+        attempt: int,
+        max_attempts: int,
+        wait_seconds: float,
+    ) -> None:
+        """进入处理态并开始 API 重试倒计时，驱动活动区实时倒计时行。
+
+        记录截止 monotonic（now + wait_seconds）与错误信息；首次记录本回合处理起点。
+        倒计时期间保持既有 `_activity` 文案不变，收到下一轮 LLMCallStarted 的 `_set_activity`
+        时倒计时被清除。
+
+        Args:
+            error_type: 触发重试的异常类名。
+            attempt: 已失败的尝试序号（1 基）。
+            max_attempts: 允许的最大尝试次数。
+            wait_seconds: 本次等待秒数（含抖动的原始浮点值）。
+        """
+        now = time.monotonic()
+        self._retry_deadline = now + wait_seconds
+        self._retry_error_type = error_type
+        self._retry_attempt = attempt
+        self._retry_max = max_attempts
+        self._mode = "processing"
+        if self._turn_started_monotonic is None:
+            self._turn_started_monotonic = now
+
     def _set_activity(self, activity: str) -> None:
         """进入处理态并设置当前活动文案，驱动底部状态条 spinner / 活动显示。
 
-        首次记录本回合处理起点；活动切换时重置本步耗时起点。
+        首次记录本回合处理起点；活动切换或刚退出重试等待时重置本步耗时起点。
 
         Args:
             activity: 当前活动文案（如"思考中"、"回应中"、工具名；空串为提交后的空闲态）。
         """
+        left_retry = self._retry_deadline is not None
+        self._retry_deadline = None  # 任何活动开始都结束重试等待
         activity_changed = activity != self._activity
         self._activity = activity
         self._mode = "processing"
         now = time.monotonic()
         if self._turn_started_monotonic is None:
             self._turn_started_monotonic = now
-        if activity_changed:
-            self._activity_started_monotonic = now  # 活动切换时重置本步耗时起点
+        if activity_changed or left_retry:
+            self._activity_started_monotonic = now  # 活动切换或退出重试时重置本步耗时起点
             # 记录本步起始时的累计暂停基线，本步耗时只剔除其后的暂停；
             # 弹窗期间消费者阻塞、不会触发活动切换，故此刻必不在暂停中。
             self._activity_paused_baseline = self._turn_clock.paused_seconds(now)
@@ -384,6 +435,7 @@ class StatusBarActions:
         self._activity_paused_baseline = 0.0
         self._turn_clock.reset()
         self._activity = ""
+        self._retry_deadline = None
         self._current_agent_type = None
         self._current_agent_uuid = None
         # 防御性清空本轮缓冲：正常流程下 Trigger B 已在进入输入态前 flush，此处兜底避免残留跨回合。

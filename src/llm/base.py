@@ -13,7 +13,7 @@ import httpx
 import openai
 import anthropic
 from src.events import EventBus
-from src.events.types import LLMCallCompleted, LLMCallStarted, ResponseDelta, ThinkingDelta
+from src.events.types import LLMCallCompleted, LLMCallStarted, LLMRetrying, ResponseDelta, ThinkingDelta
 from src.tools import ToolDict
 
 logger = logging.getLogger(__name__)
@@ -359,12 +359,13 @@ class LLMProvider(ABC):
                     if not self.is_retryable_error(e) or attempt >= max_attempts - 1:
                         raise
                     wait_time = self._retry_delay(attempt)
-                    logger.warning(
-                        "API错误 (%s)，%.1f秒后重试 (%d/%d)...",
-                        type(e).__name__,
-                        wait_time,
-                        attempt + 1,
-                        max_attempts,
+                    await self._emit_llm_retrying(
+                        error_type=type(e).__name__,
+                        attempt=attempt + 1,
+                        max_attempts=max_attempts,
+                        wait_seconds=wait_time,
+                        caller_agent_type=caller_agent_type,
+                        caller_uuid=caller_uuid,
                     )
                     await self._sleep(wait_time)
             raise RuntimeError("LLM chat: 所有重试均失败")
@@ -397,6 +398,46 @@ class LLMProvider(ABC):
             timestamp=time.time(),
             source=self.model,
             content=content,
+            caller_agent_type=caller_agent_type,
+            caller_uuid=caller_uuid,
+        ))
+
+    async def _emit_llm_retrying(
+        self,
+        error_type: str,
+        attempt: int,
+        max_attempts: int,
+        wait_seconds: float,
+        caller_agent_type: str | None = None,
+        caller_uuid: str | None = None,
+    ) -> None:
+        """发出 LLMRetrying 事件，供状态条实时倒计时；无事件总线时降级为 stderr 告警。
+
+        Args:
+            error_type: 触发重试的异常类名。
+            attempt: 已失败的尝试序号（1 基）。
+            max_attempts: 允许的最大尝试次数。
+            wait_seconds: 本次等待秒数（含抖动的原始浮点值）。
+            caller_agent_type: 发起本次调用的 agent 类型，透传给事件供 UI 标注当前 agent。
+            caller_uuid: 发起本次调用的 agent 实例 uuid，供路由器前台门控。
+        """
+        logger.debug(
+            "API错误 (%s)，%.1f秒后重试 (%d/%d)...",
+            error_type, wait_seconds, attempt, max_attempts,
+        )
+        if self.event_bus is None:
+            logger.warning(
+                "API错误 (%s)，%.1f秒后重试 (%d/%d)...",
+                error_type, wait_seconds, attempt, max_attempts,
+            )
+            return
+        await self.event_bus.emit(LLMRetrying(
+            timestamp=time.time(),
+            source=self.model,
+            error_type=error_type,
+            attempt=attempt,
+            max_attempts=max_attempts,
+            wait_seconds=wait_seconds,
             caller_agent_type=caller_agent_type,
             caller_uuid=caller_uuid,
         ))

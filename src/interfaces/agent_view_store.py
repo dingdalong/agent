@@ -71,7 +71,7 @@ class _AgentState:
     ended_monotonic: float | None = None
     transcript: deque[tuple[str, str]] = field(default_factory=deque)
     messages: list[dict] | None = None
-    activity: str = ""  # 该 agent 的最新活动文案（思考中/回应中/工具名），驱动底部列表实时显示
+    activity: str = ""  # 该 agent 的最新活动文案（等待响应/思考中/回应中/工具名），驱动底部列表实时显示
 
 
 class AgentViewStore:
@@ -355,7 +355,7 @@ class AgentViewStore:
             )
 
     def _record_call_start(self, event: LLMCallStarted) -> None:
-        """Record a known context limit and mark the calling agent as thinking.
+        """Record a known context limit and mark the calling agent as awaiting a response.
 
         Args:
             event: LLM call start event.
@@ -366,7 +366,7 @@ class AgentViewStore:
         state = self._ensure_event_state(event)
         if state is None:
             return
-        state.activity = "思考中"
+        state.activity = "等待响应"
         if event.context_limit <= 0:
             return
         state.context = ContextUsage(
