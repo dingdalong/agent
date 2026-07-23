@@ -28,6 +28,8 @@ from src.events.types import (
     ResponseDelta,
     SubagentLifecycle,
     ThinkingDelta,
+    ToolCallCompleted,
+    ToolCallStarted,
 )
 from src.interfaces.agent_view_store import AgentViewStore
 from src.interfaces.base import UserInterface
@@ -948,6 +950,94 @@ def test_store_stream_activity_tracks_thinking_then_response() -> None:
     assert [kind for kind, _text in segments] == ["thinking", "response"]
     assert segments[0][1] == "盘算一下"
     assert segments[1][1] == "正式回复"
+
+
+def _tool_started(uuid_value: str, *, tool_call_id: str, tool_name: str) -> ToolCallStarted:
+    """构造带身份与工具标识的工具开始事件。
+
+    Args:
+        uuid_value: caller UUID。
+        tool_call_id: 工具调用唯一 ID。
+        tool_name: 工具名。
+
+    Returns:
+        工具开始事件。
+    """
+    return ToolCallStarted(
+        timestamp=1.0,
+        source="tools",
+        caller_agent_type="worker",
+        caller_uuid=uuid_value,
+        tool_name=tool_name,
+        tool_call_id=tool_call_id,
+    )
+
+
+def _tool_completed(uuid_value: str, *, tool_call_id: str, tool_name: str) -> ToolCallCompleted:
+    """构造成功状态的工具完成事件。
+
+    Args:
+        uuid_value: caller UUID。
+        tool_call_id: 与开始事件配对的工具调用 ID。
+        tool_name: 工具名。
+
+    Returns:
+        工具完成事件。
+    """
+    return ToolCallCompleted(
+        timestamp=2.0,
+        source="tools",
+        caller_agent_type="worker",
+        caller_uuid=uuid_value,
+        tool_name=tool_name,
+        tool_call_id=tool_call_id,
+        status="success",
+        duration_seconds=0.5,
+        result_preview="ok",
+    )
+
+
+def test_store_single_tool_completion_resets_activity_to_awaiting() -> None:
+    """单工具：开始时状态词为工具名，完成后复位为「等待响应」，不再停留在工具名上。"""
+    store = AgentViewStore(transcript_limit=8)
+    store.record(_tool_started("worker", tool_call_id="t1", tool_name="shell"))
+    assert store.agent_snapshot("worker").activity == "shell"  # type: ignore[union-attr]
+
+    store.record(_tool_completed("worker", tool_call_id="t1", tool_name="shell"))
+    assert store.agent_snapshot("worker").activity == "等待响应"  # type: ignore[union-attr]
+
+
+def test_store_concurrent_tools_reset_activity_only_after_all_complete() -> None:
+    """并发多工具：仅当最后一个工具完成才复位，首个工具完成时仍显示某在飞工具名。"""
+    store = AgentViewStore(transcript_limit=8)
+    store.record(_tool_started("worker", tool_call_id="a", tool_name="read"))
+    store.record(_tool_started("worker", tool_call_id="b", tool_name="grep"))
+
+    # 完成先启动的 a，b 仍在运行：不得提前复位为「等待响应」，应显示仍在飞的工具名。
+    store.record(_tool_completed("worker", tool_call_id="a", tool_name="read"))
+    activity_after_first = store.agent_snapshot("worker").activity  # type: ignore[union-attr]
+    assert activity_after_first != "等待响应"
+    assert activity_after_first == "grep"
+
+    # 最后一个工具 b 完成，本轮工具全部结束：复位为「等待响应」。
+    store.record(_tool_completed("worker", tool_call_id="b", tool_name="grep"))
+    assert store.agent_snapshot("worker").activity == "等待响应"  # type: ignore[union-attr]
+
+
+def test_store_new_llm_call_clears_stale_in_flight_tool_and_restores_reset() -> None:
+    """取消等路径遗留未完成的在飞工具时，下一次 LLM 调用清残条，使后续复位重新生效。"""
+    store = AgentViewStore(transcript_limit=8)
+    # 只发 start、不发 completed（模拟取消/中断路径的残条）。
+    store.record(_tool_started("worker", tool_call_id="stale", tool_name="shell"))
+
+    # 新一轮 LLM 调用：状态词切「等待响应」，并清空残留在飞条目。
+    store.record(_started("worker"))
+    assert store.agent_snapshot("worker").activity == "等待响应"  # type: ignore[union-attr]
+
+    # 新一轮的工具完成后应能正常复位（若残条未清，active_tools 非空会导致复位失效）。
+    store.record(_tool_started("worker", tool_call_id="t2", tool_name="grep"))
+    store.record(_tool_completed("worker", tool_call_id="t2", tool_name="grep"))
+    assert store.agent_snapshot("worker").activity == "等待响应"  # type: ignore[union-attr]
 
 
 def test_store_error_segments_obey_transcript_limit() -> None:

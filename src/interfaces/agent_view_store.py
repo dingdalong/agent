@@ -83,6 +83,7 @@ class _AgentState:
     transcript: deque[tuple[str, str]] = field(default_factory=deque)
     messages: list[dict] | None = None
     activity: str = ""  # 该 agent 的最新活动文案（等待响应/思考中/回应中/工具名），驱动底部列表实时显示
+    active_tools: dict[str, str] = field(default_factory=dict)  # 在飞工具 {tool_call_id: tool_name}，用于并发下判断本轮工具是否全部完成、正确复位状态词
 
 
 class AgentViewStore:
@@ -383,6 +384,7 @@ class AgentViewStore:
         state = self._ensure_event_state(event)
         if state is None:
             return
+        state.active_tools.clear()  # 新一轮 LLM 调用意味着上一轮工具从视图看已结束，清掉可能残留的在飞条目（如取消路径只发 start 未发 completed）
         state.activity = (
             f"等待响应 {event.attempt}/{event.max_attempts}"
             if event.attempt > 1 and event.max_attempts > 0
@@ -552,16 +554,17 @@ class AgentViewStore:
         state = self._ensure_event_state(event)
         if state is None:
             return
+        state.active_tools[event.tool_call_id] = event.tool_name
         state.activity = event.tool_name
         detail = event.detail.strip()
         suffix = f" {detail}" if detail else ""
         state.transcript.append(("tool", f"● {event.tool_name}{suffix}\n"))
 
     def _append_tool_completion(self, event: ToolCallCompleted) -> None:
-        """Append a compact tool-completion transcript line.
+        """移除该在飞工具、据剩余在飞工具复位状态词，并追加紧凑的工具完成转录行。
 
         Args:
-            event: Tool-completion event with preview and duration.
+            event: 带结果预览与耗时的工具完成事件。
 
         Returns:
             None.
@@ -569,6 +572,13 @@ class AgentViewStore:
         state = self._ensure_event_state(event)
         if state is None:
             return
+        state.active_tools.pop(event.tool_call_id, None)
+        if state.active_tools:
+            # 并发工具尚未全部完成：状态词切到最近仍在运行的工具，避免停留在刚完成的工具名上
+            state.activity = next(reversed(state.active_tools.values()))
+        else:
+            # 本轮工具全部完成：复位为「等待响应」，衔接紧随其后的下一次 LLM 调用
+            state.activity = "等待响应"
         preview_lines = (event.result_preview or "").strip().splitlines()
         fallback = "完成" if event.status == "success" else "失败"
         first = preview_lines[0] if preview_lines else fallback
