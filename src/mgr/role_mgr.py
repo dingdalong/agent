@@ -76,6 +76,7 @@ def extract_manifest(
         AgentManifest 实例。
     """
     from src.mgr.permission_mgr import parse_permission_mode
+    from src.llm.base import normalize_reasoning_effort
 
     # 标识
     identifier = meta.get(id_field)
@@ -118,6 +119,17 @@ def extract_manifest(
     if isinstance(raw_thinking, bool):
         enable_thinking = raw_thinking
 
+    # 推理力度：合法档位覆盖 provider 配置，非法告警忽略
+    reasoning_effort: str | None = None
+    raw_effort = meta.get("reasoning_effort")
+    if raw_effort is not None:
+        reasoning_effort = normalize_reasoning_effort(str(raw_effort))
+        if reasoning_effort is None:
+            logger.warning(
+                "%s 的 reasoning_effort 非法：%r，已忽略",
+                path, raw_effort,
+            )
+
     # 记忆范围
     memory: str | None = None
     raw_memory = meta.get("memory")
@@ -142,6 +154,7 @@ def extract_manifest(
         model=model,
         permission_mode=permission_mode,
         enable_thinking=enable_thinking,
+        reasoning_effort=reasoning_effort,
         memory=memory,
         features=features,
     )
@@ -165,6 +178,7 @@ class AgentManifest:
     model: str | None = None
     permission_mode: PermissionMode | None = None
     enable_thinking: bool | None = None
+    reasoning_effort: str | None = None
     features: set[str] | None = None
 
 

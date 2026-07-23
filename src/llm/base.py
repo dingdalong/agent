@@ -48,6 +48,23 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# 合法推理力度档位（各 provider 降档阶梯 _EFFORT_DOWNGRADE 的并集）。
+VALID_REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max"})
+
+
+def normalize_reasoning_effort(text: str) -> str | None:
+    """规整推理力度档位。
+
+    Args:
+        text: 原始档位文本。
+
+    Returns:
+        小写去空白后命中合法档位时返回规范值，否则返回 None。
+    """
+    value = text.strip().lower()
+    return value if value in VALID_REASONING_EFFORTS else None
+
+
 @dataclass(slots=True)
 class LLMCallContext:
     """单次 chat 尝试独占的流式输出与调用方状态。"""

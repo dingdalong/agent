@@ -27,7 +27,7 @@
 `role.md` 经 `extract_manifest(..., id_field="agent_type", default_id="main")` 解析为 `AgentManifest`（`role_mgr.py:150-168`）：
 
 - **body** → 成为主 agent 的**核心身份提示词**（`PromptMgr._build_core` 的"# 核心身份"段）。
-- **frontmatter**：`agent_type` 对角色固定视为 `"main"`；`description`、`features`（启用的 feature 集）、`thinking`（默认思考开关）、`model`、`permissionMode` 等字段同子 agent（见下表）。
+- **frontmatter**：`agent_type` 对角色固定视为 `"main"`；`description`、`features`（启用的 feature 集）、`thinking`（默认思考开关）、`reasoning_effort`（默认推理力度）、`model`、`permissionMode` 等字段同子 agent（见下表）。其中 `permissionMode` 额外充当**会话级默认权限模式**（`default_mode` 的最高优先来源，见 [permissions.md](permissions.md)），`reasoning_effort` 充当主 agent 与未声明子 agent 的推理力度基准（见 [llm.md](llm.md)）。
 
 角色目录内其他资产由 `RoleMgr` 暴露路径（仅在目录/文件存在时返回，否则 `None`）：
 
@@ -77,6 +77,7 @@
 | `model` | str | `None`（用 `default`） | 模型别名（`default`/`best`/`fast`）或真实 ID；`inherit` = 继承父 agent 已解析的真实模型 ID |
 | `permissionMode` | str | `None`（回退 `default_mode`） | 该子 agent 固定权限模式，经 `parse_permission_mode` 解析；非法值告警忽略 |
 | `thinking` | bool | `None`（继承父 agent） | 是否启用思考；仅 bool 有效 |
+| `reasoning_effort` | str | `None`（继承父 agent，主 agent 回退 provider 配置） | 推理力度档位；经 `normalize_reasoning_effort` 规整（小写去空白），合法值 `low`/`medium`/`high`/`xhigh`/`max`，非法值告警忽略 |
 | `memory` | str | `None` | 记忆范围（如 `project`），控制 `MemoryMgr` 注入 |
 | `features` | YAML 列表 | `None`（继承父 agent 已解析集） | 该子 agent 的 feature 集；空列表 = 全部禁用 |
 
@@ -91,10 +92,11 @@
 3. 解析工具集：`tools_mgr.resolve_subagent_tools(manifest.tools)`。
 4. 解析模型：`inherit` → `parent_agent.llm.model`。
 5. 解析思考：`enable_thinking is None` → 继承父 agent。
-6. 解析 feature：`features is None` → 继承父 agent 已解析集。
-7. `Agent.from_manifest(...)` 构造子 agent 实例（`is_subagent=True`）。
-8. 触发 `SubagentStart` hook（若有）→ 发 `SubagentLifecycle(phase="start")` 事件 → `await agent.run(prompt)` → `finally` 发 `phase="end"` 事件 → 触发 `SubagentStop` hook。
-9. `SubagentStop` 若 `blocked` 则用 `block_reason` 覆盖结果；若有 `additional_context` 则追加到结果末尾。
+6. 解析推理力度：`reasoning_effort is None` → 继承父 agent 已解析值。
+7. 解析 feature：`features is None` → 继承父 agent 已解析集。
+8. `Agent.from_manifest(...)` 构造子 agent 实例（`is_subagent=True`）。
+9. 触发 `SubagentStart` hook（若有）→ 发 `SubagentLifecycle(phase="start")` 事件 → `await agent.run(prompt)` → `finally` 发 `phase="end"` 事件 → 触发 `SubagentStop` hook。
+10. `SubagentStop` 若 `blocked` 则用 `block_reason` 覆盖结果；若有 `additional_context` 则追加到结果末尾。
 
 > 子 agent **无 plan 能力**：四个 plan 工具标记 `subagent=False`，被 `resolve_subagent_tools` 强制排除；权限模式在构造时固定，故并发子 agent 互不干扰（见 [permissions.md](permissions.md)）。
 

@@ -6,7 +6,9 @@
 
 ## 权限模式按 agent 独立
 
-可变的权限模式持有在**每个 `Agent` 实例**上（`agent.permission_mode`，以及 plan 模式的 `_pre_plan_mode`）。`PermissionManager` 只保留全局共享的规则字典、`session_allow` 和不可变的 `default_mode`（来自 `settings.json` 的 `permissions.defaultMode`，见 `permission_mgr.py:318-324`）。`check()` / `is_tool_visible()` 都接收调用方 agent 的 `mode` 参数（`permission_mgr.py:446`、`:390`）。
+可变的权限模式持有在**每个 `Agent` 实例**上（`agent.permission_mode`，以及 plan 模式的 `_pre_plan_mode`）。`PermissionManager` 只保留全局共享的规则字典、`session_allow` 和不可变的 `default_mode`。`check()` / `is_tool_visible()` 都接收调用方 agent 的 `mode` 参数（`permission_mgr.py:446`、`:390`）。
+
+`default_mode` 的**解析优先级**（`_load_config`，`permission_mgr.py:313-330`）：激活角色 `role.md` 的 `permissionMode` →（未声明）`settings.json` 的 `permissions.defaultMode` →（未声明）内置 `DEFAULT_MODE`。role 值由 `bootstrap.create_app()` 经构造参数 `role_default_mode=role_mgr.manifest.permission_mode` 注入，`_load_config` 在读完 `settings.json` 后最后套用它（存快照于 `_role_default_mode`，不受 `settings.json` 是否有 `permissions` 块影响）。该 `default_mode` 用于：主 agent 初始模式、未声明 `permissionMode` 的子 agent 回退值、`/clear` 重置目标、绑定前状态栏显示值。
 
 语义：
 - 用户的模式设置（`/mode`、Shift+Tab、`/plan`、`/resume` 恢复）**只作用于入口主 agent**（总控），见 [agent-runtime.md](agent-runtime.md) 的 `PermissionModeController`。
@@ -93,4 +95,4 @@
 ## 其他方法与 reload
 
 - `notify_decision()`（`:847`）：对 `deny`/`auto_allow` 决策经 `event_bus.notify_permission` 发通知（`allow` 不通知）。
-- `reload()`（`:414-424`）：`/clear` 时把 `default_mode` 重置为 `DEFAULT_MODE`，清空 `session_allow` 与全部规则字典，再 `_load_config()` 重新加载。因此**编辑 `settings.json` 的权限规则可随 `/clear` 生效**；而 `mcp_servers.json` 的 per-server 规则由 `McpMgr` 在启动时抽取，`McpMgr` 无 `reload`，故**编辑需重启**（见 [mcp-and-hooks.md](mcp-and-hooks.md)）。
+- `reload()`（`:414-424`）：`/clear` 时把 `default_mode` 重置为 `DEFAULT_MODE`，清空 `session_allow` 与全部规则字典，再 `_load_config()` 重新加载——`_load_config` 会重放 `settings.json` 与 role（`_role_default_mode` 快照不清空），故 `/clear` 后 `default_mode` 仍保持上述优先级（role 值不丢）。因此**编辑 `settings.json` 的权限规则可随 `/clear` 生效**；而 `mcp_servers.json` 的 per-server 规则由 `McpMgr` 在启动时抽取，`McpMgr` 无 `reload`，故**编辑需重启**（见 [mcp-and-hooks.md](mcp-and-hooks.md)）。role.md 的 `permissionMode` 在 `create_app()` 构造时注入一次，故**编辑 role.md 需重启**才刷新。

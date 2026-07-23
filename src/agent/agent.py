@@ -172,6 +172,7 @@ class Agent:
     memory: str | None = field(default=None)
     model: str | None = field(default=None)
     enable_thinking: bool = field(default=True)
+    reasoning_effort: str | None = field(default=None)
     features: set[str] | None = field(default=None)
     _pre_plan_mode: PermissionMode | None = field(init=False, default=None)
     permission_mode: PermissionMode | None = field(default=None)
@@ -306,6 +307,7 @@ class Agent:
                 if manifest.enable_thinking is not None
                 else True
             ),
+            reasoning_effort=manifest.reasoning_effort,
             features=manifest.features,
         )
         kwargs.update(overrides)
@@ -827,6 +829,14 @@ class Agent:
             await self.deps.event_bus.request_output(f"[transcript saved: {result.transcript_path}]\n")
         return AgentState.CHECK_COMPACT
 
+    def _base_reasoning_effort(self) -> str:
+        """返回本 agent 无长度降档时实际使用的推理力度档位。
+
+        Returns:
+            自身 manifest 声明的 reasoning_effort，未声明时回退 provider 配置档位。
+        """
+        return self.reasoning_effort or self.llm.reasoning_effort
+
     async def _on_llm_call(self, ctx: RunContext) -> AgentState:
         """调用 LLM 并保存响应。
 
@@ -847,7 +857,7 @@ class Agent:
             caller_agent_type=self.agent_type,
             caller_uuid=str(self.uuid),
             enable_thinking=self.enable_thinking,
-            reasoning_effort_override=ctx.length_effort_override,
+            reasoning_effort_override=ctx.length_effort_override or self.reasoning_effort,
             ephemeral_instruction=ctx.length_ephemeral_instruction,
         )
         return AgentState.PROCESS_RESPONSE
@@ -939,7 +949,7 @@ class Agent:
         ctx.length_recoveries += 1
 
         if regenerate:
-            current_effort = ctx.length_effort_override or self.llm.reasoning_effort
+            current_effort = ctx.length_effort_override or self._base_reasoning_effort()
             lower = self.llm.next_lower_effort(current_effort)
             if lower:
                 ctx.length_effort_override = lower
@@ -960,7 +970,7 @@ class Agent:
             ctx.messages.append({"role": "user", "content": retry_instruction})
             ctx.messages[:] = self.llm.normalize_messages(ctx.messages)
             strategy = "continue"
-            effort = ctx.length_effort_override or self.llm.reasoning_effort
+            effort = ctx.length_effort_override or self._base_reasoning_effort()
 
         await self._emit_length_retrying(
             ctx,

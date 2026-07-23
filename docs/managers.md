@@ -75,7 +75,7 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 | `parse_frontmatter` | `text: str` | `tuple[dict, str]` | 从 `.md` 文本分离 YAML frontmatter 与 body |
 | `extract_manifest` | `meta: dict`, `path: Path`, `prompt`, `id_field`, `default_id`, `default_description` | `AgentManifest` | 从 frontmatter+body 构造 `AgentManifest` |
 
-**`AgentManifest` 数据类字段**（`role_mgr.py:150-168`）：`agent_type`（角色固定 `"main"`）、`description`、`path`、`prompt`、`tools`、`memory`、`model`、`permission_mode`、`enable_thinking`、`features`。
+**`AgentManifest` 数据类字段**（`role_mgr.py:150-168`）：`agent_type`（角色固定 `"main"`）、`description`、`path`、`prompt`、`tools`、`memory`、`model`、`permission_mode`、`enable_thinking`、`reasoning_effort`、`features`。
 
 **公共方法/属性**：
 
@@ -182,6 +182,7 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 
 **消费的配置或文件**：
 - `settings.json` 的 `permissions`（`_load_config` `permission_mgr.py:312-329`）：`defaultMode`、`allow`、`deny`、`ask` 列表。
+- 构造参数 `role_default_mode`（`bootstrap.create_app()` 传入 `role_mgr.manifest.permission_mode`）：`_load_config` 末尾最后套用，使 `default_mode` 解析优先级为 role.md `permissionMode` → `settings.json` `defaultMode` → 内置 `DEFAULT_MODE`（详见 [permissions.md](permissions.md)）。
 - `mcp_servers.json` 各 server 的 `permissions` 块（`_load_mcp_server_rules` `permission_mgr.py:331-359`，经 `McpMgr.server_permissions()` 拉取）——最低优先级层。
 - 工具自身的权限元数据（`_load_tool_metadata`）：`kind`、`tips`、`check_permissions`、`specifier_arg`、`mcp_server`。
 
@@ -291,7 +292,7 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 **`task_delegator` 关键行为**（`subagent_mgr.py:84-211`）：
 - 未知 `agent_type` 返回错误并列出已知；
 - 有 `task_id` 时委派前将任务置 `in_progress` 并设 `owner`；异常退出或 `RunResult.llm_error` 非空时均回滚为无 owner 的 `pending`，其余正常返回**不**自动标 `completed`，留给主 agent 评估；
-- 工具集经 `tools_mgr.resolve_subagent_tools(manifest.tools)` 解析；`model == "inherit"` 继承父 agent 已解析的真实模型 ID；`enable_thinking`/`features` 未声明时继承父 agent；
+- 工具集经 `tools_mgr.resolve_subagent_tools(manifest.tools)` 解析；`model == "inherit"` 继承父 agent 已解析的真实模型 ID；`enable_thinking`/`reasoning_effort`/`features` 未声明时继承父 agent；
 - 用 `Agent.from_manifest(is_subagent=True, ...)` 构造子 agent 实例；
 - 触发 `SubagentStart`/`SubagentStop` hook 与 `SubagentLifecycle`（start/end）事件（异常/取消也发 end）；`SubagentStop` hook 的 `blocked`/`additional_context` 可覆盖或追加结果。
 

@@ -46,7 +46,7 @@ token 用量统一为 `input_tokens`、`output_tokens`、`total_tokens`、`cache
 | `timeout` | `120.0` | SDK 请求超时秒数 |
 | `context_limit` | `0` | 模型上下文窗口；非正值表示未知 |
 | `page_token_rate` | `0.03` | 单页工具结果占上下文窗口的比例 |
-| `reasoning_effort` | `"max"` | provider 共享的默认推理力度；**按调用降档只经 `reasoning_effort_override` 参数传递，绝不修改此共享字段**（provider 被缓存并跨子 agent 共享） |
+| `reasoning_effort` | `"max"` | provider 共享的默认推理力度（agent 未声明 `reasoning_effort` 时的最终回退）；**per-agent 覆盖与按调用降档只经 `reasoning_effort_override` 参数传递，绝不修改此共享字段**（provider 被缓存并跨子 agent 共享） |
 | `preserve_thinking` | `False` | Ollama 历史思考保留开关 |
 | `max_pause_turn_continuations` | `0` | 协议续接上限；仅 Anthropic 从配置读取正整数，内置默认值为 `5` |
 
@@ -73,7 +73,7 @@ token 用量统一为 `input_tokens`、`output_tokens`、`total_tokens`、`cache
 6. 异常由统一分类器转换成 `LLMErrorInfo`；不可重试或尝试耗尽时发出 `LLMCallFailed`，抛出 `LLMCallError`。
 7. 可重试时计算等待时间、发出 `LLMRetrying`、异步等待，再以全新的尝试上下文重试。
 
-`chat()` 另有两个默认 `None` 的按调用参数：`reasoning_effort_override`（临时替换本次调用的推理力度档位，不改共享 `reasoning_effort`）与 `ephemeral_instruction`（见步骤 1）。Agent 恢复链把 `ctx.length_effort_override` / `ctx.length_ephemeral_instruction` 经此传入；两参默认 `None`，故退出总结、compact 等调用不受影响。
+`chat()` 另有两个默认 `None` 的按调用参数：`reasoning_effort_override`（临时替换本次调用的推理力度档位，不改共享 `reasoning_effort`）与 `ephemeral_instruction`（见步骤 1）。`reasoning_effort_override` 现由两条来源驱动：其一是 **per-agent 推理力度**——`Agent._on_llm_call` 用 `ctx.length_effort_override or self.reasoning_effort` 取值，`self.reasoning_effort` 源自 role.md / 子 agent frontmatter 的 `reasoning_effort` 字段（子 agent 未声明时继承父 agent 已解析值，主 agent 未声明为 `None` → 退回 provider 共享档位），见 [roles-subagents-skills.md](roles-subagents-skills.md)；其二是**长度恢复降档**——`ctx.length_effort_override` 由恢复链经 `next_lower_effort()` 从 `_base_reasoning_effort()`（即 `self.reasoning_effort or self.llm.reasoning_effort`）起步逐级降档。两参默认 `None`，故退出总结、compact 等调用不受影响。
 
 `CancelledError`、`KeyboardInterrupt`、`SystemExit` 始终原样传播。事件发布调用 `emit_telemetry_safely()`，普通遥测发布故障不会改变 LLM 调用结果，控制流异常仍传播（`src/events/bus.py:34-63`）。
 

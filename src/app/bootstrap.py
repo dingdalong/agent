@@ -62,6 +62,7 @@ async def create_app(
         workdir=str(work_dir),
         trusted_dirs=(str(global_dir),),
         mcp_mgr=mcp_mgr,
+        role_default_mode=(role_mgr.manifest.permission_mode if role_mgr.manifest else None),
     )
     session_mgr = SessionMgr(global_dir=global_dir, workdir=work_dir)
     llm_mgr = LLMMgr(config_mgr=config_mgr, event_bus=event_bus)

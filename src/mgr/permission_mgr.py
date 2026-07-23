@@ -268,8 +268,11 @@ class PermissionManager:
         workdir: str = "",
         trusted_dirs: tuple[str, ...] = (),
         mcp_mgr: Any = None,
+        role_default_mode: PermissionMode | None = None,
     ):
         self.default_mode: PermissionMode = DEFAULT_MODE
+        # 激活角色 role.md 声明的默认权限模式；优先级高于 settings.json 的 defaultMode。
+        self._role_default_mode = role_default_mode
         self.deny_rules: RulesDict = {}
         self.ask_rules: RulesDict = {}
         self.allow_rules: RulesDict = {}
@@ -313,21 +316,24 @@ class PermissionManager:
     def _load_config(self) -> None:
         """从配置文件加载权限规则和默认模式。"""
         permissions = self.config_mgr.get_user_setting("permissions")
-        if not isinstance(permissions, dict):
-            return
+        if isinstance(permissions, dict):
+            default_mode = permissions.get("defaultMode")
+            if isinstance(default_mode, str):
+                mode = parse_permission_mode(default_mode)
+                if mode is None:
+                    logger.warning("忽略无效的 permissions.defaultMode：%r", default_mode)
+                else:
+                    self.default_mode = mode
 
-        default_mode = permissions.get("defaultMode")
-        if isinstance(default_mode, str):
-            mode = parse_permission_mode(default_mode)
-            if mode is None:
-                logger.warning("忽略无效的 permissions.defaultMode：%r", default_mode)
-            else:
-                self.default_mode = mode
+            self._parse_rules(permissions.get("deny", []), "deny", self.deny_rules)
+            self._parse_rules(permissions.get("ask", []), "ask", self.ask_rules)
+            self._parse_rules(permissions.get("allow", []), "allow", self.allow_rules)
+            self._load_mcp_server_rules()
 
-        self._parse_rules(permissions.get("deny", []), "deny", self.deny_rules)
-        self._parse_rules(permissions.get("ask", []), "ask", self.ask_rules)
-        self._parse_rules(permissions.get("allow", []), "allow", self.allow_rules)
-        self._load_mcp_server_rules()
+        # role.md 的 permissionMode 最后套用，优先级高于 settings.json 的 defaultMode；
+        # 不受 settings.json 是否存在 permissions 块影响。
+        if self._role_default_mode is not None:
+            self.default_mode = self._role_default_mode
 
     def _load_mcp_server_rules(self) -> None:
         """从 mcp_servers.json 各 server 的 permissions 块加载最低优先级权限规则。

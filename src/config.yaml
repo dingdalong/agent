@@ -34,7 +34,7 @@ llm_provider:
     context_limit: 262144 # 上下文限制
 
 llm:
-  default: k3 # 必填，默认模型，子agent通过别名引用
+  default: gpt-5.6-luna # 必填，默认模型，子agent通过别名引用
   # best: ...                   # 可选，最强模型，不填时使用 default
   # fast: ...                   # 可选，最快/最便宜模型，不填时使用 default
   concurrency: 5 # 最大并发数量

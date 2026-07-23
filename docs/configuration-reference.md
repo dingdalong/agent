@@ -247,7 +247,7 @@ events:
 | `permissions.allow` | list[str] | `[]` | allow 规则列表；全局+项目并集去重 | `permission_mgr.py:328` |
 | `permissions.deny` | list[str] | `[]` | deny 规则列表（优先级最高）；全局+项目并集去重 | `permission_mgr.py:326` |
 | `permissions.ask` | list[str] | `[]` | ask 规则列表（触发确认弹窗）；深合并（非并集） | `permission_mgr.py:327` |
-| `permissions.defaultMode` | str | 缺省 `default`（`DEFAULT_MODE`） | 入口主 agent 的默认权限模式 | `permission_mgr.py:318` |
+| `permissions.defaultMode` | str | 缺省 `default`（`DEFAULT_MODE`） | 会话级默认权限模式。**解析优先级**：激活角色 `role.md` 的 `permissionMode` →（未声明）此处 `defaultMode` →（未声明）内置 `DEFAULT_MODE`（详见 [permissions.md](permissions.md)） | `permission_mgr.py:318` |
 | `mcp.enabledServers` | list[str] | 无（视为不启用白名单） | 非空时作**白名单**，只连接其中的 server | `mcp_mgr.py:193` |
 | `mcp.disabledServers` | list[str] | 无 | 始终从待连接集合剔除（连接前硬开关） | `mcp_mgr.py:194` |
 | `hooks.<Event>` | list[group] | 无 | 生命周期 hook 定义（见下） | `hooks_mgr.py:135` |

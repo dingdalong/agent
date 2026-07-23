@@ -152,6 +152,11 @@ class SubAgentMgr:
             if enable_thinking is None:
                 enable_thinking = getattr(parent_agent, "enable_thinking", True)
 
+            # 推理力度：显式设置则用设置值，否则继承父 agent 已解析值
+            reasoning_effort = manifest.reasoning_effort
+            if reasoning_effort is None:
+                reasoning_effort = getattr(parent_agent, "reasoning_effort", None)
+
             # feature 集：子 agent 自身 manifest 声明则用其值，否则继承父 agent 已解析的 feature 集
             features = manifest.features
             if features is None:
@@ -165,6 +170,7 @@ class SubAgentMgr:
                 tools=tools,
                 model=model_value,
                 enable_thinking=enable_thinking,
+                reasoning_effort=reasoning_effort,
                 features=features,
             )
 
