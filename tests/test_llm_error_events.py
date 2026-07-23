@@ -920,6 +920,36 @@ def test_store_segments_retry_and_failure_without_merging_next_response() -> Non
     assert store.agent_snapshot("foreground").activity == "失败"  # type: ignore[union-attr]
 
 
+def test_store_stream_activity_tracks_thinking_then_response() -> None:
+    """子 agent 流式阶段状态词随增量种类切换：等待响应→思考中→回应中，思考正文仍进转录。"""
+    store = AgentViewStore(transcript_limit=8)
+    store.record(_started("worker"))
+    assert store.agent_snapshot("worker").activity == "等待响应"  # type: ignore[union-attr]
+
+    store.record(ThinkingDelta(
+        timestamp=2.0,
+        source="stub",
+        caller_agent_type="worker",
+        caller_uuid="worker",
+        content="盘算一下",
+    ))
+    assert store.agent_snapshot("worker").activity == "思考中"  # type: ignore[union-attr]
+
+    store.record(ResponseDelta(
+        timestamp=3.0,
+        source="stub",
+        caller_agent_type="worker",
+        caller_uuid="worker",
+        content="正式回复",
+    ))
+    assert store.agent_snapshot("worker").activity == "回应中"  # type: ignore[union-attr]
+
+    segments = store.transcript_segments("worker")
+    assert [kind for kind, _text in segments] == ["thinking", "response"]
+    assert segments[0][1] == "盘算一下"
+    assert segments[1][1] == "正式回复"
+
+
 def test_store_error_segments_obey_transcript_limit() -> None:
     """retry/error 与其它转录一样受 transcript_limit 约束。"""
     store = AgentViewStore(transcript_limit=2)

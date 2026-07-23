@@ -533,8 +533,7 @@ class AgentViewStore:
         state = self._ensure_event_state(event)
         if state is None:
             return
-        if kind == "response":
-            state.activity = "回应中"  # ThinkingDelta 为 DETAIL 级默认丢弃，故只据 response 更新
+        state.activity = "回应中" if kind == "response" else "思考中"  # 按增量种类切换面板状态词：thinking→思考中、response→回应中
         if state.transcript and state.transcript[-1][0] == kind:
             previous_kind, previous_text = state.transcript[-1]
             state.transcript[-1] = (previous_kind, previous_text + content)
