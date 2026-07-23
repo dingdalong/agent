@@ -4,11 +4,11 @@
 
 ## 1. `AgentApp` 外层 REPL
 
-`AgentApp.run()`（`src/app/app.py:30-76`）先启动 UI 与事件消费者，输出启动信息并创建主 Agent，随后持续调用 `_run_agent_turn()`。Agent 内部可完成多轮输入；只有退出或上抛命令才返回给应用层。`/clear` 重建会话，`/agents` 复用当前 Agent 浏览子 agent 记录。
+`AgentApp.run()`（`src/app/app.py:31-77`）先启动 UI 与事件消费者，输出启动信息并创建主 Agent，随后持续调用 `_run_agent_turn()`。Agent 内部可完成多轮输入；只有退出或上抛命令才返回给应用层。`/clear` 重建会话，`/agents` 复用当前 Agent 浏览子 agent 记录。
 
-`_consume_events()`（`app.py:120-132`）内联处理 `InterruptRequested`，其余事件统一交 `OutputRouter.dispatch()`，确保 Store 先记录再决定可见性。`_run_agent_turn()`（`app.py:134-155`）把 `agent.run()` 包成任务，取消或键盘中断时调用 `_handle_interrupted_turn()` 收束任务与输入。
+`_consume_events()`（`app.py:121-133`）内联处理 `InterruptRequested`，其余事件统一交 `OutputRouter.dispatch()`，确保 Store 先记录再决定可见性。`_run_agent_turn()`（`app.py:135-156`）把 `agent.run()` 包成任务，取消或键盘中断时调用 `_handle_interrupted_turn()` 收束任务与输入。
 
-`_reset_session()`（`app.py:182-220`）的顺序是：生成 `session_id`；对固定 Manager/UI 列表调用可用的 `reload()`；重置 `AgentViewStore` 和会话上下文；安装 `PermissionModeController`；从激活角色 manifest 构造新主 Agent；登记前台 UUID；安装权限快捷键；运行 `SessionStart` hook。
+`_reset_session()`（`app.py:183-233`）先进入 UI reset gate，同步取消活跃、排队和只读请求，并等待窗口 runner 的 done callback 完成；随后进入 EventBus 的 `UiRequest` 拒绝 gate，并以 `join()` 等待 reset 前已投递或正在消费的事件完成，且经过一个没有新 delivery 的事件循环稳定检查，才开始修改共享会话状态。之后依次生成 `session_id`，对固定 Manager/UI 列表调用可用的 `reload()`，重置 `AgentViewStore` 和会话上下文，安装 `PermissionModeController`，从激活角色 manifest 构造并登记新主 Agent，安装权限快捷键，运行 `SessionStart` hook。退出 gate 前的 `finally` 再次 `join()`，以相同边界收束 reset 期间已经开始 delivery 的普通事件；尚未开始 emit、在稳定检查返回后才运行的未来 producer 不属于此次 drain。reset 期间新发布的 `UiRequest` 在入队前直接取消。UI 对请求在任何流收尾 await 前检查 gate，并在收尾后复检，因此 reset 前已经进入流收尾的在途请求也会在共享状态变更前被取消。
 
 ## 2. 状态枚举与流转
 

@@ -7,7 +7,7 @@ import json
 from prompt_toolkit.formatted_text import ANSI
 from rich.text import Text
 
-from src.interfaces.agent_view_store import AgentSnapshot, AgentViewStore
+from src.interfaces.agent_view_store import AgentSnapshot
 from src.interfaces.markdown_renderer import render_markdown
 from src.interfaces.status_presenter import (
     present_agent,
@@ -17,56 +17,17 @@ from src.interfaces.status_presenter import (
 
 
 class AgentPanelController:
-    """Own agent selection and read-only transcript overlay state."""
+    """Own agent-list selection and transcript render caches."""
 
-    def __init__(self, store: AgentViewStore) -> None:
+    def __init__(self) -> None:
         """Initialize empty agent-panel interaction state.
 
-        Args:
-            store: Shared source of snapshots and transcript content.
-
         Returns:
             None.
         """
-        self.store = store
         self.selected_index = 0
-        self.viewing_uuid: str | None = None
-        self.scroll = 0
-        self.invoked = False
         self.transcript_cache: tuple[tuple, list[str]] | None = None
         self.message_cache: tuple[tuple, list[str]] | None = None
-
-    def active_snapshots(self) -> list[AgentSnapshot]:
-        """Return active list rows from the shared Store.
-
-        Returns:
-            Stable active agent snapshots.
-        """
-        return self.store.active_agent_snapshots()
-
-    def open_live(self, uuid: str) -> None:
-        """Open one read-only live transcript overlay.
-
-        Args:
-            uuid: Viewed agent UUID.
-
-        Returns:
-            None.
-        """
-        self.viewing_uuid = uuid
-        self.scroll = 0
-        self.invoked = False
-
-    def close_live(self) -> None:
-        """Close the transcript overlay and reset its owned state.
-
-        Returns:
-            None.
-        """
-        self.viewing_uuid = None
-        self.scroll = 0
-        self.invoked = False
-
 
 _AGENT_LIST_MAX_ROWS = 8
 _TRANSCRIPT_PANEL_ROWS = 12

@@ -1,7 +1,7 @@
 """菜单/交互事件 — 阻塞等待用户经 TUI 作答、并通过 future 回传结果的事件。
 
-这些事件都是 UI 的"控制面"：EventBus 发布后，UI 进入明确的 `InteractionMode`，
-由 `src/interfaces/inline/` 中对应组件渲染；用户完成或取消后经 future 回传。
+这些事件都是 UI 的"控制面"：EventBus 发布后，Inline WindowManager 选择对应窗口
+并安排渲染；用户完成或取消后经 future 回传。
 每个事件的注释给出其在组合式 TUI 上的具体呈现形态。
 """
 
@@ -16,11 +16,14 @@ from src.events.types import Event
 
 
 @dataclass
-class MenuRequest(Event):
-    """需 UI 阻塞作答、经 future 回传结果的交互事件基类。
+class UiRequest(Event):
+    """UI 窗口请求的基类，持有由 EventBus 等待的结果 future。
 
-    UI 收到后进入相应交互模式并渲染对应界面；用户作答后由
-    complete() 回填 future（空串约定为取消），失败/取消分别走 fail()/cancel()。
+    所有交互窗口都经 future 向调用方回传结束结果。作答窗口由
+    ``MenuRequest`` 表示，只读窗口由 ``ViewRequest`` 表示。
+
+    Attributes:
+        future: 调用方等待的结果 future；由 EventBus 在发布前附加。
     """
 
     future: asyncio.Future[str] | None = None
@@ -30,7 +33,7 @@ class MenuRequest(Event):
         return self.future is not None and not self.future.done()
 
     def complete(self, value: str) -> None:
-        """以用户作答值完成 future（future 未设置或已完成时忽略）。"""
+        """以窗口结果完成 future（future 未设置或已完成时忽略）。"""
         if self._pending():
             self.future.set_result(value)
 
@@ -43,6 +46,23 @@ class MenuRequest(Event):
         """以异常终结 future（future 未设置或已完成时忽略）。"""
         if self._pending():
             self.future.set_exception(exc)
+
+
+@dataclass
+class MenuRequest(UiRequest):
+    """需 UI 阻塞作答、经 future 回传结果的交互事件基类。
+
+    UI 收到后进入相应交互模式并渲染对应界面；用户作答后由
+    complete() 回填 future（空串约定为取消），失败/取消分别走 fail()/cancel()。
+    """
+
+
+@dataclass
+class ViewRequest(UiRequest):
+    """只读窗口请求基类，不占用输入交互 future。
+
+    只读窗口可在作答窗口下方保持打开；用户关闭窗口后才完成其 future。
+    """
 
 
 @dataclass
@@ -164,7 +184,7 @@ class FormMenu(MenuRequest):
 
 
 @dataclass
-class TranscriptView(MenuRequest):
+class TranscriptView(ViewRequest):
     """请求 UI 以只读分页面板查看某子 agent 的完整原始消息记录，通过 future 回传结果（恒 ""）。
 
     由 /agents 浏览器在用户选中某子 agent 后发起。TUI 由 `inline/agent_panel.py` 的
@@ -185,7 +205,7 @@ class TranscriptView(MenuRequest):
           ⚙ 结果 (…)
         <工具返回原文…>
 
-    这是只读查看而非作答菜单：无选项、无输入；Esc 经 _resolve_input("") 解开 future，返回 ""。
+    这是只读查看而非作答菜单：无选项、无输入；Esc 经 WindowManager 移除窗口并完成 future，返回 ""。
     """
     uuid: str = ""  # 目标子 agent 的 uuid 字符串
     level: EventLevel = field(default=EventLevel.PROGRESS, init=False)

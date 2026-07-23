@@ -98,7 +98,7 @@ class StatusBarActions:
     """Render and update activity and core status state."""
 
     def _render_activity(self) -> ANSI:
-        """构建实时区活动内容的 ANSI；仅处理态且有活动/本轮工具/重试等待时由其窗口显示。
+        """构建实时区活动内容的 ANSI；仅无栈顶窗口且有活动/本轮工具/重试等待时显示。
 
         首行留空，与上方滚动正文（messages 区）分隔。重试等待中优先渲染倒计时行；否则本轮缓冲
         非空时渲染「本轮面板」（头行统计 + 每工具一行，各自 spinner/✔/✘ + 计时）；否则回退单行
@@ -287,21 +287,21 @@ class StatusBarActions:
         """构建底部会话状态或查看中子 agent 状态的 ANSI。
 
         耗时为全会话累计有效耗时（已完成回合的累计 + 本回合实时，均剔除纯人工等待），与会话 token 累计一致。
-        处理态与中途弹窗态（回合计时中且非输入态）叠加本回合实时段：有工具在算时走动、纯人工等待时冻结；
-        处理态另追加「Ctrl+C 中断」提示。输入态只显示已完成回合的累计值（冻结），不带中断提示。
+        无窗口的处理遥测与中途作答窗口（回合计时中且非 input 栈顶）叠加本回合实时段：有工具在算时走动、
+        纯人工等待时冻结；无窗口的处理遥测另追加「Ctrl+C 中断」提示。input 栈顶只显示已完成回合的累计值（冻结），不带中断提示。
         查看子 agent 时改用其快照并隐藏全部主流程操作提示。
 
         Returns:
             可作为 Window 内容的 ANSI（单行核心状态）。
         """
-        viewing_agent = self._viewing_uuid is not None
+        viewing_agent = self._transcript_visible
         processing = (
             not viewing_agent
-            and self._mode == "processing"
+            and self._top_window_kind is None
             and (bool(self._activity) or self._retry_deadline is not None)
         )
         now = time.monotonic()
-        if self._turn_started_monotonic is not None and self._mode != "input":
+        if self._turn_started_monotonic is not None and self._top_window_kind != "input":
             elapsed = self._session_elapsed_accumulated + self._turn_elapsed(now)
         else:
             elapsed = self._session_elapsed_accumulated
@@ -310,9 +310,13 @@ class StatusBarActions:
         if processing:
             status.append("  ·  ", style="bright_black")
             status.append("Ctrl+C 中断", style="bright_black")
-        if not viewing_agent and self._has_sub_agents():
+        if self._top_window_kind in {None, "input"} and self._has_sub_agents():
             status.append("  ·  ", style="bright_black")
             status.append("↓查看 agent", style="bright_black")
+        pending_count, pending_source = self._window_manager.pending_summary
+        if pending_count:
+            status.append("  ·  ", style="bright_black")
+            status.append(f"等待 {pending_count}：{pending_source}", style="yellow")
         with self._status_console.capture() as capture:
             self._status_console.print(status, end="")
         return ANSI(capture.get())
@@ -330,7 +334,7 @@ class StatusBarActions:
         line.append_text(self._status_bar.present(
             elapsed,
             self._permission_mode_toggle_handler is not None,
-            self._viewing_uuid,
+            self._viewing_uuid if self._transcript_visible else None,
         ))
 
     def _turn_elapsed(self, now: float) -> float:
@@ -383,7 +387,7 @@ class StatusBarActions:
         max_attempts: int,
         wait_seconds: float,
     ) -> None:
-        """进入处理态并开始 API 重试倒计时，驱动活动区实时倒计时行。
+        """更新 API 重试倒计时遥测，供无窗口时的活动区渲染。
 
         记录截止 monotonic（now + wait_seconds）与安全错误信息；首次记录本回合处理起点。
         倒计时期间保持既有 `_activity` 文案不变，收到下一轮 LLMCallStarted 的 `_set_activity`
@@ -402,12 +406,11 @@ class StatusBarActions:
         self._retry_safe_message = safe_message
         self._retry_attempt = attempt
         self._retry_max = max_attempts
-        self._mode = "processing"
         if self._turn_started_monotonic is None:
             self._turn_started_monotonic = now
 
     def _set_activity(self, activity: str) -> None:
-        """进入处理态并设置当前活动文案，驱动底部状态条 spinner / 活动显示。
+        """更新当前活动遥测，不改变 WindowManager 的窗口栈。
 
         首次记录本回合处理起点；活动切换或刚退出重试等待时重置本步耗时起点。
 
@@ -418,7 +421,6 @@ class StatusBarActions:
         self._clear_retry_status()
         activity_changed = activity != self._activity
         self._activity = activity
-        self._mode = "processing"
         now = time.monotonic()
         if self._turn_started_monotonic is None:
             self._turn_started_monotonic = now

@@ -5,18 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Iterator
 from contextlib import contextmanager
-from enum import StrEnum
 from typing import Any
-
-
-class InteractionMode(StrEnum):
-    """Mutually exclusive main-workflow interaction modes."""
-
-    PROCESSING = "processing"
-    INPUT = "input"
-    SELECT = "select"
-    FORM = "form"
-    CHOICE_INPUT = "choice_input"
 
 
 class InlineRuntime:
@@ -28,7 +17,6 @@ class InlineRuntime:
         Returns:
             None.
         """
-        self.mode = InteractionMode.PROCESSING
         self.app: Any = None
         self.app_task: asyncio.Task | None = None
         self.buffer: Any = None
@@ -52,10 +40,10 @@ class InlineRuntime:
 
     @contextmanager
     def interaction(self) -> Iterator[asyncio.Future[str]]:
-        """Own the sole Inline UI interaction future for one context.
+        """Own the sole internal future for one active answer-window context.
 
         Yields:
-            Future settled by the active input, menu, form, or transcript flow.
+            Future settled by the active input, menu, form, or choice-input flow.
 
         Raises:
             RuntimeError: If another interaction context still owns a future.

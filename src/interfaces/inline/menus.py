@@ -129,7 +129,6 @@ class MenuActions:
                 self._select_index = max(0, min(default_index, len(options) - 1)) if options else 0
                 self._select_cancel_value = cancel_value
                 self._select_markdown = markdown
-                self._mode = "select"
                 if (
                     self._app is not None
                     and self._agent_list_inner is not None
@@ -181,7 +180,6 @@ class MenuActions:
                 self._choice_input_placeholder = input_placeholder
                 self._choice_input_index = max(0, min(default_index, len(options) - 1)) if options else 0
                 self._choice_input_markdown = markdown
-                self._mode = "choice_input"
                 if (
                     self._app is not None
                     and self._agent_list_inner is not None

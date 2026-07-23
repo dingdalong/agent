@@ -6,8 +6,10 @@ import asyncio
 import json
 import logging
 import time
+from collections.abc import AsyncIterator, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import AsyncIterator, Literal
+from typing import Literal
 
 from src.events.levels import EventLevel
 from src.events.types import (
@@ -22,9 +24,9 @@ from src.events.menu import (
     FormMenu,
     FormQuestion,
     InputMenu,
-    MenuRequest,
     PermissionMenu,
     TranscriptView,
+    UiRequest,
 )
 
 _SENTINEL = object()
@@ -86,22 +88,60 @@ class _Subscription:
 class EventBus:
     """事件总线 — 生产者 emit，消费者 subscribe。
 
-    过滤机制（两层）：
-    1. 全局级别门控：event.level <= bus.level 才广播
-    2. 订阅者类型过滤：每个订阅者可选只关注特定事件类型
+    投递机制：
+    1. reset 拒绝 gate 先取消 UiRequest，避免跨会话入队
+    2. 全局级别门控：event.level <= bus.level 才广播
+    3. 订阅者类型过滤：每个订阅者可选只关注特定事件类型
     """
 
     def __init__(self, level: EventLevel = EventLevel.PROGRESS):
+        """Initialize an event bus without subscribers or active request gates.
+
+        Args:
+            level: Maximum event level delivered to subscribers.
+
+        Returns:
+            None.
+        """
         self._level = level
         self._subscribers: list[_Subscription] = []
+        self._ui_request_rejection_depth = 0
+        self._delivery_revision = 0
 
     async def emit(self, event: Event) -> None:
-        """广播事件到所有匹配的订阅者（非阻塞）。"""
+        """Broadcast one event to matching subscribers without blocking.
+
+        Args:
+            event: Event to deliver or reject at the active reset gate.
+
+        Returns:
+            None.
+        """
+        if isinstance(event, UiRequest) and self._ui_request_rejection_depth:
+            event.cancel()
+            return
         if event.level.value > self._level.value:
             return
+        delivered = False
         for sub in self._subscribers:
             if sub.accepts(event):
                 sub.queue.put_nowait(event)
+                delivered = True
+        if delivered:
+            self._delivery_revision += 1
+
+    @contextmanager
+    def reject_ui_requests(self) -> Iterator[None]:
+        """Reject UiRequest events synchronously while a session reset is active.
+
+        Yields:
+            None while requests are cancelled instead of enqueued.
+        """
+        self._ui_request_rejection_depth += 1
+        try:
+            yield
+        finally:
+            self._ui_request_rejection_depth -= 1
 
     async def request_output(self, content: str, source: str = "ui", markdown: bool = False) -> None:
         """通过事件队列请求 UI 串行输出。
@@ -125,11 +165,11 @@ class EventBus:
             source=source,
         ))
 
-    async def _request(self, event: MenuRequest, kind: str) -> str:
-        """构造并发起一次需 UI 阻塞作答的菜单请求，等待 future 回传结果。
+    async def _request(self, event: UiRequest, kind: str) -> str:
+        """构造并发起一次 UI 请求，等待 future 回传结果。
 
         Args:
-            event: 待发布的 MenuRequest 子类实例；载荷字段由调用方填好，future 由本方法附加。
+            event: 待发布的 UiRequest 子类实例；载荷字段由调用方填好，future 由本方法附加。
             kind: 无订阅者时 NoEventSubscribers 的类别标识（如 "input"/"choice"/"form"/"permission"）。
         Returns:
             UI 经 future 回传的字符串结果。
@@ -381,7 +421,14 @@ class EventBus:
         self,
         event_types: set[type[Event]] | None = None,
     ) -> AsyncIterator[Event]:
-        """返回 async iterator，消费者通过 async for 消费事件。"""
+        """Subscribe to matching events until the bus closes the iterator.
+
+        Args:
+            event_types: Exact event classes to receive, or None for every event.
+
+        Yields:
+            Events delivered to this subscription in FIFO order.
+        """
         sub = _Subscription(event_types=event_types)
         self._subscribers.append(sub)
         try:
@@ -397,11 +444,22 @@ class EventBus:
             self._subscribers.remove(sub)
 
     async def join(self) -> None:
-        """等待当前已投递给订阅者的事件全部处理完成。"""
-        subscribers = list(self._subscribers)
-        if not subscribers:
-            return
-        await asyncio.gather(*(sub.queue.join() for sub in subscribers))
+        """Wait for subscriber work and one stable event-loop delivery checkpoint.
+
+        Emit calls that enqueue before or during the checkpoint are included. Producers
+        that have not begun emitting when the stable checkpoint returns are future work.
+
+        Returns:
+            None.
+        """
+        while True:
+            revision = self._delivery_revision
+            subscribers = tuple(self._subscribers)
+            if subscribers:
+                await asyncio.gather(*(sub.queue.join() for sub in subscribers))
+            await asyncio.sleep(0)
+            if revision == self._delivery_revision:
+                return
 
     def set_level(self, level: EventLevel) -> None:
         """运行时动态调整级别。"""

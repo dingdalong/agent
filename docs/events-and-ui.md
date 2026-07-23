@@ -4,9 +4,9 @@
 
 ## 1. EventBus 与安全遥测
 
-`EventBus` 使用每订阅者一条 `asyncio.Queue`。`emit()` 先按 `EventLevel` 门控，再按订阅者的事件类型集合广播（`src/events/bus.py:73-104`）。`PROGRESS=1`、`DETAIL=2`、`TRACE=3`；交互、LLM 边界和正文均为 PROGRESS，思考与状态转换为 DETAIL。
+`EventBus` 使用每订阅者一条 `asyncio.Queue`。`emit()` 先以 reset 拒绝 gate 取消不得跨会话入队的 `UiRequest`，再按 `EventLevel` 门控和订阅者事件类型集合广播（`src/events/bus.py:88-143`）。`PROGRESS=1`、`DETAIL=2`、`TRACE=3`；交互、LLM 边界和正文均为 PROGRESS，思考与状态转换为 DETAIL。
 
-主要请求 API（`bus.py:106-341`）：
+主要请求 API（`bus.py:145-417`）：
 
 | 方法 | 返回 |
 |---|---|
@@ -19,9 +19,9 @@
 | `request_transcript_view(uuid)` | 空串 |
 | `request_permission(...)` | 权限决策字符串 |
 
-需要应答的菜单事件携 future，由 `complete()` / `cancel()` / `fail()` 落定；无订阅者时抛 `NoEventSubscribers`。
+`UiRequest` 是所有窗口请求的共同基类，携 future 并由 `complete()` / `cancel()` / `fail()` 落定；`MenuRequest` 表示需要作答的窗口，`ViewRequest` 表示只读窗口（当前为 `TranscriptView`）。无订阅者时抛 `NoEventSubscribers`。
 
-LLM 调用使用 `emit_telemetry_safely()`（`src/events/bus.py:34-63`）发布开始、重试、完成、失败及流增量。普通发布异常只写不含 payload 的告警，不改变调用成功/失败；`CancelledError`、`KeyboardInterrupt`、`SystemExit` 仍原样传播。
+LLM 调用使用 `emit_telemetry_safely()`（`src/events/bus.py:36-65`）发布开始、重试、完成、失败及流增量。普通发布异常只写不含 payload 的告警，不改变调用成功/失败；`CancelledError`、`KeyboardInterrupt`、`SystemExit` 仍原样传播。
 
 ## 2. 调用方身份
 
@@ -54,7 +54,7 @@ LLM 调用使用 `emit_telemetry_safely()`（`src/events/bus.py:34-63`）发布�
 | `AgentStateChanged` | `agent_state_changed` | Agent ID/类型、前后状态 |
 | `SubagentLifecycle` | `subagent_lifecycle` | 子 Agent UUID/类型、start/end、结束 messages |
 | `PermissionModeChanged` | `permission_mode_changed` | 无，通知 UI 重读当前模式 |
-| 菜单事件 | 各自类型 | prompt、选项/问题、future |
+| `MenuRequest` / `ViewRequest` | 各自类型 | prompt、选项/问题或查看目标、future |
 
 ### LLM 边界事件
 
@@ -134,12 +134,19 @@ TTY 只缓冲前台 Agent 当前一轮的工具。实时区优先级为“重试
 | 模块 | 职责 |
 |---|---|
 | `controller.py` | 组装 prompt-toolkit 布局和普通输入 |
-| `runtime.py` | 持有 Application、Buffer、future 与交互所有权 |
+| `runtime.py` | 持有 Application、Buffer 与当前作答窗口的内部 future |
+| `window_manager.py` | 窗口栈、唯一键盘焦点、FIFO 作答队列和 runner 生命周期 |
 | `status_bar.py` | 活动、重试倒计时、工具轮与底部状态 |
-| `agent_panel.py` | Agent 列表和实时/历史转录覆盖层 |
+| `agent_panel.py` | Agent 列表和转录渲染缓存 |
 | `menus.py` / `form.py` | 选择、权限、组合输入和表单 |
 | `output.py` | Rich、流式 Markdown、LLM/工具进度展示 |
 | `plain.py` | 非 TTY 输入输出，保证无 ANSI |
 | `keymap.py` | 快捷键与覆盖层优先级 |
 
-交互优先级固定为“转录 → 补全 → 模态组件 → Agent 列表 → 普通输入”。所有等待 future 的 TTY 交互都在 `InlineRuntime.interaction()` 中排他持有；退出上下文时取消未完成 future 并释放状态。
+TTY 的 `WindowManager` 是窗口状态与键盘焦点的唯一来源。它最多保留一个转录窗口和一个作答窗口：普通输入、权限、选择、表单和组合输入不会抢占已有作答窗口，而是按 FIFO 排队；状态栏显示“等待 N：来源”，来源优先使用发起 agent 类型、缺失时回退事件 source。只有真正开始运行的作答窗口才打印调用方标记和菜单上文。
+
+转录是只读窗口，不占用 `InlineRuntime.interaction()` 的内部 future。`/agents` 创建带 future 的 `TranscriptView`，Esc 移除窗口后才完成该 future；实时查看则创建无 future 的同类窗口。作答窗口位于转录之上时拥有键盘，结束后转录的 UUID 和滚动位置原样恢复。普通输入可以被实时转录临时覆盖，关闭后复用同一个 Buffer、文本和光标；权限、表单和选择期间不能进入 Agent 列表。
+
+`UserInterface.on_event()` 先让 TTY 前端接受 `UiRequest`，成功后立即返回给事件消费者；非 TTY 仍串行读取。这样正在查看转录时，后续权限请求可马上进入 WindowManager，而不会被 `TranscriptView` 阻塞。`InlineRuntime.interaction()` 只排他服务当前作答窗口；下一个作答窗口必须等前一个 runner 清理完共享 UI 状态后才会启动，且对外 future 在清理后才落定。`EventBus.join()` 等待订阅队列处理完成，并通过 delivery revision 覆盖稳定检查前已经开始的投递，但不等待 WindowManager 自有的 dialog runner，因此中断收束会在 join 后额外等待 `ui.wait_interactions_idle()`；UI 停止时先关闭 WindowManager，取消活动、排队和只读请求，再退出 prompt-toolkit。`/clear` 在重载 Managers、清空 Store 和创建新 Agent 前，会同步取消旧 UI 请求并等待所有窗口 runner 清理完成；重置期间到达的 UI 请求同样会被取消，不会跨越 session 边界。
+
+键盘由栈顶窗口决定：栈顶为作答窗口时，其快捷键优先；栈顶为转录时才由转录处理滚动和 Esc；普通输入内部再按补全、Agent 列表和输入行处理。LLM 与工具活动只更新状态栏遥测，不得改变窗口栈或隐藏活动作答窗口。

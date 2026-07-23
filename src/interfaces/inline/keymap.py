@@ -3,55 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from enum import StrEnum
 
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.key_binding import KeyBindings
-
-from src.interfaces.inline.runtime import InteractionMode
-
-
-class KeyScope(StrEnum):
-    """Priority-resolved scope that owns a key press."""
-
-    TRANSCRIPT = "transcript"
-    COMPLETION = "completion"
-    MODAL = "modal"
-    AGENT_LIST = "agent_list"
-    INPUT = "input"
-
-
-def resolve_key_scope(
-    mode: InteractionMode,
-    transcript_visible: bool,
-    completion_visible: bool,
-    agent_list_focused: bool,
-) -> KeyScope:
-    """Resolve the owner of a key using the fixed interaction priority.
-
-    Args:
-        mode: Current top-level interaction mode.
-        transcript_visible: Whether a read-only transcript overlays the UI.
-        completion_visible: Whether slash completion is visible.
-        agent_list_focused: Whether the agent list owns focus.
-
-    Returns:
-        Highest-priority active key scope.
-    """
-    if transcript_visible:
-        return KeyScope.TRANSCRIPT
-    if completion_visible:
-        return KeyScope.COMPLETION
-    if mode in {
-        InteractionMode.SELECT,
-        InteractionMode.FORM,
-        InteractionMode.CHOICE_INPUT,
-    }:
-        return KeyScope.MODAL
-    if agent_list_focused:
-        return KeyScope.AGENT_LIST
-    return KeyScope.INPUT
-
 
 def can_insert_newline(buffer_editable: bool) -> bool:
     """Return whether the newline shortcut may mutate the buffer.
@@ -66,7 +20,7 @@ def can_insert_newline(buffer_editable: bool) -> bool:
 
 
 def can_toggle_permission_mode(
-    mode: InteractionMode,
+    top_window_kind: str | None,
     transcript_visible: bool,
     completion_visible: bool,
     agent_list_focused: bool,
@@ -74,7 +28,7 @@ def can_toggle_permission_mode(
     """Return whether Shift+Tab may rotate the permission mode.
 
     Args:
-        mode: Current interaction mode.
+        top_window_kind: Current WindowManager top-window kind.
         transcript_visible: Whether transcript viewing is active.
         completion_visible: Whether completion is active.
         agent_list_focused: Whether the agent list owns focus.
@@ -83,7 +37,7 @@ def can_toggle_permission_mode(
         True only for unobscured normal input.
     """
     return (
-        mode is InteractionMode.INPUT
+        top_window_kind == "input"
         and not transcript_visible
         and not completion_visible
         and not agent_list_focused
@@ -97,7 +51,7 @@ class KeymapActions:
     """Declare Inline shortcuts in their fixed priority order."""
 
     def _build_key_bindings(self) -> KeyBindings:
-        """构建常驻 App 的按键绑定（按交互模式门控）。
+        """构建常驻 App 的按键绑定（由 WindowManager 栈顶门控）。
 
         - Enter（仅可输入态且列表未聚焦）：补全菜单已选定项时应用补全不提交，否则纯空白忽略、有文本则提交。
         - Ctrl+J / Shift+Enter：插入换行。
@@ -116,18 +70,20 @@ class KeymapActions:
         bindings = KeyBindings()
 
         # 列表可见性 & 聚焦条件（lazy evaluate at key-press time）
-        _cond_list_visible = Condition(lambda: self._has_sub_agents())
+        _cond_list_visible = Condition(
+            lambda: self._has_sub_agents() and self._top_window_kind in {None, "input"},
+        )
         _cond_list_focused = Condition(
             lambda: self._agent_list_inner is not None
             and self._app is not None
             and self._app.layout.has_focus(self._agent_list_inner)
         )
         # 转录面板可见性条件：查看子 agent 转录时为真。
-        _cond_viewing = Condition(lambda: self._viewing_uuid is not None)
-        # 主流程组件只在未被转录覆盖时接收快捷键。
-        _cond_select = ~_cond_viewing & Condition(lambda: self._mode == "select")
+        _cond_viewing = Condition(lambda: self._transcript_visible)
+        # WindowManager 栈顶的作答组件独占快捷键。
+        _cond_select = Condition(lambda: self._top_window_kind in {"permission", "choice"})
         # 表单派生条件按焦点区（答题/讨论）与标签类型细分，供各表单键位专用。
-        _cond_form = ~_cond_viewing & Condition(lambda: self._mode == "form")
+        _cond_form = Condition(lambda: self._top_window_kind == "form")
         _cond_form_answer = _cond_form & Condition(lambda: self._form_zone == "answer")  # 答题区（←→↑↓ 导航）
         _cond_form_submit = _cond_form_answer & Condition(lambda: self._form_on_submit_tab())  # 答题区且聚焦「提交」标签
         _cond_form_opt = _cond_form_answer & Condition(lambda: self._current_form_question() is not None and self._current_form_question().options is not None and not self._form_cursor_on_custom())  # 答题区有选项题且光标在选项行（空格/数字选中）
@@ -135,12 +91,12 @@ class KeymapActions:
         _cond_form_confirm = _cond_form_answer & Condition(lambda: not self._form_on_submit_tab() and not (self._form_focused_single() and not self._form_cursor_on_custom()))  # 答题区问题标签且非单选选项行（Enter 确认推进：多选题/自由文本题/单选自定义行）
         _cond_form_discuss = _cond_form & Condition(lambda: self._form_zone == "discuss")  # 底部讨论栏
         # choice_input 派生条件按光标是否在输入行细分，供各键位专用。
-        _cond_choice_input = ~_cond_viewing & Condition(lambda: self._mode == "choice_input")
+        _cond_choice_input = Condition(lambda: self._top_window_kind == "choice_input")
         _cond_choice_input_opt = _cond_choice_input & Condition(lambda: not self._choice_input_on_input_row())  # 光标在选项行（数字/Enter 直选）
         _cond_choice_input_row = _cond_choice_input & Condition(lambda: self._choice_input_on_input_row())  # 光标在输入行（Enter 提交输入）
         # 斜杠命令补全激活条件：缓冲存在补全候选时为真。
         _cond_completing = Condition(
-            lambda: self._viewing_uuid is None
+            lambda: self._top_window_kind == "input"
             and self._buffer is not None
             and self._buffer.complete_state is not None
         )
@@ -347,7 +303,7 @@ class KeymapActions:
 
         # ---- agent 列表方向键导航 ----
 
-        # ↓（eager）：从输入框进入 agent 列表（输入态光标在末行 或 处理态只读；查看面板/选择菜单/表单/choice_input/补全时不进列表）
+        # ↓（eager）：从输入框进入 agent 列表（input 光标在末行或无窗口；转录、作答窗口和补全时不进列表）。
         @bindings.add("down", eager=True, filter=_cond_list_visible & ~_cond_list_focused & ~_cond_viewing & ~_cond_select & ~_cond_form & ~_cond_choice_input & ~_cond_completing & (self._cond_accepting & _cond_cursor_at_end | ~self._cond_accepting))
         def _(event) -> None:
             if self._agent_list_inner is not None:
@@ -387,7 +343,7 @@ class KeymapActions:
             row = rows[self._agent_selected_index]
             if not row.is_main:
                 self._buffer.cancel_completion()
-                self._agent_panel.open_live(row.uuid)
+                self._window_manager.open_live_transcript(row.uuid)
             event.app.layout.focus(self._input_window)
             event.app.invalidate()
 
@@ -410,9 +366,8 @@ class KeymapActions:
             self._view_scroll = max(0, self._view_scroll - (_TRANSCRIPT_PANEL_ROWS - 1))
             event.app.invalidate()
 
-        # Esc：关闭转录覆盖层（始终优先于被遮挡的主流程组件）
-        # - 调起态（/agents）：解开 request_transcript_view 的 future，令 app 循环回到列表（收尾由 _await_transcript_view finally 做）
-        # - 实时态（列表 Enter）：只清理覆盖层，保留最新主流程 mode 与 Buffer
+        # Esc：关闭转录覆盖层（始终优先于被遮挡的作答窗口）。
+        # 调起态会在移除窗口后落定 ViewRequest；实时态只移除覆盖层并保留原 Buffer。
         @bindings.add("escape", filter=_cond_viewing, eager=True)
         def _(event) -> None:
             """Resolve a modal transcript or close a live overlay.
@@ -423,11 +378,8 @@ class KeymapActions:
             Returns:
                 None.
             """
-            if self._viewing_invoked:
-                self._resolve_input("")
-            else:
-                self._agent_panel.close_live()
-                event.app.invalidate()
+            self._window_manager.close_transcript()
+            event.app.invalidate()
 
         return bindings
 
@@ -463,8 +415,8 @@ class KeymapActions:
         if (
             self._permission_mode_toggle_handler is None
             or not can_toggle_permission_mode(
-                mode=self._mode,
-                transcript_visible=self._viewing_uuid is not None,
+                top_window_kind=self._top_window_kind,
+                transcript_visible=self._transcript_visible,
                 completion_visible=completion_visible,
                 agent_list_focused=list_focused,
             )

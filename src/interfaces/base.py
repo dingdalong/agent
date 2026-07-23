@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from contextlib import asynccontextmanager, contextmanager
 
 from src.events.types import (
     CompactDelta,
@@ -31,6 +31,8 @@ from src.events.menu import (
     MenuRequest,
     PermissionMenu,
     TranscriptView,
+    UiRequest,
+    ViewRequest,
 )
 
 
@@ -45,7 +47,8 @@ class UserInterface(ABC):
         """
         self._request_interrupt: Callable[[], None] | None = None
         self._permission_mode_provider: Callable[[], str] | None = None
-        self._active_user_request: MenuRequest | None = None
+        self._active_user_request: UiRequest | None = None
+        self._session_reset_in_progress = False
 
     @contextmanager
     def watch_interrupt(
@@ -89,6 +92,40 @@ class UserInterface(ABC):
         self._active_user_request.cancel()
         self._active_user_request = None
         return True
+
+    async def wait_interactions_idle(self) -> None:
+        """Wait for frontend-owned asynchronous interaction cleanup.
+
+        Returns:
+            None.
+        """
+
+    @asynccontextmanager
+    async def reset_session_interactions(self) -> AsyncIterator[None]:
+        """Reject new UI requests while cancelling and draining old interactions.
+
+        Yields:
+            None after frontend-owned interaction cleanup has finished.
+        """
+        previous = self._session_reset_in_progress
+        self._session_reset_in_progress = True
+        try:
+            self.cancel_active_input()
+            await self.wait_interactions_idle()
+            yield
+        finally:
+            self._session_reset_in_progress = previous
+
+    async def _accept_ui_request(self, request: UiRequest) -> bool:
+        """Offer a request to a frontend-specific asynchronous scheduler.
+
+        Args:
+            request: Pending UI request emitted by EventBus.
+
+        Returns:
+            True when the frontend accepted ownership and EventBus may continue.
+        """
+        return False
 
     def set_permission_mode_provider(self, provider: Callable[[], str] | None) -> None:
         """设置 UI 查询权限模式时使用的明确数据源。
@@ -244,33 +281,118 @@ class UserInterface(ABC):
         """
         ...
 
-    async def _complete_user_request(
-        self,
-        request: MenuRequest | None,
-        reader: Callable[[], Awaitable[str]],
-    ) -> None:
-        """重复读取非空答案并落定一个菜单请求。
+    async def _read_nonempty_answer(self, reader: Callable[[], Awaitable[str]]) -> str:
+        """Read until a non-empty answer is returned.
 
         Args:
-            request: 要落定的菜单请求；None 表示只执行 reader。
-            reader: 返回一次候选答案的异步函数。
+            reader: Asynchronous single-attempt answer reader.
+
+        Returns:
+            Stripped non-empty answer.
+        """
+        while True:
+            answer = await reader()
+            normalized = answer.strip()
+            if normalized:
+                return normalized
+
+    async def _read_menu_request(self, request: MenuRequest) -> str:
+        """Read one answer-window request without settling its public future.
+
+        Args:
+            request: Pending answer request whose active frontend owns rendering.
+
+        Returns:
+            Raw normalized result expected by the EventBus caller.
+        """
+        match request:
+            case InputMenu(prompt=prompt, default=default, markdown=markdown):
+                next_prompt = prompt
+                next_default = default
+
+                async def read_input() -> str:
+                    nonlocal next_prompt, next_default
+                    answer = await self._read_input(next_prompt, next_default, markdown)
+                    next_prompt = ""
+                    next_default = ""
+                    return answer
+
+                return await self._read_nonempty_answer(read_input)
+            case ChoiceMenu(prompt=prompt, options=options, default_index=default_index, markdown=markdown):
+                return await self._read_choice(prompt, options, default_index, markdown)
+            case FormMenu(prompt=prompt, questions=questions, markdown=markdown):
+                await self._emit_caller_banner(request.caller_agent_type, request.caller_uuid)
+                return await self._read_form(prompt, questions, markdown)
+            case ChoiceInputMenu(
+                prompt=prompt,
+                options=options,
+                descriptions=descriptions,
+                input_placeholder=input_placeholder,
+                default_index=default_index,
+                markdown=markdown,
+            ):
+                await self._emit_caller_banner(request.caller_agent_type, request.caller_uuid)
+                return await self._read_choice_input(
+                    prompt,
+                    options,
+                    descriptions,
+                    input_placeholder,
+                    default_index,
+                    markdown,
+                )
+            case PermissionMenu(
+                tool_name=tool_name,
+                detail=detail,
+                suggested_rules=suggested_rules,
+                mcp_server_rule=mcp_server_rule,
+            ):
+                await self._emit_caller_banner(request.caller_agent_type, request.caller_uuid)
+                return await self._read_nonempty_answer(
+                    lambda: self._read_permission(tool_name, detail, suggested_rules, mcp_server_rule),
+                )
+            case _:
+                raise TypeError(f"unsupported answer request: {type(request)!r}")
+
+    async def _read_view_request(self, request: ViewRequest) -> str:
+        """Read one view-window request without settling its public future.
+
+        Args:
+            request: Pending read-only view request.
+
+        Returns:
+            Result expected by the EventBus caller.
+        """
+        match request:
+            case TranscriptView(uuid=uuid):
+                return await self._read_transcript_view(uuid)
+            case _:
+                raise TypeError(f"unsupported view request: {type(request)!r}")
+
+    async def _settle_ui_request(self, request: UiRequest) -> None:
+        """Read and settle a request for serial frontends such as non-TTY input.
+
+        Args:
+            request: Pending UI request that was not accepted by an async scheduler.
 
         Returns:
             None.
         """
+        self._active_user_request = request
         try:
-            while True:
-                answer = await reader()
-                normalized = answer.strip()
-                if normalized:
-                    if request is not None:
-                        request.complete(normalized)
-                    return
+            if isinstance(request, MenuRequest):
+                answer = await self._read_menu_request(request)
+            elif isinstance(request, ViewRequest):
+                answer = await self._read_view_request(request)
+            else:
+                raise TypeError(f"unsupported UI request: {type(request)!r}")
+            request.complete(answer)
         except (EOFError, KeyboardInterrupt):
             self._request_user_interrupt()
         except BaseException as exc:
-            if request is not None:
-                request.fail(exc)
+            request.fail(exc)
+        finally:
+            if self._active_user_request is request:
+                self._active_user_request = None
 
     async def _end_thinking_if_needed(self) -> None:
         """收尾思考流（若有未结束的流）。由具体 UI 覆盖实现，默认无操作。"""
@@ -309,98 +431,24 @@ class UserInterface(ABC):
         Returns:
             None.
         """
+        if isinstance(event, UiRequest) and self._session_reset_in_progress:
+            event.cancel()
+            return
         await self._end_streams_for(event)
+        if isinstance(event, UiRequest):
+            if self._session_reset_in_progress:
+                event.cancel()
+                return
+            if await self._accept_ui_request(event):
+                return
+            await self._settle_ui_request(event)
+            return
 
         match event:
             case OutputRequested(content=content, markdown=markdown):
                 await self._write(content, markdown=markdown)
-            case InputMenu(prompt=prompt, default=default, markdown=markdown):
-                self._active_user_request = event
-                try:
-                    next_prompt = prompt
-                    next_default = default
-
-                    async def read_input() -> str:
-                        nonlocal next_prompt, next_default
-                        answer = await self._read_input(next_prompt, next_default, markdown)
-                        next_prompt = ""
-                        next_default = ""
-                        return answer if answer.strip() else ""
-
-                    await self._complete_user_request(event, read_input)
-                finally:
-                    if self._active_user_request is event:
-                        self._active_user_request = None
-            case ChoiceMenu(prompt=prompt, options=options, default_index=default_index, markdown=markdown):
-                # 选择请求允许空答案（取消），不能复用 _complete_user_request 的非空重读循环，故单次读取。
-                self._active_user_request = event
-                try:
-                    answer = await self._read_choice(prompt, options, default_index, markdown)
-                    event.complete(answer)
-                except (EOFError, KeyboardInterrupt):
-                    self._request_user_interrupt()
-                except BaseException as exc:
-                    event.fail(exc)
-                finally:
-                    if self._active_user_request is event:
-                        self._active_user_request = None
-            case FormMenu(prompt=prompt, questions=questions, markdown=markdown):
-                # 表单允许空答案（Esc 取消），与 ChoiceMenu 同样单次读取、不走非空重读循环。
-                self._active_user_request = event
-                await self._emit_caller_banner(event.caller_agent_type, event.caller_uuid)
-                try:
-                    answer = await self._read_form(prompt, questions, markdown)
-                    event.complete(answer)
-                except (EOFError, KeyboardInterrupt):
-                    self._request_user_interrupt()
-                except BaseException as exc:
-                    event.fail(exc)
-                finally:
-                    if self._active_user_request is event:
-                        self._active_user_request = None
-            case ChoiceInputMenu(prompt=prompt, options=options, descriptions=descriptions,
-                                 input_placeholder=input_placeholder, default_index=default_index, markdown=markdown):
-                # 选项+输入允许空答案（Esc 取消），与 ChoiceMenu 同样单次读取、不走非空重读循环。
-                self._active_user_request = event
-                await self._emit_caller_banner(event.caller_agent_type, event.caller_uuid)
-                try:
-                    answer = await self._read_choice_input(
-                        prompt, options, descriptions, input_placeholder, default_index, markdown
-                    )
-                    event.complete(answer)
-                except (EOFError, KeyboardInterrupt):
-                    self._request_user_interrupt()
-                except BaseException as exc:
-                    event.fail(exc)
-                finally:
-                    if self._active_user_request is event:
-                        self._active_user_request = None
-            case TranscriptView(uuid=uuid):
-                # 只读查看，恒回传 ""（Esc 关闭）；与 ChoiceMenu 同样单次读取、不走非空重读循环。
-                self._active_user_request = event
-                try:
-                    answer = await self._read_transcript_view(uuid)
-                    event.complete(answer)
-                except (EOFError, KeyboardInterrupt):
-                    self._request_user_interrupt()
-                except BaseException as exc:
-                    event.fail(exc)
-                finally:
-                    if self._active_user_request is event:
-                        self._active_user_request = None
             case PermissionNotice():
                 await self.on_permission_notice(event)
-            case PermissionMenu(tool_name=tool_name, detail=detail, suggested_rules=suggested_rules, mcp_server_rule=mcp_server_rule):
-                self._active_user_request = event
-                await self._emit_caller_banner(event.caller_agent_type, event.caller_uuid)
-                try:
-                    await self._complete_user_request(
-                        event,
-                        lambda: self._read_permission(tool_name, detail, suggested_rules, mcp_server_rule),
-                    )
-                finally:
-                    if self._active_user_request is event:
-                        self._active_user_request = None
             case CompactDelta():
                 await self.on_compact_delta(event)
             case ToolCallStarted():

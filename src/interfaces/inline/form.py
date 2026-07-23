@@ -315,7 +315,7 @@ class FormActions:
         Returns:
             form 态且 _form_zone == "answer" 时为 True。
         """
-        return self._mode == "form" and self._form_zone == "answer"
+        return self._top_window_kind == "form" and self._form_zone == "answer"
 
     async def _await_form(self, questions: list[FormQuestion], markdown: bool) -> str:
         """进入单屏表单态（form），await 由表单键位（Enter 提交 / Esc 取消）解析的 future。
@@ -338,7 +338,6 @@ class FormActions:
                 self._form_focus = 0
                 self._form_zone = "answer"
                 self._form_markdown = markdown
-                self._mode = "form"
                 if (
                     self._app is not None
                     and self._agent_list_inner is not None

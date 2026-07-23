@@ -32,6 +32,8 @@ from src.events.menu import (
     MenuRequest,
     PermissionMenu,
     TranscriptView,
+    UiRequest,
+    ViewRequest,
 )
 
 # 全部事件的联合类型（含菜单事件）。原置于 types.py，因 types.py 不再依赖 menu.py
@@ -39,6 +41,7 @@ from src.events.menu import (
 AgentEvent = Union[
     InputMenu, OutputRequested, InterruptRequested,
     PermissionNotice, PermissionMenu, ChoiceMenu, ChoiceInputMenu, FormMenu,
+    TranscriptView,
     CompactDelta, ToolCallCompleted, ToolCallStarted,
     LLMCallCompleted, LLMCallStarted, LLMRetrying, LLMLengthRetrying, LLMCallFailed,
     ResponseDelta, ThinkingDelta,
@@ -64,7 +67,9 @@ __all__ = [
     "LLMLengthRetrying",
     "LLMCallFailed",
     # 菜单/交互事件
+    "UiRequest",
     "MenuRequest",
+    "ViewRequest",
     "PermissionMenu",
     "InputMenu",
     "ChoiceMenu",

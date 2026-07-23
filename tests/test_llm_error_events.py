@@ -1154,7 +1154,7 @@ def test_completed_agent_panel_keeps_error_diagnostics_without_stream_body_dupli
     store.flush_completed()
     ui = InlineController(store)
     ui._render_width = 120
-    ui._viewing_uuid = subagent_uuid
+    ui._window_manager.open_live_transcript(subagent_uuid)
 
     rendered = fragment_list_to_text(to_formatted_text(ui._render_transcript_panel()))
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from contextlib import AbstractContextManager
+from contextlib import AbstractAsyncContextManager, AbstractContextManager
 
 from src.events.menu import FormQuestion
 from src.events.types import Event
@@ -124,6 +124,22 @@ class InlineInterface(UserInterface):
             Whether an active bus request was cancelled.
         """
         return self._controller.cancel_active_input()
+
+    async def wait_interactions_idle(self) -> None:
+        """Wait until the controller has released asynchronous window runners.
+
+        Returns:
+            None.
+        """
+        await self._controller.wait_interactions_idle()
+
+    def reset_session_interactions(self) -> AbstractAsyncContextManager[None]:
+        """Delegate the reset request gate to the event-owning controller.
+
+        Returns:
+            Context manager that drains old interactions and rejects late requests.
+        """
+        return self._controller.reset_session_interactions()
 
     def set_permission_mode_provider(
         self,

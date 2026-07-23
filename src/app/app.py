@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import uuid
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 
 from src.agent import Agent, AgentDeps
@@ -184,40 +185,52 @@ class AgentApp:
         *,
         source: str = "clear",
     ) -> Agent:
-        """重置会话状态，创建新的 Agent 实例。
+        """Reset shared session state and construct a new foreground Agent.
 
-        生成 session_id，使新 Agent 的
-        TaskManager 指向空目录（旧 task 文件留在磁盘上可通过 /resume 找回）。
+        The EventBus and UI rejection gates drain old consumer work before shared
+        state changes, reject reset-time requests, and drain reset-time events
+        before reopening. Frontend runners also finish before Managers, Store,
+        context, and Agent state are replaced.
 
         Args:
-            source: 重置来源，"startup" 或 "clear"。
+            source: Reset source, either ``startup`` or ``clear``.
 
         Returns:
-            新创建的 Agent 实例。
+            Newly constructed foreground Agent.
         """
-        self.deps.session_id = str(uuid.uuid4())
-        # UI 清理交互态；AgentViewStore 单独原子清空全部会话状态。
-        for attr in ("memory_mgr", "tools_mgr", "permission_mgr",
-                     "config_mgr", "plugin_mgr", "hooks_mgr", "plan_mgr",
-                     "ui"):
-            mgr = getattr(self.deps, attr, None)
-            if mgr is not None and hasattr(mgr, "reload"):
-                mgr.reload()
-        self.agent_view_store.reset()
-        self.deps.session_context.clear()
-        self._install_permission_mode_controller()
-        self.deps.permission_mode_controller = self._permission_mode_controller
-        agent = Agent.from_manifest(
-            manifest=self.deps.role_mgr.manifest if self.deps.role_mgr else None,
-            deps=self.deps,
-            is_subagent=False,
-        )
-        self.agent_view_store.register_foreground(str(agent.uuid), agent.agent_type)
-        if self._permission_mode_controller is not None:
-            self._permission_mode_controller.install_shortcut(agent)
-            self._permission_mode_controller.notify_state_changed()
-        await self._run_session_start_hooks(source=source)
-        return agent
+        event_bus = getattr(self.deps, "event_bus", None)
+        bus_gate = event_bus.reject_ui_requests() if event_bus is not None else nullcontext()
+        async with self.deps.ui.reset_session_interactions():
+            with bus_gate:
+                try:
+                    if event_bus is not None:
+                        await event_bus.join()
+                    self.deps.session_id = str(uuid.uuid4())
+                    # UI 清理交互态；AgentViewStore 单独原子清空全部会话状态。
+                    for attr in ("memory_mgr", "tools_mgr", "permission_mgr",
+                                 "config_mgr", "plugin_mgr", "hooks_mgr", "plan_mgr",
+                                 "ui"):
+                        mgr = getattr(self.deps, attr, None)
+                        if mgr is not None and hasattr(mgr, "reload"):
+                            mgr.reload()
+                    self.agent_view_store.reset()
+                    self.deps.session_context.clear()
+                    self._install_permission_mode_controller()
+                    self.deps.permission_mode_controller = self._permission_mode_controller
+                    agent = Agent.from_manifest(
+                        manifest=self.deps.role_mgr.manifest if self.deps.role_mgr else None,
+                        deps=self.deps,
+                        is_subagent=False,
+                    )
+                    self.agent_view_store.register_foreground(str(agent.uuid), agent.agent_type)
+                    if self._permission_mode_controller is not None:
+                        self._permission_mode_controller.install_shortcut(agent)
+                        self._permission_mode_controller.notify_state_changed()
+                    await self._run_session_start_hooks(source=source)
+                    return agent
+                finally:
+                    if event_bus is not None:
+                        await event_bus.join()
 
     def _handle_interrupt_requested(self) -> None:
         """处理中断请求：取消工作任务和活跃输入。"""
@@ -247,6 +260,7 @@ class AgentApp:
             await asyncio.gather(self._work_task, return_exceptions=True)
         await self.deps.event_bus.request_output("\n已中断当前任务。\n")
         await self.deps.event_bus.join()
+        await self.deps.ui.wait_interactions_idle()
 
     async def shutdown(self) -> None:
         """断开 MCP server 连接。

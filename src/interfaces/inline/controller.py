@@ -29,6 +29,7 @@ from prompt_toolkit.output.base import Output
 from rich.console import Console
 from rich.text import Text
 
+from src.events.menu import MenuRequest, UiRequest
 from src.interfaces.base import UserInterface
 from src.interfaces.agent_view_store import AgentViewStore
 from src.interfaces.turn_clock import TurnClock
@@ -48,8 +49,9 @@ from src.interfaces.inline.output import (
     OutputActions,
 )
 from src.interfaces.inline.plain import PlainActions, PlainFrontend
-from src.interfaces.inline.runtime import InlineRuntime, InteractionMode
+from src.interfaces.inline.runtime import InlineRuntime
 from src.interfaces.inline.status_bar import _RoundEntry, StatusBarActions, StatusBarController
+from src.interfaces.inline.window_manager import WindowManager
 
 # 状态栏 agent 列表最多同时显示的 agent 行数（不含上下滚动指示行）。
 _AGENT_LIST_MAX_ROWS = 8
@@ -156,7 +158,6 @@ class InlineController(
 ):
     """组合各 Inline 组件并实现完整终端交互。"""
 
-    _mode = _NestedField("_runtime", "mode", InteractionMode)
     _app = _NestedField("_runtime", "app")
     _app_task = _NestedField("_runtime", "app_task")
     _stdout_proxy = _NestedField("_runtime", "stdout_proxy")
@@ -171,9 +172,6 @@ class InlineController(
     _transcript_cache = _NestedField("_agent_panel", "transcript_cache")
     _message_cache = _NestedField("_agent_panel", "message_cache")
     _agent_selected_index = _NestedField("_agent_panel", "selected_index")
-    _viewing_uuid = _NestedField("_agent_panel", "viewing_uuid")
-    _view_scroll = _NestedField("_agent_panel", "scroll")
-    _viewing_invoked = _NestedField("_agent_panel", "invoked")
 
     _select_options = _NestedField("_selection", "options")
     _select_index = _NestedField("_selection", "index")
@@ -212,7 +210,8 @@ class InlineController(
         self._runtime = InlineRuntime()
         self._turn_clock = turn_clock or TurnClock()
         self._agent_view_store = agent_view_store
-        self._agent_panel = AgentPanelController(agent_view_store)
+        self._agent_panel = AgentPanelController()
+        self._window_manager = WindowManager(self._run_window_dialog, self._invalidate_window_state)
         self._selection = SelectionState()
         self._form = FormState()
         self._choice_input = ChoiceInputState()
@@ -235,11 +234,9 @@ class InlineController(
         self.is_tty: bool = self._tty  # 公共只读属性，供外部（bootstrap）判断是否可建富 UI
         self._render_width: int = self._rich_console.width  # 渲染宽度快照（分割线/markdown）
         self._fallback_session: PromptSession[str] | None = None  # 非 TTY 降级读取用的 PromptSession（懒建）
-        # 交互模式：processing（处理态/只读）/ input（可编辑文本输入）/ select（只读选择菜单）/ form（单屏多问题表单）。
-        self._mode = InteractionMode.PROCESSING
         # 可输入态（input）：缓冲可编辑、› 醒目、Enter 提交。
         self._cond_accepting = Condition(lambda: self._accepting)
-        # 缓冲可编辑条件：input 态恒可编辑；form 态仅聚焦自由文本题时可编辑；其余只读。
+        # 缓冲可编辑条件由 WindowManager 栈顶决定：input 恒可编辑；form 仅自由文本题可编辑；其余只读。
         self._cond_buffer_editable = Condition(self._buffer_editable)
 
         # ---- 选择菜单（方向键导航，权限确认 / 任意 ChoiceMenu 共用）----
@@ -294,13 +291,6 @@ class InlineController(
         self._agent_list_inner = None
         self._input_window = None
 
-        # ---- 子 agent 转录覆盖面板（半屏、实时跟随）----
-        self._viewing_uuid = None
-        self._view_scroll = 0
-        # 查看态区分：False=实时非模态查看（列表 Enter 打开，渲染 transcript 分段，Esc 就地清）；
-        # True=/agents 调起的模态查看（渲染原始 history 消息，阻塞在 _input_future，Esc 解开 future 返回列表）。
-        self._viewing_invoked = False
-
     @property
     def _accepting(self) -> bool:
         """Return whether unobscured normal text input is editable.
@@ -308,7 +298,74 @@ class InlineController(
         Returns:
             True only while INPUT is active and no transcript overlays it.
         """
-        return self._mode == "input" and self._viewing_uuid is None
+        return self._top_window_kind == "input"
+
+    @property
+    def _top_window_kind(self) -> str | None:
+        """Return the visually topmost window kind.
+
+        Returns:
+            Top window kind, or None when only the base interface is visible.
+        """
+        top = self._window_manager.top_window
+        return top.kind if top is not None else None
+
+    @property
+    def _viewing_uuid(self) -> str | None:
+        """Return the UUID visible in the retained transcript window.
+
+        Returns:
+            Viewed subagent UUID, or None when no transcript is retained.
+        """
+        return self._window_manager.transcript_uuid
+
+    @property
+    def _view_scroll(self) -> int:
+        """Return the transcript offset from its live tail.
+
+        Returns:
+            Non-negative transcript scroll offset.
+        """
+        return self._window_manager.transcript_scroll
+
+    @_view_scroll.setter
+    def _view_scroll(self, scroll: int) -> None:
+        """Store a transcript scroll offset in WindowManager.
+
+        Args:
+            scroll: Desired non-negative offset from the live tail.
+
+        Returns:
+            None.
+        """
+        self._window_manager.set_transcript_scroll(scroll)
+
+    @property
+    def _viewing_invoked(self) -> bool:
+        """Return whether the transcript belongs to a pending ViewRequest.
+
+        Returns:
+            True when Esc should settle a history-view request.
+        """
+        return self._window_manager.transcript_is_requested
+
+    @property
+    def _transcript_visible(self) -> bool:
+        """Return whether the transcript is the topmost keyboard owner.
+
+        Returns:
+            True only while no dialog overlays the transcript.
+        """
+        return self._top_window_kind == "transcript"
+
+    def _invalidate_window_state(self) -> None:
+        """Request a redraw after WindowManager changes derived UI state.
+
+        Returns:
+            None.
+        """
+        if self._app_running and self._app is not None:
+            self._app.invalidate()
 
     @property
     def _app_running(self) -> bool:
@@ -366,7 +423,7 @@ class InlineController(
             raise
 
     async def stop(self) -> None:
-        """关闭常驻 App：请求退出、等任务收尾、还原 stdout/stderr 并关闭代理。
+        """Close WindowManager, then stop the prompt-toolkit application.
 
         非 TTY 下无 App/代理，仅走基类收尾。
 
@@ -374,6 +431,7 @@ class InlineController(
             None.
         """
         try:
+            await self._window_manager.close()
             if self._app_running:
                 self._app.exit()
             if self._app_task is not None:
@@ -420,11 +478,11 @@ class InlineController(
             multiline=True,
             read_only=~self._cond_buffer_editable,
             completer=SlashCommandCompleter(self._slash_commands),
-            complete_while_typing=Condition(lambda: self._mode == "input"),  # 仅主输入态自动补全，form 文本题不弹斜杠补全
+            complete_while_typing=Condition(lambda: self._top_window_kind == "input"),  # 仅主输入态自动补全，form 文本题不弹斜杠补全
             document=Document("", 0),
         )
         # 转录面板可见性条件：查看子 agent 转录时为真，驱动面板显隐并隐藏 spinner / agent 列表。
-        cond_viewing = Condition(lambda: self._viewing_uuid is not None)
+        cond_viewing = Condition(lambda: self._transcript_visible)
         # 转录覆盖面板：分隔线框住自适应折行标题，下接内容（max=_TRANSCRIPT_PANEL_ROWS）。
         transcript_panel = ConditionalContainer(
             HSplit([
@@ -442,27 +500,31 @@ class InlineController(
         )
         activity_window = ConditionalContainer(
             Window(FormattedTextControl(self._render_activity), dont_extend_height=True, height=Dimension(min=1)),
-            filter=Condition(lambda: self._mode == "processing" and (bool(self._activity) or bool(self._round_entries) or self._retry_deadline is not None) and self._viewing_uuid is None),
+            filter=Condition(lambda: self._top_window_kind is None and (bool(self._activity) or bool(self._round_entries) or self._retry_deadline is not None)),
         )
-        # 选择菜单窗口：select 态可见，只画可重绘的选项（上文已先打到 scrollback），置于输入框上方。
+        # 选择菜单窗口：permission/choice 栈顶时可见，只画可重绘的选项（上文已先打到 scrollback）。
         select_window = ConditionalContainer(
             Window(FormattedTextControl(self._render_select), dont_extend_height=True, height=Dimension(min=1)),
-            filter=Condition(lambda: self._mode == "select"),
+            filter=Condition(lambda: self._top_window_kind in {"permission", "choice"}),
         )
-        # 表单窗口：form 态可见，纵向渲染全部问题与作答（上文已先打到 scrollback），置于输入框上方。
+        # 表单窗口：form 栈顶时可见，纵向渲染全部问题与作答（上文已先打到 scrollback）。
         form_window = ConditionalContainer(
             Window(FormattedTextControl(self._render_form), dont_extend_height=True, height=Dimension(min=1)),
-            filter=Condition(lambda: self._mode == "form"),
+            filter=Condition(lambda: self._top_window_kind == "form"),
         )
-        # 选项+输入窗口：choice_input 态可见，画选项区与操作提示（输入行由下方常驻输入框承载），置于输入框上方。
+        # 选项+输入窗口：choice_input 栈顶时可见，画选项区与操作提示（输入行由下方常驻输入框承载）。
         choice_input_window = ConditionalContainer(
             Window(FormattedTextControl(self._render_choice_input), dont_extend_height=True, height=Dimension(min=1)),
-            filter=Condition(lambda: self._mode == "choice_input"),
+            filter=Condition(lambda: self._top_window_kind == "choice_input"),
         )
         # 斜杠命令补全下拉窗口：缓冲存在补全候选时可见，置于输入框上方。
         completion_window = ConditionalContainer(
             Window(FormattedTextControl(self._render_completions), dont_extend_height=True, height=Dimension(max=8)),
-            filter=Condition(lambda: self._buffer is not None and self._buffer.complete_state is not None),
+            filter=Condition(
+                lambda: self._top_window_kind == "input"
+                and self._buffer is not None
+                and self._buffer.complete_state is not None,
+            ),
         )
         self._input_window = Window(
             BufferControl(
@@ -493,10 +555,10 @@ class InlineController(
         )
         self._agent_list_window = ConditionalContainer(
             self._agent_list_inner,
-            filter=Condition(lambda: self._has_sub_agents() and self._viewing_uuid is None),
+            filter=Condition(lambda: self._has_sub_agents() and self._top_window_kind in {None, "input"}),
         )
         filler_window = Window(height=Dimension(weight=1))  # 吸收余高，使状态块紧贴输入框
-        cond_not_form = Condition(lambda: self._mode != "form")  # 底分割线与核心状态行仅非表单态显示（表单态隐藏模式/token 等信息）
+        cond_not_form = Condition(lambda: self._top_window_kind != "form")  # 底分割线与核心状态行仅非表单态显示（表单态隐藏模式/token 等信息）
         root = HSplit([
             transcript_panel,
             activity_window,
@@ -590,7 +652,7 @@ class InlineController(
         self._round_agent_type = None
         self._round_agent_uuid = None
         self._agent_selected_index = 0
-        self._agent_panel.close_live()
+        self._window_manager.reload()
         if (
             self._app_running
             and self._agent_list_inner is not None
@@ -658,7 +720,6 @@ class InlineController(
         """
         with self._runtime.interaction() as future:
             try:
-                self._mode = "input"
                 if (
                     self._app is not None
                     and self._agent_list_inner is not None
@@ -671,55 +732,22 @@ class InlineController(
             finally:
                 self._enter_processing_idle()
 
-
-    async def _await_transcript_view(self, uuid: str) -> str:
-        """进入 /agents 调起的模态原始消息查看：显示半屏面板，await 由 ↑/↓/Esc 绑定驱动的 future。
-
-        与实时查看（列表 Enter 打开）区别：置 _viewing_invoked=True 使面板渲染原始 history 消息，
-        Esc 经 _resolve_input("") 解开本 future（而非就地清面板），令 request_transcript_view 返回、
-        app 循环回到列表。仿 _await_selection：若焦点在 agent 列表先抢回输入框。
-
-        Args:
-            uuid: 目标子 agent 的 uuid 字符串。
-        Returns:
-            恒为空串（只读查看）。
-        """
-        with self._runtime.interaction() as future:
-            try:
-                self._viewing_uuid = uuid
-                self._viewing_invoked = True
-                self._view_scroll = 0
-                if self._buffer is not None:
-                    self._buffer.cancel_completion()
-                if (
-                    self._app is not None
-                    and self._agent_list_inner is not None
-                    and self._app.layout.has_focus(self._agent_list_inner)
-                ):
-                    self._app.layout.focus(self._input_window)
-                self._app.invalidate()
-                return await future
-            finally:
-                self._agent_panel.close_live()
-
     def _buffer_editable(self) -> bool:
         """返回输入缓冲是否可编辑。
 
-        转录覆盖层可见时恒为只读；否则 input 态可编辑，form 态讨论区或答题区光标落在
-        自定义输入行时可编辑，choice_input 态光标落在输入行时可编辑。
+        WindowManager 栈顶为转录或选择窗口时恒为只读；栈顶为 input 时可编辑，form
+        的讨论区或自定义输入行可编辑，choice_input 的输入行可编辑。
 
         Returns:
             缓冲是否可编辑。
         """
-        if self._viewing_uuid is not None:
-            return False
-        if self._mode == "input":
+        if self._top_window_kind == "input":
             return True
-        if self._mode == "form":
+        if self._top_window_kind == "form":
             if self._form_zone == "discuss":
                 return True
             return self._form_cursor_on_custom()
-        if self._mode == "choice_input":
+        if self._top_window_kind == "choice_input":
             return self._choice_input_on_input_row()
         return False
 
@@ -730,11 +758,11 @@ class InlineController(
             form 态答题区自定义行为「输入自定义回答…」、其余 form 态为「讨论这几个问题…」；
             choice_input 态为调用方给定的 input_placeholder；其它态为空串。
         """
-        if self._mode == "form":
+        if self._top_window_kind == "form":
             if self._form_zone == "answer" and self._form_cursor_on_custom():
                 return "输入自定义回答…"
             return "讨论这几个问题…"
-        if self._mode == "choice_input":
+        if self._top_window_kind == "choice_input":
             return self._choice_input_placeholder
         return ""
 
@@ -765,7 +793,7 @@ class InlineController(
         """
         if self._form_answering():
             return True
-        return self._mode == "choice_input" and not self._choice_input_on_input_row()
+        return self._top_window_kind == "choice_input" and not self._choice_input_on_input_row()
 
 
 
@@ -786,12 +814,11 @@ class InlineController(
 
 
     def _enter_processing_idle(self) -> None:
-        """回到处理态并清空输入缓冲。
+        """Clear the shared input buffer after an answer-window reader exits.
 
         Returns:
             None.
         """
-        self._mode = "processing"
         if self._buffer is not None:
             self._buffer.set_document(Document("", 0), bypass_readonly=True)
         if self._app_running:
@@ -828,14 +855,52 @@ class InlineController(
         self._runtime.fail_input(exc)
 
     def cancel_active_input(self) -> bool:
-        """取消活跃输入：取消总线层请求 future（基类）并解开 UI 层读取 future。
+        """Cancel every retained TTY window or the serial fallback request.
 
         Returns:
-            是否取消了总线层的活跃输入请求。
+            Whether any request or input future was cancelled.
         """
-        cancelled = super().cancel_active_input()
+        cancelled = self._window_manager.cancel_all() if self._tty else super().cancel_active_input()
         self._runtime.cancel_input()
         return cancelled
+
+    async def wait_interactions_idle(self) -> None:
+        """Wait until WindowManager runners have released component state.
+
+        Returns:
+            None.
+        """
+        if self._tty:
+            await self._window_manager.wait_idle()
+
+    async def _accept_ui_request(self, request: UiRequest) -> bool:
+        """Hand every TTY request to WindowManager without blocking EventBus consumption.
+
+        Args:
+            request: Pending EventBus UI request.
+
+        Returns:
+            True when the TTY manager accepted or discarded the request during shutdown.
+        """
+        if not self._tty:
+            return False
+        self._window_manager.submit(request)
+        return True
+
+    async def _run_window_dialog(self, request: MenuRequest) -> str:
+        """Render and read one active dialog after WindowManager promotes it.
+
+        Args:
+            request: Active answer request promoted from the FIFO queue.
+
+        Returns:
+            Answer value to settle after component cleanup completes.
+        """
+        try:
+            return await self._read_menu_request(request)
+        except (EOFError, KeyboardInterrupt):
+            self._request_user_interrupt()
+            raise
 
     def _render_input_context(self, prompt: str, markdown: bool = False) -> None:
         """把输入提示的「上文」打到 App 上方滚动区（输入框由常驻分割线框住，无需再打印分隔线）。
@@ -861,35 +926,17 @@ class InlineController(
 
 
     async def _read_transcript_view(self, uuid: str) -> str:
-        """查看某子 agent 的完整原始消息记录（/agents 调起）。
+        """Provide the serial fallback result for a transcript view request.
 
-        TTY 走半屏模态面板（_await_transcript_view）；非 TTY 为 no-op —— app 循环在非 TTY 下
-        直接读取 Store 快照输出摘要，不会调起本读取。
+        TTY requests are always accepted by WindowManager before this method can
+        run. Non-TTY callers use the existing plain `/agents` summary path.
 
         Args:
             uuid: 目标子 agent 的 uuid 字符串。
         Returns:
             恒为空串（只读查看）。
         """
-        if not self._tty:
-            return ""
-        return await self._await_transcript_view(uuid)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+        return ""
 
 
 

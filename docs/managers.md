@@ -27,7 +27,7 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 
 ### reload 协议
 
-有会话级可变状态、需在 `/clear` 时重置的 Manager 实现 `reload()` 方法。`/clear`（`src/app/app.py:135-142`）只对**固定的 deps 层 Manager 列表**用 `hasattr(mgr, "reload")` 发现并调用：`memory_mgr`、`tools_mgr`、`permission_mgr`、`config_mgr`、`plugin_mgr`、`hooks_mgr`、`plan_mgr`、`ui`（其中 `tools_mgr`、`ui` 无 `reload()`，被 `hasattr` 跳过）。每 agent 层 Manager（`CompactMgr`/`PromptMgr`/`SkillMgr`/`SubAgentMgr`/`TaskManager`/`ReminderMgr`/`FileMgr`）在 `/clear` 时随新 `Agent` 实例整体重建，不走 `reload()`。
+有会话级可变状态、需在 `/clear` 时重置的 Manager 实现 `reload()` 方法。`/clear`（`src/app/app.py:210-215`）只对**固定的 deps 层 Manager 列表**用 `hasattr(mgr, "reload")` 发现并调用：`memory_mgr`、`tools_mgr`、`permission_mgr`、`config_mgr`、`plugin_mgr`、`hooks_mgr`、`plan_mgr`、`ui`（其中 `tools_mgr` 无 `reload()`，被 `hasattr` 跳过；`ui.reload()` 清理交互态）。每 agent 层 Manager（`CompactMgr`/`PromptMgr`/`SkillMgr`/`SubAgentMgr`/`TaskManager`/`ReminderMgr`/`FileMgr`）在 `/clear` 时随新 `Agent` 实例整体重建，不走 `reload()`。
 
 > 注意：`McpMgr` **无** `reload()`——`/clear` 不重连 MCP server，故 `mcp_servers.json` 的编辑需重启进程才生效。详见 [mcp-and-hooks.md](mcp-and-hooks.md)。
 

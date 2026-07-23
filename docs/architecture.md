@@ -18,7 +18,7 @@
 
 **入口装配层** — `main.py` 解析 CLI 参数（`--workdir`、`--debug`），调用 `src/app/bootstrap.py` 的 `create_app()`。这是整个框架**唯一的具体实现实例化点**：手动构造所有 Manager 与 UI 状态服务，注入 `AgentDeps` dataclass，返回 `AgentApp`（`bootstrap.py:19-92`）。
 
-**应用主循环层** — `src/app/app.py` 的 `AgentApp` 管理外层 REPL：启动 UI、创建事件消费任务、打印启动横幅、重置会话、循环驱动 Agent 轮次、处理中断、退出时收尾（`app.py:30-76`）。
+**应用主循环层** — `src/app/app.py` 的 `AgentApp` 管理外层 REPL：启动 UI、创建事件消费任务、打印启动横幅、重置会话、循环驱动 Agent 轮次、处理中断、退出时收尾（`app.py:31-77`）。
 
 **Agent 状态机层** — `src/agent/agent.py` 的 `Agent` 是由 `_handlers: dict[AgentState, Callable]` 驱动的有限状态机（`agent.py:236-249`），枚举定义在 `src/agent/states.py:42-55`。每轮的可变状态封装在 `RunContext`（`states.py:58-106`）中；终态 LLM 错误由 `LLM_FAILURE` 承接，上下文超限仍进入 `CONTEXT_OVERFLOW`。
 
@@ -59,7 +59,7 @@
 └─────────────────────────────────────────────────────────────┘
 ```
 
-事件流是横切各层的：所有输出与输入都通过 `EventBus`（`src/events/bus.py`）以类型化事件流转，不直接调用 UI。每次 LLM 尝试由 provider 发出 `LLMCallStarted`，可重试失败发出 `LLMRetrying`，成功发出 `LLMCallCompleted`，终态失败发出 `LLMCallFailed`；发布使用安全遥测入口，随后由 `OutputRouter` 先写 `AgentViewStore`，再按前后台身份决定是否交给 UI（`events/bus.py:34-63`、`interfaces/output_router.py:50-87`）。详见 [events-and-ui.md](./events-and-ui.md)。
+事件流是横切各层的：所有输出与输入都通过 `EventBus`（`src/events/bus.py`）以类型化事件流转，不直接调用 UI。每次 LLM 尝试由 provider 发出 `LLMCallStarted`，可重试失败发出 `LLMRetrying`，成功发出 `LLMCallCompleted`，终态失败发出 `LLMCallFailed`；发布使用安全遥测入口，随后由 `OutputRouter` 先写 `AgentViewStore`，再按前后台身份决定是否交给 UI（`events/bus.py:36-65`、`interfaces/output_router.py:50-87`）。详见 [events-and-ui.md](./events-and-ui.md)。
 
 ---
 
@@ -172,9 +172,9 @@ ALL_FEATURES = frozenset({"task", "skill", "subagent", "file", "memory", "plan"}
 
 ## 5. `reload()` 协议
 
-有状态的 Manager 实现 `reload()` 方法。`/clear` 重置会话时（`AgentApp._reset_session`），框架通过 `hasattr(mgr, "reload")` 发现并统一调用（`app.py:200-205`）。
+有状态的 Manager 实现 `reload()` 方法。`/clear` 重置会话时（`AgentApp._reset_session`），框架通过 `hasattr(mgr, "reload")` 发现并统一调用（`app.py:210-215`）。
 
-`_reset_session` 中实际遍历并 reload 的对象列表（`app.py:200-202`）：
+`_reset_session` 中实际遍历并 reload 的对象列表（`app.py:210-212`）：
 
 ```python
 for attr in ("memory_mgr", "tools_mgr", "permission_mgr",
@@ -182,7 +182,7 @@ for attr in ("memory_mgr", "tools_mgr", "permission_mgr",
              "ui"):
 ```
 
-即：`memory_mgr`、`tools_mgr`、`permission_mgr`、`config_mgr`、`plugin_mgr`、`hooks_mgr`、`plan_mgr`、`ui`（其中 `memory_mgr`、`plan_mgr` 可能为 `None`，被 `mgr is not None` 跳过）。UI 的 `reload()` 只清交互态；随后 `AgentViewStore.reset()` 原子清空前台、usage、agent 历史和转录，再登记新主 agent（`app.py:206-215`）。
+即：`memory_mgr`、`tools_mgr`、`permission_mgr`、`config_mgr`、`plugin_mgr`、`hooks_mgr`、`plan_mgr`、`ui`（其中 `memory_mgr`、`plan_mgr` 可能为 `None`，被 `mgr is not None` 跳过）。UI 的 `reload()` 只清交互态；随后 `AgentViewStore.reset()` 原子清空前台、usage、agent 历史和转录，再登记新主 agent（`app.py:216-229`）。
 
 > 每个 Manager 是否实现 `reload()` 请以其源码为准，见 [managers.md](./managers.md)。文档所述"实现 reload"的对象须与 `_reset_session` 实际调用列表一致，即上述 8 个属性；Store 通过明确的 `reset()` 调用处理。
 
