@@ -45,12 +45,16 @@
 
 ### 内置角色一览
 
-| 角色 | `thinking` | `features` | 子 agent（`agents/`） | 说明 |
-|---|---|---|---|---|
-| `coding` | `true` | 未声明（全部启用） | coder、debug、doc、review | 通用编程助手（默认角色） |
-| `mijia` | `false` | `[subagent]` | device-control、home-diagnostics、home-status、scene-automation | 米家智能家居管家；仅启用 subagent feature（无 file/memory/plan 等） |
+| 角色 | `model` | `permissionMode` | `thinking` / `reasoning_effort` | `memory` | `features` | 子 agent（`agents/`） | 说明 |
+|---|---|---|---|---|---|---|---|
+| `coding` | `best` | `default` | `true` / `max` | `project` | 未声明（全部启用） | coder、debug、doc、review | 通用编程助手（默认角色） |
+| `mijia` | `fast` | `default` | `false` / 未声明（thinking 关闭时不使用或发送） | 未声明（`None`；且 memory feature 关闭） | `[subagent]` | device-control、home-diagnostics、home-status、scene-automation | 米家智能家居管家；仅启用 subagent feature（无 file/memory/plan 等） |
 
-> `mijia` 声明 `features: [subagent]`，故 `task`/`skill`/`file`/`memory`/`plan` 均关闭——`MemoryMgr`/`PlanMgr`/`FileMgr` 等在 `create_app()` 中注入 `None`，其工具与提示词段随之从 schema 排除。
+> 两个内置角色都刻意省略 `tools`。`extract_manifest` 将缺失或空值解析为 `None`，即不设静态工具白名单，因此动态注册的 MCP 工具不会受静态白名单限制（仍受 feature 与权限过滤）。`coding` 也刻意省略 `features`；其 `None` 经 `resolve_features()` 解析为全部 feature。
+
+> 插件目前仅提供 skill 和 hook，不注册工具。`PluginMgr` 的发现和插件 hook 不受角色 feature 集限制；但插件 skill 需要 `skill` feature，因此 `mijia` 的 `features: [subagent]` 下不可用。
+
+> `mijia` 声明 `features: [subagent]`，故 `task`/`skill`/`file`/`memory`/`plan` 均关闭——`MemoryMgr` 与 `PlanMgr` 在 `create_app()` 中注入 `None`；`file` feature 未启用时，不会为该 agent 创建 `FileMgr`，对应工具不会进入 schema。
 
 ## 子智能体（Subagents）
 

@@ -1,10 +1,10 @@
 ---
 description: 通用编程助手 — 编写、调试、审查代码
-tools:
-model:
-permissionMode:
+model: best
+permissionMode: plan
 thinking: true
-reasoning_effort:
+reasoning_effort: max
+memory: project
 ---
 
 你是一个编码智能体。你负责根据明确的规格和约束，编写、修改、调试和审查代码。
