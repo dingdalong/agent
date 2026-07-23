@@ -12,6 +12,7 @@ from src.events.types import (
     LLMCallCompleted,
     LLMCallFailed,
     LLMCallStarted,
+    LLMLengthRetrying,
     LLMRetrying,
     ResponseDelta,
     SubagentLifecycle,
@@ -19,6 +20,14 @@ from src.events.types import (
     ToolCallCompleted,
     ToolCallStarted,
 )
+
+# 截断阶段分类到转录用中文标签的映射。
+_TRUNCATION_KIND_LABELS = {
+    "tool_call": "工具调用",
+    "content": "正文",
+    "thinking": "思考",
+    "unknown": "未知",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +160,8 @@ class AgentViewStore:
             self._record_call_start(event)
         elif isinstance(event, LLMRetrying):
             self._record_retry(event)
+        elif isinstance(event, LLMLengthRetrying):
+            self._record_length_retry(event)
         elif isinstance(event, LLMCallFailed):
             self._record_failure(event)
         elif isinstance(event, SubagentLifecycle):
@@ -402,6 +413,35 @@ class AgentViewStore:
             f"⚠ 尝试 {event.attempt}/{event.max_attempts} 失败，将重试 "
             f"[{event.error_kind}] {event.safe_message} "
             f"(partial={str(event.partial).lower()}, tool={event.tool_fragment_state})\n",
+        ))
+
+    def _record_length_retry(self, event: LLMLengthRetrying) -> None:
+        """记录一次输出长度截断的自动恢复并阻断前后正文分段合并。
+
+        重生成路径会丢弃被截断的思考/正文流，追加一个 retry 段可隔断被丢弃流与
+        重生成流在转录中被误合并为一段。
+
+        Args:
+            event: 携带截断阶段、恢复策略与推理力度的长度恢复事件。
+
+        Returns:
+            None.
+        """
+        state = self._ensure_event_state(event)
+        if state is None:
+            return
+        state.activity = "恢复中"
+        kind_label = _TRUNCATION_KIND_LABELS.get(event.truncation_kind, event.truncation_kind)
+        if event.strategy == "regenerate-lower-effort":
+            action = f"降低推理力度至 {event.effort} 后重生成"
+        elif event.strategy == "regenerate-compress":
+            action = "压缩思考后重生成"
+        else:
+            action = "从中断处继续生成"
+        state.transcript.append((
+            "retry",
+            f"⚠ 输出截断（{kind_label}）：{action} "
+            f"({event.attempt}/{event.max_attempts})\n",
         ))
 
     def _record_failure(self, event: LLMCallFailed) -> None:

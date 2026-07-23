@@ -15,6 +15,7 @@ from src.events.types import (
     Event,
     LLMCallFailed,
     LLMCallStarted,
+    LLMLengthRetrying,
     LLMRetrying,
     OutputRequested,
     PermissionNotice,
@@ -109,4 +110,4 @@ _CONTROL_EVENTS = (
     OutputRequested,
 )
 
-_LLM_BOUNDARY_EVENTS = (LLMCallStarted, LLMRetrying, LLMCallFailed)
+_LLM_BOUNDARY_EVENTS = (LLMCallStarted, LLMRetrying, LLMLengthRetrying, LLMCallFailed)

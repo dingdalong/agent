@@ -117,6 +117,7 @@ class SequenceLLM:
     """按顺序抛出异常或返回响应的测试 LLM。"""
 
     context_limit = 1000
+    reasoning_effort = "max"
 
     def __init__(self, outcomes: list[LLMCallError | LLMResponse]) -> None:
         """初始化调用结果序列。
@@ -164,6 +165,18 @@ class SequenceLLM:
             新的消息列表。
         """
         return list(messages)
+
+    def next_lower_effort(self, current: str) -> str | None:
+        """返回比当前档位更低的推理力度档位。
+
+        Args:
+            current: 当前推理力度档位。
+
+        Returns:
+            本测试无降档阶梯，恒为 None。
+        """
+        del current
+        return None
 
     def estimate_tokens(
         self,

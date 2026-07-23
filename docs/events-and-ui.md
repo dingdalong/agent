@@ -46,6 +46,7 @@ LLM 调用使用 `emit_telemetry_safely()`（`src/events/bus.py:34-63`）发布�
 | `LLMCallStarted` | `llm_call_started` | 模型、窗口、输入估算、消息数、工具数、`attempt`、`max_attempts` |
 | `LLMCallCompleted` | `llm_call_completed` | 输入/输出/缓存 token、耗时与吞吐率 |
 | `LLMRetrying` | `llm_retrying` | `error_kind`、`safe_message`、`partial`、`tool_fragment_state`、`attempt`、`max_attempts`、`wait_seconds` |
+| `LLMLengthRetrying` | `llm_length_retrying` | `truncation_kind`、`strategy`、`effort`、`attempt`、`max_attempts` |
 | `LLMCallFailed` | `llm_call_failed` | `error_kind`、`safe_message`、`attempts`、`partial`、工具片段状态、状态码、provider code、request ID、diagnostic ID |
 | `OutputRequested` | `output_requested` | `content`、`markdown` |
 | `InterruptRequested` | `interrupt_requested` | 无 |
@@ -59,9 +60,11 @@ LLM 调用使用 `emit_telemetry_safely()`（`src/events/bus.py:34-63`）发布�
 
 `LLMCallStarted`（`src/events/types.py:97-113`）按每次尝试发出；首次通常为 `1/max_attempts`，重试会再次发出递增的 `attempt`。输入 token 估算在线程中执行，避免阻塞事件循环（`src/llm/base.py:953-990`）。
 
-`LLMRetrying`（`types.py:136-159`）在可重试失败完成分类和等待计算后发出。`wait_seconds` 保留抖动后的浮点值；显示层自行向上取整。`partial` 覆盖正文、思考或工具片段，`tool_fragment_state` 区分无片段、半截和完整工具片段。
+`LLMRetrying`（`types.py` `LLMRetrying`）在可重试失败完成分类和等待计算后发出。`wait_seconds` 保留抖动后的浮点值；显示层自行向上取整。`partial` 覆盖正文、思考或工具片段，`tool_fragment_state` 区分无片段、半截和完整工具片段。
 
-`LLMCallFailed`（`types.py:162-191`）只在终态失败时发出。它包含安全摘要和有限诊断字段，不包含请求、响应体、凭据或原始异常对象。长度恢复耗尽也发同一事件，并使用 `output_limit` 类别（`src/agent/agent.py:804-841`）。
+`LLMLengthRetrying`（`types.py` `LLMLengthRetrying`）在响应因 `finish_reason == "length"` 被截断、进入自动恢复时发出，由 `agent.py` 的 `_emit_length_retrying` 发射（无 `event_bus` 的单测 agent 静默）。`truncation_kind` 取 `tool_call`/`content`/`thinking`/`unknown`，`strategy` 取 `continue`（正文/工具阶段续写）/`regenerate-lower-effort`（降档重生成）/`regenerate-compress`（触底压缩重生成），`effort` 为本次恢复调用将用的推理力度档位。级别为 PROGRESS，保证进入 Store 并参与前后台分流；它不含 `wait_seconds`，因长度恢复不进退避等待。
+
+`LLMCallFailed`（`types.py` `LLMCallFailed`）只在终态失败时发出。它包含安全摘要和有限诊断字段，不包含请求、响应体、凭据或原始异常对象。长度恢复耗尽也发同一事件，并使用 `output_limit` 类别（`agent.py` `_fail_response_recovery`）。
 
 `LLMCallCompleted` 只对应成功尝试；失败尝试不会产生完成事件。成功事件用于 token/context 统计，失败事件用于终态诊断，两者职责不混合。
 
@@ -74,6 +77,7 @@ LLM 调用使用 `emit_telemetry_safely()`（`src/events/bus.py:34-63`）发布�
 - `LLMCallStarted`：记录窗口，活动改为“等待响应”；第二次及以后显示 `等待响应 attempt/max_attempts`（`:363-385`）。
 - `ResponseDelta` / `ThinkingDelta`：分别追加 `response` / `thinking` 段；只有相邻同类段合并（`:480-502`）。
 - `LLMRetrying`：活动改为“重试中”，追加独立 `retry` 段，写安全类别、摘要、尝试号和片段状态（`:387-405`）。该段会阻断失败尝试正文与下一尝试正文的合并。
+- `LLMLengthRetrying`：活动改为“恢复中”，追加独立 `retry` 段（`_record_length_retry`），按 `strategy` 写「⚠ 输出截断（阶段）：<从中断处继续生成/降低推理力度至 X 后重生成/压缩思考后重生成> (attempt/max)」。重生成会丢弃被截断的思考/正文流，该段隔断被丢弃流与重生成流在转录中被误合并。
 - `LLMCallFailed`：活动改为“失败”，追加独立 `error` 段；记录 attempts、partial、工具状态及可用的状态码、provider code、request ID、diagnostic ID（`:407-437`）。
 - `LLMCallCompleted`：累计会话与 Agent token，并以实际输入 token 更新上下文用量（`:338-361`）。
 
@@ -84,7 +88,7 @@ Store 无 UUID 时只累计会话 token，不虚构 Agent。完成子 Agent 先�
 `OutputRouter.dispatch()` 始终先 `store.record(event)`（`src/interfaces/output_router.py:50-87`），然后按以下顺序路由：
 
 1. `SubagentLifecycle` 只进 Store，不进 UI。
-2. `LLMCallStarted`、`LLMRetrying`、`LLMCallFailed` 是边界事件：只有 `caller_uuid` 精确等于已登记的前台 UUID 才转发；后台和缺前台身份的边界静默。前台 started 还先迁移已完成子 Agent。
+2. `LLMCallStarted`、`LLMRetrying`、`LLMLengthRetrying`、`LLMCallFailed` 是边界事件（`_LLM_BOUNDARY_EVENTS`）：只有 `caller_uuid` 精确等于已登记的前台 UUID 才转发；后台和缺前台身份的边界静默。前台 started 还先迁移已完成子 Agent。
 3. 非 TTY 的 `passthrough=True` 对其余事件全部透传，因此正文、思考、工具、完成、菜单与 compact 都保持普通输出，同时 Store 仍记录。
 4. TTY 下菜单、权限通知、显式输出和 `CompactDelta` 始终转发。
 5. TTY 下带身份且 UUID 不等于前台的正文、思考、工具与完成事件只进 Store，避免后台事件切断前台 Markdown 流。
@@ -112,6 +116,8 @@ TTY 收到 `LLMRetrying` 时（`output.py:244-277`）：
 - 下一次 `LLMCallStarted` 调用 `_set_activity()` 时清除倒计时，显示新的 `等待响应 attempt/max_attempts`。
 
 非 TTY 每次重试都打印静态黄色语义行，显示向上取整后的等待秒数，不做动态重绘。
+
+`on_llm_length_retrying()`（`output.py` `on_llm_length_retrying`）区别于重试：长度恢复不进退避等待，故只按 `strategy` 打印一行黄色标记「⚠ 输出截断（阶段）：<从中断处继续生成/降低推理力度至 X 后重生成/压缩思考后重生成> (attempt/max)」，不启动活动区倒计时。路由已保证只转发前台 agent，TTY 与非 TTY 同样处理。
 
 `on_llm_call_failed()` 在前台永久打印红色终态行，附可用的 request ID 与 diagnostic ID，并把活动设为“失败”（`output.py:279-299`）。Store 记录更完整的安全诊断元数据；后台失败只更新 Store。
 

@@ -23,6 +23,7 @@ from src.events.types import (
     LLMCallCompleted,
     LLMCallFailed,
     LLMCallStarted,
+    LLMLengthRetrying,
     LLMRetrying,
     ResponseDelta,
     SubagentLifecycle,
@@ -174,6 +175,7 @@ class ScriptedProvider(LLMProvider):
         temperature: float = 1.0,
         tool_choice: str | dict | None = None,
         enable_thinking: bool = True,
+        reasoning_effort_override: str | None = None,
         *,
         call: LLMCallContext,
     ) -> LLMResponse:
@@ -186,6 +188,7 @@ class ScriptedProvider(LLMProvider):
             temperature: 采样温度。
             tool_choice: 工具选择策略。
             enable_thinking: 是否启用思考。
+            reasoning_effort_override: 本次调用临时替换的推理力度档位。
             call: 当前尝试上下文。
 
         Returns:
@@ -195,6 +198,7 @@ class ScriptedProvider(LLMProvider):
             BaseException: 当前脚本项为异常时原样抛出。
         """
         del messages, prompt, tools, temperature, tool_choice, enable_thinking
+        del reasoning_effort_override
         self.attempts_seen.append(call.attempt)
         if call.attempt in self.partial_attempts:
             await self.emit_response_delta(f"partial-{call.attempt}", call=call)
@@ -598,6 +602,8 @@ def test_provider_marks_length_response_partial_after_thinking_only_delta() -> N
     response = asyncio.run(provider.chat([{"role": "user", "content": "hello"}]))
 
     assert response.has_partial_data is True
+    # 仅有思考增量、无正文与工具调用的 length 响应归为思考阶段截断。
+    assert response.truncation_kind == "thinking"
 
 
 @pytest.mark.parametrize(
@@ -773,6 +779,57 @@ def test_router_forwards_foreground_boundaries_and_preserves_other_passthrough()
         asyncio.run(router.dispatch(event))
 
     assert ui.events == [*foreground_events, background_delta]
+
+
+def _length_retry(uuid_value: str) -> LLMLengthRetrying:
+    """构造带截断分类与恢复策略的长度自动恢复事件。
+
+    Args:
+        uuid_value: caller UUID。
+
+    Returns:
+        长度自动恢复进度事件。
+    """
+    return LLMLengthRetrying(
+        timestamp=2.5,
+        source="stub",
+        caller_agent_type="worker",
+        caller_uuid=uuid_value,
+        truncation_kind="thinking",
+        strategy="regenerate-lower-effort",
+        effort="high",
+        attempt=1,
+        max_attempts=3,
+    )
+
+
+def test_router_forwards_foreground_length_retry_and_records_it() -> None:
+    """前台长度自动恢复事件可见并在 Store 留下恢复转录段。"""
+    store = AgentViewStore()
+    store.register_foreground("foreground", "main")
+    ui = RecordingUI()
+    router = OutputRouter(ui, store)  # type: ignore[arg-type]
+    event = _length_retry("foreground")
+
+    asyncio.run(router.dispatch(event))
+
+    assert ui.events == [event]
+    assert [kind for kind, _text in store.transcript_segments("foreground")] == ["retry"]
+    assert store.agent_snapshot("foreground").activity == "恢复中"  # type: ignore[union-attr]
+
+
+def test_router_keeps_background_length_retry_silent_but_recorded() -> None:
+    """后台长度自动恢复事件不展示，但 Store 完整记录恢复段。"""
+    store = AgentViewStore()
+    store.register_foreground("foreground", "main")
+    ui = RecordingUI()
+    router = OutputRouter(ui, store)  # type: ignore[arg-type]
+    event = _length_retry("background")
+
+    asyncio.run(router.dispatch(event))
+
+    assert ui.events == []
+    assert [kind for kind, _text in store.transcript_segments("background")] == ["retry"]
 
 
 def test_router_does_not_treat_unidentified_boundary_as_foreground() -> None:

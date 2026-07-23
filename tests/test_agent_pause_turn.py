@@ -27,6 +27,8 @@ from src.llm.errors import LLMErrorKind, LLMStreamResponseError
 class PauseNormalizer:
     """记录 pause_turn 上限查询与消息归一化的测试 LLM。"""
 
+    reasoning_effort = "max"
+
     def __init__(self, limit: int = 3) -> None:
         """初始化协议续接上限。
 
@@ -38,6 +40,18 @@ class PauseNormalizer:
         """
         self.limit = limit
         self.finish_reasons: list[str] = []
+
+    def next_lower_effort(self, current: str) -> str | None:
+        """返回比当前档位更低的推理力度档位。
+
+        Args:
+            current: 当前推理力度档位。
+
+        Returns:
+            下一更低档位；本测试固定无更低档位，恒为 None。
+        """
+        del current
+        return None
 
     def protocol_continuation_limit(self, finish_reason: str) -> int:
         """返回 pause_turn 续接上限并记录查询终态。
@@ -88,6 +102,8 @@ class RecordingEventBus:
 
 class ProtocolScriptedProvider(LLMProvider):
     """使用真实 LLMProvider 调用模板逐次返回协议响应的测试 provider。"""
+
+    _EFFORT_DOWNGRADE = {"max": "high", "high": "medium", "medium": "low"}
 
     def __init__(
         self,
@@ -190,6 +206,7 @@ class ProtocolScriptedProvider(LLMProvider):
         temperature: float = 1.0,
         tool_choice: str | dict | None = None,
         enable_thinking: bool = True,
+        reasoning_effort_override: str | None = None,
         *,
         call: LLMCallContext,
     ) -> LLMResponse:
@@ -202,6 +219,7 @@ class ProtocolScriptedProvider(LLMProvider):
             temperature: 采样温度。
             tool_choice: 工具选择策略。
             enable_thinking: 是否启用思考。
+            reasoning_effort_override: 本次调用临时替换的推理力度档位。
             call: 当前尝试上下文。
 
         Returns:
@@ -215,6 +233,7 @@ class ProtocolScriptedProvider(LLMProvider):
             "messages": deepcopy(messages),
             "prompt": deepcopy(prompt),
             "tools": deepcopy(tools),
+            "reasoning_effort_override": reasoning_effort_override,
         })
         outcome = self.outcomes.pop(0)
         if isinstance(outcome, BaseException):
@@ -915,6 +934,69 @@ def test_pause_length_stop_mixed_chain_commits_history_and_clears_state() -> Non
     assert ctx.pause_turn_message_idx is None
     assert ctx.pause_turn_continuations == 0
     assert ctx.length_recoveries == 1
+
+
+def test_thinking_content_pause_mixed_chain_persists_effort_until_clean_terminal() -> None:
+    """思考→正文→pause_turn→stop 混合链：降档 effort 跨腿持续，干净终态才复位。"""
+    bus = RecordingEventBus()
+    provider = ProtocolScriptedProvider(
+        bus,
+        [
+            LLMResponse(
+                content="",
+                finish_reason="length",
+                assistant_message={
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning_content": "被丢弃的半截推理",
+                },
+            ),
+            LLMResponse(
+                content="正文段",
+                finish_reason="length",
+                assistant_message={"role": "assistant", "content": "正文段"},
+            ),
+            LLMResponse(
+                content="暂停段",
+                finish_reason="pause_turn",
+                assistant_message={"role": "assistant", "content": "暂停段"},
+            ),
+            LLMResponse(
+                content="收尾段",
+                finish_reason="stop",
+                assistant_message={"role": "assistant", "content": "收尾段"},
+            ),
+        ],
+        pause_turn_limit=2,
+    )
+    agent = _runtime_agent(provider, bus)
+    agent.history.append({"role": "user", "content": "执行混合恢复"})
+    ctx = RunContext(messages=agent.history, round_start_idx=0, user_input="执行混合恢复")
+
+    result = asyncio.run(agent._run_single_turn(ctx, AgentState.CHECK_COMPACT))
+
+    # 思考腿被丢弃、不贡献正文，正文/暂停/收尾三段依次拼接。
+    assert result.final_text == "正文段暂停段收尾段"
+    # 思考腿与正文腿各计一次长度恢复；干净终态复位降档与压缩瞬态。
+    assert ctx.length_recoveries == 2
+    assert ctx.length_effort_override is None
+    assert ctx.length_ephemeral_instruction is None
+    assert ctx.response_recovery_start_idx is None
+    assert ctx.pause_turn_continuations == 0
+    # 思考腿不写历史；正文腿保留 assistant 与续写 user；暂停/收尾正常提交。
+    assert agent.history == [
+        {"role": "user", "content": "执行混合恢复"},
+        {"role": "assistant", "content": "正文段"},
+        {
+            "role": "user",
+            "content": "输出达到长度上限。请从中断处直接继续，不要回顾、不要重复，必要时可以从半句话接续。",
+        },
+        {"role": "assistant", "content": "暂停段"},
+        {"role": "assistant", "content": "收尾段"},
+    ]
+    # 首次请求用初始档，思考腿降档后 high 持续到收尾腿（干净终态才复位）。
+    efforts = [request["reasoning_effort_override"] for request in provider.requests]
+    assert efforts == [None, "high", "high", "high"]
 
 
 def test_pause_length_provider_failure_rolls_back_entire_mixed_chain() -> None:

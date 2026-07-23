@@ -85,6 +85,9 @@ class RunContext:
         pause_turn_message_idx: 当前连续 pause_turn 载体在消息列表中的位置；
             没有可替换载体时为 None。
         pause_turn_continuations: 当前响应恢复链已执行的 pause_turn 续接次数。
+        length_effort_override: 当前恢复链临时降档后的推理力度；无降档时为 None。
+        length_ephemeral_instruction: 触底/无阶梯时下发的一次性压缩推理指令；
+            仅作用于下一次调用、永不写回历史，无兜底时为 None。
         response: 最近一次 LLM 响应。
         manual_compact: 当前工具轮是否请求手动 compact。
         compact_focus: 手动 compact 的可选关注点。
@@ -111,6 +114,8 @@ class RunContext:
     response_recovery_response_count: int = 0
     pause_turn_message_idx: int | None = None
     pause_turn_continuations: int = 0
+    length_effort_override: str | None = None
+    length_ephemeral_instruction: str | None = None
     response: LLMResponse | None = None
     manual_compact: bool = False
     compact_focus: str | None = None

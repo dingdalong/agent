@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from enum import Enum
 import json
 from typing import (
     TYPE_CHECKING,
     Any,
     AsyncIterable,
     AsyncIterator,
+    ClassVar,
     Collection,
     Mapping,
     Optional,
@@ -165,6 +167,14 @@ _ACTIVE_LLM_CALL: ContextVar[LLMCallContext | None] = ContextVar(
     default=None,
 )
 
+class TruncationKind(str, Enum):
+    """finish_reason == "length" 时响应被截断所处阶段的分类。"""
+    TOOL_CALL = "tool_call"
+    CONTENT = "content"
+    THINKING = "thinking"
+    UNKNOWN = "unknown"
+
+
 @dataclass
 class LLMResponse:
     """LLM 响应。"""
@@ -174,6 +184,71 @@ class LLMResponse:
     assistant_message: Optional[dict] = None
     token_usage: dict[str, int | None] | None = None
     has_partial_data: bool = False
+    truncation_kind: str | None = None
+
+
+def _has_reasoning_carrier(assistant_message: dict | None) -> bool:
+    """判断 assistant 消息是否携带任意 provider 的推理载体。
+
+    Args:
+        assistant_message: provider 归一化后的 assistant 消息，可能为 None。
+
+    Returns:
+        含 reasoning_content / reasoning 文本、Anthropic thinking 块或
+        OpenAI Responses reasoning 项时为 True。
+    """
+    if not isinstance(assistant_message, dict):
+        return False
+    if assistant_message.get("reasoning_content") or assistant_message.get("reasoning"):
+        return True
+    anthropic_content = assistant_message.get("_anthropic_content")
+    if isinstance(anthropic_content, list) and any(
+        isinstance(block, dict) and block.get("type") == "thinking"
+        for block in anthropic_content
+    ):
+        return True
+    response_output = assistant_message.get("_response_output")
+    if isinstance(response_output, list) and any(
+        isinstance(item, dict) and item.get("type") == "reasoning"
+        for item in response_output
+    ):
+        return True
+    return False
+
+
+def classify_truncation(
+    response: LLMResponse,
+    call: LLMCallContext | None = None,
+) -> str:
+    """按残片所处阶段将长度截断分类为四类之一。
+
+    Args:
+        response: finish_reason 为 length 的成品响应。
+        call: 可选的调用上下文，提供流式残片作兜底信号。
+
+    Returns:
+        TruncationKind 之一的字符串值；优先级为工具 → 正文 → 思考 → 未知。
+    """
+    assistant_message = response.assistant_message or {}
+    has_tool = bool(
+        response.tool_calls
+        or assistant_message.get("tool_calls")
+        or (call is not None and call.tool_fragment_state != "none")
+    )
+    if has_tool:
+        return TruncationKind.TOOL_CALL.value
+    has_content = bool(
+        (response.content or "").strip()
+        or (call is not None and call.response_parts)
+    )
+    if has_content:
+        return TruncationKind.CONTENT.value
+    has_thinking = _has_reasoning_carrier(assistant_message) or bool(
+        call is not None and call.thinking_parts
+    )
+    if has_thinking:
+        return TruncationKind.THINKING.value
+    return TruncationKind.UNKNOWN.value
 
 
 def validate_chat_completion_stream(
@@ -325,6 +400,9 @@ class LLMProvider(ABC):
     user_agent: str = ""
     max_pause_turn_continuations: int = 0
 
+    # 推理力度降档阶梯（当前档 → 下一更低档），各 provider 覆写；空表示无阶梯。
+    _EFFORT_DOWNGRADE: ClassVar[dict[str, str]] = {}
+
     def __post_init__(self) -> None:
         """初始化并发限制、分页预算与统一重试策略。
 
@@ -338,6 +416,17 @@ class LLMProvider(ABC):
             base_delay_seconds=self.base_delay_seconds,
             max_delay_seconds=self.max_delay_seconds,
         ))
+
+    def next_lower_effort(self, current: str) -> str | None:
+        """查询给定推理力度的下一个更低档位。
+
+        Args:
+            current: 当前推理力度档位名。
+
+        Returns:
+            存在更低档位时返回其名称，触底或该 provider 无阶梯时返回 None。
+        """
+        return self._EFFORT_DOWNGRADE.get(current)
 
     def protocol_continuation_limit(self, finish_reason: str) -> int:
         """查询指定协议终态允许的自动续接次数。
@@ -695,6 +784,8 @@ class LLMProvider(ABC):
         caller_agent_type: str | None = None,
         caller_uuid: str | None = None,
         enable_thinking: bool = True,
+        reasoning_effort_override: str | None = None,
+        ephemeral_instruction: str | None = None,
     ) -> LLMResponse:
         """执行带统一分类、退避和尝试级隔离的 LLM 调用。
 
@@ -707,6 +798,10 @@ class LLMProvider(ABC):
             caller_agent_type: 发起调用的 agent 类型。
             caller_uuid: 发起调用的 agent 实例 UUID。
             enable_thinking: 是否启用思考。
+            reasoning_effort_override: 本次调用临时替换的推理力度档位；
+                None 时沿用 provider 的 reasoning_effort，不修改共享实例。
+            ephemeral_instruction: 一次性追加到消息尾部的 user 指令；
+                仅作用于本次调用，不写回调用方 messages。
 
         Returns:
             最终成功尝试产生的 LLM 响应。
@@ -717,6 +812,11 @@ class LLMProvider(ABC):
             KeyboardInterrupt: 收到键盘中断时原样传播。
             SystemExit: 进程退出时原样传播。
         """
+        effective_messages = (
+            [*messages, {"role": "user", "content": ephemeral_instruction}]
+            if ephemeral_instruction
+            else messages
+        )
         async with self._semaphore:
             for attempt in range(1, self.max_attempts + 1):
                 call = LLMCallContext(
@@ -726,7 +826,7 @@ class LLMProvider(ABC):
                 )
                 try:
                     started_at = await self._emit_llm_call_started(
-                        messages,
+                        effective_messages,
                         prompt,
                         tools,
                         call,
@@ -734,15 +834,18 @@ class LLMProvider(ABC):
                     call_token = _ACTIVE_LLM_CALL.set(call)
                     try:
                         response = await self._do_chat(
-                            messages=messages,
+                            messages=effective_messages,
                             prompt=prompt,
                             tools=tools,
                             temperature=temperature,
                             tool_choice=tool_choice,
                             enable_thinking=enable_thinking,
+                            reasoning_effort_override=reasoning_effort_override,
                             call=call,
                         )
                         response.has_partial_data = call.has_partial_data
+                        if response.finish_reason == "length":
+                            response.truncation_kind = classify_truncation(response, call)
                     finally:
                         _ACTIVE_LLM_CALL.reset(call_token)
                     if response.finish_reason != "length":
@@ -1057,6 +1160,7 @@ class LLMProvider(ABC):
         temperature: float = 1.0,
         tool_choice: str | dict | None = None,
         enable_thinking: bool = True,
+        reasoning_effort_override: str | None = None,
         *,
         call: LLMCallContext,
     ) -> LLMResponse:
@@ -1069,6 +1173,8 @@ class LLMProvider(ABC):
             temperature: 采样温度。
             tool_choice: 工具选择策略。
             enable_thinking: 是否启用思考。
+            reasoning_effort_override: 本次调用临时替换的推理力度档位；
+                None 时沿用 provider 的 reasoning_effort。
             call: 当前独立调用尝试上下文。
 
         Returns:

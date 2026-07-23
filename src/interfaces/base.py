@@ -12,6 +12,7 @@ from src.events.types import (
     LLMCallCompleted,
     LLMCallFailed,
     LLMCallStarted,
+    LLMLengthRetrying,
     LLMRetrying,
     OutputRequested,
     PermissionNotice,
@@ -412,6 +413,8 @@ class UserInterface(ABC):
                 await self.on_llm_call_completed(event)
             case LLMRetrying():
                 await self.on_llm_retrying(event)
+            case LLMLengthRetrying():
+                await self.on_llm_length_retrying(event)
             case LLMCallFailed():
                 await self.on_llm_call_failed(event)
             case ResponseDelta(content=content):
@@ -451,6 +454,17 @@ class UserInterface(ABC):
         pass
 
     async def on_llm_retrying(self, event: LLMRetrying) -> None:
+        pass
+
+    async def on_llm_length_retrying(self, event: LLMLengthRetrying) -> None:
+        """处理 LLM 长度截断自动恢复事件，默认无操作。
+
+        Args:
+            event: 长度截断恢复事件。
+
+        Returns:
+            None。
+        """
         pass
 
     async def on_llm_call_failed(self, event: LLMCallFailed) -> None:

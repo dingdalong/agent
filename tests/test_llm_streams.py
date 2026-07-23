@@ -952,6 +952,7 @@ class LengthSuccessProvider(LLMProvider):
         temperature: float = 0.6,
         tool_choice: str | dict | None = None,
         enable_thinking: bool = True,
+        reasoning_effort_override: str | None = None,
         *,
         call: LLMCallContext,
     ) -> LLMResponse:
@@ -964,11 +965,13 @@ class LengthSuccessProvider(LLMProvider):
             temperature: 采样温度。
             tool_choice: 工具选择策略。
             enable_thinking: 是否启用思考。
+            reasoning_effort_override: 本次调用临时替换的推理力度档位。
             call: 当前独立调用上下文。
 
         Returns:
             带半截工具参数的 length 响应。
         """
+        del reasoning_effort_override
         self.captured_call = call
         call.record_tool_fragment(
             0,

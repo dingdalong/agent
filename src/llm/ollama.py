@@ -25,6 +25,8 @@ _OLLAMA_FINISH_REASONS = frozenset({"stop", "length", "tool_calls"})
 class OllamaProvider(LLMProvider):
     """Ollama Provider (OpenAI 兼容 Chat Completions API)"""
 
+    _EFFORT_DOWNGRADE = {"max": "high", "xhigh": "high", "high": "medium", "medium": "low"}
+
     def __post_init__(self):
         super().__post_init__()
         self.supports_native_structured_output = False
@@ -98,6 +100,7 @@ class OllamaProvider(LLMProvider):
         temperature: float = 0.6,
         tool_choice: str | dict | None = None,
         enable_thinking: bool = True,
+        reasoning_effort_override: str | None = None,
         *,
         call: LLMCallContext,
     ) -> LLMResponse:
@@ -110,6 +113,8 @@ class OllamaProvider(LLMProvider):
             temperature: 采样温度。
             tool_choice: 工具选择策略。
             enable_thinking: 是否启用思考。
+            reasoning_effort_override: 本次调用临时替换的推理力度档位；
+                None 时沿用 provider 的 reasoning_effort。
             call: 当前独立调用尝试上下文。
 
         Returns:
@@ -127,8 +132,9 @@ class OllamaProvider(LLMProvider):
             kwargs["tool_choice"] = tool_choice or "auto"
 
         if enable_thinking:
-            if self.reasoning_effort and self.reasoning_effort.lower() != "none":
-                kwargs["reasoning_effort"] = self.reasoning_effort
+            effort = reasoning_effort_override or self.reasoning_effort
+            if effort and effort.lower() != "none":
+                kwargs["reasoning_effort"] = effort
 
             if self.preserve_thinking:
                 kwargs["extra_body"] = {

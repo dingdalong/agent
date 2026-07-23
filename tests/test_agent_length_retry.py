@@ -13,6 +13,9 @@ from src.llm.errors import LLMErrorKind
 class IdentityNormalizer:
     """不提供消息协议兜底的测试 normalizer。"""
 
+    reasoning_effort = "max"
+    _EFFORT_DOWNGRADE = {"max": "high", "high": "medium", "medium": "low"}
+
     def normalize_messages(self, messages: list[dict]) -> list[dict]:
         """原样复制消息列表。
 
@@ -23,6 +26,17 @@ class IdentityNormalizer:
             仅复制容器、不修改消息内容的新列表。
         """
         return list(messages)
+
+    def next_lower_effort(self, current: str) -> str | None:
+        """返回比当前档位更低的推理力度档位。
+
+        Args:
+            current: 当前推理力度档位。
+
+        Returns:
+            下一更低档位；已到最低档位时为 None。
+        """
+        return self._EFFORT_DOWNGRADE.get(current)
 
 
 def _agent_with_identity_normalizer() -> Agent:
@@ -192,31 +206,11 @@ def test_normal_round_replaces_recovered_tool_preamble_even_when_empty() -> None
     assert ctx.final_text == ""
 
 
-def test_empty_text_truncation_still_requests_continuation() -> None:
-    """空文本截断经 normalizer 删除空 assistant 后仍发起续写。"""
-
-    class EmptyDroppingNormalizer(IdentityNormalizer):
-        """删除空 assistant 消息的测试 normalizer。"""
-
-        def normalize_messages(self, messages: list[dict]) -> list[dict]:
-            """删除没有 content 的 assistant 消息。
-
-            Args:
-                messages: 待归一化的消息列表。
-
-            Returns:
-                不含空 assistant 消息的新列表。
-            """
-            return [
-                message
-                for message in messages
-                if message.get("role") != "assistant" or message.get("content")
-            ]
-
-    agent = object.__new__(Agent)
-    agent.llm = EmptyDroppingNormalizer()
+def test_empty_truncation_discards_response_and_lowers_effort() -> None:
+    """完全为空的截断归为 UNKNOWN，丢弃整条响应并降低推理力度重生成。"""
+    agent = _agent_with_identity_normalizer()
     ctx = RunContext(
-        messages=[],
+        messages=[{"role": "user", "content": "开始任务"}],
         response=LLMResponse(
             content="",
             finish_reason="length",
@@ -227,12 +221,12 @@ def test_empty_text_truncation_still_requests_continuation() -> None:
     state = asyncio.run(agent._on_length_retry(ctx))
 
     assert state is AgentState.LLM_CALL
-    assert ctx.messages == [
-        {
-            "role": "user",
-            "content": "输出达到长度上限。请从中断处直接继续，不要回顾、不要重复，必要时可以从半句话接续。",
-        }
-    ]
+    assert ctx.length_recoveries == 1
+    # 丢弃重生成：不向历史追加任何合成 assistant 或续写 user。
+    assert ctx.messages == [{"role": "user", "content": "开始任务"}]
+    # max 有更低档位 high，降档而非压缩指令。
+    assert ctx.length_effort_override == "high"
+    assert ctx.length_ephemeral_instruction is None
 
 
 def test_truncated_tool_call_at_recovery_limit_leaves_valid_history() -> None:
@@ -373,6 +367,143 @@ def test_recovery_limit_uses_checkpoint_after_compact_rewrites_history() -> None
 
     assert terminal_state is AgentState.LLM_FAILURE
     assert ctx.messages == compacted_messages[:3]
+
+
+def test_thinking_truncation_discards_all_reasoning_carriers() -> None:
+    """思考截断丢弃整条响应，历史不含任何推理载体或续写脚手架。"""
+    agent = _agent_with_identity_normalizer()
+    ctx = RunContext(
+        messages=[{"role": "user", "content": "深度分析"}],
+        response=LLMResponse(
+            content="",
+            finish_reason="length",
+            assistant_message={
+                "role": "assistant",
+                "content": "",
+                "reasoning_content": "半截推理",
+                "_anthropic_content": [{"type": "thinking", "thinking": "半截"}],
+                "_response_output": [{"type": "reasoning", "summary": []}],
+            },
+        ),
+    )
+
+    state = asyncio.run(agent._on_length_retry(ctx))
+
+    assert state is AgentState.LLM_CALL
+    assert ctx.length_recoveries == 1
+    assert ctx.messages == [{"role": "user", "content": "深度分析"}]
+    assert ctx.length_effort_override == "high"
+    assert ctx.length_ephemeral_instruction is None
+    assert all("reasoning_content" not in message for message in ctx.messages)
+    assert all("_anthropic_content" not in message for message in ctx.messages)
+    assert all("_response_output" not in message for message in ctx.messages)
+
+
+def test_thinking_effort_steps_down_then_resets_on_clean_terminal() -> None:
+    """连续思考截断逐档降低推理力度，触底转压缩指令，干净终态复位。"""
+    agent = _agent_with_identity_normalizer()
+    ctx = RunContext(
+        messages=[{"role": "user", "content": "长思考任务"}],
+        max_length_recoveries=5,
+    )
+
+    def _thinking_length() -> LLMResponse:
+        return LLMResponse(
+            content="",
+            finish_reason="length",
+            assistant_message={
+                "role": "assistant",
+                "content": "",
+                "reasoning_content": "推理",
+            },
+        )
+
+    for expected in ("high", "medium", "low"):
+        ctx.response = _thinking_length()
+        assert asyncio.run(agent._on_process_response(ctx)) is AgentState.LENGTH_RETRY
+        assert asyncio.run(agent._on_length_retry(ctx)) is AgentState.LLM_CALL
+        assert ctx.length_effort_override == expected
+        assert ctx.length_ephemeral_instruction is None
+
+    # low 已是最低档，无更低档位 → 一次性压缩指令兜底，override 保持 low。
+    ctx.response = _thinking_length()
+    assert asyncio.run(agent._on_process_response(ctx)) is AgentState.LENGTH_RETRY
+    assert asyncio.run(agent._on_length_retry(ctx)) is AgentState.LLM_CALL
+    assert ctx.length_effort_override == "low"
+    assert ctx.length_ephemeral_instruction is not None
+
+    # 历史全程未被追加合成 assistant 或续写 user。
+    assert ctx.messages == [{"role": "user", "content": "长思考任务"}]
+
+    # 干净终态复位降档与压缩瞬态。
+    ctx.response = LLMResponse(
+        content="完成",
+        finish_reason="stop",
+        assistant_message={"role": "assistant", "content": "完成"},
+    )
+    assert asyncio.run(agent._on_process_response(ctx)) is AgentState.CHECK_STOP
+    assert ctx.length_effort_override is None
+    assert ctx.length_ephemeral_instruction is None
+
+
+def test_thinking_bottom_of_ladder_uses_compress_instruction_not_history() -> None:
+    """无降档阶梯（如 Moonshot）时思考截断设置压缩指令且不写入历史。"""
+
+    class NoLadderNormalizer(IdentityNormalizer):
+        """无降档阶梯的测试 normalizer。"""
+
+        _EFFORT_DOWNGRADE: dict[str, str] = {}
+
+    agent = object.__new__(Agent)
+    agent.llm = NoLadderNormalizer()
+    ctx = RunContext(
+        messages=[{"role": "user", "content": "长思考"}],
+        response=LLMResponse(
+            content="",
+            finish_reason="length",
+            assistant_message={
+                "role": "assistant",
+                "content": "",
+                "reasoning_content": "推理",
+            },
+        ),
+    )
+
+    state = asyncio.run(agent._on_length_retry(ctx))
+
+    assert state is AgentState.LLM_CALL
+    assert ctx.length_effort_override is None
+    assert ctx.length_ephemeral_instruction is not None
+    assert "压缩" in ctx.length_ephemeral_instruction
+    assert ctx.messages == [{"role": "user", "content": "长思考"}]
+
+
+def test_thinking_truncation_at_recovery_limit_uses_thinking_message() -> None:
+    """思考截断达到恢复上限时以思考专属文案收口且不改动历史。"""
+    agent = _agent_with_identity_normalizer()
+    ctx = RunContext(
+        messages=[{"role": "user", "content": "长思考任务"}],
+        response=LLMResponse(
+            content="",
+            finish_reason="length",
+            assistant_message={
+                "role": "assistant",
+                "content": "",
+                "reasoning_content": "推理",
+            },
+        ),
+        length_recoveries=3,
+        max_length_recoveries=3,
+    )
+
+    state = asyncio.run(agent._on_length_retry(ctx))
+
+    assert state is AgentState.LLM_FAILURE
+    assert ctx.llm_error is not None
+    assert ctx.llm_error.kind is LLMErrorKind.OUTPUT_LIMIT
+    assert ctx.llm_error.retryable is False
+    assert "思考阶段" in ctx.llm_error.message
+    assert ctx.messages == [{"role": "user", "content": "长思考任务"}]
 
 
 def test_successful_terminal_resets_length_recovery_checkpoint() -> None:

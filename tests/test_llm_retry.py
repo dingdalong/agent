@@ -361,6 +361,7 @@ class RetryProvider(LLMProvider):
         temperature: float = 1.0,
         tool_choice: str | dict | None = None,
         enable_thinking: bool = True,
+        reasoning_effort_override: str | None = None,
         call: LLMCallContext | None = None,
     ) -> LLMResponse:
         """执行脚本中的下一项。
@@ -372,6 +373,7 @@ class RetryProvider(LLMProvider):
             temperature: 采样温度。
             tool_choice: 工具选择策略。
             enable_thinking: 是否启用思考。
+            reasoning_effort_override: 本次调用临时替换的推理力度档位。
             call: 当前独立调用尝试上下文。
 
         Returns:
@@ -380,6 +382,7 @@ class RetryProvider(LLMProvider):
         Raises:
             BaseException: 脚本中的异常项。
         """
+        del reasoning_effort_override
         assert call is not None
         self.calls.append(call)
         item = self.script.pop(0)
@@ -650,6 +653,7 @@ class ConcurrentProvider(RetryProvider):
         temperature: float = 1.0,
         tool_choice: str | dict | None = None,
         enable_thinking: bool = True,
+        reasoning_effort_override: str | None = None,
         call: LLMCallContext | None = None,
     ) -> LLMResponse:
         """等待另一个调用进入后返回各自身份。
@@ -661,11 +665,13 @@ class ConcurrentProvider(RetryProvider):
             temperature: 采样温度。
             tool_choice: 工具选择策略。
             enable_thinking: 是否启用思考。
+            reasoning_effort_override: 本次调用临时替换的推理力度档位。
             call: 当前独立调用尝试上下文。
 
         Returns:
             content 为当前 caller UUID 的响应。
         """
+        del reasoning_effort_override
         assert call is not None
         self.calls.append(call)
         if len(self.calls) == 2:

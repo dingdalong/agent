@@ -26,6 +26,9 @@
 | `assistant_message` | 可直接回填历史的完整 assistant 消息，允许携带 provider 专属往返字段 |
 | `token_usage` | 统一 token 用量 |
 | `has_partial_data` | 本次成功尝试是否曾接收正文、思考或工具片段 |
+| `truncation_kind` | 仅 `finish_reason="length"` 时非空；`classify_truncation` 按 **工具 → 正文 → 思考 → 未知**（`tool_call`/`content`/`thinking`/`unknown`）判定的截断阶段，供 Agent 恢复链选择续写或丢弃重生成 |
+
+`classify_truncation(response, call=None)` 与 `_has_reasoning_carrier(assistant_message)`（`src/llm/base.py`）集中处理跨 provider 的截断分类：`has_tool` 看 `tool_calls` 或 `call.tool_fragment_state`；`has_content` 看正文或 `call.response_parts`；`has_thinking` 看各家推理载体（`reasoning_content` / `reasoning` 文本、Anthropic `_anthropic_content` 的 `thinking` 块、OpenAI `_response_output` 的 `reasoning` 项）或 `call.thinking_parts`。`chat()` 是唯一同时持有成品 `LLMResponse` 与 `LLMCallContext` 的位置，故分类只在此计算，五个 provider 的 `_build_response` 无需改动。
 
 token 用量统一为 `input_tokens`、`output_tokens`、`total_tokens`、`cache_read_input_tokens`、`cache_creation_input_tokens`。Anthropic 将未缓存输入、缓存读取和缓存创建相加作为统一 `input_tokens`；其余实现按各 SDK 的输入总量字段归一（`src/llm/anthropic.py:202-229`、`src/llm/openai.py:139-165`）。
 
@@ -43,21 +46,34 @@ token 用量统一为 `input_tokens`、`output_tokens`、`total_tokens`、`cache
 | `timeout` | `120.0` | SDK 请求超时秒数 |
 | `context_limit` | `0` | 模型上下文窗口；非正值表示未知 |
 | `page_token_rate` | `0.03` | 单页工具结果占上下文窗口的比例 |
-| `reasoning_effort` | `"max"` | provider 推理力度 |
+| `reasoning_effort` | `"max"` | provider 共享的默认推理力度；**按调用降档只经 `reasoning_effort_override` 参数传递，绝不修改此共享字段**（provider 被缓存并跨子 agent 共享） |
 | `preserve_thinking` | `False` | Ollama 历史思考保留开关 |
 | `max_pause_turn_continuations` | `0` | 协议续接上限；仅 Anthropic 从配置读取正整数，内置默认值为 `5` |
 
 `__post_init__` 创建信号量、计算 `page_token_budget = max(1, floor(context_limit × page_token_rate))`，并构造 `RetryPolicy`（`src/llm/base.py:328-340`）。`protocol_continuation_limit(finish_reason)` 是 Agent 查询协议续接预算的统一接口：基类及非 Anthropic provider 返回 `0`，Anthropic 对 `pause_turn` 返回实例配置值（`src/llm/base.py:342-351`、`src/llm/anthropic.py:158-169`）。协议续接会产生新的完整 LLM 调用，与同一次调用内部的网络重试次数相互独立。
 
+**推理力度降档阶梯**是单一真源：基类类属性 `_EFFORT_DOWNGRADE: ClassVar[dict[str, str]] = {}` 与方法 `next_lower_effort(current) -> str | None`（返回 `_EFFORT_DOWNGRADE.get(current)`）。各 provider 只覆写字典（pre-map 词表，Anthropic 的档位另经 `_map_effort` 二次映射）：
+
+| provider | 降档阶梯 |
+|---|---|
+| OpenAI | `max→xhigh→high→medium→low` |
+| Anthropic / Ollama | `max→high→medium→low` |
+| DeepSeek | `max→high` |
+| Moonshot | 空（`{}`）→ `next_lower_effort` 恒 `None` → 思考截断直接走一次性压缩指令 |
+
 底层 SDK 的内建自动重试在五个调用客户端及模型发现客户端上均关闭，值固定为 0；调用级重试只由基类统一控制（`src/llm/base.py:388-394`、五个 provider 的 `__post_init__`）。
 
-`chat()`（`src/llm/base.py:688-794`）是唯一公共调用入口，采用模板方法：
+`chat()`（`src/llm/base.py` 的 `chat`）是唯一公共调用入口，采用模板方法：
 
-1. 在信号量内按 `1..max_attempts` 创建独立 `LLMCallContext`。
-2. 发出 `LLMCallStarted`，再调用子类 `_do_chat(...)`。
-3. 成功后补齐工具片段完成态，发出 `LLMCallCompleted` 并返回 `LLMResponse`。
-4. 异常由统一分类器转换成 `LLMErrorInfo`；不可重试或尝试耗尽时发出 `LLMCallFailed`，抛出 `LLMCallError`。
-5. 可重试时计算等待时间、发出 `LLMRetrying`、异步等待，再以全新的尝试上下文重试。
+1. 构造 `effective_messages`：`ephemeral_instruction` 非空时在尾部追加一条一次性 `user` 指令（用 `user` 角色避开 `normalize_messages` 的 developer 门控），**不改动调用方 `messages` 列表**；较“append 后回滚”更稳、天然一次性且并发安全。
+2. 在信号量内按 `1..max_attempts` 创建独立 `LLMCallContext`。
+3. 发出 `LLMCallStarted`，再调用子类 `_do_chat(..., reasoning_effort_override=...)`。
+4. `finish_reason=="length"` 时用 `classify_truncation(response, call)` 计算并写入 `response.truncation_kind`（其余终态不设）。
+5. 成功后补齐工具片段完成态，发出 `LLMCallCompleted` 并返回 `LLMResponse`。
+6. 异常由统一分类器转换成 `LLMErrorInfo`；不可重试或尝试耗尽时发出 `LLMCallFailed`，抛出 `LLMCallError`。
+7. 可重试时计算等待时间、发出 `LLMRetrying`、异步等待，再以全新的尝试上下文重试。
+
+`chat()` 另有两个默认 `None` 的按调用参数：`reasoning_effort_override`（临时替换本次调用的推理力度档位，不改共享 `reasoning_effort`）与 `ephemeral_instruction`（见步骤 1）。Agent 恢复链把 `ctx.length_effort_override` / `ctx.length_ephemeral_instruction` 经此传入；两参默认 `None`，故退出总结、compact 等调用不受影响。
 
 `CancelledError`、`KeyboardInterrupt`、`SystemExit` 始终原样传播。事件发布调用 `emit_telemetry_safely()`，普通遥测发布故障不会改变 LLM 调用结果，控制流异常仍传播（`src/events/bus.py:34-63`）。
 
@@ -77,7 +93,7 @@ token 用量统一为 `input_tokens`、`output_tokens`、`total_tokens`、`cache
 子类必须实现：
 
 - `estimate_tokens(messages, prompt=None, tools=None)`：按该 provider 实际请求形态估算完整输入；
-- `_do_chat(..., call=LLMCallContext)`：只执行一次 provider 调用，不自行重试，返回已归一并校验的 `LLMResponse`（`src/llm/base.py:1032-1058`）。
+- `_do_chat(..., reasoning_effort_override=None, call=LLMCallContext)`：只执行一次 provider 调用，不自行重试，返回已归一并校验的 `LLMResponse`。请求构建处用 `reasoning_effort_override or self.reasoning_effort` 取本次力度（Anthropic 再经 `_map_effort`），从不写回共享字段（`src/llm/base.py` 的 `_do_chat` 抽象声明）。
 
 ## 3. 统一错误域
 
@@ -177,7 +193,7 @@ assistant 的 provider 专属字段在判断“真正为空”之前由 `_normal
 - Ollama 可把 developer 归为 system，同时兼容 `reasoning` 与 `reasoning_content`；`preserve_thinking` 控制 chat template 历史思考保留（`src/llm/ollama.py:79-147`）。
 - Moonshot/Kimi K3 保留跨轮 `reasoning_content`，带工具调用的 assistant 即使无思考正文也补空字符串；不下发 temperature，思考力度走顶层字段（`src/llm/moonshot.py:114-175,240-276`）。
 
-`enable_thinking=False` 时，Anthropic 显式 disabled，OpenAI 不传 reasoning，DeepSeek 显式 disabled，Ollama 关闭 chat template thinking，Moonshot 不传 reasoning effort。
+`enable_thinking=False` 时，Anthropic 显式 disabled，OpenAI 不传 reasoning，DeepSeek 显式 disabled，Ollama 关闭 chat template thinking，Moonshot 不传 reasoning effort。此时各 provider 都不下发推理力度，故 `reasoning_effort_override` 对本次调用是无害 no-op；关闭思考时也不会出现思考阶段截断。
 
 ## 8. 模型发现
 

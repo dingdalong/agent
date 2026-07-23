@@ -160,6 +160,29 @@ class LLMRetrying(Event):
 
 
 @dataclass
+class LLMLengthRetrying(Event):
+    """LLM 响应因输出长度上限被截断、进入自动恢复时发射，供 UI 标记与 Store 转录。
+
+    级别为 PROGRESS：保证不被级别门控在总线处丢弃，从而能进入 AgentViewStore 并参与
+    前台/后台分流；UI 标记本身不启动倒计时（区别于 LLMRetrying）。
+
+    Attributes:
+        truncation_kind: 截断所处阶段，取 tool_call、content、thinking 或 unknown。
+        strategy: 采取的恢复策略，取 continue、regenerate-lower-effort 或 regenerate-compress。
+        effort: 本次恢复调用将使用的推理力度档位。
+        attempt: 本轮已执行的长度恢复次数（1 基）。
+        max_attempts: 本轮允许的最大长度恢复次数。
+    """
+    truncation_kind: str = ""
+    strategy: str = ""
+    effort: str = ""
+    attempt: int = 0
+    max_attempts: int = 0
+    level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
+    type: Literal["llm_length_retrying"] = field(default="llm_length_retrying", init=False)
+
+
+@dataclass
 class LLMCallFailed(Event):
     """LLM 调用不可继续后的安全终态信息。
 

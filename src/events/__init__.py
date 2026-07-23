@@ -12,6 +12,7 @@ from src.events.types import (
     LLMCallCompleted,
     LLMCallFailed,
     LLMCallStarted,
+    LLMLengthRetrying,
     LLMRetrying,
     OutputRequested,
     PermissionNotice,
@@ -39,7 +40,7 @@ AgentEvent = Union[
     InputMenu, OutputRequested, InterruptRequested,
     PermissionNotice, PermissionMenu, ChoiceMenu, ChoiceInputMenu, FormMenu,
     CompactDelta, ToolCallCompleted, ToolCallStarted,
-    LLMCallCompleted, LLMCallStarted, LLMRetrying, LLMCallFailed,
+    LLMCallCompleted, LLMCallStarted, LLMRetrying, LLMLengthRetrying, LLMCallFailed,
     ResponseDelta, ThinkingDelta,
     AgentStateChanged, SubagentLifecycle, PermissionModeChanged,
 ]
@@ -60,6 +61,7 @@ __all__ = [
     "LLMCallCompleted",
     "LLMCallStarted",
     "LLMRetrying",
+    "LLMLengthRetrying",
     "LLMCallFailed",
     # 菜单/交互事件
     "MenuRequest",

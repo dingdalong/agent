@@ -9,6 +9,7 @@ from src.events.types import (
     CompactDelta,
     LLMCallFailed,
     LLMCallStarted,
+    LLMLengthRetrying,
     LLMRetrying,
     PermissionNotice,
     ResponseDelta,
@@ -32,6 +33,15 @@ class _MarkdownStream:
         """
         self.renderer = MarkdownStreamRenderer(base_style=base_style)
         self.active = False
+
+
+# 截断阶段分类到用户可见中文标签的映射，供长度恢复标记展示。
+_TRUNCATION_KIND_LABELS = {
+    "tool_call": "工具调用",
+    "content": "正文",
+    "thinking": "思考",
+    "unknown": "未知",
+}
 
 
 class OutputActions:
@@ -273,6 +283,33 @@ class OutputActions:
         self._print_rich(
             f"⚠ LLM 调用失败 [{event.error_kind}] {event.safe_message}；"
             f"{remaining}秒后重试 ({event.attempt}/{event.max_attempts})",
+            style="yellow",
+        )
+
+    async def on_llm_length_retrying(self, event: LLMLengthRetrying) -> None:
+        """展示一次输出长度截断的自动恢复标记（不驱动倒计时）。
+
+        区别于 on_llm_retrying：长度恢复不进入退避等待，故只打印一行黄色标记说明
+        截断阶段与所采取的恢复策略，不占用活动区倒计时。
+
+        路由已保证只转发前台 agent 的 LLMLengthRetrying。
+
+        Args:
+            event: 携带截断阶段、恢复策略、推理力度与恢复计数的事件。
+
+        Returns:
+            None。
+        """
+        self._set_current_agent(event.caller_agent_type, event.caller_uuid)
+        kind_label = _TRUNCATION_KIND_LABELS.get(event.truncation_kind, event.truncation_kind)
+        if event.strategy == "regenerate-lower-effort":
+            action = f"降低推理力度至 {event.effort} 后重生成"
+        elif event.strategy == "regenerate-compress":
+            action = "压缩思考后重生成"
+        else:
+            action = "从中断处继续生成"
+        self._print_rich(
+            f"⚠ 输出截断（{kind_label}）：{action} ({event.attempt}/{event.max_attempts})",
             style="yellow",
         )
 

@@ -97,6 +97,8 @@ def _contains_refusal_block(value: Any) -> bool:
 class OpenAIProvider(LLMProvider):
     """OpenAI Provider (Responses API)"""
 
+    _EFFORT_DOWNGRADE = {"max": "xhigh", "xhigh": "high", "high": "medium", "medium": "low"}
+
     def __post_init__(self):
         super().__post_init__()
         self.supports_native_structured_output = True
@@ -255,6 +257,7 @@ class OpenAIProvider(LLMProvider):
         temperature: float = 0.6,
         tool_choice: str | dict | None = None,
         enable_thinking: bool = True,
+        reasoning_effort_override: str | None = None,
         *,
         call: LLMCallContext,
     ) -> LLMResponse:
@@ -267,6 +270,8 @@ class OpenAIProvider(LLMProvider):
             temperature: 采样温度。
             tool_choice: 工具选择策略。
             enable_thinking: 是否启用思考。
+            reasoning_effort_override: 本次调用临时替换的推理力度档位；
+                None 时沿用 provider 的 reasoning_effort。
             call: 当前独立调用尝试上下文。
 
         Returns:
@@ -287,7 +292,7 @@ class OpenAIProvider(LLMProvider):
         }
         if enable_thinking:
             kwargs["reasoning"] = {
-                "effort": self.reasoning_effort,
+                "effort": reasoning_effort_override or self.reasoning_effort,
                 "summary": "auto",
             }
         if converted_tools:

@@ -49,6 +49,8 @@ LLM_CALL → PROCESS_RESPONSE ──length────→ LENGTH_RETRY ──可
                                       └─放行──→ DONE
 ```
 
+`LENGTH_RETRY → LLM_CALL` 有两类回边：正文/工具截断走续写（保留残片 + 追加续写指令），思考/未知截断走 discard-regenerate（丢弃整条响应、不改历史，降档或加压缩指令后重生成）。详见 §6。
+
 所有 handler 还有统一失败边：
 
 ```text
@@ -69,7 +71,7 @@ LLM_CALL → PROCESS_RESPONSE ──length────→ LENGTH_RETRY ──可
 | 轮次回滚 | `turn_start_messages`（追加本轮 user 前的浅快照）、`round_start_idx`（无快照上下文的兼容回退） |
 | 轮次与工具 | `has_tool_calls`、`manual_compact`、`compact_focus` |
 | 自动压缩 | `compact_streak`、`max_compact_streak=3`、压缩前 token、摘要消息数、摘要是否非空 |
-| 响应恢复 | `length_recoveries`、`max_length_recoveries=3`、`response_recovery_start_idx`、`response_recovery_response_count`、`pause_turn_message_idx`、`pause_turn_continuations` |
+| 响应恢复 | `length_recoveries`、`max_length_recoveries=3`、`response_recovery_start_idx`、`response_recovery_response_count`、`pause_turn_message_idx`、`pause_turn_continuations`、`length_effort_override`（思考截断重生成时的临时降档 effort）、`length_ephemeral_instruction`（触底时一次性压缩指令，永不落历史） |
 | 交互终态 | `user_input`、`command`、`exit_requested`、`stop_hook_used` |
 | LLM 终态 | `llm_error: LLMErrorInfo | None` |
 
@@ -92,7 +94,8 @@ LLM_CALL → PROCESS_RESPONSE ──length────→ LENGTH_RETRY ──可
 | 情况 | 状态 | 历史处理 |
 |---|---|---|
 | `context_limit` | `CONTEXT_OVERFLOW` | 保留本轮 user 消息，不追加错误 assistant |
-| provider 正常返回 `finish_reason="length"` | `LENGTH_RETRY` | 保存实际收到的 assistant 文本；半截工具调用不保存 |
+| `finish_reason="length"`，正文/工具阶段截断 | `LENGTH_RETRY` | 续写路径：保存实际收到的 assistant 文本（半截工具调用不保存），追加续写指令 |
+| `finish_reason="length"`，思考/未知阶段截断 | `LENGTH_RETRY` | 重生成路径：丢弃整条不完整响应，不追加任何消息，降低推理力度或加压缩指令后重试 |
 | Anthropic 正常返回 `finish_reason="pause_turn"` | `PAUSE_TURN` | 回填 provider 原始 blocks；连续 pause 只保留最新载体 |
 | 长度恢复耗尽 | `LLM_FAILURE`，`llm_error.kind=output_limit` | 回滚本轮截断正文和续写指令，只保留本轮原始 user 与此前合法历史 |
 | pause 协议续接耗尽 | `LLM_FAILURE`，`llm_error.kind=output_limit` | 回滚整个混合恢复链，不切换模型 |
@@ -134,11 +137,14 @@ handler 映射在 `Agent.__post_init__` 建立（`src/agent/agent.py:236-250`）
 
 ### `length`
 
-`_on_length_retry()`（`src/agent/agent.py:872-935`）处理 provider 已合法返回的 `finish_reason="length"`：
+`_on_length_retry()`（`src/agent/agent.py` 的 `_on_length_retry`）处理 provider 已合法返回的 `finish_reason="length"`。每趟按 `response.truncation_kind`（`LLMProvider.chat()` 在 length 终态下用 `classify_truncation` 计算，Agent 侧再用 `classify_truncation(response)` 兜底）分四类，优先级 **工具 → 正文 → 思考 → 未知**：
 
-- 普通文本截断：保存真实 assistant 消息，追加“从中断处继续”的 user 指令，经归一化后再调 LLM。
-- 工具调用截断：不执行、不保存半截调用 ID、名称、参数或 provider 原始工具载体；仅保存非空正文为纯文本 assistant，再要求模型生成完整且更小的工具调用。
+- **正文截断（CONTENT）**：保存真实 assistant 消息，追加“从中断处继续”的 user 指令，经归一化后再调 LLM。
+- **工具调用截断（TOOL_CALL）**：不执行、不保存半截调用 ID、名称、参数或 provider 原始工具载体；仅保存非空正文为纯文本 assistant，再要求模型生成完整且更小的工具调用。
+- **思考/未知截断（THINKING / UNKNOWN）**：模型在推理阶段就耗尽输出预算（正文为空、无工具调用，仅半截 reasoning，或全空）。**丢弃整条不完整响应、不向 `ctx.messages` 追加任何内容**，改为按调用临时降低推理力度重生成：`self.llm.next_lower_effort()` 有更低档位时写入 `ctx.length_effort_override`（strategy `regenerate-lower-effort`）；无更低档位时改用一次性压缩指令 `ctx.length_ephemeral_instruction`（strategy `regenerate-compress`）。因不追加消息，checkpoint 使回滚成为 no-op，历史全程干净。降档/压缩瞬态跨恢复腿持续，只在干净终态由 `_on_process_response` 复位为 None。
 - 从 pause 转入 length 时清除 `pause_turn_message_idx`，停止替换旧 pause 载体，但保留整条恢复链 checkpoint。
+
+四类都在分支末尾发出 `LLMLengthRetrying` 进度事件（携 `truncation_kind`、`strategy`、`effort`、`attempt`/`max_attempts`），供 UI 标记与 Store 转录隔断。`length_recoveries` 以 `max_length_recoveries`（=3）封顶，耗尽时经 `_fail_response_recovery` 产出 `output_limit`；思考/未知阶段用思考专属失败文案（`_length_failure_message`），提示降低推理力度后仍无法完成、建议缩小任务或改用输出上限更高的模型。
 
 ### `pause_turn`
 

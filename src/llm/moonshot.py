@@ -139,6 +139,7 @@ class MoonshotProvider(LLMProvider):
         temperature: float = 0.6,
         tool_choice: str | dict | None = None,
         enable_thinking: bool = True,
+        reasoning_effort_override: str | None = None,
         *,
         call: LLMCallContext,
     ) -> LLMResponse:
@@ -154,6 +155,8 @@ class MoonshotProvider(LLMProvider):
             temperature: 采样温度（K3 忽略，不下发）。
             tool_choice: 工具选择策略。
             enable_thinking: 是否开启思考（K3 恒思考，关闭时仅不传 reasoning_effort）。
+            reasoning_effort_override: 本次调用临时替换的推理力度档位；
+                None 时沿用 provider 的 reasoning_effort。
             call: 当前独立调用尝试上下文。
 
         Returns:
@@ -170,7 +173,7 @@ class MoonshotProvider(LLMProvider):
             kwargs["tools"] = tools
             kwargs["tool_choice"] = tool_choice or "auto"
         if enable_thinking:
-            kwargs["reasoning_effort"] = self.reasoning_effort
+            kwargs["reasoning_effort"] = reasoning_effort_override or self.reasoning_effort
 
         response = await self._client.chat.completions.create(**kwargs)
         return await self._parse_stream(response, call=call)

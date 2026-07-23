@@ -26,6 +26,8 @@ _DEEPSEEK_FINISH_REASONS = frozenset({"stop", "length", "tool_calls"})
 class DeepSeekProvider(LLMProvider):
     """基于 OpenAI SDK 的 LLM Provider。"""
 
+    _EFFORT_DOWNGRADE = {"max": "high"}
+
     def __post_init__(self):
         super().__post_init__()
         self.supports_native_structured_output = False
@@ -111,6 +113,7 @@ class DeepSeekProvider(LLMProvider):
         temperature: float = 0.6,
         tool_choice: str | dict | None = None,
         enable_thinking: bool = True,
+        reasoning_effort_override: str | None = None,
         *,
         call: LLMCallContext,
     ) -> LLMResponse:
@@ -123,6 +126,8 @@ class DeepSeekProvider(LLMProvider):
             temperature: 采样温度。
             tool_choice: 工具选择策略。
             enable_thinking: 是否启用思考。
+            reasoning_effort_override: 本次调用临时替换的推理力度档位；
+                None 时沿用 provider 的 reasoning_effort。
             call: 当前独立调用尝试上下文。
 
         Returns:
@@ -138,7 +143,7 @@ class DeepSeekProvider(LLMProvider):
             "tool_choice": tool_choice or ("auto" if tools else None),
         }
         if enable_thinking:
-            kwargs["reasoning_effort"] = self.reasoning_effort
+            kwargs["reasoning_effort"] = reasoning_effort_override or self.reasoning_effort
             kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
         else:
             kwargs["extra_body"] = {"thinking": {"type": "disabled"}}

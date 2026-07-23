@@ -103,6 +103,9 @@ def _dump_anthropic_content_block(block: Any) -> dict[str, Any]:
 class AnthropicProvider(LLMProvider):
     """Anthropic Provider (Messages API)"""
 
+    # 降档阶梯用 pre-map 档名，实际下发前仍经 _map_effort 二次映射。
+    _EFFORT_DOWNGRADE = {"max": "high", "xhigh": "high", "high": "medium", "medium": "low"}
+
     @classmethod
     async def list_models(
         cls,
@@ -451,6 +454,7 @@ class AnthropicProvider(LLMProvider):
         temperature: float = 0.6,
         tool_choice: str | dict | None = None,
         enable_thinking: bool = True,
+        reasoning_effort_override: str | None = None,
         *,
         call: LLMCallContext,
     ) -> LLMResponse:
@@ -463,6 +467,8 @@ class AnthropicProvider(LLMProvider):
             temperature: 采样温度。
             tool_choice: 工具选择策略。
             enable_thinking: 是否启用思考。
+            reasoning_effort_override: 本次调用临时替换的推理力度档位；
+                None 时沿用 provider 的 reasoning_effort。
             call: 当前独立调用尝试上下文。
 
         Returns:
@@ -480,7 +486,7 @@ class AnthropicProvider(LLMProvider):
 
         if enable_thinking:
             kwargs["thinking"] = {"type": "adaptive"}
-            effort = self._map_effort(self.reasoning_effort)
+            effort = self._map_effort(reasoning_effort_override or self.reasoning_effort)
             kwargs["output_config"] = {"effort": effort}
         else:
             kwargs["thinking"] = {"type": "disabled"}

@@ -10,11 +10,13 @@ from src.events.types import (
     AgentStateChanged,
     CompactDelta,
     LLMCallFailed,
+    LLMLengthRetrying,
     PermissionModeChanged,
     caller_identity,
 )
 from src.agent.states import AgentState, RunContext, RunResult, parse_command
 from src.events import NoEventSubscribers, emit_telemetry_safely
+from src.llm.base import TruncationKind, classify_truncation
 from src.llm.errors import LLMCallError, LLMErrorInfo, LLMErrorKind
 from src.mgr import FileMgr, TaskManager, CompactMgr, CompactResult, PromptMgr, SkillMgr, SubAgentMgr, ReminderMgr
 
@@ -50,6 +52,13 @@ _REQUEST_LLM_ERROR_KINDS = {
     LLMErrorKind.PAYLOAD_TOO_LARGE,
     LLMErrorKind.UNPROCESSABLE,
 }
+
+# 触底/无降档阶梯时，思考截断恢复注入的一次性压缩推理指令（仅作用于下一次调用，不落历史）。
+_COMPRESS_REASONING_INSTRUCTION = (
+    "上一次回复在思考阶段就耗尽了输出预算，未能给出任何正式答复。"
+    "请大幅压缩思考过程：只保留必要的关键推理，直接产出面向用户的答复或工具调用，"
+    "不要展开冗长的内部推理。"
+)
 
 
 def _llm_failure_advice(kind: LLMErrorKind) -> str:
@@ -435,6 +444,8 @@ class Agent:
         ctx.response_recovery_response_count = 0
         ctx.pause_turn_message_idx = None
         ctx.pause_turn_continuations = 0
+        ctx.length_effort_override = None
+        ctx.length_ephemeral_instruction = None
 
     async def _fail_response_recovery(
         self,
@@ -836,6 +847,8 @@ class Agent:
             caller_agent_type=self.agent_type,
             caller_uuid=str(self.uuid),
             enable_thinking=self.enable_thinking,
+            reasoning_effort_override=ctx.length_effort_override,
+            ephemeral_instruction=ctx.length_ephemeral_instruction,
         )
         return AgentState.PROCESS_RESPONSE
 
@@ -863,6 +876,8 @@ class Agent:
         ctx.response_recovery_response_count = 0
         ctx.pause_turn_message_idx = None
         ctx.pause_turn_continuations = 0
+        ctx.length_effort_override = None
+        ctx.length_ephemeral_instruction = None
         ctx.messages.append(response.assistant_message)
 
         if response.tool_calls:
@@ -870,69 +885,147 @@ class Agent:
         return AgentState.CHECK_STOP
 
     async def _on_length_retry(self, ctx: RunContext) -> AgentState:
-        """处理因长度上限截断的响应并决定是否继续恢复。
+        """按截断所处阶段选择续写或丢弃重生成两类恢复策略。
+
+        工具/正文截断走续写路径：保留已完成的残片、追加续写指令后重试。思考/未知
+        阶段截断走重生成路径：丢弃整条不完整响应（不向 ctx.messages 追加任何内容），
+        改为临时降低推理力度重生成；无更低档位时附加一次性压缩推理指令兜底。
 
         Args:
-            ctx: 当前运行上下文；截断响应取自 ctx.response，恢复消息写入
-                ctx.messages。
+            ctx: 当前运行上下文；截断响应取自 ctx.response。续写路径把恢复消息写入
+                ctx.messages，重生成路径仅更新降档/压缩瞬态字段而不改动消息。
 
         Returns:
             未达到恢复上限时返回 LLM_CALL，达到上限时返回 LLM_FAILURE。
         """
         response = ctx.response
-        ctx.response_recovery_response_count += 1
+        kind = response.truncation_kind or classify_truncation(response)
         assistant_message = response.assistant_message or {}
-        has_truncated_tool_call = bool(
-            response.tool_calls or assistant_message.get("tool_calls")
-        )
+        ctx.response_recovery_response_count += 1
         ctx.pause_turn_message_idx = None
         if ctx.response_recovery_start_idx is None:
             ctx.response_recovery_start_idx = len(ctx.messages)
 
-        if has_truncated_tool_call:
-            if response.content:
-                ctx.messages.append({"role": "assistant", "content": response.content})
-        else:
-            ctx.messages.append(
-                response.assistant_message
-                or {"role": "assistant", "content": response.content or None}
-            )
+        regenerate = kind in (TruncationKind.THINKING.value, TruncationKind.UNKNOWN.value)
+        is_tool_call = kind == TruncationKind.TOOL_CALL.value
+
+        # 续写路径保留残片作为历史；重生成路径丢弃整条响应，不追加任何消息。
+        if not regenerate:
+            if is_tool_call:
+                if response.content:
+                    ctx.messages.append({"role": "assistant", "content": response.content})
+            else:
+                ctx.messages.append(
+                    response.assistant_message
+                    or {"role": "assistant", "content": response.content or None}
+                )
 
         if ctx.length_recoveries >= ctx.max_length_recoveries:
-            if has_truncated_tool_call:
-                message = (
-                    "模型工具调用连续被截断，未执行不完整调用，"
-                    "已达到自动恢复上限。请缩小参数范围后重试。"
-                )
-            else:
-                message = "模型输出连续被截断，已达到自动续写恢复上限。请缩小输出范围后重试。"
             return await self._fail_response_recovery(
                 ctx,
-                message=message,
+                message=self._length_failure_message(kind),
                 partial=bool(
                     response.has_partial_data
                     or response.content
-                    or has_truncated_tool_call
+                    or is_tool_call
                     or assistant_message.get("reasoning_content")
                 ),
-                tool_fragment_state=(
-                    "partial" if has_truncated_tool_call else "none"
+                tool_fragment_state="partial" if is_tool_call else "none",
+                original_exception_type=(
+                    "ThinkingOutputLengthLimit" if regenerate else "OutputLengthLimit"
                 ),
-                original_exception_type="OutputLengthLimit",
             )
 
         ctx.length_recoveries += 1
-        if has_truncated_tool_call:
-            retry_instruction = (
-                "上一次工具调用因输出长度限制而不完整，已丢弃且未执行。"
-                "请重新生成完整、有效的工具调用；若参数较长，请拆分为多个较小调用。"
-                "写入大文件时请使用现有的分块能力。"
-            )
+
+        if regenerate:
+            current_effort = ctx.length_effort_override or self.llm.reasoning_effort
+            lower = self.llm.next_lower_effort(current_effort)
+            if lower:
+                ctx.length_effort_override = lower
+                ctx.length_ephemeral_instruction = None
+                strategy, effort = "regenerate-lower-effort", lower
+            else:
+                ctx.length_ephemeral_instruction = _COMPRESS_REASONING_INSTRUCTION
+                strategy, effort = "regenerate-compress", current_effort
         else:
-            retry_instruction = "输出达到长度上限。请从中断处直接继续，不要回顾、不要重复，必要时可以从半句话接续。"
-        ctx.messages.append({"role": "user", "content": retry_instruction})
-        ctx.messages[:] = self.llm.normalize_messages(ctx.messages)
+            if is_tool_call:
+                retry_instruction = (
+                    "上一次工具调用因输出长度限制而不完整，已丢弃且未执行。"
+                    "请重新生成完整、有效的工具调用；若参数较长，请拆分为多个较小调用。"
+                    "写入大文件时请使用现有的分块能力。"
+                )
+            else:
+                retry_instruction = "输出达到长度上限。请从中断处直接继续，不要回顾、不要重复，必要时可以从半句话接续。"
+            ctx.messages.append({"role": "user", "content": retry_instruction})
+            ctx.messages[:] = self.llm.normalize_messages(ctx.messages)
+            strategy = "continue"
+            effort = ctx.length_effort_override or self.llm.reasoning_effort
+
+        await self._emit_length_retrying(
+            ctx,
+            truncation_kind=kind,
+            strategy=strategy,
+            effort=effort,
+        )
         return AgentState.LLM_CALL
+
+    @staticmethod
+    def _length_failure_message(kind: str) -> str:
+        """返回与截断阶段匹配的输出上限失败文案。
+
+        Args:
+            kind: TruncationKind 之一的字符串值。
+
+        Returns:
+            面向用户的单句安全错误摘要。
+        """
+        if kind == TruncationKind.TOOL_CALL.value:
+            return (
+                "模型工具调用连续被截断，未执行不完整调用，"
+                "已达到自动恢复上限。请缩小参数范围后重试。"
+            )
+        if kind in (TruncationKind.THINKING.value, TruncationKind.UNKNOWN.value):
+            return (
+                "模型在思考阶段连续达到输出上限，降低推理力度后仍无法完成，"
+                "已达到自动恢复上限。请缩小任务范围或改用输出上限更高的模型后重试。"
+            )
+        return "模型输出连续被截断，已达到自动续写恢复上限。请缩小输出范围后重试。"
+
+    async def _emit_length_retrying(
+        self,
+        ctx: RunContext,
+        *,
+        truncation_kind: str,
+        strategy: str,
+        effort: str,
+    ) -> None:
+        """发出一次长度截断自动恢复的进度事件。
+
+        Args:
+            ctx: 当前运行上下文，用于读取长度恢复计数。
+            truncation_kind: 本次截断所处阶段的分类字符串。
+            strategy: 采取的恢复策略（continue / regenerate-lower-effort / regenerate-compress）。
+            effort: 本次恢复调用将使用的推理力度档位。
+
+        Returns:
+            None。
+        """
+        event_bus = getattr(getattr(self, "deps", None), "event_bus", None)
+        if event_bus is None:
+            return
+        caller_agent_type, caller_uuid = caller_identity(self)
+        await emit_telemetry_safely(event_bus, LLMLengthRetrying(
+            timestamp=time.time(),
+            source=self.agent_type,
+            truncation_kind=truncation_kind,
+            strategy=strategy,
+            effort=effort,
+            attempt=ctx.length_recoveries,
+            max_attempts=ctx.max_length_recoveries,
+            caller_agent_type=caller_agent_type,
+            caller_uuid=caller_uuid,
+        ))
 
     async def _on_pause_turn(self, ctx: RunContext) -> AgentState:
         """保存 pause_turn 原始载体并发起同参数协议续接。
