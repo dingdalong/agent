@@ -1416,7 +1416,7 @@ class FakeAnthropicStream:
 
 
 class FakeAnthropicMessages:
-    """提供 Anthropic messages.stream 测试接口。"""
+    """提供 Anthropic messages.stream 测试接口并记录请求参数。"""
 
     def __init__(self, stream: FakeAnthropicStream) -> None:
         """保存待返回的流。
@@ -1428,16 +1428,46 @@ class FakeAnthropicMessages:
             None。
         """
         self._stream = stream
+        self.requests: list[dict[str, Any]] = []
 
     def stream(self, **kwargs: Any) -> FakeAnthropicStream:
-        """返回预设 Anthropic 流。
+        """记录请求参数并返回预设 Anthropic 流。
 
         Args:
-            kwargs: 生产 provider 下发的参数，本测试不使用。
+            kwargs: 生产 provider 下发的参数。
 
         Returns:
             预设 Anthropic 流。
         """
+        self.requests.append(kwargs)
+        return self._stream
+
+
+class CapturingAsyncCreate:
+    """记录 OpenAI 风格 SDK 请求并返回预设异步流。"""
+
+    def __init__(self, stream: FakeAsyncStream) -> None:
+        """保存待返回的流与请求记录。
+
+        Args:
+            stream: create 调用后应返回的异步流。
+
+        Returns:
+            None。
+        """
+        self._stream = stream
+        self.requests: list[dict[str, Any]] = []
+
+    async def create(self, **kwargs: Any) -> FakeAsyncStream:
+        """记录 SDK 请求参数并返回预设流。
+
+        Args:
+            kwargs: 生产 provider 下发的请求参数。
+
+        Returns:
+            预设异步流。
+        """
+        self.requests.append(kwargs)
         return self._stream
 
 
@@ -1453,6 +1483,30 @@ def _anthropic_provider(stream: FakeAnthropicStream) -> AnthropicProvider:
     provider = _bare_provider(AnthropicProvider)
     provider._client = SimpleNamespace(messages=FakeAnthropicMessages(stream))
     return provider
+
+
+def _capturing_chat_provider(
+    provider_type: type[LLMProvider],
+    stream: FakeAsyncStream,
+) -> tuple[Any, CapturingAsyncCreate]:
+    """构造记录 OpenAI 风格请求参数的 provider。
+
+    Args:
+        provider_type: 待测试的 provider 类型。
+        stream: SDK create 调用后应返回的异步流。
+
+    Returns:
+        provider 与其请求记录器。
+    """
+    provider = _bare_provider(provider_type)
+    create = CapturingAsyncCreate(stream)
+    if provider_type is OpenAIProvider:
+        provider._client = SimpleNamespace(responses=create)
+    else:
+        provider._client = SimpleNamespace(
+            chat=SimpleNamespace(completions=create)
+        )
+    return provider, create
 
 
 def _anthropic_message(
@@ -1483,6 +1537,69 @@ def _anthropic_message_stop() -> SimpleNamespace:
         可由生产 parser 识别的 message_stop 事件。
     """
     return SimpleNamespace(type="message_stop")
+
+
+def test_anthropic_request_uses_128k_output_limit() -> None:
+    """Anthropic Messages 请求应固定下发 128,000 token 输出上限。
+
+    Returns:
+        None。
+    """
+    messages = FakeAnthropicMessages(
+        FakeAnthropicStream(
+            [_anthropic_message_stop()],
+            final_message=_anthropic_message("end_turn"),
+        )
+    )
+    provider = _bare_provider(AnthropicProvider)
+    provider._client = SimpleNamespace(messages=messages)
+
+    asyncio.run(
+        provider._do_chat(
+            [{"role": "user", "content": "hello"}],
+            enable_thinking=False,
+            call=_call(),
+        )
+    )
+
+    assert messages.requests[0]["max_tokens"] == 128_000
+
+
+@pytest.mark.parametrize(
+    "provider_type",
+    [OpenAIProvider, DeepSeekProvider, OllamaProvider, MoonshotProvider],
+)
+def test_non_anthropic_request_omits_output_limit(
+    provider_type: type[LLMProvider],
+) -> None:
+    """非 Anthropic provider 应把输出长度交给服务端默认值。
+
+    Args:
+        provider_type: 待验证的 provider 类型。
+
+    Returns:
+        None。
+    """
+    stream = (
+        FakeAsyncStream(
+            [_response_event("response.completed", response=_openai_response("completed"))]
+        )
+        if provider_type is OpenAIProvider
+        else FakeAsyncStream([_chat_chunk(finish_reason="stop")])
+    )
+    provider, create = _capturing_chat_provider(provider_type, stream)
+
+    asyncio.run(
+        provider._do_chat(
+            [{"role": "user", "content": "hello"}],
+            enable_thinking=False,
+            call=_call(),
+        )
+    )
+
+    assert not {"max_tokens", "max_completion_tokens", "max_output_tokens"}.intersection(
+        create.requests[0]
+    )
 
 
 @pytest.mark.parametrize(

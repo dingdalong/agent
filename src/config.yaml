@@ -1,21 +1,28 @@
 llm_provider:
   deepseek:
+    models:
+      - deepseek-v4-pro
+      - deepseek-v4-flash
     base_url: https://api.deepseek.com
     reasoning_effort: high # 推理力度
     context_limit: 400000 # 上下文限制
   openai:
     models:
-      - gpt-5.5
+      - gpt-5.6-sol
+      - gpt-5.6-terra
+      - gpt-5.6-luna
     base_url: https://api.openai.com/v1
     reasoning_effort: medium # 推理力度
     context_limit: 262144 # 上下文限制
   anthropic:
+    models:
+      - claude-opus-4-8
+      - claude-sonnet-5
+      - k3
     base_url: https://api.anthropic.com
     max_pause_turn_continuations: 5 # pause_turn 协议终态的单轮最大自动续接次数
     reasoning_effort: high # 推理力度
     context_limit: 262144 # 上下文限制
-    models:
-      - k3
   ollama:
     base_url: http://127.0.0.1:8001/v1
     reasoning_effort: high

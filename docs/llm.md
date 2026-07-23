@@ -183,7 +183,7 @@ assistant 的 provider 专属字段在判断“真正为空”之前由 `_normal
 | token 估算 | `cl100k_base`，失败时字符估算 | 模型编码，未知模型用 `o200k_base` | 本地 tokenizer | 字符估算 | 字符估算 |
 | 历史专属字段 | `_anthropic_content` | `_response_output` | `reasoning_content`、`prefix` | `reasoning`、`reasoning_content` | `reasoning_content` |
 | temperature | 不下发 | 下发 | 下发 | 下发 | 不下发 |
-| 输出上限 | 16000 | SDK 默认 | SDK 默认 | SDK 默认 | 32768 |
+| 输出上限 | 固定传入 128,000 | 不下发（provider 默认） | 不下发（provider 默认） | 不下发（provider 默认） | 不下发（provider 默认） |
 
 实现要点：
 

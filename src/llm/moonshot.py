@@ -5,7 +5,7 @@ Kimi K3（model id `k3(1M)`）与普通 OpenAI 兼容模型的关键差异：
   每条 assistant 消息（尤其带 tool_calls 的）必须原样回传 `reasoning_content`，
   否则报 400「reasoning_content is missing in assistant tool call message」。
 - `reasoning_effort` 为顶层字段（low/high/max，默认 max），不使用 extra_body.thinking。
-- 思考模型不可传 temperature；max_tokens 需足够大以容纳 reasoning + content。
+- 思考模型不可传 temperature；输出上限由服务端默认值决定。
 - 支持上下文缓存，usage 走 OpenAI 口径 + prompt_tokens_details.cached_tokens。
 """
 
@@ -28,8 +28,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Kimi 思考模型要求 max_tokens 足够大，以免 reasoning_content 与 content 被截断。
-_MOONSHOT_MAX_TOKENS = 32768
 _MOONSHOT_FINISH_REASONS = frozenset({"stop", "length", "tool_calls"})
 
 
@@ -145,8 +143,8 @@ class MoonshotProvider(LLMProvider):
     ) -> LLMResponse:
         """向 Moonshot Chat Completions 发起一次流式调用。
 
-        深度匹配 K3：不下发 temperature（思考模型不可修改），固定较大的
-        max_tokens，思考通过顶层 reasoning_effort 控制（不使用 extra_body.thinking）。
+        深度匹配 K3：不下发 temperature（思考模型不可修改）或输出上限，
+        思考通过顶层 reasoning_effort 控制（不使用 extra_body.thinking）。
 
         Args:
             messages: 会话消息列表。
@@ -167,7 +165,6 @@ class MoonshotProvider(LLMProvider):
             "messages": prompt + messages if prompt is not None else messages,
             "stream": True,
             "stream_options": {"include_usage": True},
-            "max_tokens": _MOONSHOT_MAX_TOKENS,
         }
         if tools:
             kwargs["tools"] = tools

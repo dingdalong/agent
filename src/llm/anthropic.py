@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_DEFAULT_MAX_TOKENS = 128_000
 _ANTHROPIC_CACHEABLE_BLOCK_TYPES = frozenset({
     "text",
     "image",
@@ -458,7 +459,7 @@ class AnthropicProvider(LLMProvider):
         *,
         call: LLMCallContext,
     ) -> LLMResponse:
-        """向 Anthropic Messages API 发起一次流式调用。
+        """向 Anthropic Messages API 发起一次固定 128,000 token 上限的流式调用。
 
         Args:
             messages: 会话消息列表。
@@ -480,7 +481,7 @@ class AnthropicProvider(LLMProvider):
 
         kwargs: dict = {
             "model": self.model,
-            "max_tokens": 16000,
+            "max_tokens": _DEFAULT_MAX_TOKENS,
             "messages": claude_messages,
         }
 
