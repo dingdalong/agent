@@ -22,7 +22,7 @@ mijia/
 └── README.md
 ```
 
-角色资产（子 agent、技能、人设、AGENT.md）位于 `src/roles/mijia/`，
+角色资产（子 agent、技能、人设、AGENTS.md）位于 `src/roles/mijia/`，
 与 `src/roles/coding/` 平级，均为内置角色。
 
 ## MCP 工具名回填

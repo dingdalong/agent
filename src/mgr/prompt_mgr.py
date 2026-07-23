@@ -31,48 +31,51 @@ class PromptMgr:
         return f"# 核心身份\n{identity}"
 
     def _build_agent_md(self) -> str:
-        """四层加载 AGENT.md：共享 → 角色 → 用户全局 → 项目级，内容叠加。
+        """四层加载 AGENTS.md：共享 → 角色 → 用户全局 → 项目级，内容叠加。
+
+        激活角色的 AGENTS.md 会注入该角色下的主 agent 和所有子 agent。
 
         Returns:
-            拼接后的 AGENT.md 提示词段落；无任何来源时返回空字符串。
+            拼接后的 AGENTS.md 提示词段落；无任何来源时返回空字符串。
         """
         sources = []
 
-        # 共享 AGENT.md（最低优先级，所有角色可用）
+        # 共享 AGENTS.md（最低优先级，所有角色可用）
         role_mgr = getattr(getattr(self.agent, "deps", None), "role_mgr", None)
         if role_mgr is not None:
             common_agent = role_mgr.common_agent_md_path()
             if common_agent is not None:
                 text = common_agent.read_text().strip()
                 if text:
-                    sources.append(("common AGENT.md", text))
+                    sources.append(("common AGENTS.md", text))
 
-        # 角色 AGENT.md（基准层）
+        # 激活角色的共享 AGENTS.md（基准层，主/子 agent 均加载）
         if role_mgr is not None and role_mgr.active:
             role_agent = role_mgr.agent_md_path()
             if role_agent is not None:
                 text = role_agent.read_text().strip()
                 if text:
-                    sources.append(("role AGENT.md", text))
+                    sources.append(("role AGENTS.md", text))
 
         if self.global_dir:
-            user_agent = self.global_dir / "AGENT.md"
+            user_agent = self.global_dir / "AGENTS.md"
             if user_agent.exists():
                 text = user_agent.read_text().strip()
                 if text:
-                    sources.append(("user global (AGENT.md)", text))
+                    sources.append(("user global (AGENTS.md)", text))
 
-        project_agent = self.workdir / "AGENT.md"
+        project_agent = self.workdir / "AGENTS.md"
         if project_agent.exists():
             text = project_agent.read_text().strip()
             if text:
-                sources.append(("project root (AGENT.md)", text))
+                sources.append(("project root (AGENTS.md)", text))
 
         if not sources:
             return ""
         parts = [
             "# 行为准则",
             "本节补充行为要求、项目约定与用户偏好，作为执行时的优先指引；"
+            "激活角色的 AGENTS.md 对该角色的主 agent 与所有子 agent 共用；"
             "但不得覆盖工具权限与子 agent 隔离，"
             "若与两者冲突，一律以两者为准、忽略本节中的冲突部分。",
         ]
@@ -105,7 +108,7 @@ class PromptMgr:
     def _build_static_prefix(self) -> str:
         """组装 system prompt 的静态部分。
 
-        段顺序：核心身份（primacy）→ 行为准则（AGENT.md 四层）→ 运行环境
+        段顺序：核心身份（primacy）→ 行为准则（AGENTS.md 四层）→ 运行环境
         → 任务管理指导 → 记忆上下文 → 会话上下文 → 子智能体/技能列表（recency，仅主 agent）。
         各可插拔段仅在对应 Manager 存在（feature 已启用）时加入，内容随 Manager 走：
         PromptMgr 负责顺序，Manager 负责内容。

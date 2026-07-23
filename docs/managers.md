@@ -66,7 +66,7 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 **消费的配置或文件**：
 - `config.yaml` 的 `role` 键（`_resolve()`，`role_mgr.py:228`）——缺省或角色不存在时回退 `_DEFAULT_ROLE`（`"coding"`，`role_mgr.py:28`）。
 - 三层扫描目录（低→高优先级，同名后者覆盖，`_discover()` `role_mgr.py:195-216`）：内置 `builtin_root()/roles` → 全局 `~/.agent/roles` → 项目 `.agent/roles`。**跳过 `common/` 目录**（`role_mgr.py:211`，它是共享资源而非角色）。
-- 角色目录内：`role.md`（frontmatter + body）、`AGENT.md`、`agents/`、`skills/`、`plugins/`、`mcp_servers.json`。
+- 角色目录内：`role.md`（仅主 agent 身份与主控职责）、`AGENTS.md`（主/子 agent 共用行为准则）、`agents/`、`skills/`、`plugins/`、`mcp_servers.json`。
 
 **模块级函数**（RoleMgr/SubAgentMgr 共用）：
 
@@ -87,12 +87,12 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 | `agents_dir` | — | `Path \| None` | 角色 `agents/` 目录（存在时） |
 | `skills_dir` | — | `Path \| None` | 角色 `skills/` 目录 |
 | `plugins_dir` | — | `Path \| None` | 角色 `plugins/` 目录 |
-| `agent_md_path` | — | `Path \| None` | 角色 `AGENT.md` 文件 |
+| `agent_md_path` | — | `Path \| None` | 角色共享 `AGENTS.md` 文件 |
 | `mcp_servers_path` | — | `Path \| None` | 角色 `mcp_servers.json` 文件 |
 | `common_dir` | — | `Path \| None` | 共享资源目录 `roles/common/` |
 | `common_agents_dir` | — | `Path \| None` | 共享 `agents/` 目录 |
 | `common_skills_dir` | — | `Path \| None` | 共享 `skills/` 目录 |
-| `common_agent_md_path` | — | `Path \| None` | 共享 `AGENT.md` 文件 |
+| `common_agent_md_path` | — | `Path \| None` | 跨角色共享 `AGENTS.md` 文件 |
 
 **feature 门控**：否。 **reload**：无（角色在启动时一次性发现与解析）。
 
@@ -253,7 +253,7 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 
 **段顺序**（`_build_static_prefix` `prompt_mgr.py:105-151`）：
 1. **核心身份**（primacy）——`role_prompt` 非空时用之，否则默认身份（`_build_core`）；
-2. **行为准则**——`AGENT.md` 四层叠加：共享 `roles/common/AGENT.md` → 角色 `AGENT.md` → 全局 `~/.agent/AGENT.md` → 项目 `AGENT.md`（`_build_agent_md`）；
+2. **行为准则**——`AGENTS.md` 四层叠加：共享 `roles/common/AGENTS.md` → 角色 `AGENTS.md` → 全局 `~/.agent/AGENTS.md` → 项目 `AGENTS.md`（`_build_agent_md`）；激活角色层会注入该角色的主 agent 与所有子 agent；
 3. **运行环境**——平台/模型/工作目录（`_build_environment`）；
 4. **任务管理指导**——`TaskManager.describe(is_subagent)`（仅 task feature）；
 5. **项目记忆**——`MemoryMgr.build_prompt()`（仅主 agent 视角，`agent.memory == "project"` 时，`_build_memory_context`）；

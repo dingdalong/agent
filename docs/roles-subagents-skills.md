@@ -26,14 +26,14 @@
 
 `role.md` 经 `extract_manifest(..., id_field="agent_type", default_id="main")` 解析为 `AgentManifest`（`role_mgr.py:150-168`）：
 
-- **body** → 成为主 agent 的**核心身份提示词**（`PromptMgr._build_core` 的"# 核心身份"段）。
+- **body** → 成为主 agent 的**核心身份与主控职责提示词**（`PromptMgr._build_core` 的"# 核心身份"段）；仅主 agent 的身份、委派职责与工作流写在这里，不放入共享准则文件。
 - **frontmatter**：`agent_type` 对角色固定视为 `"main"`；`description`、`features`（启用的 feature 集）、`thinking`（默认思考开关）、`reasoning_effort`（默认推理力度）、`model`、`permissionMode` 等字段同子 agent（见下表）。其中 `permissionMode` 额外充当**会话级默认权限模式**（`default_mode` 的最高优先来源，见 [permissions.md](permissions.md)），`reasoning_effort` 充当主 agent 与未声明子 agent 的推理力度基准（见 [llm.md](llm.md)）。
 
 角色目录内其他资产由 `RoleMgr` 暴露路径（仅在目录/文件存在时返回，否则 `None`）：
 
 | 方法 | 资产 | 用途 |
 |---|---|---|
-| `agent_md_path()` | `AGENT.md` | 角色级行为准则 → "# 行为准则"段 |
+| `agent_md_path()` | `AGENTS.md` | 激活角色内主/子 agent 共用的行为准则 → "# 行为准则"段 |
 | `agents_dir()` | `agents/*.md` | 角色专属子 agent |
 | `skills_dir()` | `skills/*/SKILL.md` | 角色专属技能 |
 | `plugins_dir()` | `plugins/` | 角色专属插件 |
@@ -41,7 +41,7 @@
 
 ### `common/` 共享目录
 
-`src/roles/common/` 不是角色，而是**对所有角色生效的最低优先级共享层**（`RoleMgr` 的 `common_*` 系列方法，`role_mgr.py:337-355`，基于 `common_role_dir()`）。其 `agents/`、`skills/`、`AGENT.md` 会被叠加到任意激活角色之下（后续层同名覆盖）。当前 `common/agents/` 提供四个通用子 agent：`explore`、`general-purpose`、`plan`、`shell`。
+`src/roles/common/` 不是角色，而是**对所有角色生效的最低优先级共享层**（`RoleMgr` 的 `common_*` 系列方法，`role_mgr.py:337-355`，基于 `common_role_dir()`）。其 `agents/`、`skills/`、`AGENTS.md` 会被叠加到任意激活角色之下（后续层同名覆盖）。当前 `common/agents/` 提供四个通用子 agent：`explore`、`general-purpose`、`plan`、`shell`。
 
 ### 内置角色一览
 

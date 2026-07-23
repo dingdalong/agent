@@ -333,10 +333,10 @@ class RoleMgr:
         return self._make_path("plugins")
 
     def agent_md_path(self) -> Path | None:
-        """角色 AGENT.md 文件路径。"""
+        """激活角色共享 AGENTS.md 文件路径。"""
         if not self._role_path:
             return None
-        p = self._role_path / "AGENT.md"
+        p = self._role_path / "AGENTS.md"
         return p if p.is_file() else None
 
     def mcp_servers_path(self) -> Path | None:
@@ -364,6 +364,6 @@ class RoleMgr:
         return p if p.exists() else None
 
     def common_agent_md_path(self) -> Path | None:
-        """共享 AGENT.md 文件。"""
-        p = common_role_dir() / "AGENT.md"
+        """跨角色共享 AGENTS.md 文件路径。"""
+        p = common_role_dir() / "AGENTS.md"
         return p if p.is_file() else None

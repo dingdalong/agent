@@ -213,6 +213,6 @@ for attr in ("memory_mgr", "tools_mgr", "permission_mgr",
 | MCP server | 角色 `mcp_servers.json` | `~/.agent/mcp_servers.json` | `.agent/mcp_servers.json` |
 | 权限/settings | — | `~/.agent/settings.json` | `.agent/settings.json` |
 
-`src/roles/common/` 是特殊的共享目录（不是角色），其 `agents/`、`skills/`、`AGENT.md` 对所有角色生效，作为最低优先级层被叠加。
+`src/roles/common/` 是特殊的共享目录（不是角色），其 `agents/`、`skills/`、`AGENTS.md` 对所有角色生效，作为最低优先级层被叠加。
 
 完整目录布局速查见 [configuration-reference.md](./configuration-reference.md)。

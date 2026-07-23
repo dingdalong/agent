@@ -96,10 +96,10 @@ uv run pytest tests/test_foo.py      # 运行单个测试文件
 ### 项目结构
 
 ```
+├── AGENTS.md               # 项目级 Agent 行为指令
 ├── main.py                 # CLI 入口
 ├── src/
 │   ├── config.yaml         # 内置默认配置
-│   ├── AGENT.md            # Agent 行为指令
 │   ├── agent/              # Agent 状态机 + 子智能体定义
 │   ├── app/                # 应用主循环 + 依赖组装
 │   ├── events/             # 事件总线 + 事件类型

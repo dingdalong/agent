@@ -2,6 +2,8 @@
 
 本文件为 Claude Code (claude.ai/code) 在此仓库中工作时的指导文件。
 
+使用用户输入的语言交流、撰写注释与文档等。
+
 ## 开发命令
 
 ```bash
@@ -42,13 +44,13 @@ REQUEST_INPUT → CHECK_COMPACT → [COMPACT →] LLM_CALL → PROCESS_RESPONSE
 **角色是框架的顶层组织单位**——一套角色决定了主 agent 的身份提示词、可用子 agent、技能、MCP server 与启用的 feature 集。`RoleMgr`（`src/mgr/role_mgr.py`）三层发现所有角色（低→高优先级）：内置 `src/roles/` → 全局 `~/.agent/roles/` → 项目 `.agent/roles/`，同名后者覆盖。激活角色由 `config.yaml` 的 `role:` 键指定（缺省回退 `coding`；当前仓库设为 `mijia`）。
 
 每个角色目录 `src/roles/<role>/` 结构：
-- `role.md` — 角色定义文件（YAML frontmatter + body，与子 agent 的 `*.md` 同格式）。body 成为**主 agent 的核心身份提示词**（`PromptMgr._build_core` 的“# 核心身份”段）；frontmatter 的 `features` 键声明启用的 feature 集，`agent_type` 固定视为 `main`。
-- `AGENT.md` — 角色级行为准则，进入“# 行为准则”段。
+- `role.md` — 角色定义文件（YAML frontmatter + body，与子 agent 的 `*.md` 同格式）。body 成为**主 agent 的核心身份与主控职责提示词**（`PromptMgr._build_core` 的“# 核心身份”段）；frontmatter 的 `features` 键声明启用的 feature 集，`permissionMode` 设定会话级默认权限模式（优先级高于 `settings.json` 的 `defaultMode`），`reasoning_effort` 设定推理力度档位（`low`/`medium`/`high`/`xhigh`/`max`），`agent_type` 固定视为 `main`。
+- `AGENTS.md` — 激活角色内主 agent 与所有子 agent 共用的行为准则，进入“# 行为准则”段；不得放入仅属于主 agent 的身份或总控职责。
 - `agents/*.md` — 角色专属子 agent 定义。
 - `skills/*/SKILL.md` — 角色专属技能。
 - `plugins/`、`mcp_servers.json` — 角色专属插件与 MCP server 配置。
 
-`src/roles/common/` 是**特殊的共享目录**（不是一个角色，`RoleMgr._discover` 显式跳过），其 `agents/`、`skills/`、`AGENT.md` 对所有角色生效，作为最低优先级层被叠加。
+`src/roles/common/` 是**特殊的共享目录**（不是一个角色，`RoleMgr._discover` 显式跳过），其 `agents/`、`skills/`、`AGENTS.md` 对所有角色生效，作为最低优先级层被叠加。
 
 ### feature 门控
 
@@ -69,7 +71,7 @@ REQUEST_INPUT → CHECK_COMPACT → [COMPACT →] LLM_CALL → PROCESS_RESPONSE
 `settings.json`（全局 `~/.agent/` + 项目 `.agent/` 两层合并，`allow`/`deny` 列表去重并集，其余键项目覆盖全局）承载权限与 MCP 策略：
 
 - `permissions.{allow,deny,ask}`：规则文本形如 `工具名` 或 `工具名(specifier)`，`specifier` 走 fnmatch；**工具名段也支持 `*`/`?` 通配**，故可写 `mcp__<server>__*` 一次性 allow/deny/ask 整个 MCP server，或 `mcp__github__get_*` 按前缀放行（`deny` 优先于 `allow`）。
-- `permissions.defaultMode`：入口主 agent 的默认权限模式。
+- `permissions.defaultMode`：会话级默认权限模式。**解析优先级**：激活角色 `role.md` 的 `permissionMode` →（未声明）此处 `settings.json` `defaultMode` →（未声明）内置默认。该结果即 `PermissionManager.default_mode`，用作主 agent 初始模式、未声明 `permissionMode` 的子 agent 的回退值、`/clear` 重置目标与绑定前状态栏显示值。
 - `mcp.enabledServers`（非空时作白名单）/ `mcp.disabledServers`（始终剔除）：在 `mcp_mgr.start()` 连接前过滤 server，被禁用的 server 不连接、其工具不注册、不进 LLM schema。与上面的 `deny` 规则正交——`deny` 仍连接并仅在调用时拒绝，`disabledServers` 是连接前的硬开关。
 
 MCP server 连接配置在独立的 `mcp_servers.json`（角色 `src/roles/<role>/` → 全局 `~/.agent/` → 项目 `.agent/` 三层合并），格式见 `src/mgr/mcp_mgr.py`。
@@ -90,9 +92,9 @@ MCP server 连接配置在独立的 `mcp_servers.json`（角色 `src/roles/<role
   - **阻塞型**：函数体做同步 I/O / CPU 工作。叶子工具直接声明为普通 `def`——装饰器（`decorator.py:94-97`）会用 `asyncio.to_thread` 自动卸载到线程；若方法必须保留 `async def`（被异步调用方 `await` 的 Manager 方法），则把阻塞段包进 `await asyncio.to_thread(...)`。范例：`web_search`/`web_fetch` 用同步库（`ddgs`/`urllib`），声明为 `def`；`FileMgr`（`src/mgr/file_mgr.py`）各方法为普通 `def`，其工具包装（`file.py`/`plan.py`）也是普通 `def`，由装饰器统一经 `to_thread` 卸载（装饰器是唯一的线程卸载点，无需层层手写 `to_thread`）。
   - **禁止**：`async def` 里直接跑同步阻塞工作而不 `await`。排查此类问题可用 `python main.py --debug`（启用 asyncio 调试，事件循环被占用超过 0.1s 即打印 `Executing ... took N seconds` 告警）。
 
-**子智能体** — 定义为 `*.md`（YAML frontmatter 声明 `agent_type`、`tools`、`model`、`memory`、`permissionMode`、`thinking`、`features` 等 + body 作提示词），由 `SubAgentMgr` **四层扫描**加载，同名后者覆盖（低→高）：共享 `src/roles/common/agents/` → 激活角色 `src/roles/<role>/agents/` → 全局 `~/.agent/agents/` → 项目 `.agent/agents/`。主 Agent 通过 `task_delegator` 工具调度子智能体，每个子智能体是共享 `AgentDeps` 的完整 `Agent` 实例（`Agent.from_manifest` 构造）。`model: inherit` 表示继承父 agent 已解析的真实模型 ID。
+**子智能体** — 定义为 `*.md`（YAML frontmatter 声明 `agent_type`、`tools`、`model`、`memory`、`permissionMode`、`thinking`、`reasoning_effort`、`features` 等 + body 作提示词），由 `SubAgentMgr` **四层扫描**加载，同名后者覆盖（低→高）：共享 `src/roles/common/agents/` → 激活角色 `src/roles/<role>/agents/` → 全局 `~/.agent/agents/` → 项目 `.agent/agents/`。主 Agent 通过 `task_delegator` 工具调度子智能体，每个子智能体是共享 `AgentDeps` 的完整 `Agent` 实例（`Agent.from_manifest` 构造）。`model: inherit` 表示继承父 agent 已解析的真实模型 ID；`thinking`、`reasoning_effort` 未声明时同样继承父 agent 已解析值（`reasoning_effort` 最终未声明则回退 provider 配置）。
 
-**权限模式按 agent 独立** — 可变的权限模式 (`permission_mode`) 与 plan 模式状态 (`_pre_plan_mode`) 持有在每个 `Agent` 实例上，`PermissionManager` 只保留全局共享的规则、`session_allow` 和不可变的 `default_mode`（来自 config `defaultMode`）。`check()` / `is_tool_visible()` / `get_schemas()` 均接收 agent 的 `mode` 参数。语义：用户的模式设置（`/mode`、Shift+Tab、`/plan`、`/resume` 恢复）只作用于入口主 agent（总控）；每个子 agent 在构造时从自身 frontmatter 的 `permissionMode` 取一次值（缺省回退到 `default_mode`），整个生命周期固定不变——子 agent 无 plan 能力、四个 plan 工具标记 `subagent=False` 从子 agent 强制排除，故并发子 agent 互不干扰。MCP 工具触发 ask 弹窗时，除"本工具"会话/保存外，额外提供"信任整个 server"两项（写入 `mcp__<server>__*` 规则），server 名经 `ToolPermission.mcp_server` 透传（见 `permission_mgr.resolve_ask`）。
+**权限模式按 agent 独立** — 可变的权限模式 (`permission_mode`) 与 plan 模式状态 (`_pre_plan_mode`) 持有在每个 `Agent` 实例上，`PermissionManager` 只保留全局共享的规则、`session_allow` 和不可变的 `default_mode`（解析优先级：`role.md` `permissionMode` → `settings.json` `defaultMode` → 内置默认；由 `bootstrap` 将角色 manifest 的 `permission_mode` 注入 `PermissionManager`，`_load_config` 末尾套用使其胜出，`reload()` 自动重放）。`check()` / `is_tool_visible()` / `get_schemas()` 均接收 agent 的 `mode` 参数。语义：用户的模式设置（`/mode`、Shift+Tab、`/plan`、`/resume` 恢复）只作用于入口主 agent（总控）；每个子 agent 在构造时从自身 frontmatter 的 `permissionMode` 取一次值（缺省回退到 `default_mode`），整个生命周期固定不变——子 agent 无 plan 能力、四个 plan 工具标记 `subagent=False` 从子 agent 强制排除，故并发子 agent 互不干扰。MCP 工具触发 ask 弹窗时，除"本工具"会话/保存外，额外提供"信任整个 server"两项（写入 `mcp__<server>__*` 规则），server 名经 `ToolPermission.mcp_server` 透传（见 `permission_mgr.resolve_ask`）。
 
 **技能系统** — `SkillMgr` 四层扫描 `SKILL.md`（共享 → 角色 → 全局 → 项目，插件技能穿插其间），同名后者覆盖；通过 `load_skill` 工具按需注入系统提示词。
 
@@ -135,3 +137,7 @@ MCP server 连接配置在独立的 `mcp_servers.json`（角色 `src/roles/<role
 - **废弃即删除，不留痕迹**：某设计、功能或方向被判断为"已取代"或"废弃"时，将其整句或整段从当前活跃文档（含 `CLAUDE.md`）中彻底移除，禁止保留并加"历史参考/已废弃"等注释。
 - **唯一存档点**：历史版本仅通过 Git 追溯；活跃文档不得保留任何失效计划、旧方向或旧设计。
 - **执行标准**：宁可"消失"，不要"备注"。
+
+当新增需要配置的内容时，需要在配置文件中体现出来
+
+文档不需要是精确性的path:line，精确到函数、字段，有关键词能够索引到即可

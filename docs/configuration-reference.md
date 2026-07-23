@@ -207,7 +207,7 @@ llm_provider:
 
 # ── 模型别名与调用参数 ──────────────────────────────────
 llm:
-  default: k3                            # 必填：默认模型，启动时精确校验
+  default: gpt-5.6-luna                  # 必填：默认模型，启动时精确校验
   # best: ...                            # 可选：最强模型（别名 best / Claude Code opus）
   # fast: ...                            # 可选：最快/最省模型（别名 fast / Claude Code haiku）
   concurrency: 5                         # provider 并发上限

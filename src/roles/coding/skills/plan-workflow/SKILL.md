@@ -5,7 +5,7 @@ description: 编码任务的规划工作流。进入计划模式后自动加载�
 
 ## 你的角色
 
-你是总控 agent（见 AGENT.md §8 强制委派）。规划各阶段的探索与方案设计通过 `task_delegator` 委派子 agent 完成，你负责整合子 agent 结果、与用户澄清、撰写计划并提交审核。可用子 agent：`explore`（只读探索/检索）、`plan`（架构设计，只读）。
+你是总控 agent（见 `role.md` 的“运行决策顺序（强制委派）”）。规划各阶段的探索与方案设计通过 `task_delegator` 委派子 agent 完成，你负责整合子 agent 结果、与用户澄清、撰写计划并提交审核。可用子 agent：`explore`（只读探索/检索）、`plan`（架构设计，只读）。
 
 ## 前置条件
 

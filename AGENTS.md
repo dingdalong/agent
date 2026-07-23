@@ -42,13 +42,13 @@ REQUEST_INPUT → CHECK_COMPACT → [COMPACT →] LLM_CALL → PROCESS_RESPONSE
 **角色是框架的顶层组织单位**——一套角色决定了主 agent 的身份提示词、可用子 agent、技能、MCP server 与启用的 feature 集。`RoleMgr`（`src/mgr/role_mgr.py`）三层发现所有角色（低→高优先级）：内置 `src/roles/` → 全局 `~/.agent/roles/` → 项目 `.agent/roles/`，同名后者覆盖。激活角色由 `config.yaml` 的 `role:` 键指定（缺省回退 `coding`；当前仓库设为 `onboard`）。
 
 每个角色目录 `src/roles/<role>/` 结构：
-- `role.md` — 角色定义文件（YAML frontmatter + body，与子 agent 的 `*.md` 同格式）。body 成为**主 agent 的核心身份提示词**（`PromptMgr._build_core` 的“# 核心身份”段）；frontmatter 的 `features` 键声明启用的 feature 集，`permissionMode` 设定会话级默认权限模式（优先级高于 `settings.json` 的 `defaultMode`），`reasoning_effort` 设定推理力度档位（`low`/`medium`/`high`/`xhigh`/`max`），`agent_type` 固定视为 `main`。
-- `AGENT.md` — 角色级行为准则，进入“# 行为准则”段。
+- `role.md` — 角色定义文件（YAML frontmatter + body，与子 agent 的 `*.md` 同格式）。body 成为**主 agent 的核心身份与主控职责提示词**（`PromptMgr._build_core` 的“# 核心身份”段）；frontmatter 的 `features` 键声明启用的 feature 集，`permissionMode` 设定会话级默认权限模式（优先级高于 `settings.json` 的 `defaultMode`），`reasoning_effort` 设定推理力度档位（`low`/`medium`/`high`/`xhigh`/`max`），`agent_type` 固定视为 `main`。
+- `AGENTS.md` — 激活角色内主 agent 与所有子 agent 共用的行为准则，进入“# 行为准则”段；不得放入仅属于主 agent 的身份或总控职责。
 - `agents/*.md` — 角色专属子 agent 定义。
 - `skills/*/SKILL.md` — 角色专属技能。
 - `plugins/`、`mcp_servers.json` — 角色专属插件与 MCP server 配置。
 
-`src/roles/common/` 是**特殊的共享目录**（不是一个角色，`RoleMgr._discover` 显式跳过），其 `agents/`、`skills/`、`AGENT.md` 对所有角色生效，作为最低优先级层被叠加。
+`src/roles/common/` 是**特殊的共享目录**（不是一个角色，`RoleMgr._discover` 显式跳过），其 `agents/`、`skills/`、`AGENTS.md` 对所有角色生效，作为最低优先级层被叠加。
 
 ### feature 门控
 
