@@ -156,6 +156,9 @@ class SubAgentMgr:
             reasoning_effort = manifest.reasoning_effort
             if reasoning_effort is None:
                 reasoning_effort = getattr(parent_agent, "reasoning_effort", None)
+                if reasoning_effort is None:
+                    parent_llm = getattr(parent_agent, "llm", None)
+                    reasoning_effort = getattr(parent_llm, "reasoning_effort", None)
 
             # feature 集：子 agent 自身 manifest 声明则用其值，否则继承父 agent 已解析的 feature 集
             features = manifest.features
