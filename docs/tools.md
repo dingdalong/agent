@@ -155,7 +155,11 @@ else:
 | `plan_write_file` | `name:str`, `content:str` | False | readonly（`plan_visible=True`） | plan | 全量写入计划文件（按计划名生成路径）。普通 def。 |
 | `plan_edit_file` | `file_path:str`, `start_line:int`, `new_text:str=""`, `end_line:int\|None=None` | False | readonly（`plan_visible=True`） | plan | 按行号增量编辑计划文件。普通 def。 |
 | `load_skill` | `name:str` | False | readonly | skill | 将指定技能全文加载进当前上下文。 |
-| `calculator` | `expression:str` | - | readonly | - | AST 安全求值数学表达式。 |
+| `calculator` | `expression:str` | - | readonly | - | AST 安全求值数学表达式：算术运算 + 数学函数（sqrt/log/sin/factorial/comb/mean 等）+ 常量（pi/e/tau）。普通 def。 |
+| `random` | `operation:str`, `low/high:int\|None`, `items:list[str]\|None`, `count:int=1`, `length:int\|None`, `sides:int=6`, `num_dice:int=1` | - | readonly | - | 生成真随机值（int/float/choice/sample/shuffle/uuid/password/token_hex/dice/coin）。普通 def。 |
+| `datetime` | `operation:str`, `timezone_name:str\|None`, `date1/date2:str\|None`, `amount:int\|None`, `unit:str\|None`, `timestamp:float\|None` | - | readonly | - | 当前时间与日期运算（now/diff/add/weekday/to_timestamp/from_timestamp）。普通 def。 |
+| `encode` | `operation:str`, `text:str` | - | readonly | - | 文本编解码与哈希（base64/hex/url 编解码，md5/sha1/sha256）。普通 def。 |
+| `text_stats` | `operation:str`, `text:str`, `substring:str\|None` | - | readonly | - | 精确文本统计（summary/char_count/byte_count/word_count/line_count/count_substring/reverse）。普通 def。 |
 | `ask_user` | `questions:list[Question]`（`Question`=`question:str`+`header:str`+`options:list[Option]\|None=None`+`multi_select:bool=False`，1–3 项；`Option`=`label:str`+`description:str=""`） | False | readonly | - | 向用户提问，一次至多 3 个各自独立的问题。用户在单屏标签页向导内作答：←→ 切标签（顶部标签栏各题前带答题状态 ☑/☐、显示 header 简介、末尾恒有「提交」标签）、↑↓ 移动答案行、空格勾选多选项、数字直选、每题末尾恒有自定义输入行、Enter 确认并推进；选项的 description 以浅色副行展示在该选项下方供参考；底部常驻讨论栏（Tab 切入）随答案回传为「讨论：…」。 |
 | `read_tool_result` | `tool_call_id:str`, `page:int=2` | True | readonly | - | 读取分页工具结果的后续页。`raw_output=True`。 |
 | `compact` | `focus:str` | True | readonly | - | 触发对话历史压缩（信号工具，返回固定提示）。 |
@@ -166,6 +170,8 @@ else:
 - `task_*` 虽为写任务列表的操作，但 `kind` 标为 `readonly`（不触碰文件系统/外部状态），且 `subagent=True` 自动注入到子 agent。
 - `read_tool_result` 与 `compact` 标 `subagent=True`；`read_tool_result` 额外 `raw_output=True`（其内容本身就是分页结果，不再二次分页）。
 - `MemoryType` 为 `save_memory` 的枚举参数类型，定义在 `src/mgr/memory_mgr.py`（见 [managers.md](managers.md) 的 MemoryMgr）。
+- `random`/`datetime`/`encode`/`text_stats` 集中实现在 `src/tools/builtin/utility.py`，与 `calculator` 同属"确定性工具"：补齐 LLM 无法可靠完成的操作（真随机、当前时间/日期运算、编解码哈希、精确计数）。四者均 `readonly`、无 feature 门控（恒可用）、纯 stdlib、普通 def；每个工具用 `operation` 参数区分子操作。
+- `calculator` 通过 AST 白名单（`SAFE_OPERATORS`/`SAFE_FUNCTIONS`/`SAFE_NAMES`）安全求值单条表达式：除算术运算外，放行白名单数学函数调用与常量，拒绝属性访问、关键字/星号参数及非白名单名称（挡住 `__import__`、`().__class__` 等）；`factorial` 带参数上限防挂死。
 
 ---
 
