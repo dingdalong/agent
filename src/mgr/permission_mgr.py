@@ -12,6 +12,7 @@ settings.json 规则（Step 1-4）与 mcp_servers.json 规则（Step 4.7）共�
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass
@@ -20,6 +21,7 @@ from itertools import chain
 from typing import Any, Callable, Iterable, Literal, TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from src.tools import ToolDict
     from src.tools.decorator import ToolEntry
 
 from src.events.types import caller_identity
@@ -40,6 +42,18 @@ class PermissionCheckResult:
     decision: Literal["allow", "deny", "ask", "passthrough"]
     reason: str = ""
     bypass_immune: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class PermissionVerdict:
+    """auto 模式 LLM 判官的结构化裁决。
+
+    Attributes:
+        decision: 裁决 — "allow"（放行）、"ask"（交人工确认）、"deny"（拒绝并让 agent 重试）。
+        reason: 裁决理由，用于日志、UI 展示与拒绝时供 agent 调整重试。
+    """
+    decision: Literal["allow", "ask", "deny"]
+    reason: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -250,6 +264,97 @@ def parse_rule(text: str, permission: Literal["allow", "deny", "ask"]) -> Permis
     return PermissionRule(tool=tool, specifier=specifier, permission=permission)
 
 
+# ── auto 模式 LLM 判官 ─────────────────────────────────────────────────
+
+# 判官配置缺省值（settings.json 无内置层，缺省在此兜底）
+_JUDGE_DEFAULT_MODEL = "fast"
+_JUDGE_DEFAULT_MAX_CONSECUTIVE = 3
+_JUDGE_DEFAULT_MAX_TOTAL = 20
+
+# 判官系统提示词：auto 模式下替代人工审批的放行闸门（对齐 Claude Code auto mode 的分类器角色）
+_JUDGE_SYSTEM_PROMPT = """你是自主编码 agent 的权限判官，是「人工审批」的替身闸门。当前 agent 运行在 auto 权限模式：确定安全的操作已被快路径放行，确定危险的已被硬规则拦截，只有影响面模糊的操作才交到你手里。你要替代人类快速判断这次工具调用能否放行。
+
+你会收到：工作目录、工具名，以及工具参数（shell 给完整命令，文件工具给目标路径与操作，其它工具给名称与参数）。
+
+裁决三选一，调用 record_verdict 返回：
+- allow：明显安全的常规开发操作。如构建/测试/lint、读取与检索、工作目录内新建与修改、常规 git 操作（status/diff/add/commit/log 等）、安装项目依赖。
+- deny：明显有害或越界。如删库或大范围不可逆删除、改动系统目录或用户主目录中与本项目无关的文件、向外部网络泄露仓库内容或凭证、绕过或提升自身权限、明显超出当前任务范围的操作。reason 里点明风险点，供 agent 换更安全做法后重试。
+- ask：你无法判定影响面、或需人类知情的操作。如 git push、对外发布、删除数量不明的文件、触及工作区外但未必有害的路径。交人类确认。
+
+判据：宁可 ask 也不要误放行有害操作；但对确属常规的开发操作要果断 allow，避免打断 agent。reason 用一句话说明理由。"""
+
+# 结构化裁决工具：无 JSON-mode helper，用强制工具调用取回 (decision, reason)
+_JUDGE_VERDICT_TOOL: "ToolDict" = {
+    "type": "function",
+    "function": {
+        "name": "record_verdict",
+        "description": "记录本次工具调用的权限裁决。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "decision": {
+                    "type": "string",
+                    "enum": ["allow", "ask", "deny"],
+                    "description": "权限裁决：allow 放行 / ask 交人工确认 / deny 拒绝并让 agent 重试。",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "一句话说明裁决理由；deny 时点明风险点。",
+                },
+            },
+            "required": ["decision", "reason"],
+        },
+    },
+}
+
+
+def _format_judge_request(tool_name: str, tool_input: dict[str, Any], workdir: str) -> str:
+    """构造判官的用户消息：工作目录 + 工具名 + 参数摘要。
+
+    Args:
+        tool_name: 被裁决的工具名。
+        tool_input: 工具调用参数。
+        workdir: 当前工作目录。
+
+    Returns:
+        供判官阅读的自然语言请求文本。
+    """
+    if tool_name == "shell":
+        detail = f"命令：\n{tool_input.get('command', '')}"
+    else:
+        try:
+            detail = "参数：\n" + json.dumps(tool_input, ensure_ascii=False, indent=2)
+        except (TypeError, ValueError):
+            detail = f"参数：\n{tool_input!r}"
+    return (
+        f"工作目录：{workdir}\n工具：{tool_name}\n{detail}\n\n"
+        "请判断该操作能否在 auto 模式下自动放行，并调用 record_verdict 返回裁决。"
+    )
+
+
+def _parse_verdict(response: Any) -> PermissionVerdict:
+    """从 LLM 响应的强制工具调用解析结构化裁决，解析失败回落 ask。
+
+    Args:
+        response: provider.chat 返回的 LLMResponse。
+
+    Returns:
+        解析出的 PermissionVerdict；未取到有效 record_verdict 时回落 ask。
+    """
+    tool_calls = getattr(response, "tool_calls", None) or {}
+    for call in tool_calls.values():
+        if call.get("name") != "record_verdict":
+            continue
+        try:
+            args = json.loads(call.get("arguments") or "{}")
+        except (TypeError, ValueError):
+            continue
+        decision = args.get("decision")
+        if decision in ("allow", "ask", "deny"):
+            return PermissionVerdict(decision, args.get("reason") or "")
+    return PermissionVerdict("ask", "判官未返回有效裁决，回落人工确认")
+
+
 # ── PermissionManager ─────────────────────────────────────────────────
 
 # 规则字典类型：key 为 tool 名（可含 "*"/"?" 通配符，由 _get_rules 调用期 fnmatch 匹配），value 为该工具的规则列表。
@@ -291,6 +396,15 @@ class PermissionManager:
         self._specifier_args: dict[str, str] = {}
         self._mcp_servers: dict[str, str] = {}  # MCP 工具名 → 所属 server 名
 
+        # auto 模式 LLM 判官：开关、模型、升级阈值、会话缓存与拒绝计数（缺省，_load_config 可覆盖）
+        self.judge_enabled: bool = True
+        self._judge_model: str = _JUDGE_DEFAULT_MODEL
+        self._judge_max_consecutive: int = _JUDGE_DEFAULT_MAX_CONSECUTIVE
+        self._judge_max_total: int = _JUDGE_DEFAULT_MAX_TOTAL
+        self._judge_cache: dict[tuple[str, str], PermissionVerdict] = {}
+        self._judge_consecutive_denials: int = 0
+        self._judge_total_denials: int = 0
+
         self._load_tool_metadata(tools or [])
         self._load_config()
 
@@ -328,12 +442,34 @@ class PermissionManager:
             self._parse_rules(permissions.get("deny", []), "deny", self.deny_rules)
             self._parse_rules(permissions.get("ask", []), "ask", self.ask_rules)
             self._parse_rules(permissions.get("allow", []), "allow", self.allow_rules)
+            self._load_judge_config(permissions.get("autoJudge"))
             self._load_mcp_server_rules()
 
         # role.md 的 permissionMode 最后套用，优先级高于 settings.json 的 defaultMode；
         # 不受 settings.json 是否存在 permissions 块影响。
         if self._role_default_mode is not None:
             self.default_mode = self._role_default_mode
+
+    def _load_judge_config(self, cfg: Any) -> None:
+        """从 permissions.autoJudge 读取 auto 判官配置，非法或缺失项保留缺省。
+
+        Args:
+            cfg: permissions.autoJudge 的值，期望为 dict；非 dict 时不改动任何缺省。
+        """
+        if not isinstance(cfg, dict):
+            return
+        enabled = cfg.get("enabled")
+        if isinstance(enabled, bool):
+            self.judge_enabled = enabled
+        model = cfg.get("model")
+        if isinstance(model, str) and model:
+            self._judge_model = model
+        max_consecutive = cfg.get("maxConsecutiveDenials")
+        if isinstance(max_consecutive, int) and max_consecutive > 0:
+            self._judge_max_consecutive = max_consecutive
+        max_total = cfg.get("maxTotalDenials")
+        if isinstance(max_total, int) and max_total > 0:
+            self._judge_max_total = max_total
 
     def _load_mcp_server_rules(self) -> None:
         """从 mcp_servers.json 各 server 的 permissions 块加载最低优先级权限规则。
@@ -428,6 +564,14 @@ class PermissionManager:
         self.mcp_deny_rules.clear()
         self.mcp_ask_rules.clear()
         self.mcp_allow_rules.clear()
+        # auto 判官：重置配置为缺省并清空会话缓存与拒绝计数，_load_config 随后按最新配置覆盖
+        self.judge_enabled = True
+        self._judge_model = _JUDGE_DEFAULT_MODEL
+        self._judge_max_consecutive = _JUDGE_DEFAULT_MAX_CONSECUTIVE
+        self._judge_max_total = _JUDGE_DEFAULT_MAX_TOTAL
+        self._judge_cache.clear()
+        self._judge_consecutive_denials = 0
+        self._judge_total_denials = 0
         self._load_config()
 
     @staticmethod
@@ -889,3 +1033,145 @@ class PermissionManager:
             caller_agent_type=caller_agent_type,
             caller_uuid=caller_uuid,
         )
+
+    async def auto_judge(
+        self,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        mode: PermissionMode,
+        deps: Any,
+        agent: Any = None,
+    ) -> PermissionDecision:
+        """auto 模式下对 check() 判为 ask 的模糊操作调用 LLM 判官，返回 (decision, reason)。
+
+        仅由 execute 在 AUTO 模式、check() 判 ask、非 hook 触发 ask 时调用。处理顺序：
+        安全关键路径写入直接交人工（不调 LLM，防自我提权）→ 升级阈值（连续/累计拒绝）达标转人工
+        → 会话缓存命中直接复用 → 否则调判官并写缓存 → 按裁决更新拒绝计数。判官出错/不可用/
+        无效裁决一律回落人工确认（绝不 error→allow）。
+
+        Args:
+            tool_name: 被裁决的工具名。
+            tool_input: 工具调用参数。
+            mode: 调用方 agent 的权限模式（预期为 AUTO_MODE，由调用方保证）。
+            deps: AgentDeps 依赖对象，提供 llm_mgr。
+            agent: 发起该工具调用的 Agent 实例，用于 LLM 事件的 caller 标注。
+
+        Returns:
+            (decision, reason) 元组，decision 为 allow|ask|deny。
+        """
+        # 安全关键自守：命中即人工确认，绝不交 LLM 判官
+        hit = self._judge_security_critical_hit(tool_name, tool_input)
+        if hit is not None:
+            return "ask", f"安全关键路径需人工确认：{hit}"
+
+        # 升级：累计拒绝达上限为会话级硬底线（不重置）；连续拒绝达阈值升级一次后清零，交人工后判官恢复
+        if self._judge_total_denials >= self._judge_max_total:
+            return "ask", "判官累计拒绝已达上限，转人工确认"
+        if self._judge_consecutive_denials >= self._judge_max_consecutive:
+            self._judge_consecutive_denials = 0
+            return "ask", "判官连续拒绝已达阈值，转人工确认"
+
+        # 会话缓存命中直接复用，否则调判官并写缓存
+        key = self._judge_cache_key(tool_name, tool_input)
+        verdict = self._judge_cache.get(key)
+        if verdict is None:
+            try:
+                verdict = await self._call_judge(tool_name, tool_input, deps, agent)
+            except Exception as exc:  # 判官不可用一律回落人工，绝不误放行
+                logger.warning("auto 判官调用失败，回落人工确认：%s", exc)
+                return "ask", "判官不可用，回落人工确认"
+            self._judge_cache[key] = verdict
+
+        # 拒绝计数：deny 累加连续与累计；allow 清零连续计数
+        if verdict.decision == "deny":
+            self._judge_consecutive_denials += 1
+            self._judge_total_denials += 1
+        elif verdict.decision == "allow":
+            self._judge_consecutive_denials = 0
+
+        return verdict.decision, verdict.reason
+
+    def _judge_security_critical_hit(self, tool_name: str, tool_input: dict[str, Any]) -> str | None:
+        """检测工具目标是否触及安全关键路径，供判官自守（命中则不调 LLM 直接交人工）。
+
+        Args:
+            tool_name: 被裁决的工具名。
+            tool_input: 工具调用参数。
+
+        Returns:
+            命中的安全关键路径字符串，未命中时返回 None。
+        """
+        from src.tools.builtin.file import is_security_critical_path
+
+        if tool_name == "shell":
+            from src.tools.builtin.shell import _check_security_critical_paths
+
+            command = tool_input.get("command")
+            if isinstance(command, str):
+                return _check_security_critical_paths(command, self._workdir)
+            return None
+        for key in ("path", "file_path", "source", "destination"):
+            value = tool_input.get(key)
+            if isinstance(value, str) and is_security_critical_path(value):
+                return value
+        return None
+
+    def _judge_cache_key(self, tool_name: str, tool_input: dict[str, Any]) -> tuple[str, str]:
+        """构造判官会话缓存键：(工具名, 规范化参数)。
+
+        优先用 specifier（如 shell 的完整命令），否则用参数的稳定 JSON 序列化。
+
+        Args:
+            tool_name: 被裁决的工具名。
+            tool_input: 工具调用参数。
+
+        Returns:
+            (tool_name, 规范化参数) 缓存键。
+        """
+        specifier = self._extract_specifier(tool_name, tool_input)
+        if specifier:
+            return (tool_name, specifier)
+        try:
+            return (tool_name, json.dumps(tool_input, sort_keys=True, ensure_ascii=False))
+        except (TypeError, ValueError):
+            return (tool_name, repr(tool_input))
+
+    async def _call_judge(
+        self,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        deps: Any,
+        agent: Any,
+    ) -> PermissionVerdict:
+        """用快模型调用判官并解析结构化裁决（强制 record_verdict 工具调用）。
+
+        Args:
+            tool_name: 被裁决的工具名。
+            tool_input: 工具调用参数。
+            deps: AgentDeps 依赖对象，提供 llm_mgr。
+            agent: 发起该工具调用的 Agent 实例，用于 LLM 事件的 caller 标注。
+
+        Returns:
+            解析出的 PermissionVerdict。
+
+        Raises:
+            RuntimeError: 缺少 llm_mgr 时。
+            其它异常由底层 LLM 调用抛出，交由 auto_judge 兜底回落人工。
+        """
+        llm_mgr = getattr(deps, "llm_mgr", None) if deps is not None else None
+        if llm_mgr is None:
+            raise RuntimeError("缺少 llm_mgr，无法调用 auto 判官")
+        provider = llm_mgr.get(self._judge_model)
+        caller_agent_type, caller_uuid = caller_identity(agent)
+        response = await provider.chat(
+            messages=[{"role": "user", "content": _format_judge_request(tool_name, tool_input, self._workdir)}],
+            prompt=[{"role": "system", "content": _JUDGE_SYSTEM_PROMPT}],
+            tools=[_JUDGE_VERDICT_TOOL],
+            tool_choice={"type": "function", "function": {"name": "record_verdict"}},
+            temperature=0.0,
+            enable_thinking=False,
+            reasoning_effort_override="low",
+            caller_agent_type=caller_agent_type,
+            caller_uuid=caller_uuid,
+        )
+        return _parse_verdict(response)

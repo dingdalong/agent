@@ -5,7 +5,7 @@ import time
 from typing import Any, Dict, TYPE_CHECKING
 
 from src.events.types import ToolCallCompleted, ToolCallStarted, caller_identity
-from src.mgr.permission_mgr import tool_sort_order
+from src.mgr.permission_mgr import AUTO_MODE, tool_sort_order
 from src.tools import ToolDict, ToolEntry
 from src.tools.decorator import format_tool_tips
 
@@ -305,6 +305,24 @@ class ToolsMgr:
             hook_has_ask = pre_hook_result is not None and any(
                 d == "ask" for d, _ in pre_hook_result.permission_decisions
             )
+
+            # auto 模式：check() 判 ask 且非 hook 触发时，交 LLM 判官（Tier 3）分流。
+            # 判官 allow→静默放行；deny→回落 agent 重试；ask→保持 ask 落入下方人工确认。
+            if (
+                decision == "ask"
+                and not hook_has_ask
+                and mode is AUTO_MODE
+                and permission_mgr.judge_enabled
+            ):
+                judge_decision, judge_reason = await permission_mgr.auto_judge(
+                    tool_name, arguments, mode, deps, agent=agent,
+                )
+                if judge_decision == "allow":
+                    decision = "allow"  # 判官放行：静默执行（与 auto_allow 一致，工具面板已展示调用）
+                elif judge_decision == "deny":
+                    await permission_mgr.notify_decision(tool_name, arguments, deps, "deny", agent=agent)
+                    return f"判官拦截：{judge_reason}。请改用更安全的做法后重试。"
+                # judge_decision == "ask"：保持 decision=="ask"，落入下方 resolve_ask 人工确认
 
             if decision == "deny":
                 await permission_mgr.notify_decision(tool_name, arguments, deps, "deny", agent=agent)

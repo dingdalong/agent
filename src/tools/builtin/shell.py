@@ -6,7 +6,7 @@ from pathlib import Path, PurePosixPath
 import shlex
 from typing import Any
 from src.mgr.permission_mgr import PermissionCheckResult, PermissionContext
-from src.tools.builtin.file import is_sensitive_path
+from src.tools.builtin.file import is_security_critical_path
 from src.tools.decorator import ToolPermission, tool
 from pydantic import BaseModel, Field
 
@@ -851,20 +851,19 @@ def _extract_path_candidates(segment: list[str]) -> list[str]:
     return candidates
 
 
-def _check_sensitive_paths(command: str, workdir: str, extra_trusted: tuple[str, ...] = ()) -> str | None:
-    """扫描 shell 命令中的文件路径参数，返回第一个匹配的敏感路径。
+def _check_security_critical_paths(command: str, workdir: str) -> str | None:
+    """扫描 shell 命令中的文件路径参数，返回第一个安全关键路径。
 
-    对命令进行分词和分段，提取每段中的路径候选 token，
-    解析相对路径后调用 is_sensitive_path 检查。
-    支持 bash -c "..." 的递归检查。
+    对命令进行分词和分段，提取每段中的路径候选 token，~ 展开并将相对路径基于 workdir
+    解析为绝对路径后调用 is_security_critical_path 检查（.git/、.vscode/、.idea/ 等子串判定
+    依赖绝对路径的前导分隔符）。支持 bash -c "..." 的递归检查。
 
     Args:
         command: 完整的 shell 命令字符串。
-        workdir: 工作区根目录路径。
-        extra_trusted: 额外可信目录路径列表（如 global_dir），这些目录内的路径不视为敏感。
+        workdir: 工作区根目录路径，用于解析相对路径。
 
     Returns:
-        第一个敏感路径字符串，未找到时返回 None。
+        第一个安全关键路径的原始 token，未找到时返回 None。
     """
     if "`" in command:
         return None
@@ -882,7 +881,7 @@ def _check_sensitive_paths(command: str, workdir: str, extra_trusted: tuple[str,
         if stripped:
             inner = _shell_c_command(stripped)
             if inner is not None:
-                result = _check_sensitive_paths(inner, workdir, extra_trusted)
+                result = _check_security_critical_paths(inner, workdir)
                 if result is not None:
                     return result
         candidates = _extract_path_candidates(segment)
@@ -892,7 +891,7 @@ def _check_sensitive_paths(command: str, workdir: str, extra_trusted: tuple[str,
             # 相对路径基于 workdir 解析
             if not PurePosixPath(path_str).is_absolute():
                 path_str = str(Path(workdir) / path_str)
-            if is_sensitive_path(path_str, workdir, extra_trusted):
+            if is_security_critical_path(path_str):
                 return token
     return None
 
@@ -935,9 +934,11 @@ def _is_accept_edits_command(command: str) -> bool:
 
 
 def check_shell_permissions(values: dict[str, Any], ctx: PermissionContext) -> PermissionCheckResult:
-    """shell 安全检查：检测危险命令阻止执行，识别只读命令自动放行，acceptEdits/auto 模式下放行安全文件操作。
+    """shell 安全检查：危险命令阻止，只读命令放行，安全关键写入人工确认，acceptEdits/auto 放行安全文件操作。
 
-    评估顺序：危险 → deny，敏感路径 → ask，acceptEdits/auto 文件操作 → allow，只读 → allow，其余 → passthrough。
+    评估顺序：危险 → deny，只读 → allow（Tier 1，先于安全关键以修复只读误伤，读取安全关键文件亦放行），
+    安全关键写入 → ask（人工确认、跳过判官，防自我提权），acceptEdits/auto 文件操作 → allow（Tier 2），
+    其余 → passthrough（auto 模式下经 _mode_default 判 ask，交判官 Tier 3）。
 
     Args:
         values: 工具调用参数，需包含 "command" 字段。
@@ -953,14 +954,15 @@ def check_shell_permissions(values: dict[str, Any], ctx: PermissionContext) -> P
         return PermissionCheckResult("passthrough")
     if _is_dangerous_command(command):
         return PermissionCheckResult("deny", f"危险命令被阻止：{command[:80]}", bypass_immune=True)
-    sensitive = _check_sensitive_paths(command, ctx.workdir, ctx.trusted_dirs)
-    if sensitive is not None:
-        return PermissionCheckResult("ask", f"命令涉及敏感路径需确认：{sensitive}", bypass_immune=True)
+    # 只读命令先于安全关键：cat ~/.agent/settings.json 等读取一律放行，仅非只读命令触及安全关键路径才 ask
+    if _is_readonly_command(command):
+        return PermissionCheckResult("allow", f"只读命令自动放行：{command[:80]}")
+    security_critical = _check_security_critical_paths(command, ctx.workdir)
+    if security_critical is not None:
+        return PermissionCheckResult("ask", f"命令涉及安全关键路径需人工确认：{security_critical}", bypass_immune=True)
     # acceptEdits/auto 模式：安全文件操作命令自动放行（对齐 CC v2.1.173 的 checkPermissionMode）
     if ctx.mode in (ACCEPT_EDITS_MODE, AUTO_MODE) and _is_accept_edits_command(command):
         return PermissionCheckResult("allow", f"{ctx.mode.value} 模式放行文件操作：{command[:80]}")
-    if _is_readonly_command(command):
-        return PermissionCheckResult("allow", f"只读命令自动放行：{command[:80]}")
     return PermissionCheckResult("passthrough")
 
 

@@ -248,6 +248,7 @@ events:
 | `permissions.deny` | list[str] | `[]` | deny 规则列表（优先级最高）；全局+项目并集去重 | `permission_mgr.py:326` |
 | `permissions.ask` | list[str] | `[]` | ask 规则列表（触发确认弹窗）；深合并（非并集） | `permission_mgr.py:327` |
 | `permissions.defaultMode` | str | 缺省 `default`（`DEFAULT_MODE`） | 会话级默认权限模式。**解析优先级**：激活角色 `role.md` 的 `permissionMode` →（未声明）此处 `defaultMode` →（未声明）内置 `DEFAULT_MODE`（详见 [permissions.md](permissions.md)） | `permission_mgr.py:318` |
+| `permissions.autoJudge` | dict | 见下（代码兜底） | **仅作用于 auto 模式**的 LLM 判官配置：`check()` 判 `ask` 的模糊操作交快模型裁决放行/拒绝/交人工（详见 [permissions.md](permissions.md) 「auto 模式 LLM 判官」） | `permission_mgr.py` `_load_judge_config` |
 | `mcp.enabledServers` | list[str] | 无（视为不启用白名单） | 非空时作**白名单**，只连接其中的 server | `mcp_mgr.py:193` |
 | `mcp.disabledServers` | list[str] | 无 | 始终从待连接集合剔除（连接前硬开关） | `mcp_mgr.py:194` |
 | `hooks.<Event>` | list[group] | 无 | 生命周期 hook 定义（见下） | `hooks_mgr.py:135` |
@@ -255,6 +256,17 @@ events:
 **规则文本格式**：`工具名` 或 `工具名(specifier)`，`specifier` 走 fnmatch，工具名段也支持 `*`/`?` 通配（如 `mcp__github__*`、`mcp__github__get_*`）。`deny` 优先于 `allow`。完整规则语法、6 步评估顺序、复合命令逐段匹配详见 [permissions.md](permissions.md)。
 
 **`defaultMode` 合法值**（`permission_mgr.py:94`~`117`，`parse_permission_mode` 接受编号或名字）：`default`、`acceptEdits`、`plan`、`bypassPermissions`、`auto`、`dontAsk`。语义见 [permissions.md](permissions.md)。
+
+**`permissions.autoJudge` 子键**（`_load_judge_config` 消费；`settings.json` 无内置层，缺省在代码兜底）：
+
+| 子键 | 类型 | 默认值 | 效果 |
+|----|------|--------|------|
+| `enabled` | bool | `true` | 是否启用 auto 判官；`false` 时 auto 模式回退纯确定性行为（模糊操作直接人工确认） |
+| `model` | str | `fast` | 判官使用的模型别名；`llm.fast` 未配则回落 `default`（见 [llm.md](llm.md)） |
+| `maxConsecutiveDenials` | int(>0) | `3` | 连续拒绝达此值升级一次人工（随后清零连续计数、判官恢复） |
+| `maxTotalDenials` | int(>0) | `20` | 会话累计拒绝达此值后一律转人工（硬底线，不重置；`/clear` 归零） |
+
+只对 auto 模式生效；其余模式无判官。判官对**安全关键路径写入**（两根 `.agent` 核心配置、`.env`/凭证、`.git` 等）永远直接交人工、绝不静默放行；出错/超时/不可用一律回落人工确认。四项配置随 `/clear` 重载。
 
 **`hooks` 事件**（`hooks_mgr.py:17` `HOOK_EVENTS`，共 8 种）：`PreToolUse`、`PostToolUse`、`UserPromptSubmit`、`Stop`、`SessionStart`、`SessionEnd`、`SubagentStart`、`SubagentStop`。每个事件下是 group 列表，group 含可选 `matcher` 与 `hooks` 命令数组，命令支持 JSON stdin/stdout 协议、`timeout`（默认 60s）、`async`（默认 false）。格式详解见 [mcp-and-hooks.md](mcp-and-hooks.md)。
 
@@ -276,7 +288,13 @@ events:
     ],
     "ask": [
       "shell(git push:*)"
-    ]
+    ],
+    "autoJudge": {
+      "enabled": true,
+      "model": "fast",
+      "maxConsecutiveDenials": 3,
+      "maxTotalDenials": 20
+    }
   },
   "mcp": {
     "disabledServers": ["some-noisy-server"]
@@ -451,6 +469,7 @@ OPENAI_API_KEY=sk-yyyyyyyyyyyyyyyy
 | 换激活角色 | `config.yaml` `role` | 设为目标角色名 |
 | 看模型思考过程 | `config.yaml` `events.level` | 设为 `detail`（或 `trace`） |
 | 减少权限弹窗 | `settings.json` `permissions.defaultMode` 或 `permissions.allow` | 设更宽松模式（如 `acceptEdits`/`auto`）或加 allow 规则 |
+| 调整 auto 判官（模型/阈值/开关） | `settings.json` `permissions.autoJudge` | 改 `model`/`maxConsecutiveDenials`/`maxTotalDenials`；`enabled: false` 关闭判官 |
 | 禁止某类命令 | `settings.json` `permissions.deny` | 加 deny 规则（优先级最高） |
 | 某操作每次都确认 | `settings.json` `permissions.ask` | 加 ask 规则 |
 | 禁用某个 MCP server | `settings.json` `mcp.disabledServers` | 加入该 server 名（连接前剔除） |

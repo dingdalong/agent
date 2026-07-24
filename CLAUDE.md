@@ -72,6 +72,7 @@ REQUEST_INPUT → CHECK_COMPACT → [COMPACT →] LLM_CALL → PROCESS_RESPONSE
 
 - `permissions.{allow,deny,ask}`：规则文本形如 `工具名` 或 `工具名(specifier)`，`specifier` 走 fnmatch；**工具名段也支持 `*`/`?` 通配**，故可写 `mcp__<server>__*` 一次性 allow/deny/ask 整个 MCP server，或 `mcp__github__get_*` 按前缀放行（`deny` 优先于 `allow`）。
 - `permissions.defaultMode`：会话级默认权限模式。**解析优先级**：激活角色 `role.md` 的 `permissionMode` →（未声明）此处 `settings.json` `defaultMode` →（未声明）内置默认。该结果即 `PermissionManager.default_mode`，用作主 agent 初始模式、未声明 `permissionMode` 的子 agent 的回退值、`/clear` 重置目标与绑定前状态栏显示值。
+- `permissions.autoJudge`：**仅 auto 模式**的 LLM 判官配置（`enabled`/`model`/`maxConsecutiveDenials`/`maxTotalDenials`，缺省 true/`fast`/3/20，代码兜底）。auto 模式下 `check()` 判 `ask` 的模糊操作（状态变更 shell、工作区外操作、MCP、网络等）交快模型裁决：`allow` 静默放行、`deny` 回落 agent 重试、`ask` 交人工；连续/累计拒绝达阈值升级人工。**安全关键路径写入**（两根 `.agent` 核心配置 `{settings.json,mcp_servers.json,config.yaml}`、`.env`/凭证、`.git`、`.vscode`/`.idea`）由 `is_security_critical_path` 判定，永远直接交人工、判官绝不静默放行（防提示注入自我提权）；判官出错/超时/不可用一律回落人工确认。详见 `docs/permissions.md`「auto 模式 LLM 判官」。
 - `mcp.enabledServers`（非空时作白名单）/ `mcp.disabledServers`（始终剔除）：在 `mcp_mgr.start()` 连接前过滤 server，被禁用的 server 不连接、其工具不注册、不进 LLM schema。与上面的 `deny` 规则正交——`deny` 仍连接并仅在调用时拒绝，`disabledServers` 是连接前的硬开关。
 
 MCP server 连接配置在独立的 `mcp_servers.json`（角色 `src/roles/<role>/` → 全局 `~/.agent/` → 项目 `.agent/` 三层合并），格式见 `src/mgr/mcp_mgr.py`。

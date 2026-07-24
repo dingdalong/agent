@@ -1,5 +1,5 @@
 from __future__ import annotations
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any, TYPE_CHECKING, Optional
 
 from src.mgr.permission_mgr import PermissionCheckResult, PermissionContext
@@ -10,7 +10,7 @@ if TYPE_CHECKING:
     from src.agent import Agent
 
 
-# 敏感文件名集合 — 写入这些文件始终需要用户确认（对齐 CC v2.1.173 的 checkPathSafetyForAutoEdit）
+# 安全关键文件名集合 — 写入这些文件始终需要人工确认（判官不得静默放行），防自我提权。
 SENSITIVE_NAMES = {
     # 环境变量 / 凭证
     ".env", ".env.local", ".env.production", "credentials.json", ".npmrc", ".pypirc",
@@ -20,8 +20,12 @@ SENSITIVE_NAMES = {
     ".gitconfig",
 }
 
-# 敏感目录前缀 — 路径中包含这些目录时需要用户确认
-SENSITIVE_DIRS = {"/.agent/", "/.vscode/", "/.idea/"}
+# 安全关键的 .agent 核心配置文件名 — 仅当父目录名为 ".agent" 时命中，故项目
+# <workdir>/.agent/ 与全局 ~/.agent/ 两根完全对等；角色目录下嵌套的同名文件（父目录非 .agent）不算。
+SECURITY_CRITICAL_AGENT_FILES = {"settings.json", "mcp_servers.json", "config.yaml"}
+
+# 安全关键目录前缀 — 路径中包含这些目录时需要人工确认（IDE 配置）。
+SENSITIVE_DIRS = {"/.vscode/", "/.idea/"}
 
 
 def is_outside_workspace(path: str, workdir: str, extra_trusted: tuple[str, ...] = ()) -> bool:
@@ -50,32 +54,41 @@ def is_outside_workspace(path: str, workdir: str, extra_trusted: tuple[str, ...]
         return True
 
 
-def is_sensitive_path(path: str, workdir: str, extra_trusted: tuple[str, ...] = ()) -> bool:
-    """判断文件路径是否为敏感路径（.git 目录、敏感配置文件、敏感目录、可信目录外路径）。
+def is_security_critical_path(path: str) -> bool:
+    """判断文件路径是否为安全关键路径（写入须人工确认，判官不得静默放行）。
+
+    与所处根目录无关：项目 <workdir>/.agent/ 与全局 ~/.agent/ 待遇完全对等。命中条件（任一）：
+    敏感文件名（.env/凭证/shell 配置/git 配置，任意位置）；.agent 目录下的核心配置
+    （settings.json/mcp_servers.json/config.yaml，父目录名须为 .agent）；.git 内部；IDE 配置目录
+    （.vscode/、.idea/）。仅按 ~ 展开归一，不做 .resolve() 以免依赖当前工作目录。
 
     Args:
         path: 待检查的文件路径。
-        workdir: 工作区根目录路径。
-        extra_trusted: 额外可信目录路径列表（如 global_dir），这些目录内的路径不视为"外部路径"。
 
     Returns:
-        True 表示路径敏感，需要用户确认。
+        True 表示路径安全关键，需要人工确认。
     """
     if not path:
         return False
-    normalized = PurePosixPath(path).as_posix()
-    lower = normalized.lower()
-    # .git 目录检查（大小写不敏感，兼容 macOS APFS 等大小写不敏感文件系统）
+    try:
+        expanded = Path(path).expanduser()
+    except (OSError, ValueError, RuntimeError):
+        return False
+    name = expanded.name
+    # 敏感文件名（任意位置，大小写不敏感）
+    if name.lower() in SENSITIVE_NAMES:
+        return True
+    # 两根 .agent 核心配置：文件名 + 父目录名 == ".agent"（大小写敏感，与磁盘上实际目录名一致）
+    if name in SECURITY_CRITICAL_AGENT_FILES and expanded.parent.name == ".agent":
+        return True
+    lower = expanded.as_posix().lower()
+    # .git 目录（大小写不敏感，兼容 macOS APFS 等大小写不敏感文件系统）
     if "/.git/" in lower or lower.endswith("/.git"):
         return True
-    if PurePosixPath(path).name.lower() in SENSITIVE_NAMES:
-        return True
-    # 敏感目录检查（.agent/、.vscode/、.idea/ 等项目配置目录，大小写不敏感）
+    # IDE 配置目录（.vscode/、.idea/）
     for sensitive_dir in SENSITIVE_DIRS:
         if sensitive_dir in lower or lower.endswith(sensitive_dir.rstrip("/")):
             return True
-    if is_outside_workspace(path, workdir, extra_trusted):
-        return True
     return False
 
 
@@ -98,8 +111,32 @@ def _extract_edit_path(tool_input: dict[str, Any], ctx: PermissionContext) -> st
     return tool_input.get("path") or tool_input.get("file_path") or tool_input.get("source") or ""
 
 
+def _classify_edit_path(path: str, ctx: PermissionContext) -> PermissionCheckResult | None:
+    """对单个编辑目标路径分级，供文件编辑/移动检查复用。
+
+    安全关键路径 → bypass_immune 的 ask（人工确认，auto 模式下判官不接管）；工作区及可信目录外
+    → 非 immune 的 ask（auto 模式下落入判官）；否则 None（工作区内非关键，交后续流程放行）。
+
+    Args:
+        path: 待分级的文件路径。
+        ctx: 权限上下文，包含工作目录与可信目录。
+
+    Returns:
+        命中安全关键或工作区外时返回对应 PermissionCheckResult，否则 None。
+    """
+    if not path:
+        return None
+    if is_security_critical_path(path):
+        return PermissionCheckResult("ask", f"安全关键路径需人工确认：{path}", bypass_immune=True)
+    if is_outside_workspace(path, ctx.workdir, ctx.trusted_dirs):
+        return PermissionCheckResult("ask", f"工作目录外路径需确认：{path}", bypass_immune=False)
+    return None
+
+
 def check_file_edit_permissions(tool_input: dict[str, Any], ctx: PermissionContext) -> PermissionCheckResult:
-    """文件编辑安全检查：敏感路径强制询问。模式策略由 PermissionManager._mode_default() 统一处理。
+    """文件编辑安全检查：安全关键路径强制人工确认，工作区外路径需确认。
+
+    模式策略由 PermissionManager._mode_default() 统一处理。
 
     Args:
         tool_input: 工具调用参数。
@@ -108,14 +145,12 @@ def check_file_edit_permissions(tool_input: dict[str, Any], ctx: PermissionConte
     Returns:
         PermissionCheckResult 权限检查结果。
     """
-    path = _extract_edit_path(tool_input, ctx)
-    if is_sensitive_path(path, ctx.workdir, ctx.trusted_dirs):
-        return PermissionCheckResult("ask", f"敏感路径需确认：{path}", bypass_immune=True)
-    return PermissionCheckResult("passthrough")
+    result = _classify_edit_path(_extract_edit_path(tool_input, ctx), ctx)
+    return result if result is not None else PermissionCheckResult("passthrough")
 
 
 def check_file_move_permissions(tool_input: dict[str, Any], ctx: PermissionContext) -> PermissionCheckResult:
-    """move_file 安全检查：同时检查源路径和目标路径的敏感性。
+    """move_file 安全检查：同时检查源路径和目标路径的安全关键性与工作区归属。
 
     Args:
         tool_input: 工具调用参数，需包含 "source" 和 "destination" 字段。
@@ -125,9 +160,9 @@ def check_file_move_permissions(tool_input: dict[str, Any], ctx: PermissionConte
         PermissionCheckResult 权限检查结果。
     """
     for key in ("source", "destination"):
-        path = tool_input.get(key, "")
-        if is_sensitive_path(path, ctx.workdir, ctx.trusted_dirs):
-            return PermissionCheckResult("ask", f"敏感路径需确认：{path}", bypass_immune=True)
+        result = _classify_edit_path(tool_input.get(key, ""), ctx)
+        if result is not None:
+            return result
     return PermissionCheckResult("passthrough")
 
 
