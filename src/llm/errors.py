@@ -245,7 +245,12 @@ _BAD_REQUEST_CODES = {
     "invalid_request_error",
     "unsupported_image_media_type",
 }
-_PROTOCOL_CODES = {"invalid_response", "invalid_response_error", "response_validation_error"}
+_PROTOCOL_CODES = {
+    "invalid_response",
+    "invalid_response_error",
+    "response_validation_error",
+    "stream_read_error",
+}
 
 _CONTEXT_TEXT_PATTERNS = (
     "context length",

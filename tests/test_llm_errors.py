@@ -443,6 +443,49 @@ def test_sdk_response_validation_error_is_retryable_protocol_failure() -> None:
     assert info.retryable is True
 
 
+def test_openai_stream_read_error_is_retryable_protocol_error() -> None:
+    """OpenAI SDK 的流读取错误码应归为可重试的响应协议错误。
+
+    Returns:
+        None。
+    """
+    request = httpx.Request("POST", "https://example.test/v1/responses")
+    error = openai.APIError(
+        "stream interrupted",
+        request=request,
+        body={"code": "stream_read_error", "message": "stream interrupted"},
+    )
+
+    info = classify_llm_error(error)
+
+    assert info.kind is LLMErrorKind.RESPONSE_PROTOCOL
+    assert info.retryable is True
+    assert info.provider_code == "stream_read_error"
+
+
+def test_openai_unknown_stream_error_is_not_retryable() -> None:
+    """未知的 OpenAI SDK 流错误码应保持不可重试。
+
+    Returns:
+        None。
+    """
+    request = httpx.Request("POST", "https://example.test/v1/responses")
+    error = openai.APIError(
+        "unexpected stream failure",
+        request=request,
+        body={
+            "code": "unrelated_stream_problem",
+            "message": "unexpected stream failure",
+        },
+    )
+
+    info = classify_llm_error(error)
+
+    assert info.kind is LLMErrorKind.UNKNOWN
+    assert info.retryable is False
+    assert info.provider_code == "unrelated_stream_problem"
+
+
 @pytest.mark.parametrize(
     ("message", "kind"),
     [
