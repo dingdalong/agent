@@ -289,15 +289,27 @@ class AgentApp:
         self.deps.session_context.extend(result.additional_context)
 
     def _startup_banner(self) -> str:
-        """生成包含当前模型、角色、权限模式和工作目录的启动横幅。
+        """生成包含当前模型、推理力度、角色、权限模式和工作目录的启动横幅。
 
         Returns:
             启动时输出的纯文本横幅。
         """
-        model = getattr(self.deps.llm_mgr.get(), "model", "unknown") if self.deps.llm_mgr else "unknown"
         role_mgr = getattr(self.deps, "role_mgr", None)
         role_name = getattr(role_mgr, "role_name", None)
         manifest = getattr(role_mgr, "manifest", None)
+        model = "unknown"
+        reasoning_effort = "unknown"
+        llm_mgr = getattr(self.deps, "llm_mgr", None)
+        if llm_mgr is not None:
+            try:
+                llm = llm_mgr.get(getattr(manifest, "model", None))
+                model = getattr(llm, "model", "unknown")
+                reasoning_effort = (
+                    getattr(manifest, "reasoning_effort", None)
+                    or getattr(llm, "reasoning_effort", "unknown")
+                )
+            except Exception:
+                logger.debug("读取启动横幅的模型信息失败", exc_info=True)
         if not role_name or manifest is None:
             role = "unavailable"
         else:
@@ -310,7 +322,7 @@ class AgentApp:
             permission_mode = self.deps.permission_mgr.default_mode.value
         return (
             "Agent workbench ready\n"
-            f"model: {model}\n"
+            f"model: {model} {reasoning_effort}\n"
             f"role: {role}\n"
             f"permission mode: {permission_mode}\n"
             f"workdir: {self.deps.workdir}\n"
