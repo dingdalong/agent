@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager, AbstractContextManager
 
+from rich.text import Text
+
 from src.events.menu import FormQuestion
 from src.events.types import Event
 from src.interfaces.agent_view_store import AgentViewStore
@@ -177,12 +179,12 @@ class InlineInterface(UserInterface):
         """
         self._controller.on_permission_mode_changed()
 
-    async def _write(self, message: str, markdown: bool = False) -> None:
+    async def _write(self, message: str | Text, markdown: bool = False) -> None:
         """Write content through the composed output frontend.
 
         Args:
-            message: Text or Markdown source.
-            markdown: Whether to interpret the message as Markdown on TTY.
+            message: Plain text, Markdown source, or Rich text.
+            markdown: Whether to interpret string messages as Markdown on TTY.
 
         Returns:
             None.

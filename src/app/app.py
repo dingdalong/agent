@@ -6,6 +6,8 @@ import uuid
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 
+from rich.text import Text
+
 from src.agent import Agent, AgentDeps
 from src.agent.states import RunResult
 from src.interfaces.output_router import OutputRouter
@@ -288,11 +290,11 @@ class AgentApp:
         )
         self.deps.session_context.extend(result.additional_context)
 
-    def _startup_banner(self) -> str:
-        """生成包含当前模型、推理力度、角色、权限模式和工作目录的启动横幅。
+    def _startup_banner(self) -> Text:
+        """生成包含当前会话信息的中文 Rich 启动卡。
 
         Returns:
-            启动时输出的纯文本横幅。
+            不含 ANSI 控制码的 Rich 文本；由 UI 按运行环境渲染或降级。
         """
         role_mgr = getattr(self.deps, "role_mgr", None)
         role_name = getattr(role_mgr, "role_name", None)
@@ -312,19 +314,29 @@ class AgentApp:
                 logger.debug("读取启动横幅的模型信息失败", exc_info=True)
         if not role_name or manifest is None:
             role = "unavailable"
+            description = ""
         else:
-            description = getattr(manifest, "description", "").strip()
+            description = " ".join(str(getattr(manifest, "description", "") or "").split())
             role = role_name
-            if description:
-                role += f" — {description}"
         permission_mode = "unknown"
         if getattr(self.deps, "permission_mgr", None) is not None:
             permission_mode = self.deps.permission_mgr.default_mode.value
-        return (
-            "Agent workbench ready\n"
-            f"model: {model} {reasoning_effort}\n"
-            f"role: {role}\n"
-            f"permission mode: {permission_mode}\n"
-            f"workdir: {self.deps.workdir}\n"
-            "Enter submits · Ctrl+J newline · Ctrl+C interrupts · exit/quit to leave · /mode to switch\n"
-        )
+
+        banner = Text()
+        banner.append("╭─ ◆ 智能体工作台", style="bold cyan")
+        banner.append("  已就绪", style="bold green")
+        banner.append("\n│  模型  ", style="bold cyan")
+        banner.append(str(model), style="bold")
+        banner.append(" ", style="bold")
+        banner.append(str(reasoning_effort), style="bold")
+        banner.append("\n│  角色  ", style="bold cyan")
+        banner.append(str(role), style="bold")
+        if description:
+            banner.append(f"  {description}", style="dim")
+        banner.append("\n│  权限  ", style="bold cyan")
+        banner.append(str(permission_mode), style="bold yellow")
+        banner.append("\n│  工作目录  ", style="bold cyan")
+        banner.append(str(self.deps.workdir), style="dim")
+        banner.append("\n╰─ ", style="bold cyan")
+        banner.append("Enter 提交 · Ctrl+J 换行 · Ctrl+C 中断\n", style="dim")
+        return banner

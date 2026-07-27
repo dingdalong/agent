@@ -6,6 +6,8 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 
+from rich.text import Text
+
 from src.events.types import (
     CompactDelta,
     Event,
@@ -188,8 +190,8 @@ class UserInterface(ABC):
         pass
 
     @abstractmethod
-    async def _write(self, message: str, markdown: bool = False) -> None:
-        """输出文本（markdown 为真时按 Markdown 渲染）。"""
+    async def _write(self, message: str | Text, markdown: bool = False) -> None:
+        """输出文本或 Rich 文本（字符串 markdown 为真时按 Markdown 渲染）。"""
         ...
 
     @abstractmethod

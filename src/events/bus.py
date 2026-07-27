@@ -11,6 +11,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Literal
 
+from rich.text import Text
+
 from src.events.levels import EventLevel
 from src.events.types import (
     Event,
@@ -143,13 +145,13 @@ class EventBus:
         finally:
             self._ui_request_rejection_depth -= 1
 
-    async def request_output(self, content: str, source: str = "ui", markdown: bool = False) -> None:
+    async def request_output(self, content: str | Text, source: str = "ui", markdown: bool = False) -> None:
         """通过事件队列请求 UI 串行输出。
 
         Args:
-            content: 要输出的文本。
+            content: 要输出的纯文本或 Rich 文本。
             source: 事件来源标识。
-            markdown: 为真时 UI 按 Markdown 渲染（用于计划内容、hook 说明等消息型内容）。
+            markdown: 为真且 content 为字符串时，UI 按 Markdown 渲染。
         """
         await self.emit(OutputRequested(
             timestamp=time.time(),

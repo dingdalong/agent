@@ -106,14 +106,14 @@ class OutputActions:
                 rows.append(row)
         return Text(" ").join(rows)
 
-    async def _write(self, message: str, markdown: bool = False) -> None:
-        """输出文本到 scrollback（不额外补换行）。
+    async def _write(self, message: str | Text, markdown: bool = False) -> None:
+        """输出文本或 Rich 文本到 scrollback（不额外补换行）。
 
         Args:
-            message: 要输出的文本。
-            markdown: 为真且处于 TTY 时按 Markdown 渲染，否则按纯文本（经 _print_rich）。
+            message: 要输出的纯文本或 Rich 文本。
+            markdown: 为真、消息为字符串且处于 TTY 时按 Markdown 渲染；Rich 文本直接渲染。
         """
-        if markdown and self._tty:
+        if markdown and isinstance(message, str) and self._tty:
             self._print_markdown(message)
         else:
             self._print_rich(message, end="")

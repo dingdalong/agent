@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
+from rich.text import Text
+
 from src.events.levels import EventLevel
 
 
@@ -216,8 +218,8 @@ class LLMCallFailed(Event):
 
 @dataclass
 class OutputRequested(Event):
-    """请求 UI 串行输出文本。"""
-    content: str = ""
+    """请求 UI 串行输出纯文本或 Rich 文本。"""
+    content: str | Text = ""
     markdown: bool = False  # 是否按 Markdown 渲染（如计划内容、hook 拦截说明等消息型内容）
     level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
     type: Literal["output_requested"] = field(default="output_requested", init=False)
