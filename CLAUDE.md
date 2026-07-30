@@ -95,7 +95,7 @@ MCP server 连接配置在独立的 `mcp_servers.json`（角色 `src/roles/<role
 
 **子智能体** — 定义为 `*.md`（YAML frontmatter 声明 `agent_type`、`tools`、`model`、`memory`、`permissionMode`、`thinking`、`reasoning_effort`、`features` 等 + body 作提示词），由 `SubAgentMgr` **四层扫描**加载，同名后者覆盖（低→高）：共享 `src/roles/common/agents/` → 激活角色 `src/roles/<role>/agents/` → 全局 `~/.agent/agents/` → 项目 `.agent/agents/`。主 Agent 通过 `task_delegator` 工具调度子智能体，每个子智能体是共享 `AgentDeps` 的完整 `Agent` 实例（`Agent.from_manifest` 构造）。`model: inherit` 表示继承父 agent 已解析的真实模型 ID；`thinking`、`reasoning_effort` 未声明时同样继承父 agent 已解析值（`reasoning_effort` 最终未声明则回退 provider 配置）。
 
-**权限模式按 agent 独立** — 可变的权限模式 (`permission_mode`) 与 plan 模式状态 (`_pre_plan_mode`) 持有在每个 `Agent` 实例上，`PermissionManager` 只保留全局共享的规则、`session_allow` 和不可变的 `default_mode`（解析优先级：`role.md` `permissionMode` → `settings.json` `defaultMode` → 内置默认；由 `bootstrap` 将角色 manifest 的 `permission_mode` 注入 `PermissionManager`，`_load_config` 末尾套用使其胜出，`reload()` 自动重放）。`check()` / `is_tool_visible()` / `get_schemas()` 均接收 agent 的 `mode` 参数。语义：用户的模式设置（`/mode`、Shift+Tab、`/plan`、`/resume` 恢复）只作用于入口主 agent（总控）；每个子 agent 在构造时从自身 frontmatter 的 `permissionMode` 取一次值（缺省回退到 `default_mode`），整个生命周期固定不变——子 agent 无 plan 能力、四个 plan 工具标记 `subagent=False` 从子 agent 强制排除，故并发子 agent 互不干扰。MCP 工具触发 ask 弹窗时，除"本工具"会话/保存外，额外提供"信任整个 server"两项（写入 `mcp__<server>__*` 规则），server 名经 `ToolPermission.mcp_server` 透传（见 `permission_mgr.resolve_ask`）。
+**权限模式按 agent 独立** — 可变的权限模式 (`permission_mode`) 与 plan 模式状态 (`_pre_plan_mode`) 持有在每个 `Agent` 实例上，`PermissionManager` 只保留全局共享的规则、`session_allow` 和不可变的 `default_mode`（解析优先级：`role.md` `permissionMode` → `settings.json` `defaultMode` → 内置默认；由 `bootstrap` 将角色 manifest 的 `permission_mode` 注入 `PermissionManager`，`_load_config` 末尾套用使其胜出，`reload()` 自动重放）。`check()` 接收 agent 的 `mode` 参数。语义：用户的模式设置（`/mode`、Shift+Tab、`/plan`、`/resume` 恢复）只作用于入口主 agent（总控）；每个子 agent 在构造时从自身 frontmatter 的 `permissionMode` 取一次值（缺省回退到 `default_mode`），整个生命周期固定不变——子 agent 无 plan 能力、四个 plan 工具标记 `subagent=False` 从子 agent 强制排除，故并发子 agent 互不干扰。MCP 工具触发 ask 弹窗时，除"本工具"会话/保存外，额外提供"信任整个 server"两项（写入 `mcp__<server>__*` 规则），server 名经 `ToolPermission.mcp_server` 透传（见 `permission_mgr.resolve_ask`）。
 
 **技能系统** — `SkillMgr` 四层扫描 `SKILL.md`（共享 → 角色 → 全局 → 项目，插件技能穿插其间），同名后者覆盖；通过 `load_skill` 工具按需注入系统提示词。
 
@@ -104,41 +104,4 @@ MCP server 连接配置在独立的 `mcp_servers.json`（角色 `src/roles/<role
 **`reload()` 协议** — 有状态的 Manager 实现 `reload()` 方法，`/clear` 重置会话时通过 `hasattr` 发现并统一调用。
 
 ## 编码与协作规范
-
-### 命名、类型与注释
-- **见名知义**：函数名与实际用途强相关；相同含义、用途的函数与字段用同一命名。
-- **参数标类型**：每个参数显式声明具体类型。
-- **写文档注释**：每个新增或修改的函数都写精炼的文档注释，逐一说明各参数与返回值的含义，只描述"是什么/做什么"，不写缘由。
-
-### 复用与抽象
-- **消除真正的重复**：多处相同逻辑合并为一个通用函数，不复制粘贴；但不为复用而复用。
-- **优先改造旧逻辑**：新需求与已有方法、函数、逻辑部分重合时，优先改造旧逻辑以适配；若改造后变复杂，则拆分并提取公共部分。
-- **避免过度抽象**：不为"统一"强行拆分或封装；仅转发调用的包装函数（如 `on_enter/on_exit/on_fire` 只转调 `on_event`）应直接内联，保持扁平、减少间接层。
-
-### 简洁与优化
-- **代码简洁、清晰、健壮**，不留隐晦的背后约定；关键算法与设计模式优先用中级程序员能读懂的简单实现。
-- **确需复杂算法或高级模式**，先与用户沟通并获批准。
-- **不为优化而优化**：优化须实测有效（实现更简洁，或有性能数据支撑），否则先与用户沟通，不擅自改动。
-
-### 修改与重构
-- **改前查全链**：调整或重构函数前，检索并理解所有调用与引用点，保证全链一致、不遗漏。
-- **删除死代码**：无任何引用的方法、字段、定义连同其注释文档一并移除。
-- **同步提示词**：改动涉及工作流变化时，同步新增或更新提示词，指导 LLM 如何工作。
-- **先复现再修 bug**：先稳定复现、定位根因，再修改，最后验证。
-- **允许大范围重构**：当前项目未上线，无需考虑兼容性与过渡期；只要有益即可大范围重构，不留技术债。
-
-### 判断依据
-- **以实际代码逻辑为准**，而非注释、文档或记忆；不默认已有代码就是正确的。
-- **标注提示词来源**：决策若受某条提示词影响，明确指出是哪一条。
-
-### 提示词编写
-- 只给确定、可落地的指导，杜绝模糊描述。
-
-### 文档维护（强制）
-- **废弃即删除，不留痕迹**：某设计、功能或方向被判断为"已取代"或"废弃"时，将其整句或整段从当前活跃文档（含 `CLAUDE.md`）中彻底移除，禁止保留并加"历史参考/已废弃"等注释。
-- **唯一存档点**：历史版本仅通过 Git 追溯；活跃文档不得保留任何失效计划、旧方向或旧设计。
-- **执行标准**：宁可"消失"，不要"备注"。
-
-当新增需要配置的内容时，需要在配置文件中体现出来
-
-文档不需要是精确性的path:line，精确到函数、字段，有关键词能够索引到即可
+读取并遵循[`编码与协作规范.md`](编码与协作规范.md)
