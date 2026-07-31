@@ -153,7 +153,7 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 | `all_tool_names` | — | `set[str]` | 全部工具名 |
 | `excluded_tool_names` | `enabled: set[str]` | `set[str]` | 因所属 feature 未启用而应排除的工具名 |
 | `resolve_subagent_tools` | `tool_names: set[str] \| None` | `set[str]` | 在声明集上注入 `subagent=True`、排除 `subagent=False` |
-| `get_schemas` | `tool_names`, `permission_mgr`, `mode` | `list[ToolDict]` | OpenAI function-calling schema；传 `permission_mgr`+`mode` 时按 `is_tool_visible` 过滤 |
+| `get_schemas` | `tool_names` | `list[ToolDict]` | OpenAI function-calling schema |
 | `get_page` | `tool_call_id: str`, `page: int` | `str` | 返回缓存分页结果的指定页 |
 | `execute` (async) | `tool_name`, `arguments`, `current_tool_call_id`, `deps`, `agent` | `str` | 执行工具全流程（见下） |
 
@@ -191,13 +191,9 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 | 方法 | 关键参数 | 返回 | 作用 |
 |---|---|---|---|
 | `check` | `tool_name`, `tool_input`, `mode` | `PermissionDecision` | 6 步评估：deny→ask→工具自检→allow(含 session_allow)→处理穿透 ask→mcp 层规则→bypass→模式默认 |
-| `is_tool_visible` | `tool: ToolEntry`, `mode` | `bool` | 该工具在此模式下是否暴露给 LLM（plan_visible/readonly/普通规则） |
-| `get_schemas` | — | — | *（无此方法；schema 过滤由 `ToolsMgr.get_schemas` 调用 `is_tool_visible` 完成）* |
 | `resolve_ask` (async) | `tool_name`, `tool_input`, `deps` | `PermissionDecision` | 弹窗确认；支持 session/always 与 MCP“信任整个 server”（写 `session_allow`，always 落 `settings.json`） |
 | `notify_decision` (async) | `tool_name`, `tool_input`, `deps`, `decision` | `None` | 向 UI 通知非 allow 决策 |
 | `reload` | — | `None` | 清空规则、`session_allow`、重置 `default_mode`，重载配置 |
-
-> 注：文档任务参考中提到的 `get_schemas()` 实际不在 `PermissionManager` 上——schema 可见性过滤是 `ToolsMgr.get_schemas` 传入 `permission_mgr`+`mode` 后回调 `is_tool_visible` 实现的。以源码为准。
 
 **权限模式常量**（`permission_mgr.py:94-117`）：`DEFAULT_MODE`、`ACCEPT_EDITS_MODE`、`PLAN_MODE`、`BYPASS_MODE`、`AUTO_MODE`、`DONT_ASK_MODE`。Shift+Tab 轮转为 `CAROUSEL_MODES`（default/acceptEdits/plan），`/mode` 菜单为 `MENU_MODES`（全部 6 种）。
 
@@ -385,27 +381,24 @@ MCP 连接配置格式、per-server 权限分层见 [mcp-and-hooks.md](mcp-and-h
 
 `src/mgr/plan_mgr.py`
 
-**单一职责**：管理计划模式的进入/退出（切换 agent 的 `permission_mode`）、生成计划文件路径、判断路径是否在计划目录内，并作为提醒源向 `ReminderMgr` 注入 plan 指令。
+**单一职责**：管理计划模式的进入/退出（切换 agent 的 `permission_mode`）、管理计划目录路径，并作为提醒源向 `ReminderMgr` 注入 plan 指令。计划模式下的行为约束（只允许只读工具和编辑计划文件）完全通过提示词实现。
 
-**消费的配置或文件**：计划文件目录 `{workdir}/.agent/plans/`（`PLANS_SUBDIR`）；文件名由 LLM 调用 `plan_write_file` 时命名。周期性提醒间隔 `_REMINDER_INTERVAL = 5` 轮。
+**消费的配置或文件**：计划文件目录 `{workdir}/.agent/plans/`。
 
 **公共方法**：
 
 | 方法 | 关键参数 | 返回 | 作用 |
 |---|---|---|---|
-| `enter_mode` | `agent`, `reminder_mgr` | `bool` | 切 agent 到 PLAN_MODE，记录进入前模式，注册提醒源；已在 plan 返回 False |
-| `exit_mode` | `agent`, `reminder_mgr` | `bool` | 恢复进入前模式，置退出提醒标志（保留一轮后注销）；不在 plan 返回 False |
-| `resolve_plan_path` | `name: str` | `str` | 生成 `{plan_dir}/{name}.md` 绝对路径（首次写入调用） |
-| `get_plan_dir` | — | `str` | 计划目录绝对路径（供权限检查） |
-| `is_plan_file` | `file_path: str` | `bool` | 路径是否在计划目录下 |
+| `enter_mode` | `agent`, `reminder_mgr` | `bool` | 切 agent 到 PLAN_MODE，注册提醒源；已在 plan 返回 False |
+| `exit_mode` | `agent`, `reminder_mgr` | `bool` | 恢复进入前模式，置退出提醒标志；不在 plan 返回 False |
+| `set_last_plan_path` | `path: str` | `None` | 记录最后提交的计划文件路径（供重入提示词引用） |
 | `get_turn_start_reminder` | `mode` | `str` | turn 开始时注入 plan 指令，或退出后一次性退出提醒 |
-| `notify_tool_round` | `tool_names` | `None` | 累计距上次注入的轮数 |
-| `pop_post_round_reminder` | `mode` | `str \| None` | POST_ROUND 注入：轮中进入 plan 或超阈值时返回指令 |
-| `reload` | — | `None` | 重置会话级注入状态 |
+| `pop_post_round_reminder` | `mode` | `str \| None` | 轮中进入 plan 时注入指令 |
+| `reload` | — | `None` | 重置会话级状态 |
 
 **feature 门控**：`plan`（依赖 `file`；未启用时 `bootstrap` 注入 `None`）。 **reload**：有。
 
-**持有的关键状态**：`_plan_dir`、`_full_instructions_sent`、`_pending_injection`、`_rounds_since_injection`、`_need_exit_reminder`、`_has_exited_plan`。
+**持有的关键状态**：`_plan_dir`、`_pending_injection`、`_need_exit_reminder`、`_last_plan_path`。
 
 计划工作流与权限模式交互见 [permissions.md](permissions.md) 与 [agent-runtime.md](agent-runtime.md)。
 

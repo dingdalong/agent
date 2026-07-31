@@ -241,6 +241,8 @@ class Agent:
         else:
             self._task_mgr = None
         self._reminder_mgr = ReminderMgr()
+        if self.deps.permission_mgr is not None:
+            self._reminder_mgr.register(self.deps.permission_mgr)
         if self._task_mgr is not None:
             self._reminder_mgr.register(self._task_mgr)
         self._handlers = {
@@ -314,14 +316,10 @@ class Agent:
         return cls(**kwargs)
 
     def refresh_tools_schemas(self) -> None:
-        """刷新工具 schema 列表（减去被禁用 feature 的工具，再按当前权限模式过滤可见性）。"""
+        """刷新工具 schema 列表（减去被禁用 feature 的工具）。"""
         names = self.tools if self.tools is not None else self.deps.tools_mgr.all_tool_names()
         names = names - self._excluded_tools
-        self._tools_schemas = self.deps.tools_mgr.get_schemas(
-            names,
-            permission_mgr=self.deps.permission_mgr,
-            mode=self.permission_mode,
-        )
+        self._tools_schemas = self.deps.tools_mgr.get_schemas(names)
 
     def set_permission_mode(self, mode) -> bool:
         """切换本 agent 的权限模式，处理计划模式的特殊进入/退出逻辑。
@@ -587,7 +585,6 @@ class Agent:
         if not self.set_permission_mode(PLAN_MODE):
             await self.deps.event_bus.request_output("已在计划模式中。\n")
             return
-        self.refresh_tools_schemas()
         await self.deps.event_bus.emit(PermissionModeChanged(timestamp=time.time(), source=self.agent_type))
         await self.deps.event_bus.request_output("已进入计划模式。\n")
 
@@ -644,6 +641,8 @@ class Agent:
             from src.mgr import TaskManager
             self._task_mgr = TaskManager(tasks_dir=tasks_dir)
             self._reminder_mgr = ReminderMgr()
+            if self.deps.permission_mgr is not None:
+                self._reminder_mgr.register(self.deps.permission_mgr)
             self._reminder_mgr.register(self._task_mgr)
 
         # 恢复权限模式

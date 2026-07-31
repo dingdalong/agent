@@ -94,7 +94,6 @@ def test_expected_tool_feature_mapping():
     assert by_name["save_memory"] == "memory"
     assert by_name["read_memory"] == "memory"
     assert by_name["enter_plan_mode"] == "plan"
-    assert by_name["plan_write_file"] == "plan"
     # 无归属工具恒可用
     assert by_name["shell"] is None
 
@@ -172,7 +171,7 @@ def test_mijia_role_features_and_schema():
     effective = mgr.all_tool_names() - mgr.excluded_tool_names(feats)
     assert "task_delegator" in effective
     for absent in ("task_create", "load_skill", "read_file", "write_file",
-                   "save_memory", "enter_plan_mode", "plan_write_file"):
+                   "save_memory", "enter_plan_mode"):
         assert absent not in effective
 
 

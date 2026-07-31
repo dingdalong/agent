@@ -136,6 +136,7 @@ def _classify_edit_path(path: str, ctx: PermissionContext) -> PermissionCheckRes
 def check_file_edit_permissions(tool_input: dict[str, Any], ctx: PermissionContext) -> PermissionCheckResult:
     """文件编辑安全检查：安全关键路径强制人工确认，工作区外路径需确认。
 
+    Plan 模式下，计划目录（.agent/plans/）内的文件写入自动放行。
     模式策略由 PermissionManager._mode_default() 统一处理。
 
     Args:
@@ -145,8 +146,19 @@ def check_file_edit_permissions(tool_input: dict[str, Any], ctx: PermissionConte
     Returns:
         PermissionCheckResult 权限检查结果。
     """
-    result = _classify_edit_path(_extract_edit_path(tool_input, ctx), ctx)
-    return result if result is not None else PermissionCheckResult("passthrough")
+    path = _extract_edit_path(tool_input, ctx)
+    result = _classify_edit_path(path, ctx)
+    if result is not None:
+        return result
+
+    # Plan 模式下：写入计划目录的文件自动放行
+    from src.mgr.permission_mgr import PLAN_MODE
+    if ctx.mode is PLAN_MODE and path:
+        plan_dir = str(Path(ctx.workdir) / ".agent" / "plans")
+        if path.startswith(plan_dir + "/") or path == plan_dir:
+            return PermissionCheckResult("allow", f"计划模式放行计划文件：{path}")
+
+    return PermissionCheckResult("passthrough")
 
 
 def check_file_move_permissions(tool_input: dict[str, Any], ctx: PermissionContext) -> PermissionCheckResult:

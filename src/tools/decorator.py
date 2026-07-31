@@ -24,8 +24,6 @@ class ToolPermission:
     Attributes:
         kind: 工具类别。"readonly"=只读（所有模式自动放行且始终可见），
             "edit"=文件编辑（acceptEdits 模式下自动放行），None=其他（如 shell）。
-        plan_visible: plan 模式下保持可见。非只读工具默认在 plan 模式下隐藏，
-            设为 True 可让工具在 plan 模式下也保持可见（如 plan 专用文件工具）。
         specifier_arg: 用于内容级规则匹配的参数名。check() 自动提取该参数值做 fnmatch 匹配，
             同时用于构建 "always allow" session 规则。None 表示无内容级匹配。
         tips: 权限提示模板，如 "写入文件：{path}"，用于向用户展示操作详情。
@@ -35,7 +33,6 @@ class ToolPermission:
         mcp_server: 该工具所属的 MCP server 名（仅 MCP 工具非空），用于 ask 弹窗提供"信任整个 server"选项。
     """
     kind: Literal["readonly", "edit"] | None = None
-    plan_visible: bool = False
     specifier_arg: str | None = None
     tips: str | None = None
     check_permissions: Callable[[dict[str, Any], PermissionContext], PermissionCheckResult] | None = None

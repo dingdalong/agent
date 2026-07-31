@@ -109,15 +109,11 @@ class ToolsMgr:
     def get_schemas(
         self,
         tool_names: set[str] | list[str] | None = None,
-        permission_mgr: Any = None,
-        mode: Any = None,
     ) -> list[ToolDict]:
         """返回 OpenAI function-calling 格式的工具 schema 列表。
 
         Args:
             tool_names: 要返回的工具名集合，None 返回全部。
-            permission_mgr: 权限管理器；与 mode 同时提供时按该模式过滤工具可见性。
-            mode: 调用方 agent 的权限模式（PermissionMode 实例）。
 
         Returns:
             工具 schema 列表。
@@ -126,8 +122,6 @@ class ToolsMgr:
             tools = list(self._tools.values())
         else:
             tools = [self._tools[name] for name in tool_names if name in self._tools]
-        if permission_mgr is not None and mode is not None:
-            tools = [tool for tool in tools if permission_mgr.is_tool_visible(tool, mode)]
         tools = sorted(tools, key=_tool_sort_key)
         return [
             {

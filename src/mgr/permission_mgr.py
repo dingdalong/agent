@@ -99,9 +99,11 @@ class PermissionMode:
     Attributes:
         value: 模式标识名。
         description: 模式描述。
+        reminder: 每轮 turn start 注入的提醒文本，空串表示无需提醒。
     """
     value: str
     description: str
+    reminder: str = ""
 
 
 # ── 模式常量 ──────────────
@@ -113,10 +115,12 @@ DEFAULT_MODE = PermissionMode(
 ACCEPT_EDITS_MODE = PermissionMode(
     value="acceptEdits",
     description="只读和文件编辑自动放行；命令执行默认询问",
+    reminder="【acceptEdits 模式】允许读取和编辑文件。",
 )
 PLAN_MODE = PermissionMode(
     value="plan",
     description="计划模式；只读自动放行，其余操作需确认",
+    reminder="【计划模式】只允许读取文件。计划文件的创建和编辑是例外。",
 )
 BYPASS_MODE = PermissionMode(
     value="bypassPermissions",
@@ -530,30 +534,6 @@ class PermissionManager:
             if isinstance(text, str) and (rule := parse_rule(text, permission)):
                 target.setdefault(rule.tool, []).append(rule)
 
-    def is_tool_visible(self, tool: ToolEntry, mode: PermissionMode) -> bool:
-        """判断工具在给定权限模式下是否暴露给 LLM。
-
-        可见性规则（按优先级）：
-        - 无权限元数据的外部工具：始终可见
-        - plan_visible 工具：仅 plan 模式可见（优先于 readonly）
-        - readonly 工具：所有模式可见
-        - 普通非只读工具：非 plan 模式可见，plan 模式隐藏
-
-        Args:
-            tool: 工具条目。
-            mode: 调用方 agent 的权限模式。
-
-        Returns:
-            True 表示该工具在此模式下对 LLM 可见。
-        """
-        if tool.permission is None:
-            return True
-        if tool.permission.plan_visible:
-            return mode is PLAN_MODE
-        if tool.permission.kind == "readonly":
-            return True
-        return mode is not PLAN_MODE
-
     def reload(self) -> None:
         """重置会话级状态（/clear 时调用）。"""
         self.default_mode = DEFAULT_MODE
@@ -573,6 +553,21 @@ class PermissionManager:
         self._judge_consecutive_denials = 0
         self._judge_total_denials = 0
         self._load_config()
+
+    # ── 模式提醒（ReminderMgr provider） ─────────────────────────────
+
+    def get_turn_start_reminder(self, mode: PermissionMode | None) -> str:
+        """每轮 turn start 由 ReminderMgr 调用，返回当前模式的提醒文本。
+
+        Args:
+            mode: 调用方 agent 的权限模式。
+
+        Returns:
+            提醒字符串，默认模式或 mode 为 None 时返回空串（ReminderMgr 自动跳过）。
+        """
+        if mode is None:
+            return ""
+        return mode.reminder
 
     @staticmethod
     def _get_rules(rules: RulesDict, tool_name: str) -> list[PermissionRule]:

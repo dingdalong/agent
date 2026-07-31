@@ -5,7 +5,7 @@ llm_provider:
       - deepseek-v4-flash
     base_url: https://api.deepseek.com
     reasoning_effort: high # 推理力度
-    context_limit: 400000 # 上下文限制
+    context_limit: 1000000 # 上下文限制
   openai:
     models:
       - gpt-5.6-sol
@@ -13,12 +13,11 @@ llm_provider:
       - gpt-5.6-luna
     base_url: https://api.openai.com/v1
     reasoning_effort: max # 推理力度
-    context_limit: 400000 # 上下文限制
+    context_limit: 1000000 # 上下文限制
   anthropic:
     models:
       - claude-opus-4-8
       - claude-sonnet-5
-      - k3
     base_url: https://api.anthropic.com
     max_pause_turn_continuations: 5 # pause_turn 协议终态的单轮最大自动续接次数
     reasoning_effort: high # 推理力度
@@ -31,7 +30,7 @@ llm_provider:
   moonshot:
     base_url: https://api.moonshot.cn/v1 # 可被 MOONSHOT_API_URL 覆盖
     reasoning_effort: max # 恒开思考，当前仅支持 max
-    context_limit: 400000 # 上下文限制
+    context_limit: 1000000 # 上下文限制
 
 llm:
   default: k3 # 必填，默认模型，子agent通过别名引用
@@ -54,7 +53,7 @@ compact:
   keep_recent_messages_token_rate: 0.25 # 近期原文的硬预算比例；超限时可在优先轮次内部按原子消息块切分
 
 # 激活的角色名。coding = 编程助手（默认），可切换为自定义角色。
-role: onboard
+role: coding
 
 events:
   level: detail   # progress | detail | trace

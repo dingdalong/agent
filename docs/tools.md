@@ -44,7 +44,7 @@ else:
 
 据此，工具作者的规则（呼应根 CLAUDE.md 的异步/阻塞契约）：
 
-- **叶子工具做同步 I/O / CPU 工作** → 声明为**普通 `def`**，装饰器自动经 `asyncio.to_thread` 卸载，不冻结事件循环。例：`file.py` 各工具、`plan_write_file` / `plan_edit_file`、`web_search`、`web_fetch`。
+- **叶子工具做同步 I/O / CPU 工作** → 声明为**普通 `def`**，装饰器自动经 `asyncio.to_thread` 卸载，不冻结事件循环。例：`file.py` 各工具、`web_search`、`web_fetch`。
 - **真异步工具**（函数体只 `await` 真正的异步原语，如 `asyncio.create_subprocess_shell`、事件总线 `request_input`）→ 保持 `async def`。例：`shell`、`ask_user`、`task_*`、`task_delegator`。
 - **禁止** 在 `async def` 里直接跑同步阻塞工作而不 `await`；无需层层手写 `to_thread`（装饰器是唯一卸载点）。
 
@@ -89,8 +89,7 @@ else:
 
 | 字段 | 默认 | 影响 |
 |---|---|---|
-| `kind` | `None` | `"readonly"`=只读（所有模式自动放行且始终可见）；`"edit"`=文件编辑（acceptEdits 模式自动放行）；`None`=其他（如 shell）。 |
-| `plan_visible` | `False` | 非只读工具默认在 plan 模式隐藏；`True` 使其在 plan 模式仍可见（plan 专用文件工具用）。 |
+| `kind` | `None` | `"readonly"`=只读（所有模式自动放行）；`"edit"`=文件编辑（acceptEdits 模式自动放行）；`None`=其他（如 shell）。 |
 | `specifier_arg` | `None` | 内容级规则匹配的参数名；`check()` 提取该参数值做 fnmatch 匹配，也用于构建 "always allow" 会话规则。 |
 | `tips` | `None` | 权限提示模板（如 `写入文件：{path}`、`task_delegator` 的 `委托 {agent_type}`），用工具参数格式化后作为事件 `detail`；缺省时回退工具描述。 |
 | `check_permissions` | `None` | 工具自身安全逻辑检查函数 `(tool_input, ctx) -> PermissionCheckResult`；只处理工具特有安全逻辑（shell 危险命令、file 敏感路径），不做规则匹配。 |
@@ -114,9 +113,9 @@ else:
 7. 发 **`ToolCallCompleted`** 事件（含 `status`、耗时、`result_preview`）。`_result_status` 按结果前缀（`错误：`/`参数验证失败:`/`工具执行出错:`/`权限拒绝：`）判为 `error`，否则 `success`。
 8. **结果分页**（`src/mgr/tools_mgr.py:347`）：`raw_output=True` 或无 `tool_call_id` 或无 `llm` 时直接返回；否则 `_truncate` —— 若结果 `estimate_tokens` 超过 `llm.page_token_budget`，用 `llm.split_page` 切页缓存到 `_result_store`，返回首页并提示可用 `read_tool_result` 读后续页。
 
-### schema 可见性过滤（重要）
+### schema 获取
 
-`PermissionManager` **没有** `get_schemas()` 方法。schema 可见性过滤由 **`ToolsMgr.get_schemas(tool_names, permission_mgr, mode)`**（`src/mgr/tools_mgr.py:109`）实现：当同时传入 `permission_mgr` 与 `mode` 时，对每个工具回调 `permission_mgr.is_tool_visible(tool, mode)` 决定是否纳入 schema。工具按 `_tool_sort_key`（只读优先、非只读次之、无权限元数据最后）排序后返回 OpenAI function-calling 格式。
+`ToolsMgr.get_schemas(tool_names)`（`src/mgr/tools_mgr.py:109`）按 `tool_names` 过滤工具，以 `_tool_sort_key`（只读优先、非只读次之、无权限元数据最后）排序后返回 OpenAI function-calling 格式。所有工具在所有模式下均对 LLM 可见，plan 模式的约束由 `PlanMgr` 注入的提示词承担。
 
 ### 分页翻页
 
@@ -150,10 +149,8 @@ else:
 | `task_delegator` | `description:str`, `agent_type:str`, `prompt:str`, `task_id:str\|None=None` | False | readonly | subagent | 委派任务给子智能体并返回结果。 |
 | `save_memory` | `title:str`, `description:str`, `type:MemoryType`, `body:str` | - | readonly | memory | 保存长期项目记忆（同标题覆盖）。 |
 | `read_memory` | `title:str` | - | readonly | memory | 读取一条记忆的完整内容。 |
-| `enter_plan_mode` | （无参数） | False | readonly | plan | 切换到计划模式并刷新工具可见性。 |
-| `exit_plan_mode` | `file_path:str` | False | readonly（`plan_visible=True`） | plan | 提交计划供用户审核（自动/手动执行或修改意见）。 |
-| `plan_write_file` | `name:str`, `content:str` | False | readonly（`plan_visible=True`） | plan | 全量写入计划文件（按计划名生成路径）。普通 def。 |
-| `plan_edit_file` | `file_path:str`, `start_line:int`, `new_text:str=""`, `end_line:int\|None=None` | False | readonly（`plan_visible=True`） | plan | 按行号增量编辑计划文件。普通 def。 |
+| `enter_plan_mode` | （无参数） | False | readonly | plan | 切换到计划模式。 |
+| `exit_plan_mode` | `file_path:str` | False | readonly | plan | 提交计划供用户审核（自动/手动执行或修改意见）。 |
 | `load_skill` | `name:str` | False | readonly | skill | 将指定技能全文加载进当前上下文。 |
 | `calculator` | `expression:str` | - | readonly | - | AST 安全求值数学表达式：算术运算 + 数学函数（sqrt/log/sin/factorial/comb/mean 等）+ 常量（pi/e/tau）。普通 def。 |
 | `random` | `operation:str`, `low/high:int\|None`, `items:list[str]\|None`, `count:int=1`, `length:int\|None`, `sides:int=6`, `num_dice:int=1` | - | readonly | - | 生成真随机值（int/float/choice/sample/shuffle/uuid/password/token_hex/dice/coin）。普通 def。 |

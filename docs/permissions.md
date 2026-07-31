@@ -6,7 +6,7 @@
 
 ## 权限模式按 agent 独立
 
-可变的权限模式持有在**每个 `Agent` 实例**上（`agent.permission_mode`，以及 plan 模式的 `_pre_plan_mode`）。`PermissionManager` 只保留全局共享的规则字典、`session_allow` 和不可变的 `default_mode`。`check()` / `is_tool_visible()` 都接收调用方 agent 的 `mode` 参数（`permission_mgr.py:446`、`:390`）。
+可变的权限模式持有在**每个 `Agent` 实例**上（`agent.permission_mode`，以及 plan 模式的 `_pre_plan_mode`）。`PermissionManager` 只保留全局共享的规则字典、`session_allow` 和不可变的 `default_mode`。`check()` 接收调用方 agent 的 `mode` 参数。
 
 `default_mode` 的**解析优先级**（`_load_config`，`permission_mgr.py:313-330`）：激活角色 `role.md` 的 `permissionMode` →（未声明）`settings.json` 的 `permissions.defaultMode` →（未声明）内置 `DEFAULT_MODE`。role 值由 `bootstrap.create_app()` 经构造参数 `role_default_mode=role_mgr.manifest.permission_mode` 注入，`_load_config` 在读完 `settings.json` 后最后套用它（存快照于 `_role_default_mode`，不受 `settings.json` 是否有 `permissions` 块影响）。该 `default_mode` 用于：主 agent 初始模式、未声明 `permissionMode` 的子 agent 回退值、`/clear` 重置目标、绑定前状态栏显示值。
 
@@ -122,15 +122,6 @@
 - 建议规则由 `_build_session_rule`（`:687`）智能生成——shell 优先生成前缀规则（如 `git commit:*`），减少后续同类弹窗；复合命令由 `_build_compound_session_rules`（`:719`）为每段生成前缀规则。
 - **持久化只落 `settings.json`**；框架永不写回 `mcp_servers.json`。
 - MCP 工具的 server 名经 `ToolPermission.mcp_server` 透传到 `_mcp_servers`（`:309`），据此提供 `mcp__<server>__*` 的"信任整个 server"选项（`:653-658`）。
-
-## 工具对 LLM 的可见性
-
-`is_tool_visible(tool, mode)`（`permission_mgr.py:390-412`）决定某工具是否出现在发给 LLM 的 schema 中（注意：**过滤发生在 `ToolsMgr.get_schemas(tool_names, permission_mgr, mode)`**，它回调本方法；`PermissionManager` 自身没有 `get_schemas()` 方法）：
-
-- 无权限元数据的外部工具：始终可见。
-- `plan_visible=True` 的工具：**仅** plan 模式可见（优先于 `readonly`）——如 `exit_plan_mode`、`plan_write_file`、`plan_edit_file`。
-- `kind="readonly"`：所有模式可见。
-- 其余非只读工具：非 plan 模式可见，plan 模式隐藏。
 
 ## 其他方法与 reload
 
