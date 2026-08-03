@@ -18,7 +18,7 @@ from src.events.types import (
     PermissionNotice,
     ResponseDelta,
     SubagentLifecycle,
-    PermissionModeChanged,
+    PlanStateChanged,
     ThinkingDelta,
     ToolCallCompleted,
     ToolCallStarted,
@@ -45,7 +45,7 @@ AgentEvent = Union[
     CompactDelta, ToolCallCompleted, ToolCallStarted,
     LLMCallCompleted, LLMCallStarted, LLMRetrying, LLMLengthRetrying, LLMCallFailed,
     ResponseDelta, ThinkingDelta,
-    AgentStateChanged, SubagentLifecycle, PermissionModeChanged,
+    AgentStateChanged, SubagentLifecycle, PlanStateChanged,
 ]
 
 __all__ = [
@@ -77,5 +77,5 @@ __all__ = [
     "FormMenu",
     "FormQuestion",
     "TranscriptView",
-    "PermissionModeChanged",
+    "PlanStateChanged",
 ]

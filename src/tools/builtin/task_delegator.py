@@ -1,7 +1,8 @@
 from __future__ import annotations
 from typing import TYPE_CHECKING
 
-from src.tools.decorator import ToolPermission, tool
+from src.tools import AccessKind, DataFlow, ToolPolicy
+from src.tools.decorator import tool
 from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
@@ -17,7 +18,7 @@ class TaskDelegator(BaseModel):
     )
 
 @tool(model=TaskDelegator, description="委托一个任务给子智能体",
-      permission=ToolPermission(kind="readonly", tips="委托 {agent_type}"), subagent=False,
+      policy=ToolPolicy(AccessKind.INTERNAL, DataFlow.LOCAL, plan_safe=True, detail_template="委托 {agent_type}"), subagent=False,
       feature="subagent", counts_as_work=False)
 async def task_delegator(
     description: str,

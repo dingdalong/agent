@@ -67,33 +67,19 @@
 
 `create_app(workdir_override)` 按固定顺序构造组件（`bootstrap.py:19-92`）。顺序不可随意调整——存在若干硬依赖，下表标注关键先后约束。
 
-| 步骤 | 构造对象 | 源码 | 说明 |
-|---|---|---|---|
-| 1 | `global_dir` | `bootstrap.py:30-31` | `global_data_dir()`（`$AGENT_HOME` 或 `~/.agent/`），并 `mkdir` 确保存在 |
-| 2 | `work_dir` | `bootstrap.py:32` | `workdir(workdir_override)` 解析工作目录 |
-| 3 | `ConfigManager` | `bootstrap.py:34` | 三层配置合并（内置 → 全局 → 项目） |
-| 4 | `RoleMgr` | `bootstrap.py:35` | 发现并激活角色，提供 `manifest` |
-| 5 | `EventBus` | `bootstrap.py:36` | 事件级别取自 `config_mgr.get_config("events")["level"]`（缺省 `"progress"`），经 `EventLevel.from_str` 解析 |
-| 6 | `AgentViewStore` | `bootstrap.py:37` | UI 唯一 session/agent 状态读模型 |
-| 7 | `InlineInterface` | `bootstrap.py:38-41` | 注入 Store 与 `SLASH_COMMANDS`；自身是薄门面 |
-| 8 | `OutputRouter` | `bootstrap.py:42-46` | 注入同一 Store；非 TTY 时 `passthrough=True` |
-| 9 | `ToolsMgr` | `bootstrap.py:47` | 工具注册表 |
-| 10 | `resolve_features` | `bootstrap.py:49` | 依据激活角色 manifest 的 `features` 计算有效 feature 集 |
-| 11 | `MemoryMgr`（门控） | `bootstrap.py:50` | 仅当 `"memory" in feats` 才实例化，否则 `None` |
-| 12 | `PluginMgr` | `bootstrap.py:51` | 插件发现 |
-| 13 | `HooksMgr` | `bootstrap.py:52` | 生命周期钩子，依赖 `plugin_mgr` |
-| 14 | `PlanMgr`（门控） | `bootstrap.py:53` | 仅当 `"plan" in feats` 才实例化，否则 `None` |
-| 15 | `McpMgr` + `await start()` | `bootstrap.py:55-56` | 连接 MCP server 并将其工具注册进 `tools_mgr` |
-| 16 | `PermissionManager` | `bootstrap.py:57-63` | 从 `tools_mgr.list_entries()` 收集工具权限元数据 |
-| 17 | `SessionMgr` | `bootstrap.py:64` | 会话历史持久化与恢复 |
-| 18 | `LLMMgr` + `await load_models()` | `bootstrap.py:67-68` | 严格校验调用配置并并发发现模型；单个 provider 失败可记录错误并使用非空静态模型清单 |
-| 19 | `ensure_default_available()` | `bootstrap.py:71` | 精确校验默认模型，不可用时抛错且不切换 provider |
-| 20 | `AgentDeps` | `bootstrap.py:72-90` | 组装业务依赖容器 |
-| 21 | `AgentApp` | `bootstrap.py:91-95` | 注入同一 Store 与 Router，返回应用实例 |
+| 步骤 | 构造对象 | 说明 |
+|---|---|---|
+| 1 | `global_dir` / `work_dir` | 解析并规范化全局目录与工作目录 |
+| 2 | `ProjectTrustGate` | 在任何项目可执行配置加载前确认工作区指纹 |
+| 3 | `ConfigManager` / `DataGuard` | 按信任结果加载配置，并登记 Provider、环境和 MCP 精确秘密 |
+| 4 | `RoleMgr` / `EventBus` / UI | 激活角色并构造事件与展示层 |
+| 5 | `ToolsMgr` / feature Managers / Hooks | 注册内置工具；项目 Hook 仅在受信任时加载 |
+| 6 | `McpMgr.start()` | 按信任和连接开关启动 server；动态工具强制 `REVIEW + EXTERNAL` |
+| 7 | `SessionMgr` / `LLMMgr` | 构造持久化服务、发现模型并验证 default |
+| 8 | `PermissionManager` | 注入 workdir、JudgeClient、一次性确认回调与 DataGuard |
+| 9 | `AgentDeps` / `AgentApp` | 组装共享依赖并返回应用实例 |
 
-### 为何 `McpMgr.start()` 必须在 `PermissionManager` 之前
-
-`McpMgr.start()`（`bootstrap.py:55-56`）在连接 MCP server 后会把每个 server 的上游工具注册进 `tools_mgr`。`PermissionManager` 构造时（`bootstrap.py:57-63`）通过 `tools=tools_mgr.list_entries()` 一次性收集**所有已注册工具**的权限元数据。若权限层先于 MCP 启动构造，MCP 工具尚未进入 `tools_mgr`，其权限元数据就不会被收录——权限检查将无法识别 MCP 工具。因此二者顺序是硬约束。注释见 `bootstrap.py:54`。
+启动信任必须先于 ConfigManager、Hook 和 MCP；这是防止未信任项目通过环境、模型端点或子进程在确认前执行的硬顺序。PermissionManager 不快照工具元数据，ToolsMgr 每次调用都把当前 ToolEntry 的 policy 与 origin 传给 `authorize()`，因此动态 MCP 工具可在运行时注册和重连。
 
 ### LLM 启动错误链
 
@@ -122,7 +108,7 @@
 | `session_mgr` | `SessionMgr \| None` | 否 | 会话持久化与恢复 |
 | `mcp_mgr` | `McpMgr \| None` | 否 | MCP server 连接管理 |
 | `role_mgr` | `RoleMgr \| None` | 否 | 角色发现与激活，提供 manifest |
-| `permission_mode_controller` | `Any` | 否 | 权限模式 UI 协调器，`_reset_session` 时注入 |
+| `plan_mode_controller` | `Any` | 否 | 入口 Agent 的 Plan 状态与快捷键协调器，`_reset_session` 时注入 |
 | `session_context` | `list[str]` | 否 | 会话级附加上下文（SessionStart hook、resume 摘要注入） |
 | `session_id` | `str` | 否 | 当前会话 ID，`_reset_session` 时生成 |
 | `workdir` | `Path \| None` | 否 | 用户工作目录 |
@@ -172,19 +158,7 @@ ALL_FEATURES = frozenset({"task", "skill", "subagent", "file", "memory", "plan"}
 
 ## 5. `reload()` 协议
 
-有状态的 Manager 实现 `reload()` 方法。`/clear` 重置会话时（`AgentApp._reset_session`），框架通过 `hasattr(mgr, "reload")` 发现并统一调用（`app.py:210-215`）。
-
-`_reset_session` 中实际遍历并 reload 的对象列表（`app.py:210-212`）：
-
-```python
-for attr in ("memory_mgr", "tools_mgr", "permission_mgr",
-             "config_mgr", "plugin_mgr", "hooks_mgr", "plan_mgr",
-             "ui"):
-```
-
-即：`memory_mgr`、`tools_mgr`、`permission_mgr`、`config_mgr`、`plugin_mgr`、`hooks_mgr`、`plan_mgr`、`ui`（其中 `memory_mgr`、`plan_mgr` 可能为 `None`，被 `mgr is not None` 跳过）。UI 的 `reload()` 只清交互态；随后 `AgentViewStore.reset()` 原子清空前台、usage、agent 历史和转录，再登记新主 agent（`app.py:216-229`）。
-
-> 每个 Manager 是否实现 `reload()` 请以其源码为准，见 [managers.md](./managers.md)。文档所述"实现 reload"的对象须与 `_reset_session` 实际调用列表一致，即上述 8 个属性；Store 通过明确的 `reset()` 调用处理。
+有状态的 Manager 可以实现 `reload()`，但 `/clear` 不做无序发现。`AgentApp._reset_session()` 按依赖顺序显式执行：停止 MCP 并注销 MCP 工具 → 更新项目信任与 ConfigManager → 重建 DataGuard 秘密集 → 重载 RoleMgr、PluginMgr、HooksMgr → `LLMMgr.reconfigure()` → 重启 MCP → 清理会话级 Memory/Tools/Plan/UI 状态 → 重建 Agent。该顺序保证旧 provider、端点、项目环境和外部连接不会跨会话存活。
 
 ---
 

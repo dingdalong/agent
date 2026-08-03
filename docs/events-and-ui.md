@@ -53,7 +53,7 @@ LLM 调用使用 `emit_telemetry_safely()`（`src/events/bus.py:36-65`）发布�
 | `PermissionNotice` | `permission_notice` | 决策状态、工具名、detail |
 | `AgentStateChanged` | `agent_state_changed` | Agent ID/类型、前后状态 |
 | `SubagentLifecycle` | `subagent_lifecycle` | 子 Agent UUID/类型、start/end、结束 messages |
-| `PermissionModeChanged` | `permission_mode_changed` | 无，通知 UI 重读当前模式 |
+| `PlanStateChanged` | `plan_state_changed` | `active`，通知 UI 重读入口 Agent 的 Plan 状态 |
 | `MenuRequest` / `ViewRequest` | 各自类型 | prompt、选项/问题或查看目标、future |
 
 ### LLM 边界事件
@@ -147,6 +147,6 @@ TTY 的 `WindowManager` 是窗口状态与键盘焦点的唯一来源。它最�
 
 转录是只读窗口，不占用 `InlineRuntime.interaction()` 的内部 future。`/agents` 创建带 future 的 `TranscriptView`，Esc 移除窗口后才完成该 future；实时查看则创建无 future 的同类窗口。作答窗口位于转录之上时拥有键盘，结束后转录的 UUID 和滚动位置原样恢复。普通输入可以被实时转录临时覆盖，关闭后复用同一个 Buffer、文本和光标；权限、表单和选择期间不能进入 Agent 列表。
 
-`UserInterface.on_event()` 先让 TTY 前端接受 `UiRequest`，成功后立即返回给事件消费者；非 TTY 仍串行读取。这样正在查看转录时，后续权限请求可马上进入 WindowManager，而不会被 `TranscriptView` 阻塞。`InlineRuntime.interaction()` 只排他服务当前作答窗口；下一个作答窗口必须等前一个 runner 清理完共享 UI 状态后才会启动，且对外 future 在清理后才落定。`EventBus.join()` 等待订阅队列处理完成，并通过 delivery revision 覆盖稳定检查前已经开始的投递，但不等待 WindowManager 自有的 dialog runner，因此中断收束会在 join 后额外等待 `ui.wait_interactions_idle()`；UI 停止时先关闭 WindowManager，取消活动、排队和只读请求，再退出 prompt-toolkit。`/clear` 在重载 Managers、清空 Store 和创建新 Agent 前，会同步取消旧 UI 请求并等待所有窗口 runner 清理完成；重置期间到达的 UI 请求同样会被取消，不会跨越 session 边界。
+`UserInterface.on_event()` 先让 TTY 前端接受 `UiRequest`，成功后立即返回给事件消费者；非 TTY 仍串行读取。这样正在查看转录时，后续权限请求可马上进入 WindowManager，而不会被 `TranscriptView` 阻塞。`InlineRuntime.interaction()` 只排他服务当前作答窗口；下一个作答窗口必须等前一个 runner 清理完共享 UI 状态后才会启动，且对外 future 在清理后才落定。`EventBus.join()` 等待订阅队列处理完成，并通过 delivery revision 覆盖稳定检查前已经开始的投递，但不等待 WindowManager 自有的 dialog runner，因此中断收束会在 join 后额外等待 `ui.wait_interactions_idle()`；UI 停止时先关闭 WindowManager，取消活动、排队和只读请求，再退出 prompt-toolkit。`/clear` 的项目信任菜单在 reset gate 前完成；随后重载 Managers、清空 Store 和创建新 Agent 前，会同步取消旧 UI 请求并等待所有窗口 runner 清理完成。重置期间到达的 UI 请求同样会被取消，不会跨越 session 边界。
 
 键盘由栈顶窗口决定：栈顶为作答窗口时，其快捷键优先；栈顶为转录时才由转录处理滚动和 Esc；普通输入内部再按补全、Agent 列表和输入行处理。LLM 与工具活动只更新状态栏遥测，不得改变窗口栈或隐藏活动作答窗口。

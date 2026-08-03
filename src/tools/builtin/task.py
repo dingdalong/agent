@@ -7,7 +7,8 @@ from typing import Any, Dict, List, Literal, TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
-from src.tools.decorator import ToolPermission, tool
+from src.tools import AccessKind, DataFlow, ToolPolicy
+from src.tools.decorator import tool
 
 if TYPE_CHECKING:
     from src.agent import Agent
@@ -26,7 +27,7 @@ class TaskCreateModel(BaseModel):
 @tool(
     model=TaskCreateModel,
     description="创建新任务（状态为 pending）。",
-    permission=ToolPermission(kind="readonly"),
+    policy=ToolPolicy(AccessKind.INTERNAL, DataFlow.LOCAL, plan_safe=True),
     subagent=True,
     feature="task",
 )
@@ -75,7 +76,7 @@ class TaskUpdateModel(BaseModel):
 @tool(
     model=TaskUpdateModel,
     description="更新任务字段。",
-    permission=ToolPermission(kind="readonly"),
+    policy=ToolPolicy(AccessKind.INTERNAL, DataFlow.LOCAL, plan_safe=True),
     subagent=True,
     feature="task",
 )
@@ -135,7 +136,7 @@ class TaskListModel(BaseModel):
 @tool(
     model=TaskListModel,
     description="列出所有任务的摘要，包含 ID、标题、状态、未完成的依赖。",
-    permission=ToolPermission(kind="readonly"),
+    policy=ToolPolicy(AccessKind.INTERNAL, DataFlow.LOCAL, plan_safe=True),
     subagent=True,
     feature="task",
 )
@@ -162,7 +163,7 @@ class TaskGetModel(BaseModel):
 @tool(
     model=TaskGetModel,
     description="查看任务的完整详情，包含描述、依赖关系。",
-    permission=ToolPermission(kind="readonly"),
+    policy=ToolPolicy(AccessKind.INTERNAL, DataFlow.LOCAL, plan_safe=True),
     subagent=True,
     feature="task",
 )

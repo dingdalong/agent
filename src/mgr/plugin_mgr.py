@@ -47,6 +47,7 @@ class PluginMgr:
     workdir: Path
     global_dir: Path | None = None
     role_mgr: RoleMgr | None = None
+    project_trusted: bool = False
     _plugins: list[PluginInfo] = field(init=False, default_factory=list)
 
     def __post_init__(self) -> None:
@@ -62,7 +63,10 @@ class PluginMgr:
                 plugins.extend(self._scan_layer(pd, PluginLayer.ROLE))
         if self.global_dir:
             plugins.extend(self._scan_layer(self.global_dir / "plugins", PluginLayer.GLOBAL))
-        plugins.extend(self._scan_layer(self.workdir / ".agent" / "plugins", PluginLayer.PROJECT))
+        if self.project_trusted:
+            plugins.extend(self._scan_layer(
+                self.workdir / ".agent" / "plugins", PluginLayer.PROJECT
+            ))
         self._plugins = plugins
 
     def _scan_layer(self, plugins_dir: Path, layer: PluginLayer) -> list[PluginInfo]:

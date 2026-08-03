@@ -4,7 +4,8 @@ import operator
 import statistics
 from typing import Callable
 
-from src.tools.decorator import ToolPermission, tool
+from src.tools import AccessKind, DataFlow, ToolPolicy
+from src.tools.decorator import tool
 from pydantic import BaseModel, Field
 
 SAFE_OPERATORS = {
@@ -162,7 +163,7 @@ class CalculatorInput(BaseModel):
                 "（sqrt/cbrt/exp/log/ln/log2/log10、sin/cos/tan 及反三角、degrees/radians、"
                 "floor/ceil/round/abs/trunc、factorial/gcd/lcm/comb/perm、min/max/sum/mean/median/hypot 等），"
                 "以及常量 pi/e/tau/inf。可自由组合，如 'log(100, 10)'、'sin(pi/2)'、'factorial(6)'。",
-    permission=ToolPermission(kind="readonly"),
+    policy=ToolPolicy(AccessKind.INTERNAL, DataFlow.LOCAL, plan_safe=True),
 )
 def calculator(expression: str) -> str:
     """安全求值一段数学表达式。

@@ -180,8 +180,7 @@ def test_onboard_role_declares_pipeline_agents_and_isolated_features() -> None:
     for manifest in manifests.values():
         assert manifest.agent_type == manifest.path.stem
         assert manifest.features == {"file"}
-        assert manifest.permission_mode is not None
-        assert manifest.permission_mode.value == "acceptEdits"
+        assert manifest.start_in_plan_mode is False
         effective_tools = (
             tools_mgr.resolve_subagent_tools(manifest.tools)
             - tools_mgr.excluded_tool_names(resolve_features(manifest.features))

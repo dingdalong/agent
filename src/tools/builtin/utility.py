@@ -15,7 +15,8 @@ from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, Field
 
-from src.tools.decorator import ToolPermission, tool
+from src.tools import AccessKind, DataFlow, ToolPolicy
+from src.tools.decorator import tool
 
 # 星期索引（datetime.weekday() 返回 0=周一）对应的中英文名，避免 strftime 的 locale 依赖。
 _WEEKDAY_CN = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
@@ -58,7 +59,7 @@ class RandomInput(BaseModel):
     name="random",
     description="生成真随机值：随机整数/浮点、从列表随机选取/抽样/洗牌、UUID、密码、"
                 "十六进制令牌、掷骰、抛硬币。LLM 无法自行产生真随机，需要随机结果时用此工具。",
-    permission=ToolPermission(kind="readonly"),
+    policy=ToolPolicy(AccessKind.INTERNAL, DataFlow.LOCAL, plan_safe=True),
 )
 def random_value(
     operation: str,
@@ -165,7 +166,7 @@ def _resolve_tz(timezone_name: Optional[str]) -> timezone | ZoneInfo:
     name="datetime",
     description="当前时间与日期运算：获取现在的时间（带时区/星期/时间戳）、两个日期相差多少、"
                 "日期加减、某天星期几、日期与 Unix 时间戳互转。LLM 不知道当前时间且日期运算易错，需要时用此工具。",
-    permission=ToolPermission(kind="readonly"),
+    policy=ToolPolicy(AccessKind.INTERNAL, DataFlow.LOCAL, plan_safe=True),
 )
 def datetime_tool(
     operation: str,
@@ -248,7 +249,7 @@ class EncodeInput(BaseModel):
     model=EncodeInput,
     description="文本编解码与哈希：base64、hex、URL 编解码，md5/sha1/sha256 哈希。"
                 "这些逐字符的确定性变换 LLM 无法可靠心算，需要时用此工具。",
-    permission=ToolPermission(kind="readonly"),
+    policy=ToolPolicy(AccessKind.INTERNAL, DataFlow.LOCAL, plan_safe=True),
 )
 def encode(operation: str, text: str) -> str:
     """按 operation 对 text 做编解码或哈希。
@@ -298,7 +299,7 @@ class TextStatsInput(BaseModel):
     model=TextStatsInput,
     description="精确文本统计：字符数、字节数、词数、行数、某子串出现次数、字符串反转。"
                 "LLM 因分词数不准这些数量（如'strawberry 有几个 r'），需要精确计数时用此工具。",
-    permission=ToolPermission(kind="readonly"),
+    policy=ToolPolicy(AccessKind.INTERNAL, DataFlow.LOCAL, plan_safe=True),
 )
 def text_stats(operation: str, text: str, substring: Optional[str] = None) -> str:
     """按 operation 精确统计 text。

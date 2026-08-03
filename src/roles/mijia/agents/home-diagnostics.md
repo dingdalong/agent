@@ -5,7 +5,6 @@ description: |
   只读分析，不执行修复操作。诊断结论反馈给主 agent，由主 agent 决定后续动作。
 tools: list_directory, glob, grep, get_file_info, read_file
 model: default
-permissionMode: dontAsk
 memory: project
 ---
 

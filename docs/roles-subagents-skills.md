@@ -2,7 +2,7 @@
 
 本篇讲清框架的三个"可扩展装配单位"：**角色**（顶层组织单位）、**子智能体**（可被主 agent 委派的完整 Agent）、**技能**（按需注入的提示词包）。三者都以 `*.md`（YAML frontmatter + body）定义，共用同一套 frontmatter 解析（`parse_frontmatter` / `extract_manifest`，`src/mgr/role_mgr.py:34-147`）。
 
-相关：feature 门控见 [architecture.md](architecture.md)；权限模式见 [permissions.md](permissions.md)；提示词拼装见 [managers.md](managers.md) 的 `PromptMgr`。
+相关：feature 门控见 [architecture.md](architecture.md)；统一授权和 Plan 见 [permissions.md](permissions.md)；提示词拼装见 [managers.md](managers.md) 的 `PromptMgr`。
 
 ## 角色系统（Roles）
 
@@ -27,7 +27,7 @@
 `role.md` 经 `extract_manifest(..., id_field="agent_type", default_id="main")` 解析为 `AgentManifest`（`role_mgr.py:150-168`）：
 
 - **body** → 成为主 agent 的**核心身份与主控职责提示词**（`PromptMgr._build_core` 的"# 核心身份"段）；仅主 agent 的身份、委派职责与工作流写在这里，不放入共享准则文件。
-- **frontmatter**：`agent_type` 对角色固定视为 `"main"`；`description`、`features`（启用的 feature 集）、`thinking`（默认思考开关）、`reasoning_effort`（默认推理力度）、`model`、`permissionMode` 等字段同子 agent（见下表）。其中 `permissionMode` 额外充当**会话级默认权限模式**（`default_mode` 的最高优先来源，见 [permissions.md](permissions.md)），`reasoning_effort` 充当主 agent 与未声明子 agent 的推理力度基准（见 [llm.md](llm.md)）。
+- **frontmatter**：`agent_type` 对角色固定视为 `"main"`；`description`、`features`、`thinking`、`reasoning_effort`、`model`、`startInPlanMode` 等字段同子 Agent。`startInPlanMode` 只设置初始 `plan_active`，授权策略仍由工具策略和统一授权入口决定。
 
 角色目录内其他资产由 `RoleMgr` 暴露路径（仅在目录/文件存在时返回，否则 `None`）：
 
@@ -45,11 +45,11 @@
 
 ### 内置角色一览
 
-| 角色 | `model` | `permissionMode` | `thinking` / `reasoning_effort` | `memory` | `features` | 子 agent（`agents/`） | 说明 |
+| 角色 | `model` | `startInPlanMode` | `thinking` / `reasoning_effort` | `memory` | `features` | 子 agent（`agents/`） | 说明 |
 |---|---|---|---|---|---|---|---|
-| `coding` | `best` | `plan` | `true` / `max` | `project` | 未声明（全部启用） | coder、debug、doc、review | 通用编程助手（默认角色） |
-| `mijia` | `fast` | `default` | `false` / 未声明（thinking 关闭时不使用或发送） | 未声明（`None`；且 memory feature 关闭） | `[subagent]` | device-control、home-diagnostics、home-status、scene-automation | 米家智能家居管家；仅启用 subagent feature（无 file/memory/plan 等） |
-| `onboard` | `best` | `auto` | `true` / `max` | 未声明（`None`；且 memory feature 关闭） | `[subagent, file, task]` | repository-map、module-analyst、cross-module、dimension-classifier、verifier、manual-writer、manual-reviewer | 证据驱动的项目开发手册分析与发布角色 |
+| `coding` | `best` | `true` | `true` / `max` | `project` | 未声明（全部启用） | coder、debug、doc、review | 通用编程助手（默认角色） |
+| `mijia` | `fast` | `false` | `false` / 未声明 | 未声明 | `[subagent]` | device-control、home-diagnostics、home-status、scene-automation | 米家智能家居管家 |
+| `onboard` | `best` | `false` | `true` / `high` | 未声明 | `[subagent, file, task]` | repository-map、module-analyst、cross-module、dimension-classifier、verifier、manual-writer、manual-reviewer | 证据驱动的项目开发手册分析与发布角色 |
 
 > `coding` 与 `mijia` 都刻意省略 `tools`。`extract_manifest` 将缺失或空值解析为 `None`，即不设静态工具白名单，因此动态注册的 MCP 工具不会受静态白名单限制（仍受 feature 与权限过滤）。`coding` 也刻意省略 `features`；其 `None` 经 `resolve_features()` 解析为全部 feature。`onboard` 则声明固定工具白名单和 `[subagent, file, task]` feature 集，以限制其只执行证据流水线。
 
@@ -104,7 +104,7 @@ onboard 的续跑只适用于同一未发布运行：`cross_module`、四个维�
 | `description` | str | `"没有说明内容"` | 出现在主 agent 的"# 可用子智能体"提示词段，供 LLM 选择 |
 | `tools` | 逗号分隔 str | 空 → `None`（全部工具） | 工具白名单；再经 `resolve_subagent_tools` 注入 `subagent=True`、排除 `subagent=False` |
 | `model` | str | `None`（用 `default`） | 模型别名（`default`/`best`/`fast`）或真实 ID；`inherit` = 继承父 agent 已解析的真实模型 ID |
-| `permissionMode` | str | `None`（回退 `default_mode`） | 该子 agent 固定权限模式，经 `parse_permission_mode` 解析；非法值告警忽略 |
+| `startInPlanMode` | bool | `False` | 独立构造时的初始 Plan 状态；经 `task_delegator` 构造时由父 Agent 当前状态覆盖 |
 | `thinking` | bool | `None`（继承父 agent） | 是否启用思考；仅 bool 有效 |
 | `reasoning_effort` | str | `None`（继承父 agent，主 agent 回退 provider 配置） | 推理力度档位；经 `normalize_reasoning_effort` 规整（小写去空白），合法值 `low`/`medium`/`high`/`xhigh`/`max`，非法值告警忽略 |
 | `memory` | str | `None` | 记忆范围（如 `project`），控制 `MemoryMgr` 注入 |
@@ -123,54 +123,54 @@ onboard 的续跑只适用于同一未发布运行：`cross_module`、四个维�
 5. 解析思考：`enable_thinking is None` → 继承父 agent。
 6. 解析推理力度：`reasoning_effort is None` → 继承父 agent 已解析值。
 7. 解析 feature：`features is None` → 继承父 agent 已解析集。
-8. `Agent.from_manifest(...)` 构造子 agent 实例（`is_subagent=True`）。
+8. 继承 `parent_agent.plan_active`，再由 `Agent.from_manifest(...)` 构造子 agent 实例（`is_subagent=True`）。
 9. 触发 `SubagentStart` hook（若有）→ 发 `SubagentLifecycle(phase="start")` 事件 → `await agent.run(prompt)` → `finally` 发 `phase="end"` 事件 → 触发 `SubagentStop` hook。
 10. `SubagentStop` 若 `blocked` 则用 `block_reason` 覆盖结果；若有 `additional_context` 则追加到结果末尾。
 
-> 子 agent **无 plan 能力**：四个 plan 工具标记 `subagent=False`，被 `resolve_subagent_tools` 强制排除；权限模式在构造时固定，故并发子 agent 互不干扰（见 [permissions.md](permissions.md)）。
+> Plan 工作流工具标记 `subagent=False`，不会进入子 Agent schema；但子 Agent 继承父 Agent 当前 `plan_active`，因此授权层的 Plan 限制仍然生效。
 
 ### 子智能体清单（当前仓库）
 
 **共享（`common/`，所有角色可用）**
 
-| agent_type | tools | model | permissionMode | 用途 |
-|---|---|---|---|---|
-| `explore` | 只读检索 + `web_search`/`web_fetch` | `default` | `dontAsk` | 只读探索代码/架构、联网研究并总结证据 |
-| `general-purpose` | 全部（未声明） | `default` | `default` | 无专用 agent 匹配时的兜底任务执行 |
-| `plan` | 只读检索（无写） | `best` | `dontAsk` | 架构设计与实现方案规划 |
-| `shell` | `shell` | `fast` | `default` | 独立上下文运行命令 / Git 查询 / 测试执行 |
+| agent_type | tools | model | 用途 |
+|---|---|---|---|
+| `explore` | 只读检索 + `web_search`/`web_fetch` | `default` | 只读探索代码/架构、联网研究并总结证据 |
+| `general-purpose` | 全部（未声明） | `default` | 无专用 agent 匹配时的兜底任务执行 |
+| `plan` | 只读检索（无写） | `best` | 架构设计与实现方案规划 |
+| `shell` | `shell` | `fast` | 独立上下文运行命令 / Git 查询 / 测试执行 |
 
 **coding 角色**
 
-| agent_type | tools | model | permissionMode | 用途 |
-|---|---|---|---|---|
-| `coder` | 只读检索 + 写文件三件套 + `shell` | `best` | `default` | 实现功能 / 修 bug / 重构 / 写测试 |
-| `debug` | 只读检索 + `shell` | `best` | `default` | 复现问题、定位根因、给诊断报告 |
-| `doc` | 只读检索 + 写文件三件套 | `default` | `acceptEdits` | 编写/维护文档 |
-| `review` | 只读检索（无写） | `best` | `dontAsk` | 只读代码审查 |
+| agent_type | tools | model | 用途 |
+|---|---|---|---|
+| `coder` | 只读检索 + 写文件三件套 + `shell` | `best` | 实现功能 / 修 bug / 重构 / 写测试 |
+| `debug` | 只读检索 + `shell` | `best` | 复现问题、定位根因、给诊断报告 |
+| `doc` | 只读检索 + 写文件三件套 | `default` | 编写/维护文档 |
+| `review` | 只读检索（无写） | `best` | 只读代码审查 |
 
 **mijia 角色**
 
-| agent_type | tools | model | permissionMode | 用途 |
-|---|---|---|---|---|
-| `device-control` | 只读检索* | `default` | `default` | 执行设备控制并验证状态 |
-| `home-diagnostics` | 只读检索* | `default` | `dontAsk` | 只读诊断家居问题 |
-| `home-status` | 只读检索* | `default` | `dontAsk` | 只读查询设备状态/布局/能力 |
-| `scene-automation` | 只读检索* | `default` | `default` | 创建/编辑/删除/执行场景与自动化 |
+| agent_type | tools | model | 用途 |
+|---|---|---|---|
+| `device-control` | 只读检索* | `default` | 执行设备控制并验证状态 |
+| `home-diagnostics` | 只读检索* | `default` | 只读诊断家居问题 |
+| `home-status` | 只读检索* | `default` | 只读查询设备状态/布局/能力 |
+| `scene-automation` | 只读检索* | `default` | 创建/编辑/删除/执行场景与自动化 |
 
 > \* mijia 各 agent frontmatter 声明的 `tools` 均为内置只读检索工具集；实际的米家设备操作能力来自角色的 `mcp_servers.json` 注入的 MCP 工具（见 [mcp-and-hooks.md](mcp-and-hooks.md)），这些工具不在 frontmatter 白名单内时会经 `resolve_subagent_tools` 的 subagent 注入规则处理。"只读检索"指 `list_directory, glob, grep, get_file_info, read_file`。
 
 **onboard 角色**
 
-| agent_type | tools | model | permissionMode | 用途 |
-|---|---|---|---|---|
-| `repository-map` | 文件检索/报告写入 + `shell` + codebase-memory 索引/架构工具 | `best` | `acceptEdits` | 建立索引、模块地图、生成物边界与分片计划 |
-| `module-analyst` | 文件检索/卡写入 + codebase-memory 查询工具 | `best` | `acceptEdits` | MAP：只读单分片源码+代码图，产出四维度证据卡 |
-| `cross-module` | 文件检索/账本写入 + codebase-memory 查询/调用图工具 | `best` | `acceptEdits` | 跨模块消解：汇总卡的待确认关系有界核对，产出跨模块事实账本 |
-| `dimension-classifier` | 文件检索/报告写入 + `shell` + codebase-memory 查询/调用图工具 | `best` | `acceptEdits` | REDUCE：按主 agent 指派的维度（conventions/runtime-flow/change-patterns/guardrails）读卡+账本做维度内归类，产出该维度证据报告 |
-| `verifier` | 文件检索/侧车写入 + `shell` + codebase-memory 查询/调用图工具 | `best` | `acceptEdits` | 分类核实：对残留桶发现打开有界源码对抗式复核改判，产出核实侧车 |
-| `manual-writer` | 文件读取与编辑 | `best` | `acceptEdits` | 生成、修订并在审核通过后发布手册 |
-| `manual-reviewer` | 文件检索/报告写入 + `shell` + codebase-memory 查询工具 | `best` | `acceptEdits` | 按 `module::symbol` 反查候选规则、技能、快照、残留桶核实闭环和发布安全 |
+| agent_type | tools | model | 用途 |
+|---|---|---|---|
+| `repository-map` | 文件检索/报告写入 + `shell` + codebase-memory 索引/架构工具 | `best` | 建立索引、模块地图、生成物边界与分片计划 |
+| `module-analyst` | 文件检索/卡写入 + codebase-memory 查询工具 | `best` | MAP：只读单分片源码+代码图，产出四维度证据卡 |
+| `cross-module` | 文件检索/账本写入 + codebase-memory 查询/调用图工具 | `best` | 跨模块消解，产出事实账本 |
+| `dimension-classifier` | 文件检索/报告写入 + `shell` + codebase-memory 查询/调用图工具 | `best` | REDUCE：按指派维度归类证据 |
+| `verifier` | 文件检索/侧车写入 + `shell` + codebase-memory 查询/调用图工具 | `best` | 对残留桶发现做源码复核 |
+| `manual-writer` | 文件读取与编辑 | `best` | 生成、修订并发布手册 |
+| `manual-reviewer` | 文件检索/报告写入 + `shell` + codebase-memory 查询工具 | `best` | 反查候选规则并给出发布判定 |
 
 这些子 agent 都显式声明 `features: [file]`，不会继承主 agent 的 `task` 或 `subagent` feature。codebase-memory 的 MCP 工具（`mcp__codebase-memory__*`）`feature=None`、不受 feature 门控，但 `subagent=None` 既不自动注入也不排除，故各 agent 必须在 frontmatter `tools:` 逐一列出所需 MCP 工具名。获准使用 `shell` 的代理只执行只读 Git 查询；所有分析报告、证据卡、跨模块账本与核实侧车的写入路径由角色提示词限制在 `.agent/onboard/`。
 

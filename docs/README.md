@@ -38,19 +38,19 @@ uv run pytest                            # 运行全部测试
 | 文档 | 内容 |
 |---|---|
 | [architecture.md](architecture.md) | 四层架构、`create_app()` 装配顺序、`AgentDeps` 字段、feature 门控总览、`reload()` 协议、路径解析（`paths.py`） |
-| [agent-runtime.md](agent-runtime.md) | `AgentApp` 外层 REPL、`AgentState` 全枚举与边缘状态、`RunContext`、逐个 handler、`Agent.from_manifest`、`PermissionModeController` |
+| [agent-runtime.md](agent-runtime.md) | `AgentApp` 外层 REPL、`AgentState` 全枚举与边缘状态、`RunContext`、逐个 handler、`Agent.from_manifest`、`PlanModeController` |
 | [managers.md](managers.md) | Manager 服务层参考：逐个 Manager 的职责/公共方法/消费配置/reload/feature 门控 |
 | [llm.md](llm.md) | `LLMProvider` 调用模板、统一错误分类与重试、流式协议、模型发现及五个 provider（Anthropic/OpenAI/DeepSeek/Ollama/Moonshot）差异 |
-| [tools.md](tools.md) | `@tool` 装饰器、`ToolEntry`/`ToolPermission`、`subagent`/`feature` 门控、`ToolsMgr.execute` 流水线、内置工具清单 |
+| [tools.md](tools.md) | `@tool` 装饰器、`ToolEntry`/`ToolPolicy`、`subagent`/`feature` 门控、`ToolsMgr.execute` 流水线、内置工具清单 |
 | [roles-subagents-skills.md](roles-subagents-skills.md) | 角色系统（三层发现、`role.md`、`common/`）、子智能体（四层扫描、frontmatter、委派）、技能系统、内置 agent 清单 |
-| [permissions.md](permissions.md) | 6 种权限模式、6 步评估顺序、`PermissionRule` 规则格式、`resolve_ask` 选项、按 agent 独立模式、工具可见性 |
-| [mcp-and-hooks.md](mcp-and-hooks.md) | MCP 三层合并/三种 transport/工具命名/per-server 权限/server 开关；Hooks 8 事件/配置格式/JSON 协议/退出码 |
+| [permissions.md](permissions.md) | 单一授权入口、工具策略、路径分类、Hard Deny、LLM 判官、DataGuard、项目启动信任与 Plan 约束 |
+| [mcp-and-hooks.md](mcp-and-hooks.md) | MCP 三层合并/三种 transport/工具命名/server 开关；Hooks 8 事件/配置格式/JSON 协议/退出码 |
 | [events-and-ui.md](events-and-ui.md) | `EventBus` API、`EventLevel` 门控、事件目录表、`UserInterface`/`InlineInterface`、`OutputRouter` 多 agent 路由、Markdown 流式渲染、斜杠补全 |
 | [configuration-reference.md](configuration-reference.md) | 配置总参考：三层合并规则、`config.yaml`/`settings.json`/`mcp_servers.json` 完整 schema、环境变量、目录布局 |
 
 ## 按主题跳转
 
-- **想改配置**：先看 [configuration-reference.md](configuration-reference.md)（`config.yaml` 逐键）+ [permissions.md](permissions.md)（`settings.json` 权限）+ [mcp-and-hooks.md](mcp-and-hooks.md)（`mcp_servers.json`）。
+- **想改配置**：先看 [configuration-reference.md](configuration-reference.md)（配置 schema）+ [permissions.md](permissions.md)（安全边界）+ [mcp-and-hooks.md](mcp-and-hooks.md)（`mcp_servers.json`）。
 - **想加工具**：[tools.md](tools.md)（`@tool` + 异步/阻塞契约）+ [managers.md](managers.md)（`ToolsMgr`）。
 - **想加角色/子 agent/技能**：[roles-subagents-skills.md](roles-subagents-skills.md)。
 - **想懂运行流程**：[agent-runtime.md](agent-runtime.md)（状态机）+ [architecture.md](architecture.md)（装配）+ [events-and-ui.md](events-and-ui.md)（I/O）。

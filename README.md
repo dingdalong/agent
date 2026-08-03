@@ -8,7 +8,7 @@
 - **Agent 状态机** — 有限状态机驱动 Agent 生命周期，支持子智能体调度与任务委派
 - **内置工具集** — 文件操作、Shell 执行、Web 搜索与抓取、任务管理、计算器等
 - **技能系统** — 通过 SKILL.md 定义可复用工作流，按需加载到上下文中
-- **权限管理** — 6 种权限模式 + 基于规则的权限引擎，支持生命周期 Hooks
+- **权限管理** — 声明式工具策略、代码级高危拦截、LLM 风险判官与一次性人工确认
 - **事件驱动 I/O** — 类型化事件总线解耦 Agent 逻辑与 UI 渲染，支持流式 Markdown 输出
 - **3 层配置** — 内置默认 → 全局 `~/.agent/` → 项目 `.agent/`，逐层覆盖合并
 - **插件系统** — 全局和项目级插件目录，可扩展工具、子智能体、技能
@@ -81,7 +81,7 @@ REQUEST_INPUT → CHECK_COMPACT → [COMPACT →] LLM_CALL → PROCESS_RESPONSE
 2. 全局配置 — `~/.agent/config.yaml`
 3. 项目配置 — `.agent/config.yaml`
 
-权限规则和 Hooks 通过 `settings.json` 配置（同样支持全局和项目两级）。
+MCP 连接开关和 Hooks 通过 `settings.json` 配置；工具授权使用内置声明式策略、代码级安全规则和逐次判官裁决。
 
 环境变量 `{PROVIDER}_API_KEY` 和 `{PROVIDER}_API_URL` 可覆盖对应提供商的配置。
 

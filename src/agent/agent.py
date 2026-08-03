@@ -11,7 +11,7 @@ from src.events.types import (
     CompactDelta,
     LLMCallFailed,
     LLMLengthRetrying,
-    PermissionModeChanged,
+    PlanStateChanged,
     caller_identity,
 )
 from src.agent.states import AgentState, RunContext, RunResult, parse_command
@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from src.interfaces.base import UserInterface
     from src.events.bus import EventBus
     from src.mgr.tools_mgr import ToolsMgr
-    from src.mgr.permission_mgr import PermissionManager, PermissionMode
+    from src.mgr.permission_mgr import PermissionManager
     from src.mgr.config_mgr import ConfigManager
     from src.mgr.memory_mgr import MemoryMgr
     from src.mgr.hooks_mgr import HooksMgr
@@ -124,11 +124,7 @@ def _resolve_memory_scope(manifest_memory: str | None, is_subagent: bool) -> str
 
 @dataclass
 class AgentDeps:
-    """外部依赖（进程级全局对象）。
-
-    /clear 时通过 hasattr(mgr, "reload") 判断并调用，
-    仅在管理器有运行时可变状态需要重置时才实现 reload() 方法。
-    """
+    """由 bootstrap 组装、供 Agent 与显式重载流程共享的进程级依赖。"""
 
     llm_mgr: LLMMgr = None
     ui: UserInterface = None
@@ -144,7 +140,9 @@ class AgentDeps:
     mcp_mgr: McpMgr | None = None
     role_mgr: RoleMgr | None = None
     turn_clock: TurnClock | None = None
-    permission_mode_controller: Any = None
+    plan_mode_controller: Any = None
+    data_guard: Any = None
+    trust_gate: Any = None
     session_context: list[str] = field(default_factory=list)
     session_id: str = ""
     workdir: Path | None = None
@@ -158,8 +156,7 @@ class Agent:
         uuid: 唯一类型标识。
         agent_type: agent类型
         description: 一句话描述
-        permission_mode: 本 agent 的权限模式；构造时传 None 表示回退到 default_mode，
-            __post_init__ 结束后恒为真正的 PermissionMode。
+        plan_active: 本 agent 是否处于 Plan。
     """
 
     uuid: UUID = field(init=False)
@@ -174,8 +171,7 @@ class Agent:
     enable_thinking: bool = field(default=True)
     reasoning_effort: str | None = field(default=None)
     features: set[str] | None = field(default=None)
-    _pre_plan_mode: PermissionMode | None = field(init=False, default=None)
-    permission_mode: PermissionMode | None = field(default=None)
+    plan_active: bool = field(default=False)
     history: list[dict] = field(init=False, default_factory=list)
     _tools_schemas: list[ToolDict] = field(init=False)
     _excluded_tools: set[str] = field(init=False, default_factory=set)
@@ -198,11 +194,6 @@ class Agent:
         self.uuid = uuid.uuid4()
         # 主、子 agent 均以单实例 UUID 关联生命周期、usage 与转录事件，
         # 供 AgentViewStore 汇聚成一致快照。
-        # 未显式指定权限模式时回退到 permission_mgr.default_mode（缺失则全局 DEFAULT_MODE）
-        if self.permission_mode is None:
-            from src.mgr.permission_mgr import DEFAULT_MODE
-            pm = self.deps.permission_mgr
-            self.permission_mode = pm.default_mode if pm is not None else DEFAULT_MODE
         self.llm = self.deps.llm_mgr.get(self.model)
         # 解析本 agent 启用的 feature 集，据此过滤工具、按需创建各可插拔 Manager
         from src.mgr import resolve_features
@@ -219,6 +210,7 @@ class Agent:
             auto_compact_size=int(context_limit * compact_cfg["auto_compact_rate"]),
             keep_recent_user_turns=compact_cfg.get("keep_recent_user_turns", 3),
             recent_messages_token_limit=int(context_limit * compact_cfg.get("keep_recent_messages_token_rate", 0.25)),
+            data_guard=self.deps.data_guard,
         )
         workdir = self.deps.workdir
         # 可插拔 Manager：仅启用对应 feature 时创建，否则为 None（其工具已从 schema 排除）
@@ -237,12 +229,13 @@ class Agent:
             tasks_dir = None
             if not self.is_subagent and self.deps.global_dir and self.deps.session_id:
                 tasks_dir = self.deps.global_dir / "tasks" / self.deps.session_id
-            self._task_mgr = TaskManager(tasks_dir=tasks_dir)
+            self._task_mgr = TaskManager(tasks_dir=tasks_dir, data_guard=self.deps.data_guard)
         else:
             self._task_mgr = None
         self._reminder_mgr = ReminderMgr()
-        if self.deps.permission_mgr is not None:
-            self._reminder_mgr.register(self.deps.permission_mgr)
+        if self.plan_active and self.deps.plan_mgr is not None:
+            self.plan_active = False
+            self.deps.plan_mgr.enter_mode(self, self._reminder_mgr)
         if self._task_mgr is not None:
             self._reminder_mgr.register(self._task_mgr)
         self._handlers = {
@@ -303,7 +296,7 @@ class Agent:
             is_subagent=is_subagent,
             memory=_resolve_memory_scope(manifest.memory, is_subagent),
             model=manifest.model,
-            permission_mode=manifest.permission_mode,
+            plan_active=manifest.start_in_plan_mode,
             enable_thinking=(
                 manifest.enable_thinking
                 if manifest.enable_thinking is not None
@@ -321,31 +314,16 @@ class Agent:
         names = names - self._excluded_tools
         self._tools_schemas = self.deps.tools_mgr.get_schemas(names)
 
-    def set_permission_mode(self, mode) -> bool:
-        """切换本 agent 的权限模式，处理计划模式的特殊进入/退出逻辑。
-
-        统一入口：/mode 命令、Shift+Tab 轮转、prompt_selection 菜单均通过此方法切换。
-        仅主 agent 走此路径；子 agent 模式构造后固定不变。
-
-        Args:
-            mode: 目标权限模式（PermissionMode 实例）。
-
-        Returns:
-            模式是否发生了变化。
-        """
-        from src.mgr.permission_mgr import PLAN_MODE
+    def set_plan_active(self, active: bool) -> bool:
+        """切换 Plan 状态并同步 PlanMgr 提醒生命周期。"""
         plan_mgr = self.deps.plan_mgr
-
-        if mode is PLAN_MODE and plan_mgr is not None:
-            return plan_mgr.enter_mode(self, self._reminder_mgr)
-
-        if self.permission_mode is PLAN_MODE and plan_mgr is not None:
-            plan_mgr.exit_mode(self, self._reminder_mgr)
-
-        if mode is self.permission_mode:
+        if active == self.plan_active:
             return False
-
-        self.permission_mode = mode
+        if active and plan_mgr is not None:
+            return plan_mgr.enter_mode(self, self._reminder_mgr)
+        if not active and plan_mgr is not None:
+            return plan_mgr.exit_mode(self, self._reminder_mgr)
+        self.plan_active = active
         return True
 
     async def run(self, input: str | None = None) -> RunResult:
@@ -362,15 +340,18 @@ class Agent:
             RunResult，包含最终文本、斜杠命令、退出请求和终态 LLM 错误。
         """
         if input is not None:
+            data_guard = getattr(self.deps, "data_guard", None)
+            if data_guard is not None:
+                input = str(data_guard.redact(input))
             ctx = RunContext(
                 messages=self.history,
                 turn_start_messages=list(self.history),
                 round_start_idx=len(self.history),
             )
-            turn_instr = self._reminder_mgr.build_turn_start_instructions(self.permission_mode)
+            turn_instr = self._reminder_mgr.build_turn_start_instructions(self.plan_active)
             if turn_instr:
                 input = f"{turn_instr}\n\n{input}"
-            self.history.append({"role": "user", "content": input})
+            self._append_message(self.history, {"role": "user", "content": input})
             ctx.user_input = input
             result = await self._run_single_turn(ctx, AgentState.CHECK_COMPACT)
             if not ctx.has_tool_calls:
@@ -533,9 +514,6 @@ class Agent:
             if cmd_name == "plan":
                 await self._handle_plan_command()
                 return AgentState.REQUEST_INPUT
-            if cmd_name == "mode":
-                await self._handle_mode_command()
-                return AgentState.REQUEST_INPUT
             if cmd_name == "clear":
                 ctx.command = cmd
                 return AgentState.DONE
@@ -567,25 +545,27 @@ class Agent:
                     str(item) for item in hook_result.additional_context
                 )
 
-        turn_instr = self._reminder_mgr.build_turn_start_instructions(self.permission_mode)
+        turn_instr = self._reminder_mgr.build_turn_start_instructions(self.plan_active)
         if turn_instr:
             user_input = f"{turn_instr}\n\n{user_input}"
 
+        data_guard = getattr(self.deps, "data_guard", None)
+        if data_guard is not None:
+            user_input = str(data_guard.redact(user_input))
         ctx.turn_start_messages = list(self.history)
         ctx.round_start_idx = len(self.history)
-        self.history.append({"role": "user", "content": user_input})
+        self._append_message(self.history, {"role": "user", "content": user_input})
 
         return AgentState.CHECK_COMPACT
 
     async def _handle_plan_command(self) -> None:
         """处理 /plan 命令：进入计划模式。"""
-        from src.mgr.permission_mgr import PLAN_MODE
-        if self.deps.permission_mgr is None:
-            return
-        if not self.set_permission_mode(PLAN_MODE):
+        if not self.set_plan_active(True):
             await self.deps.event_bus.request_output("已在计划模式中。\n")
             return
-        await self.deps.event_bus.emit(PermissionModeChanged(timestamp=time.time(), source=self.agent_type))
+        await self.deps.event_bus.emit(PlanStateChanged(
+            timestamp=time.time(), source=self.agent_type, active=True,
+        ))
         await self.deps.event_bus.request_output("已进入计划模式。\n")
 
     async def _handle_resume_command(self, cmd_args: list[str]) -> None:
@@ -632,21 +612,18 @@ class Agent:
 
         # 替换对话历史和 session_id
         self.history.clear()
-        self.history.extend(result.messages)
+        self._extend_messages(self.history, result.messages)
         self.deps.session_id = result.session_id
 
         # 重建 TaskManager 指向恢复会话的 tasks 目录（仅在启用 task feature 时）
         if self.deps.global_dir and "task" in self.features:
             tasks_dir = self.deps.global_dir / "tasks" / result.session_id
             from src.mgr import TaskManager
-            self._task_mgr = TaskManager(tasks_dir=tasks_dir)
+            self._task_mgr = TaskManager(tasks_dir=tasks_dir, data_guard=self.deps.data_guard)
             self._reminder_mgr = ReminderMgr()
-            if self.deps.permission_mgr is not None:
-                self._reminder_mgr.register(self.deps.permission_mgr)
             self._reminder_mgr.register(self._task_mgr)
 
-        # 恢复权限模式
-        mode_info = await self._restore_permission_mode(result.metadata)
+        plan_info = await self._restore_plan_state(result.metadata)
 
         # 构建并输出恢复摘要
         topic = result.metadata.get("topic", "")
@@ -658,7 +635,7 @@ class Agent:
             task_info = f"，{open_count} 个未完成任务"
 
         await self.deps.event_bus.request_output(
-            f"已恢复会话 {result.session_id[:8]}...（{msg_count} 条消息{task_info}{mode_info}）\n"
+            f"已恢复会话 {result.session_id[:8]}...（{msg_count} 条消息{task_info}{plan_info}）\n"
         )
 
         # 注入 session_context 让 LLM 知道上下文来自恢复
@@ -669,50 +646,21 @@ class Agent:
         )
         self._prompt_mgr.invalidate_cache()
 
-    async def _restore_permission_mode(self, metadata: dict) -> str:
-        """从会话元数据恢复权限模式。
-
-        处理 plan 模式的特殊恢复（先设 pre_plan_mode，再 enter_mode），
-        恢复后刷新工具 schema 和 UI 状态。
+    async def _restore_plan_state(self, metadata: dict) -> str:
+        """从会话元数据恢复 Plan 状态。
 
         Args:
             metadata: 目标会话的元数据字典。
 
         Returns:
-            权限模式描述文本（如 "，权限模式: plan"），无变更时返回空串。
+            Plan 状态描述文本，无变更时返回空串。
         """
-        saved_mode_value = metadata.get("permission_mode", "")
-        if not saved_mode_value or self.deps.permission_mgr is None:
-            return ""
-
-        from src.mgr.permission_mgr import PLAN_MODE, parse_permission_mode, DEFAULT_MODE
-
-        if saved_mode_value == PLAN_MODE.value:
-            pre_plan_value = metadata.get("pre_plan_mode", "")
-            pre_plan = parse_permission_mode(pre_plan_value) if pre_plan_value else None
-            self.permission_mode = pre_plan or DEFAULT_MODE
-            plan_mgr = self.deps.plan_mgr
-            if plan_mgr is not None:
-                plan_mgr.enter_mode(self, self._reminder_mgr)
-            mode_info = "，权限模式: plan"
-        else:
-            mode = parse_permission_mode(saved_mode_value)
-            if mode is not None:
-                self.set_permission_mode(mode)
-                mode_info = f"，权限模式: {mode.value}"
-            else:
-                return ""
-
-        self.refresh_tools_schemas()
-        await self.deps.event_bus.emit(PermissionModeChanged(timestamp=time.time(), source=self.agent_type))
-
-        return mode_info
-
-    async def _handle_mode_command(self) -> None:
-        """处理 /mode 命令：委托给 PermissionModeController。"""
-        controller = self.deps.permission_mode_controller
-        if controller is not None:
-            await controller.prompt_selection()
+        active = metadata.get("plan_active") is True
+        self.set_plan_active(active)
+        await self.deps.event_bus.emit(PlanStateChanged(
+            timestamp=time.time(), source=self.agent_type, active=active,
+        ))
+        return "，Plan: active" if active else ""
 
     async def _on_check_compact(self, ctx: RunContext) -> AgentState:
         """估算完整输入并推进自动 compact 状态。
@@ -821,7 +769,7 @@ class Agent:
             caller_uuid=caller_uuid,
         ))
         result = await self._compact_mgr.compact_history(ctx.messages)
-        ctx.messages[:] = result.messages
+        self._replace_messages(ctx.messages, result.messages)
         ctx.auto_compact_summarized_message_count = result.summarized_message_count
         ctx.auto_compact_has_summary = bool(result.summary.strip())
         if result.transcript_path:
@@ -848,7 +796,7 @@ class Agent:
         Raises:
             LLMCallError: 调用不可继续时交由单轮状态机边界收口。
         """
-        ctx.messages[:] = self.llm.normalize_messages(ctx.messages)
+        self._replace_messages(ctx.messages, self.llm.normalize_messages(ctx.messages))
         ctx.response = await self.llm.chat(
             prompt=ctx.prompt,
             messages=ctx.messages,
@@ -887,7 +835,7 @@ class Agent:
         ctx.pause_turn_continuations = 0
         ctx.length_effort_override = None
         ctx.length_ephemeral_instruction = None
-        ctx.messages.append(response.assistant_message)
+        self._append_message(ctx.messages, response.assistant_message)
 
         if response.tool_calls:
             return AgentState.EXECUTE_TOOLS
@@ -922,9 +870,12 @@ class Agent:
         if not regenerate:
             if is_tool_call:
                 if response.content:
-                    ctx.messages.append({"role": "assistant", "content": response.content})
+                    self._append_message(
+                        ctx.messages, {"role": "assistant", "content": response.content}
+                    )
             else:
-                ctx.messages.append(
+                self._append_message(
+                    ctx.messages,
                     response.assistant_message
                     or {"role": "assistant", "content": response.content or None}
                 )
@@ -966,8 +917,8 @@ class Agent:
                 )
             else:
                 retry_instruction = "输出达到长度上限。请从中断处直接继续，不要回顾、不要重复，必要时可以从半句话接续。"
-            ctx.messages.append({"role": "user", "content": retry_instruction})
-            ctx.messages[:] = self.llm.normalize_messages(ctx.messages)
+            self._append_message(ctx.messages, {"role": "user", "content": retry_instruction})
+            self._replace_messages(ctx.messages, self.llm.normalize_messages(ctx.messages))
             strategy = "continue"
             effort = ctx.length_effort_override or self._base_reasoning_effort()
 
@@ -1079,11 +1030,11 @@ class Agent:
             or pause_message_idx < 0
             or pause_message_idx >= len(ctx.messages)
         ):
-            ctx.messages.append(carrier)
+            self._append_message(ctx.messages, carrier)
         else:
-            ctx.messages[pause_message_idx] = carrier
+            ctx.messages[pause_message_idx] = self._safe_history_value(carrier)
         ctx.pause_turn_continuations += 1
-        ctx.messages[:] = self.llm.normalize_messages(ctx.messages)
+        self._replace_messages(ctx.messages, self.llm.normalize_messages(ctx.messages))
         if ctx.messages and ctx.messages[-1].get("role") == "assistant":
             ctx.pause_turn_message_idx = len(ctx.messages) - 1
         else:
@@ -1143,7 +1094,7 @@ class Agent:
 
         called_tools = [name for _, _, name in results if name is not None]
         for tool_call_id, result_text, _ in results:
-            ctx.messages.append({
+            self._append_message(ctx.messages, {
                 "role": "tool",
                 "tool_call_id": tool_call_id,
                 "content": result_text,
@@ -1165,7 +1116,7 @@ class Agent:
             if stop_hook.blocked:
                 ctx.stop_hook_used = True
                 reason = stop_hook.block_reason or "Stop hook blocked"
-                ctx.messages.append({
+                self._append_message(ctx.messages, {
                     "role": "user",
                     "content": f"<reminder>{reason}</reminder>",
                 })
@@ -1173,8 +1124,8 @@ class Agent:
         return AgentState.DONE
 
     async def _on_post_round(self, ctx: RunContext) -> AgentState:
-        for msg in self._reminder_mgr.collect_post_round_messages(self.permission_mode):
-            ctx.messages.append(msg)
+        for msg in self._reminder_mgr.collect_post_round_messages(self.plan_active):
+            self._append_message(ctx.messages, msg)
 
         if ctx.manual_compact:
             caller_agent_type, caller_uuid = caller_identity(self)
@@ -1188,7 +1139,7 @@ class Agent:
             result = await self._compact_mgr.compact_history(
                 ctx.messages, focus=ctx.compact_focus,
             )
-            ctx.messages[:] = result.messages
+            self._replace_messages(ctx.messages, result.messages)
             if result.transcript_path:
                 await self.deps.event_bus.request_output(f"[transcript saved: {result.transcript_path}]\n")
 
@@ -1225,8 +1176,8 @@ class Agent:
         )
         if response.content:
             ctx.final_text = response.content
-        ctx.messages[:] = summary_messages
-        ctx.messages.append(response.assistant_message)
+        self._replace_messages(ctx.messages, summary_messages)
+        self._append_message(ctx.messages, response.assistant_message)
         return AgentState.DONE
 
     async def _on_context_overflow(self, ctx: RunContext) -> AgentState:
@@ -1269,6 +1220,19 @@ class Agent:
 
     # ---- helpers ----
 
+    def _safe_history_value(self, value: Any) -> Any:
+        data_guard = getattr(getattr(self, "deps", None), "data_guard", None)
+        return data_guard.redact(value) if data_guard is not None else value
+
+    def _append_message(self, messages: list[dict], message: dict) -> None:
+        messages.append(self._safe_history_value(message))
+
+    def _extend_messages(self, messages: list[dict], new_messages: list[dict]) -> None:
+        messages.extend(self._safe_history_value(new_messages))
+
+    def _replace_messages(self, messages: list[dict], new_messages: list[dict]) -> None:
+        messages[:] = self._safe_history_value(new_messages)
+
     def _persist_session(self, user_input: str = "") -> None:
         """持久化当前会话历史和元数据（仅主 agent，子 agent 跳过）。
 
@@ -1286,14 +1250,11 @@ class Agent:
         self.deps.session_mgr.save_history(session_id, self.history)
         if user_input and self.history:
             is_new = self.deps.session_mgr.get_metadata(session_id) is None
-            perm_mode = self.permission_mode.value
-            pre_plan = self._pre_plan_mode.value if self._pre_plan_mode else ""
             self.deps.session_mgr.save_metadata(
                 session_id,
                 is_new=is_new,
                 topic=user_input if is_new else "",
-                permission_mode=perm_mode,
-                pre_plan_mode=pre_plan,
+                plan_active=self.plan_active,
             )
 
     async def _emit_state_changed(self, from_state: AgentState, to_state: AgentState) -> None:

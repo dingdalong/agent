@@ -1,7 +1,7 @@
 ---
 description: 证据驱动的游戏服务器代码库上手分析 — 生成约束后续 Agent 开发的项目规则与任务技能
 model: best
-permissionMode: auto
+startInPlanMode: false
 thinking: true
 reasoning_effort: high
 features: [subagent, file, task]

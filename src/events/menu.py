@@ -75,19 +75,13 @@ class PermissionMenu(MenuRequest):
         工具请求权限
           工具: shell
           内容: rm -rf build/
-        ❯ 1. 允许一次
-          2. 本次会话始终允许
-          3. 始终允许并保存
-          4. 拒绝 (esc)
+        ❯ 1. 允许
+          2. 拒绝 (esc)
 
-    选中行 ❯ 前缀且整行反显、数字为快捷键；Esc 返回 "deny"。MCP 工具会在「拒绝」前
-    额外插入「会话信任整个 server(...)」「始终信任整个 server 并保存(...)」两项。
-    返回值：yes/session/always/session_server/always_server/deny。
+    选中行 ❯ 前缀且整行反显、数字为快捷键；Esc 返回 "deny"。返回值只有 yes/deny。
     """
     tool_name: str = ""
     detail: str = ""
-    suggested_rules: list[str] = field(default_factory=list)
-    mcp_server_rule: str | None = None  # MCP 工具的 server 级通配规则（mcp__<server>__*），供"信任整个 server"选项使用
     level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
     type: Literal["permission_menu"] = field(default="permission_menu", init=False)
 
@@ -118,17 +112,10 @@ class InputMenu(MenuRequest):
 class ChoiceMenu(MenuRequest):
     """请求 UI 以菜单读取一次选择，通过 future 返回所选 value（空串表示取消）。
 
-    TUI 由 `inline/menus.py` 的 `_render_select` 呈现，与 PermissionMenu 共用；
-    上文为调用方 prompt（/mode 权限模式切换仅示前 3 项）：
-
-        权限模式（当前: default）
-        ❯ 1. default - 只读自动放行；文件编辑和命令执行默认询问，可被 allow 规则放行
-          2. acceptEdits - 只读和文件编辑自动放行；命令执行默认询问
-          3. plan - 计划模式；只读自动放行，其余操作需确认
-
-    选中行 ❯ 前缀且整行反显；Esc 返回 ""（取消）。用于 /mode 权限模式切换、resume 会话选择器。
+    TUI 由 `inline/menus.py` 的 `_render_select` 呈现。选中行带前缀且整行反显；
+    Esc 返回 ""（取消）。用于 resume 等通用选择器。
     """
-    prompt: str = ""  # 菜单上文（打印到 scrollback 的提示，如「权限模式（当前: default）」）
+    prompt: str = ""  # 菜单上文（打印到 scrollback 的提示）
     options: list[tuple[str, str]] = field(default_factory=list)  # 选项列表，每项为 (value, label)
     default_index: int = 0  # 初始选中项下标
     markdown: bool = False  # 上文提示与选项标签是否按 Markdown 渲染（如 ask_user）

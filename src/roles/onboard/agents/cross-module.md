@@ -3,7 +3,6 @@ agent_type: cross-module
 description: 汇总全部证据卡的待确认跨模块关系,按点名符号有界核对,产出已核实的跨模块事实账本。
 tools: list_directory, glob, grep, get_file_info, read_file, create_directory, write_file, move_file, mcp__codebase-memory__search_graph, mcp__codebase-memory__query_graph, mcp__codebase-memory__trace_path, mcp__codebase-memory__get_code_snippet, mcp__codebase-memory__search_code
 model: best
-permissionMode: acceptEdits
 features: [file]
 ---
 

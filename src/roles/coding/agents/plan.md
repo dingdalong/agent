@@ -4,7 +4,6 @@ description: |
   软件架构师和规划专家子智能体。探索代码库、分析影响面、设计可直接落地的实现方案，产出含有序任务分解、测试策略（务实混合）和可验证验收标准的计划。当任务涉及多模块修改、架构决策或需要先评估影响再动手时，总控 agent 应委派给它。
 tools: list_directory, glob, grep, get_file_info, read_file
 model: best
-permissionMode: dontAsk
 memory: project
 ---
 

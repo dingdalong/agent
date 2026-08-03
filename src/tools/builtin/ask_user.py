@@ -6,7 +6,8 @@ from pydantic import BaseModel, Field
 
 from src.events.menu import FormQuestion
 from src.events.types import caller_identity
-from src.tools.decorator import ToolPermission, tool
+from src.tools import AccessKind, DataFlow, ToolPolicy
+from src.tools.decorator import tool
 
 if TYPE_CHECKING:
     from src.agent import Agent, AgentDeps
@@ -56,7 +57,7 @@ class AskUser(BaseModel):
           "表单底部有讨论栏，用户的疑问或补充会以「讨论：…」附在返回末尾。"
           "返回逐题配对的「问题 + 回答」；用户取消或漏答的项以哨兵串标注。"
       ),
-      permission=ToolPermission(kind="readonly"), subagent=False, counts_as_work=False)
+      policy=ToolPolicy(AccessKind.INTERNAL, DataFlow.LOCAL, plan_safe=True), subagent=False, counts_as_work=False)
 async def ask_user(questions: list[dict], deps: AgentDeps, agent: Agent) -> str:
     """向用户提出一个或多个问题并返回逐题作答。
 

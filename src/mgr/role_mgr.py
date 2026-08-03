@@ -20,7 +20,6 @@ from src.mgr.paths import builtin_root, common_role_dir
 
 if TYPE_CHECKING:
     from src.mgr.config_mgr import ConfigManager
-    from src.mgr.permission_mgr import PermissionMode
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +74,6 @@ def extract_manifest(
     Returns:
         AgentManifest 实例。
     """
-    from src.mgr.permission_mgr import parse_permission_mode
     from src.llm.base import normalize_reasoning_effort
 
     # 标识
@@ -102,16 +100,10 @@ def extract_manifest(
     if isinstance(raw_model, str) and raw_model.strip():
         model = raw_model.strip()
 
-    # 权限模式
-    permission_mode = None
-    raw_mode = meta.get("permissionMode")
-    if raw_mode is not None:
-        permission_mode = parse_permission_mode(str(raw_mode))
-        if permission_mode is None:
-            logger.warning(
-                "%s 的 permissionMode 非法：%r，已忽略",
-                path, raw_mode,
-            )
+    start_in_plan_mode = meta.get("startInPlanMode", False)
+    if not isinstance(start_in_plan_mode, bool):
+        logger.warning("%s 的 startInPlanMode 必须是 bool，已使用 false", path)
+        start_in_plan_mode = False
 
     # 思考模式：仅 bool 有效，非 bool 静默忽略
     enable_thinking: bool | None = None
@@ -152,7 +144,7 @@ def extract_manifest(
         prompt=prompt.strip() or None,
         tools=tools,
         model=model,
-        permission_mode=permission_mode,
+        start_in_plan_mode=start_in_plan_mode,
         enable_thinking=enable_thinking,
         reasoning_effort=reasoning_effort,
         memory=memory,
@@ -176,7 +168,7 @@ class AgentManifest:
     tools: set[str] | None = None
     memory: str | None = None
     model: str | None = None
-    permission_mode: PermissionMode | None = None
+    start_in_plan_mode: bool = False
     enable_thinking: bool | None = None
     reasoning_effort: str | None = None
     features: set[str] | None = None
@@ -204,6 +196,11 @@ class RoleMgr:
         self._discover()
         self._resolve()
 
+    def reload(self) -> None:
+        self._all_roles.clear()
+        self._discover()
+        self._resolve()
+
     # —— 发现 ————————————————————————————————————————————————————————
 
     def _discover(self) -> None:
@@ -214,7 +211,8 @@ class RoleMgr:
         scan_dirs: list[Path] = [builtin_root() / "roles"]
         if self.global_dir:
             scan_dirs.append(self.global_dir / "roles")
-        scan_dirs.append(self.workdir / ".agent" / "roles")
+        if self.config_mgr.project_trusted:
+            scan_dirs.append(self.workdir / ".agent" / "roles")
 
         for directory in scan_dirs:
             if not directory.exists():

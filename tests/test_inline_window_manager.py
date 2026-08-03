@@ -129,7 +129,7 @@ def _build_reset_app(
         plan_mgr=None,
         role_mgr=None,
         event_bus=event_bus,
-        permission_mode_controller=None,
+        plan_mode_controller=None,
     )
     app = AgentApp(
         deps=deps,
@@ -1063,7 +1063,7 @@ def test_session_reset_drains_ui_before_reloading_managers() -> None:
             plan_mgr=None,
             role_mgr=None,
             event_bus=None,
-            permission_mode_controller=None,
+            plan_mode_controller=None,
         )
         app = AgentApp(deps=deps, agent_view_store=store, output_router=object())
         new_agent = SimpleNamespace(uuid="new-agent", agent_type="main")
@@ -1156,7 +1156,7 @@ def test_session_reset_rejects_ui_request_arriving_during_cleanup() -> None:
             plan_mgr=None,
             role_mgr=None,
             event_bus=None,
-            permission_mode_controller=None,
+            plan_mode_controller=None,
         )
         app = AgentApp(deps=deps, agent_view_store=store, output_router=object())
         new_agent = SimpleNamespace(uuid="new-agent", agent_type="main")

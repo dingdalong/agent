@@ -4,11 +4,14 @@ import asyncio
 import json
 import math
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from src.llm.base import LLMProvider
 from src.mgr.paths import project_data_dir
+from src.mgr.secure_io import atomic_write_text
 
 
 @dataclass
@@ -216,6 +219,7 @@ class CompactMgr:
     auto_compact_size: int = 0
     keep_recent_user_turns: int = 3
     recent_messages_token_limit: int = 0
+    data_guard: Any = field(default=None, repr=False)
     recent_files: list[str] = field(init=False, default_factory=list)
     has_compacted: bool = False
 
@@ -269,17 +273,11 @@ class CompactMgr:
             已创建对话记录文件的绝对路径。
         """
         transcript_dir = project_data_dir(self.workdir) / "transcripts"
-        transcript_dir.mkdir(parents=True, exist_ok=True)
-        timestamp = time.time_ns()
-        while True:
-            path = transcript_dir / f"transcript_{timestamp}.jsonl"
-            try:
-                with path.open("x", encoding="utf-8") as handle:
-                    for message in messages:
-                        handle.write(_serialize_json(message) + "\n")
-                return path
-            except FileExistsError:
-                timestamp += 1
+        path = transcript_dir / f"transcript_{time.time_ns()}_{uuid.uuid4().hex}.jsonl"
+        safe_messages = self.data_guard.redact(messages) if self.data_guard is not None else messages
+        content = "".join(_serialize_json(message) + "\n" for message in safe_messages)
+        atomic_write_text(path, content)
+        return path
 
     async def write_transcript(self, messages: list[dict]) -> Path:
         """将对话历史写入对话记录文件。
@@ -549,6 +547,11 @@ class CompactMgr:
         preserved_messages = preserved_messages or []
         messages_to_summarize = messages_to_summarize or []
         recent_messages = recent_messages or []
+        if self.data_guard is not None:
+            preserved_messages = self.data_guard.redact(preserved_messages)
+            messages_to_summarize = self.data_guard.redact(messages_to_summarize)
+            recent_messages = self.data_guard.redact(recent_messages)
+            focus = str(self.data_guard.redact(focus)) if focus is not None else None
         if not messages_to_summarize:
             return ""
 
@@ -681,6 +684,9 @@ class CompactMgr:
         Returns:
             包含压缩后消息、对话记录路径、尝试摘要的消息数和摘要结果的对象。
         """
+        if self.data_guard is not None:
+            messages = self.data_guard.redact(messages)
+            focus = str(self.data_guard.redact(focus)) if focus is not None else None
         transcript_path = await self.write_transcript(messages)
         partition = await asyncio.to_thread(
             self.split_history_for_compaction,

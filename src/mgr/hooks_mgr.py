@@ -7,7 +7,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import Any, Mapping, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from src.mgr.plugin_mgr import PluginMgr
@@ -65,6 +65,9 @@ class HooksMgr:
         workdir: str | Path,
         global_dir: Path | None = None,
         plugin_mgr: PluginMgr | None = None,
+        data_guard: Any = None,
+        base_environment: Mapping[str, Any] | None = None,
+        project_trusted: bool = False,
     ):
         """初始化 hook 管理器 — 两层扫描：全局 → 项目，hooks 全部追加。
 
@@ -76,6 +79,11 @@ class HooksMgr:
         self.workdir = Path(workdir)
         self.global_dir = global_dir
         self.plugin_mgr = plugin_mgr
+        self.data_guard = data_guard
+        self.base_environment = dict(
+            os.environ if base_environment is None else base_environment
+        )
+        self.project_trusted = project_trusted
         self.project_root = self.workdir
         self._hooks = self._load_hooks()
 
@@ -97,6 +105,14 @@ class HooksMgr:
         from src.mgr.plugin_mgr import PluginLayer
 
         hooks: list[HookEntry] = []
+        if self.plugin_mgr is not None:
+            for p in self.plugin_mgr.plugins(layer=PluginLayer.ROLE):
+                if not self.project_trusted and p.root.is_relative_to(self.workdir):
+                    continue
+                hooks.extend(self._load_hook_file(
+                    p.root / "hooks" / "hooks.json",
+                    plugin_root=p.root,
+                ))
         # 全局层
         if self.global_dir:
             if self.plugin_mgr is not None:
@@ -107,13 +123,14 @@ class HooksMgr:
                     ))
             hooks.extend(self._load_hook_file(self.global_dir / "settings.json"))
         # 项目层
-        if self.plugin_mgr is not None:
+        if self.project_trusted and self.plugin_mgr is not None:
             for p in self.plugin_mgr.plugins(layer=PluginLayer.PROJECT):
                 hooks.extend(self._load_hook_file(
                     p.root / "hooks" / "hooks.json",
                     plugin_root=p.root,
                 ))
-        hooks.extend(self._load_hook_file(self.workdir / ".agent" / "settings.json"))
+        if self.project_trusted:
+            hooks.extend(self._load_hook_file(self.workdir / ".agent" / "settings.json"))
         return hooks
 
     def _load_hook_file(self, path: Path, *, plugin_root: Path | None = None) -> list[HookEntry]:
@@ -196,6 +213,27 @@ class HooksMgr:
             result.merge(hook_result)
             if hook_result.updated_input is not None:
                 payload = {**payload, "tool_input": hook_result.updated_input}
+        return self._sanitize_result(result, keep_updated_input=pre_tool)
+
+    def _sanitize_result(
+        self, result: HookRunResult, *, keep_updated_input: bool
+    ) -> HookRunResult:
+        if self.data_guard is None:
+            return result
+        result.additional_context = [
+            str(self.data_guard.redact(item)) for item in result.additional_context
+        ]
+        result.permission_decisions = [
+            (decision, str(self.data_guard.redact(reason)))
+            for decision, reason in result.permission_decisions
+        ]
+        result.block_reason = (
+            str(self.data_guard.redact(result.block_reason))
+            if result.block_reason is not None else None
+        )
+        result.errors = [str(self.data_guard.redact(item)) for item in result.errors]
+        if result.updated_input is not None and not keep_updated_input:
+            result.updated_input = self.data_guard.redact(result.updated_input)
         return result
 
     def _matching_hooks(self, event: str, value: str | None = None) -> list[HookEntry]:
@@ -231,11 +269,16 @@ class HooksMgr:
         *,
         pre_tool: bool,
     ) -> HookRunResult:
-        env = os.environ.copy()
+        extra_env: dict[str, str] = {}
         if hook.plugin_root is not None:
             root = str(hook.plugin_root)
-            env["CLAUDE_PLUGIN_ROOT"] = root
-            env["AGENT_PLUGIN_ROOT"] = root
+            extra_env["CLAUDE_PLUGIN_ROOT"] = root
+            extra_env["AGENT_PLUGIN_ROOT"] = root
+        env = (
+            self.data_guard.safe_environment(self.base_environment, extra_env)
+            if self.data_guard is not None
+            else {**self.base_environment, **extra_env}
+        )
 
         proc: asyncio.subprocess.Process | None = None
         try:

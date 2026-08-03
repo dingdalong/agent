@@ -5,7 +5,6 @@ description: |
   自动化是基于条件（时间、传感器、设备状态）的自动触发规则。
 tools: list_directory, glob, grep, get_file_info, read_file
 model: default
-permissionMode: default
 memory: project
 ---
 

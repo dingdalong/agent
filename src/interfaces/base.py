@@ -19,7 +19,7 @@ from src.events.types import (
     OutputRequested,
     PermissionNotice,
     ResponseDelta,
-    PermissionModeChanged,
+    PlanStateChanged,
     ThinkingDelta,
     ToolCallCompleted,
     ToolCallStarted,
@@ -48,7 +48,7 @@ class UserInterface(ABC):
             None.
         """
         self._request_interrupt: Callable[[], None] | None = None
-        self._permission_mode_provider: Callable[[], str] | None = None
+        self._plan_state_provider: Callable[[], bool] | None = None
         self._active_user_request: UiRequest | None = None
         self._session_reset_in_progress = False
 
@@ -129,31 +129,31 @@ class UserInterface(ABC):
         """
         return False
 
-    def set_permission_mode_provider(self, provider: Callable[[], str] | None) -> None:
-        """设置 UI 查询权限模式时使用的明确数据源。
+    def set_plan_state_provider(self, provider: Callable[[], bool] | None) -> None:
+        """设置 UI 查询 Plan 状态时使用的数据源。
 
         Args:
-            provider: 返回当前入口主 agent 权限模式的函数，None 表示移除。
+            provider: 返回当前入口主 agent Plan 状态的函数，None 表示移除。
 
         Returns:
             None.
         """
 
-        self._permission_mode_provider = provider
+        self._plan_state_provider = provider
 
-    def get_permission_mode(self) -> str:
-        """获取当前入口主 agent 的权限模式。
+    def get_plan_state(self) -> bool:
+        """获取当前入口主 agent 的 Plan 状态。
 
         Returns:
-            当前权限模式；未装配 provider 时返回 ``default``。
+            未装配 provider 时返回 False。
         """
 
-        if self._permission_mode_provider is None:
-            return "default"
-        return self._permission_mode_provider()
+        if self._plan_state_provider is None:
+            return False
+        return self._plan_state_provider()
 
-    def on_permission_mode_changed(self) -> None:
-        """权限模式变化通知。固定状态栏 UI 可在这里触发刷新。
+    def on_plan_state_changed(self) -> None:
+        """Plan 状态变化通知。固定状态栏 UI 可在这里触发刷新。
 
         Returns:
             None.
@@ -161,8 +161,8 @@ class UserInterface(ABC):
 
         pass
 
-    def set_permission_mode_toggle_handler(self, handler: Callable[[], None] | None) -> None:
-        """设置输入期间的权限模式快捷键处理器。
+    def set_plan_toggle_handler(self, handler: Callable[[], None] | None) -> None:
+        """设置输入期间的 Plan 切换快捷键处理器。
 
         Args:
             handler: 模式轮转回调，None 表示禁用。
@@ -204,16 +204,12 @@ class UserInterface(ABC):
         self,
         tool_name: str,
         detail: str,
-        suggested_rules: list[str] | None = None,
-        mcp_server_rule: str | None = None,
     ) -> str:
         """读取权限确认结果。
 
         Args:
             tool_name: 工具名。
             detail: 权限请求详情。
-            suggested_rules: 建议的 allow 规则列表，供 UI 展示。
-            mcp_server_rule: MCP 工具的 server 级通配规则（mcp__<server>__*）；非空时提供"信任整个 server"选项。
         """
         ...
 
@@ -345,12 +341,10 @@ class UserInterface(ABC):
             case PermissionMenu(
                 tool_name=tool_name,
                 detail=detail,
-                suggested_rules=suggested_rules,
-                mcp_server_rule=mcp_server_rule,
             ):
                 await self._emit_caller_banner(request.caller_agent_type, request.caller_uuid)
                 return await self._read_nonempty_answer(
-                    lambda: self._read_permission(tool_name, detail, suggested_rules, mcp_server_rule),
+                    lambda: self._read_permission(tool_name, detail),
                 )
             case _:
                 raise TypeError(f"unsupported answer request: {type(request)!r}")
@@ -471,8 +465,8 @@ class UserInterface(ABC):
                 await self.on_response_delta(event, content)
             case ThinkingDelta(content=content):
                 await self.on_thinking_delta(event, content)
-            case PermissionModeChanged():
-                self.on_permission_mode_changed()
+            case PlanStateChanged():
+                self.on_plan_state_changed()
             case _:
                 await self.on_unhandled_event(event)
 

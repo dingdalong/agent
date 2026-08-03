@@ -235,7 +235,7 @@ class InterruptRequested(Event):
 @dataclass
 class PermissionNotice(Event):
     """工具权限状态通知，供 UI 自行组织展示。"""
-    status: Literal["allow", "deny", "auto_allow"] = "allow"
+    status: Literal["allow", "deny"] = "allow"
     tool_name: str = ""
     detail: str = ""
     level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
@@ -273,11 +273,12 @@ class SubagentLifecycle(Event):
 
 
 @dataclass
-class PermissionModeChanged(Event):
-    """权限模式已变更 — 通知 UI 重读明确的 permission-mode provider 并重绘。
+class PlanStateChanged(Event):
+    """Plan 状态已变更，通知 UI 重读 provider 并重绘。
 
     无 payload：UI 以 pull 模型读取最新权限模式，本事件仅作重绘信号。
     级别为 PROGRESS：避免被级别门控丢弃，保证状态栏即时刷新。
     """
+    active: bool = False
     level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
-    type: Literal["permission_mode_changed"] = field(default="permission_mode_changed", init=False)
+    type: Literal["plan_state_changed"] = field(default="plan_state_changed", init=False)

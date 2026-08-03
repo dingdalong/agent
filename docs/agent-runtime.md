@@ -8,7 +8,7 @@
 
 `_consume_events()`（`app.py:121-133`）内联处理 `InterruptRequested`，其余事件统一交 `OutputRouter.dispatch()`，确保 Store 先记录再决定可见性。`_run_agent_turn()`（`app.py:135-156`）把 `agent.run()` 包成任务，取消或键盘中断时调用 `_handle_interrupted_turn()` 收束任务与输入。
 
-`_reset_session()`（`app.py:183-233`）先进入 UI reset gate，同步取消活跃、排队和只读请求，并等待窗口 runner 的 done callback 完成；随后进入 EventBus 的 `UiRequest` 拒绝 gate，并以 `join()` 等待 reset 前已投递或正在消费的事件完成，且经过一个没有新 delivery 的事件循环稳定检查，才开始修改共享会话状态。之后依次生成 `session_id`，对固定 Manager/UI 列表调用可用的 `reload()`，重置 `AgentViewStore` 和会话上下文，安装 `PermissionModeController`，从激活角色 manifest 构造并登记新主 Agent，安装权限快捷键，运行 `SessionStart` hook。退出 gate 前的 `finally` 再次 `join()`，以相同边界收束 reset 期间已经开始 delivery 的普通事件；尚未开始 emit、在稳定检查返回后才运行的未来 producer 不属于此次 drain。reset 期间新发布的 `UiRequest` 在入队前直接取消。UI 对请求在任何流收尾 await 前检查 gate，并在收尾后复检，因此 reset 前已经进入流收尾的在途请求也会在共享状态变更前被取消。
+`_reset_session()` 处理 `/clear` 时先在常驻 UI 中通过 EventBus 菜单重新检查项目指纹；Esc、取消、菜单失败或默认选项都进入受限模式。确认结束后进入 UI reset gate，取消活跃、排队和只读请求并等待窗口 runner 清理；随后拒绝新的 `UiRequest`，用 `EventBus.join()` 收束已投递事件，再更新信任状态并重载配置、Hook 和 MCP，生成 `session_id`，重置 `AgentViewStore` 与会话上下文，安装 `PlanModeController`，从激活角色 manifest 构造新主 Agent并运行 `SessionStart` Hook。
 
 ## 2. 状态枚举与流转
 
@@ -75,7 +75,7 @@ LLM_CALL → PROCESS_RESPONSE ──length────→ LENGTH_RETRY ──可
 | 交互终态 | `user_input`、`command`、`exit_requested`、`stop_hook_used` |
 | LLM 终态 | `llm_error: LLMErrorInfo | None` |
 
-`RunResult`（`src/agent/states.py:123-141`）返回 `final_text`、`command`、`exit_requested`、`user_input` 和 `llm_error`。调用方无需从错误文本反向推断类别。`/plan`、`/mode`、`/resume` 在 Agent 内处理；`/clear` 与 `/agents` 通过 `command` 交给应用层。
+`RunResult` 返回 `final_text`、`command`、`exit_requested`、`user_input` 和 `llm_error`。调用方无需从错误文本反向推断类别。`/plan`、`/resume` 在 Agent 内处理；`/clear` 与 `/agents` 通过 `command` 交给应用层。
 
 ## 4. 单点 LLM 错误收口
 
@@ -111,7 +111,7 @@ handler 映射在 `Agent.__post_init__` 建立（`src/agent/agent.py:236-250`）
 
 ### 输入与命令
 
-`_on_request_input()`（`agent.py:490-567`）读取输入；处理 `exit` / `quit`；分派 `/plan`、`/mode`、`/clear`、`/agents`、`/resume`；运行 `UserPromptSubmit` hook；注入 turn-start reminder；最后保存 `turn_start_messages`、记录兼容下标并追加 user 消息。
+`_on_request_input()` 读取输入；处理 `exit` / `quit`；分派 `/plan`、`/clear`、`/agents`、`/resume`；运行 `UserPromptSubmit` Hook；注入 turn-start reminder；最后保存 `turn_start_messages` 并追加 user 消息。
 
 ### 压缩检查
 
@@ -168,9 +168,9 @@ handler 映射在 `Agent.__post_init__` 建立（`src/agent/agent.py:236-250`）
 
 ## 8. 主 Agent 与子 Agent
 
-`Agent.from_manifest()`（`src/agent/agent.py:252-303`）映射 manifest 的身份、提示词、工具、记忆、模型、权限、思考与 feature。主 Agent 未声明 memory 时默认 `project`，子 Agent 默认不加载；`**overrides` 供委派时注入已解析设置。
+`Agent.from_manifest()` 映射 manifest 的身份、提示词、工具、记忆、模型、初始 Plan、思考与 feature。主 Agent 未声明 memory 时默认 `project`，子 Agent 默认不加载；`**overrides` 供委派时注入父 Agent 当前 Plan 等已解析设置。
 
-`Agent.__post_init__()`（`agent.py:182-250`）解析权限模式与模型，解析 feature、过滤工具，创建带调用方身份的 `CompactMgr`，再按 feature 创建 `FileMgr`、`SkillMgr`、`SubAgentMgr`、`TaskManager`，并构造 `PromptMgr`、`ReminderMgr` 与 handler 表。
+`Agent.__post_init__()` 解析模型和 feature、过滤工具，创建带调用方身份的 `CompactMgr`，再按 feature 创建 `FileMgr`、`SkillMgr`、`SubAgentMgr`、`TaskManager`，并构造 `PromptMgr`、`ReminderMgr` 与 handler 表。
 
 `Agent.run()` 有两种模式（`agent.py:342-379`）：
 
@@ -179,6 +179,6 @@ handler 映射在 `Agent.__post_init__` 建立（`src/agent/agent.py:236-250`）
 
 `SubAgentMgr.task_delegator()` 检查 `run_result.llm_error`；子 agent 以 LLM 终态失败返回时，关联 task 回滚为无 owner 的 `pending`，与异常/取消路径一致，最终错误文本仍返回父 Agent（`src/mgr/subagent_mgr.py:197-205`）。生命周期 end 事件照常携当时的真实 history，便于 `/agents` 诊断。
 
-## 9. 权限模式协调
+## 9. Plan 状态协调
 
-`PermissionModeController` 只作用于入口主 Agent。`prompt_selection()` 驱动 `/mode` 菜单，`cycle_mode()` 驱动 Shift+Tab，变化后统一刷新工具 schema 和 UI（`src/app/permission_mode_controller.py:59-85,107-132`）。子 agent 权限模式在构造时确定，生命周期内不被主 Agent 的切换影响。
+`PlanModeController` 只作用于入口主 Agent。Shift+Tab 调用 `toggle()`，直接翻转 `agent.plan_active`、刷新 UI 并发布 `PlanStateChanged`。切换不重建工具 schema，退出 Plan 也不清除活动计划路径。子 Agent 构造时继承父 Agent 当前 Plan 状态；调用时安全边界由 `PermissionManager.authorize()` 独立执行。

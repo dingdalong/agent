@@ -277,7 +277,7 @@ def _runtime_agent(
     agent.llm = llm
     agent._tools_schemas = []
     agent.enable_thinking = True
-    agent.permission_mode = None
+    agent.plan_active = False
     agent.is_subagent = False
     agent._pending_input = ""
     agent._prompt_mgr = StaticPromptMgr()

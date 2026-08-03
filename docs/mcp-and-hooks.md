@@ -13,7 +13,7 @@ MCP server 连接配置写在 `mcp_servers.json`，格式为 `{"mcpServers": {"<
 | 角色 | `role_mgr.mcp_servers_path()` | 激活角色目录下的 `mcp_servers.json` |
 | 全局 + 项目 | `config_mgr.load_mcp_servers()` | `~/.agent/mcp_servers.json` → `<项目>/.agent/mcp_servers.json`（project 覆盖 global） |
 
-合并后经 `_apply_server_policy()` 过滤（见下），再抽取各 server 的 `permissions` 块。若没有任何 server 或未安装 `mcp` 包（`__import__("mcp")` 失败），整体跳过、不影响主流程。
+合并后经 `_apply_server_policy()` 过滤（见下）。若没有任何 server 或未安装 `mcp` 包，整体跳过且不影响主流程。项目层和项目角色层 server 只有通过 `ProjectTrustGate` 才会加载。
 
 ### 连接模型
 
@@ -25,7 +25,7 @@ MCP server 连接配置写在 `mcp_servers.json`，格式为 `{"mcpServers": {"<
 
 | transport | 别名 | 必需字段 | 可选字段 | 说明 |
 |---|---|---|---|---|
-| `stdio` | — | `command` | `args`、`env` | 启动子进程；`env` 叠加在 `get_default_environment()`（含 PATH）之上；子进程 stderr → DEVNULL |
+| `stdio` | — | `command` | `args`、`env` | 启动子进程；使用 DataGuard 安全环境并叠加可信配置显式 env；子进程 stderr → DEVNULL |
 | `streamable-http` | `http`、`streamable_http` | `url` | `headers` | 经 `httpx.AsyncClient` 连接 streamable HTTP server |
 | `sse` | — | `url` | `headers` | Server-Sent Events |
 
@@ -39,8 +39,7 @@ MCP server 连接配置写在 `mcp_servers.json`，格式为 `{"mcpServers": {"<
 
 - **工具名** = `_safe_tool_name("mcp__<server>__<tool>")`：非 `[A-Za-z0-9_-]` 字符替换为 `_`，截断到 `_MAX_TOOL_NAME = 64`（对齐 Anthropic 工具名约束）。
 - **参数模型** = `_PassThroughArgs`（`extra="allow"`，原样透传全部入参，不做字段级校验）；`parameters_schema` 用上游 `inputSchema`。
-- **只读判定**：上游 `annotations.readOnlyHint` 为真 → `kind="readonly"`（全模式可见、按只读自动放行）；否则 `kind=None`（默认询问、plan 模式隐藏）。
-- `permission.mcp_server = server`，供权限系统提供"信任整个 server"选项（见 [permissions.md](permissions.md)）。
+- **授权策略**：无条件 `REVIEW + EXTERNAL`，`origin=ToolOrigin("mcp", server)`；上游 annotation（含 `readOnlyHint`）不能提升权限。
 - 结果经 `_format_result()`（`mcp_mgr.py:70-94`）拼接文本块；`isError` 为真时加 `错误：` 前缀以命中 ToolsMgr 的错误判定。
 
 ### server 级开关（`settings.json` 的 `mcp` 段）
@@ -52,15 +51,7 @@ MCP server 连接配置写在 `mcp_servers.json`，格式为 `{"mcpServers": {"<
 | `mcp.enabledServers` | 非空时作**白名单**，只连其中的 server |
 | `mcp.disabledServers` | 始终剔除（优先于白名单） |
 
-这是**连接前的硬开关**：被禁用的 server 不连接、其工具不注册、不进 LLM schema。与权限 `deny` 规则正交——`deny` 仍连接、仅在调用时拒绝。
-
-### per-server `permissions` 块（最低优先级权限层）
-
-每个 server 配置可带一个**只读**的 `permissions` 块（`{"allow": [...], "deny": [...], "ask": [...]}`），就近声明该 server 的权限。`start()` 抽取生效 server 的该块存入 `_server_permissions`，经 `server_permissions()`（`mcp_mgr.py:207-213`）供 `PermissionManager` 拉取，作为**最低优先级层**参与评估（第 4.7 步，见 [permissions.md](permissions.md)）。
-
-- 条目是**相对该 server 的上游工具名通配**（如 `get_*`、`create_issue`、`*`）；加载时展开为 `mcp__<server>__<entry>` 规则。以 `mcp__` 开头的条目按完整工具模式原样使用（逃生口）。
-- **只读**：框架永不写回 `mcp_servers.json`；"信任整个 server"等持久化只落 `settings.json`。
-- **编辑需重启生效**：`McpMgr` 无 `reload()`，`/clear` 不重连 server，故不刷新。（对比：`settings.json` 的权限编辑随 `/clear` 重载。）
+这是连接前的硬开关：被禁用的 server 不连接、其工具不注册、不进 LLM schema。它只控制连接，不改变工具授权；所有已连接 MCP 工具仍逐次进入判官。
 
 当前 `src/roles/mijia/mcp_servers.json` 示例：
 
@@ -70,14 +61,13 @@ MCP server 连接配置写在 `mcp_servers.json`，格式为 `{"mcpServers": {"<
     "mijia": {
       "transport": "stdio",
       "command": "uv",
-      "args": ["--directory", "/Users/dingdalong/github/mijia-mcp", "run", "mijia-mcp", "serve"],
-      "permissions": { "allow": ["*"] }
+      "args": ["--directory", "/path/to/mijia-mcp", "run", "mijia-mcp", "serve"]
     }
   }
 }
 ```
 
-即：以 stdio 启动 `mijia-mcp` 子进程，并对该 server 的全部工具 `allow`（`mcp__mijia__*` 自动放行）。
+即：以 stdio 启动 `mijia-mcp` 子进程；发现的每个工具仍按 `REVIEW + EXTERNAL` 授权。
 
 ## Hooks
 
@@ -146,14 +136,14 @@ Hooks 写在 `settings.json` 的 `hooks` 段（也可来自插件的 `hooks/hook
 | `2` | **阻止**：`blocked=True`，`block_reason` 取 stderr |
 | 其他 | 非阻止错误：记日志并继续 |
 
-超时或 `OSError` → `_error_result`：记为 error；若 `pre_tool` 则追加一条 `("ask", message)` 权限决策（偏安全）。
+超时或 `OSError` → `_error_result`：记为 error；PreToolUse 的执行错误会使工具调用拒绝或进入统一授权的保守路径。
 
 **stdout JSON 解析**（`_parse_output`，`hooks_mgr.py:286-323`）——非 JSON 文本整体作为 `additionalContext`；JSON dict 可含（顶层或 `hookSpecificOutput` 内）：
 
 | 字段 | 类型 | 效果（映射到 `HookRunResult`） |
 |---|---|---|
 | `additionalContext` | str / list | 追加上下文 |
-| `permissionDecision` | `allow`/`deny`/`ask`/`defer` | 追加权限决策（`permission_decisions`） |
+| `permissionDecision` | `deny`/`ask`/`defer` | deny 可直接阻止；其余值不能绕过统一授权 |
 | `permissionDecisionReason` / `reason` | str | 决策原因 |
 | `updatedInput` | dict | 替换工具入参 |
 | `decision: "block"` + `reason` | | `blocked=True`，`block_reason=reason` |
@@ -163,7 +153,7 @@ Hooks 写在 `settings.json` 的 `hooks` 段（也可来自插件的 `hooks/hook
 | 字段 | 类型 | 含义 |
 |---|---|---|
 | `additional_context` | list[str] | 注入给 LLM 的附加上下文 |
-| `permission_decisions` | list[(str,str)] | (decision, reason) 列表，供 PreToolUse 影响权限 |
+| `permission_decisions` | list[(str,str)] | Hook 决策列表；deny 可阻止，任何值都不能直接放行工具 |
 | `updated_input` | dict / None | 被 hook 改写的工具入参 |
 | `blocked` | bool | 是否拦截 |
 | `block_reason` | str / None | 拦截原因 |

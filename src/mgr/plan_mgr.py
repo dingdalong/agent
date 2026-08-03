@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from src.agent import Agent
-    from src.mgr.permission_mgr import PermissionMode
     from src.mgr.reminder_mgr import ReminderMgr
 
 logger = logging.getLogger(__name__)
@@ -53,23 +52,20 @@ class PlanMgr:
     # ── 模式切换 ──────────────────────────────────────────────────────
 
     def enter_mode(self, agent: Agent, reminder_mgr: ReminderMgr) -> bool:
-        """进入计划模式：切换权限模式、注册提醒。
+        """进入计划模式并注册提醒。
 
-        三条入口（enter_plan_mode 工具、/plan 命令、/mode 命令）均调用此方法。
+        enter_plan_mode 工具、/plan 命令和 Shift+Tab 均调用此方法。
 
         Args:
-            agent: 目标 Agent，持有 permission_mode 与 _pre_plan_mode。
+            agent: 目标 Agent。
             reminder_mgr: 提醒管理器，用于注册 plan 提醒源。
 
         Returns:
             是否成功进入（已在 plan 模式时返回 False）。
         """
-        if self._is_plan_mode(agent.permission_mode):
+        if agent.plan_active:
             return False
-
-        from src.mgr.permission_mgr import PLAN_MODE
-        agent._pre_plan_mode = agent.permission_mode
-        agent.permission_mode = PLAN_MODE
+        agent.plan_active = True
 
         self._pending_injection = True
         self._need_exit_reminder = False
@@ -79,23 +75,20 @@ class PlanMgr:
         return True
 
     def exit_mode(self, agent: Agent, reminder_mgr: ReminderMgr) -> bool:
-        """退出计划模式：恢复权限模式、设置退出提醒。
+        """退出计划模式并设置退出提醒。
 
         不立即注销 reminder_mgr，保留一轮用于输出退出提醒。
 
         Args:
-            agent: 目标 Agent，恢复其 _pre_plan_mode 记录的进入前模式。
+            agent: 目标 Agent。
             reminder_mgr: 提醒管理器，退出提醒输出后才注销。
 
         Returns:
             是否成功退出（不在 plan 模式时返回 False）。
         """
-        if not self._is_plan_mode(agent.permission_mode):
+        if not agent.plan_active:
             return False
-
-        from src.mgr.permission_mgr import DEFAULT_MODE
-        agent.permission_mode = agent._pre_plan_mode or DEFAULT_MODE
-        agent._pre_plan_mode = None
+        agent.plan_active = False
 
         self._pending_injection = False
         self._need_exit_reminder = True
@@ -116,18 +109,6 @@ class PlanMgr:
         self._active_plan_path = path
 
     # ── 指令注入 ──────────────────────────────────────────────────────
-
-    def _is_plan_mode(self, mode: PermissionMode | None) -> bool:
-        """检查给定权限模式是否为 plan 模式。
-
-        Args:
-            mode: 待判断的权限模式，可为 None。
-
-        Returns:
-            True 表示处于 plan 模式。
-        """
-        from src.mgr.permission_mgr import PLAN_MODE
-        return mode is PLAN_MODE
 
     def _generate_instructions(self) -> str:
         """生成 plan 模式指令文本。
@@ -161,20 +142,17 @@ class PlanMgr:
 
         return text
 
-    def get_turn_start_reminder(self, mode: PermissionMode | None) -> str:
+    def get_turn_start_reminder(self, plan_active: bool) -> str:
         """在 agent.run() 开始时由 ReminderMgr 调用，返回 prepend 到用户输入的提醒。
 
         Args:
-            mode: 调用方 agent 的权限模式。
+            plan_active: 调用方 agent 是否处于 Plan。
 
         Returns:
             提醒字符串，无需注入时返回空串。
         """
-        if mode is None:
-            return ""
-
         # 退出 plan 模式后的一次性提醒
-        if self._need_exit_reminder and not self._is_plan_mode(mode):
+        if self._need_exit_reminder and not plan_active:
             self._need_exit_reminder = False
             if self._reminder_mgr is not None:
                 self._reminder_mgr.unregister(self)
@@ -184,25 +162,25 @@ class PlanMgr:
                 f"你现在可以编辑文件、运行工具和执行操作。计划目录：{plan_dir}"
             )
 
-        if not self._is_plan_mode(mode):
+        if not plan_active:
             return ""
 
         self._pending_injection = False
         return self._generate_instructions()
 
-    def pop_post_round_reminder(self, mode: PermissionMode | None) -> str | None:
+    def pop_post_round_reminder(self, plan_active: bool) -> str | None:
         """POST_ROUND 时由 ReminderMgr 调用，返回 plan 模式指令纯文本。
 
         仅在轮中进入 plan 模式时触发（_pending_injection），
         无需注入时返回 None。
 
         Args:
-            mode: 调用方 agent 的权限模式。
+            plan_active: 调用方 agent 是否处于 Plan。
 
         Returns:
             plan 模式指令纯文本，或 None 表示无需注入。
         """
-        if mode is None or not self._is_plan_mode(mode):
+        if not plan_active:
             return None
 
         if self._pending_injection:

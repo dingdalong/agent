@@ -241,30 +241,26 @@ class MenuActions:
         self,
         tool_name: str,
         detail: str,
-        suggested_rules: list[str] | None = None,
-        mcp_server_rule: str | None = None,
     ) -> str:
         """工具权限确认：打印权限说明上文到 App 上方，再以方向键选择菜单读取决策。
 
-        非 TTY 走扁平降级（打字 y/s/a/n，MCP 工具另加 ss/aa）。
+        非 TTY 走扁平降级（打字 y/n）。
 
         Args:
             tool_name: 工具名。
             detail: 权限请求详情。
-            suggested_rules: 建议的 allow 规则列表，供展示。
-            mcp_server_rule: MCP 工具的 server 级通配规则；非空时增加"信任整个 server"两项。
         Returns:
-            "yes" / "session" / "always" / "session_server" / "always_server" / "deny"。
+            "yes" 或 "deny"。
         """
         if not self._tty:
-            return await self._read_permission_plain(tool_name, detail, suggested_rules, mcp_server_rule)
-        self._print_rich(self._permission_context_text(tool_name, detail, suggested_rules), end="")
-        return await self._await_selection(self._permission_options(suggested_rules, mcp_server_rule), 0, cancel_value="deny")
+            return await self._read_permission_plain(tool_name, detail)
+        self._print_rich(self._permission_context_text(tool_name, detail), end="")
+        return await self._await_selection(self._permission_options(), 0, cancel_value="deny")
 
     async def _read_choice(
         self, prompt: str, options: list[tuple[str, str]], default_index: int, markdown: bool = False
     ) -> str:
-        """以方向键选择菜单读取一次选择（通用 ChoiceMenu，如 /mode）。
+        """以方向键选择菜单读取一次选择。
 
         非 TTY 走扁平降级（打印编号菜单 + 读数字，纯文本）。
 
@@ -317,35 +313,16 @@ class MenuActions:
                 self._print_rich(prompt)
         return await self._await_choice_input(options, descriptions, input_placeholder, default_index, markdown)
 
-    def _permission_options(self, suggested_rules: list[str] | None, mcp_server_rule: str | None = None) -> list[tuple[str, str]]:
-        """构建权限确认的菜单选项（value, label）。
+    def _permission_options(self) -> list[tuple[str, str]]:
+        """构建一次性 yes/no 权限菜单。"""
+        return [("yes", "允许一次"), ("deny", "拒绝 (esc)")]
 
-        Args:
-            suggested_rules: 建议的 allow 规则列表（非空时 session/always 标注「上述规则」）。
-            mcp_server_rule: MCP 工具的 server 级通配规则；非空时追加"信任整个 server"两项。
-        Returns:
-            选项列表：允许一次 / 会话允许 / 始终允许并保存 /（MCP）会话信任整 server / 始终信任整 server / 拒绝。
-        """
-        session_label = "会话允许(上述规则)" if suggested_rules else "本次会话始终允许"
-        always_label = "始终允许并保存(上述规则)" if suggested_rules else "始终允许并保存"
-        options = [
-            ("yes", "允许一次"),
-            ("session", session_label),
-            ("always", always_label),
-        ]
-        if mcp_server_rule:
-            options.append(("session_server", f"会话信任整个 server({mcp_server_rule})"))
-            options.append(("always_server", f"始终信任整个 server 并保存({mcp_server_rule})"))
-        options.append(("deny", "拒绝 (esc)"))
-        return options
-
-    def _permission_context_text(self, tool_name: str, detail: str, suggested_rules: list[str] | None) -> Text:
-        """构建权限确认上文（工具/内容/建议规则），供菜单上文与非 TTY 降级共用，不含操作提示。
+    def _permission_context_text(self, tool_name: str, detail: str) -> Text:
+        """构建权限确认上文。
 
         Args:
             tool_name: 工具名。
             detail: 权限请求详情。
-            suggested_rules: 建议的 allow 规则列表，供展示。
         Returns:
             可经 _print_rich 输出的 Rich Text。
         """
@@ -354,57 +331,32 @@ class MenuActions:
         prompt_text.append("工具请求权限", style="yellow")
         prompt_text.append(f"\n  工具: {tool_name}\n")
         prompt_text.append(f"  内容: {detail}\n")
-        if suggested_rules:
-            if len(suggested_rules) == 1:
-                prompt_text.append(f"  建议规则: {suggested_rules[0]}\n")
-            else:
-                prompt_text.append("  建议规则:\n")
-                for rule_str in suggested_rules:
-                    prompt_text.append(f"    - {rule_str}\n")
         return prompt_text
 
-    def _permission_prompt_text(self, tool_name: str, detail: str, suggested_rules: list[str] | None, mcp_server_rule: str | None = None) -> Text:
-        """构建权限确认说明块（上文 + 打字操作提示），供非 TTY 降级使用。
+    def _permission_prompt_text(self, tool_name: str, detail: str) -> Text:
+        """构建非 TTY 权限确认说明块。
 
         Args:
             tool_name: 工具名。
             detail: 权限请求详情。
-            suggested_rules: 建议的 allow 规则列表，供展示。
-            mcp_server_rule: MCP 工具的 server 级通配规则；非空时追加 ss/aa 信任整 server 提示。
         Returns:
             可经 _print_rich 输出的 Rich Text。
         """
-        session_label = "会话允许(上述规则)" if suggested_rules else "本次会话始终允许"
-        always_label = "始终允许并保存(上述规则)" if suggested_rules else "始终允许并保存"
-        prompt_text = self._permission_context_text(tool_name, detail, suggested_rules)
-        if mcp_server_rule:
-            prompt_text.append("  输入 y/s/a/ss/aa/n 后按 Enter 确认\n")
-        else:
-            prompt_text.append("  输入 y/s/a/n 后按 Enter 确认\n")
-        prompt_text.append(f"  [y] 允许一次   [s] {session_label}   [a] {always_label}   [n] 拒绝\n")
-        if mcp_server_rule:
-            prompt_text.append(f"  [ss] 会话信任整个 server({mcp_server_rule})   [aa] 始终信任整个 server 并保存\n")
+        prompt_text = self._permission_context_text(tool_name, detail)
+        prompt_text.append("  输入 y/n 后按 Enter 确认\n")
+        prompt_text.append("  [y] 允许一次   [n] 拒绝\n")
         return prompt_text
 
-    def _normalize_permission_answer(self, answer: str, mcp_server_rule: str | None = None) -> str | None:
+    def _normalize_permission_answer(self, answer: str) -> str | None:
         """把用户输入归一化为权限决策；非法返回 None。
 
         Args:
             answer: 已 strip/lower 的用户输入。
-            mcp_server_rule: MCP 工具的 server 级通配规则；非空时接受 ss/aa 信任整 server。
         Returns:
-            "yes"/"session"/"always"/"session_server"/"always_server"/"deny"，非法时 None。
+            "yes"/"deny"，非法时 None。
         """
         if answer in {"y", "yes"}:
             return "yes"
-        if mcp_server_rule and answer in {"ss", "session_server"}:
-            return "session_server"
-        if mcp_server_rule and answer in {"aa", "always_server"}:
-            return "always_server"
-        if answer in {"s", "session"}:
-            return "session"
-        if answer in {"a", "always"}:
-            return "always"
         if answer in {"n", "no", "deny"}:
             return "deny"
         return None

@@ -20,7 +20,8 @@ from typing import Any, TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict
 
-from src.tools.decorator import ToolEntry, ToolPermission
+from src.tools import AccessKind, DataFlow, ToolOrigin, ToolPolicy
+from src.tools.decorator import ToolEntry
 
 if TYPE_CHECKING:
     from src.mgr.config_mgr import ConfigManager
@@ -136,24 +137,24 @@ class McpMgr:
         tools_mgr: ToolsMgr,
         role_mgr: RoleMgr | None = None,
         workdir: Path | None = None,
+        data_guard: Any = None,
+        project_trusted: bool = False,
     ) -> None:
         self.config_mgr = config_mgr
         self.tools_mgr = tools_mgr
         self.role_mgr = role_mgr
         self.workdir = workdir or Path.cwd()
+        self.data_guard = data_guard
+        self.project_trusted = project_trusted
         self._conns: dict[str, _ServerConn] = {}
         self._tasks: list[asyncio.Task] = []
         self._stop_event: asyncio.Event | None = None
-        # 各 server 在 mcp_servers.json 中声明的只读权限块（server 名 → {allow/deny/ask: [...]}），
-        # 由 PermissionManager 拉取并适配为最低优先级权限规则层。start() 按生效 server 集填充。
-        self._server_permissions: dict[str, dict[str, Any]] = {}
 
     async def start(self) -> None:
         """读取配置，为每个 MCP server 启动常驻连接任务并等待其就绪。
 
         三层 MCP 配置合并（低→高）：角色 → global → project。
-        合并并过滤后，抽取各 server 的 permissions 块存入 self._server_permissions，
-        供 PermissionManager 拉取适配为最低优先级权限规则层。
+        MCP 工具始终注册为 REVIEW + EXTERNAL。
         单个 server 连接失败仅记日志并跳过，不影响其它 server 与主流程。
         未配置 server 或未安装 mcp 包时整体跳过。
         """
@@ -162,7 +163,8 @@ class McpMgr:
         # 角色层
         if self.role_mgr is not None and self.role_mgr.active:
             sp = self.role_mgr.mcp_servers_path()
-            if sp is not None:
+            role_is_project = sp is not None and sp.is_relative_to(self.workdir)
+            if sp is not None and (self.project_trusted or not role_is_project):
                 try:
                     role_data = json.loads(sp.read_text()).get("mcpServers", {})
                     if isinstance(role_data, dict):
@@ -173,13 +175,6 @@ class McpMgr:
         servers.update(self.config_mgr.load_mcp_servers())
         # server 级开关：settings.json 的 mcp.enabledServers（非空则白名单）与 mcp.disabledServers（始终剔除）
         servers = self._apply_server_policy(servers)
-        # 抽取生效 server 的只读 permissions 块（在早返回前完成：即便 mcp 包缺失或连接失败，
-        # 其 deny 规则仍登记，方向偏安全）。
-        self._server_permissions = {
-            name: spec["permissions"]
-            for name, spec in servers.items()
-            if isinstance(spec.get("permissions"), dict)
-        }
         if not servers:
             return
         try:
@@ -233,14 +228,6 @@ class McpMgr:
             logger.info("按 mcp 策略跳过 %d 个 server：%s", len(skipped), ", ".join(skipped))
         return kept
 
-    def server_permissions(self) -> dict[str, dict[str, Any]]:
-        """返回各生效 server 在 mcp_servers.json 中声明的 permissions 块。
-
-        Returns:
-            server 名 → 该 server 的权限块（含 allow/deny/ask 列表），未声明的 server 不在其中。
-        """
-        return self._server_permissions
-
     async def stop(self) -> None:
         """通知所有 server 任务退出并等待其清退连接，超时则强制取消。"""
         if self._stop_event is None:
@@ -254,6 +241,8 @@ class McpMgr:
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
         self._tasks.clear()
+        self._conns.clear()
+        self._stop_event = None
 
     async def _serve(self, name: str, spec: dict[str, Any], ready: asyncio.Event) -> None:
         """常驻任务：打开 server 连接、注册工具，保持到收到停止信号。
@@ -302,10 +291,17 @@ class McpMgr:
                 args=spec.get("args", []),
                 # 默认环境（含 PATH）叠加用户声明的 env，避免子进程丢失 PATH 导致启动失败；
                 # env 值先经占位符替换（${workdir}、~），使其能引用随运行变化的绝对路径。
-                env={
-                    **get_default_environment(),
-                    **_interpolate_env(spec.get("env") or {}, self.workdir),
-                },
+                env=(
+                    self.data_guard.safe_environment(
+                        self.config_mgr.environment,
+                        _interpolate_env(spec.get("env") or {}, self.workdir),
+                    )
+                    if self.data_guard is not None
+                    else {
+                        **get_default_environment(),
+                        **_interpolate_env(spec.get("env") or {}, self.workdir),
+                    }
+                ),
             )
             # 将 server 子进程的 stderr 导向 DEVNULL，避免日志输出到控制台
             read, write = await stack.enter_async_context(
@@ -342,13 +338,10 @@ class McpMgr:
         """
         tool_name = _safe_tool_name(f"mcp__{server}__{mcp_tool.name}")
         schema = mcp_tool.inputSchema or {"type": "object", "properties": {}}
-        annotations = getattr(mcp_tool, "annotations", None)
-        read_only = bool(getattr(annotations, "readOnlyHint", False)) if annotations else False
-        # readOnlyHint 为真 → 只读（全模式可见、自动放行）；否则保守按非只读处理（默认询问、plan 隐藏）。
-        permission = ToolPermission(
-            kind="readonly" if read_only else None,
-            tips=f"MCP {server}: {mcp_tool.name}",
-            mcp_server=server,
+        policy = ToolPolicy(
+            AccessKind.REVIEW,
+            DataFlow.EXTERNAL,
+            detail_template=f"MCP {server}: {mcp_tool.name}",
         )
         upstream_name = mcp_tool.name
 
@@ -362,7 +355,8 @@ class McpMgr:
             model=_PassThroughArgs,
             description=mcp_tool.description or "",
             parameters_schema=schema,
-            permission=permission,
+            policy=policy,
+            origin=ToolOrigin("mcp", server),
             subagent=None,
         ))
         return tool_name

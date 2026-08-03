@@ -1,129 +1,106 @@
-# 权限系统
+# 统一授权与数据安全
 
-权限系统决定"某次工具调用是放行、拒绝，还是弹窗让用户确认"。它由两部分组成：**权限模式**（粗粒度策略）与**规则引擎**（细粒度 allow/deny/ask 规则）。核心实现在 `src/mgr/permission_mgr.py` 的 `PermissionManager`。
+权限系统的唯一公共入口是 `PermissionManager.authorize()`。它对每次已经过 Pydantic 校验和可信 `PreToolUse` Hook 改写后再校验的工具调用，返回不可变的 `AuthorizationResult`。调用级裁决不缓存，也没有会话级或持久放行。
 
-工具的权限元数据（`ToolPermission`：`kind`/`specifier_arg`/`check_permissions`/`tips`/`mcp_server` 等）来自各工具的 `@tool` 声明，参见 [tools.md](tools.md)。配置入口（`settings.json` 的 `permissions.*`、`mcp_servers.json` 的 per-server `permissions`）参见 [configuration-reference.md](configuration-reference.md) 与 [mcp-and-hooks.md](mcp-and-hooks.md)。
+## 工具策略
 
-## 权限模式按 agent 独立
+工具通过冻结的 `ToolPolicy` 声明授权所需事实，定义见 `src/tools/policy.py`：
 
-可变的权限模式持有在**每个 `Agent` 实例**上（`agent.permission_mode`，以及 plan 模式的 `_pre_plan_mode`）。`PermissionManager` 只保留全局共享的规则字典、`session_allow` 和不可变的 `default_mode`。`check()` 接收调用方 agent 的 `mode` 参数。
-
-`default_mode` 的**解析优先级**（`_load_config`，`permission_mgr.py:313-330`）：激活角色 `role.md` 的 `permissionMode` →（未声明）`settings.json` 的 `permissions.defaultMode` →（未声明）内置 `DEFAULT_MODE`。role 值由 `bootstrap.create_app()` 经构造参数 `role_default_mode=role_mgr.manifest.permission_mode` 注入，`_load_config` 在读完 `settings.json` 后最后套用它（存快照于 `_role_default_mode`，不受 `settings.json` 是否有 `permissions` 块影响）。该 `default_mode` 用于：主 agent 初始模式、未声明 `permissionMode` 的子 agent 回退值、`/clear` 重置目标、绑定前状态栏显示值。
-
-语义：
-- 用户的模式设置（`/mode`、Shift+Tab、`/plan`、`/resume` 恢复）**只作用于入口主 agent**（总控），见 [agent-runtime.md](agent-runtime.md) 的 `PermissionModeController`。
-- 每个子 agent 在构造时从自身 frontmatter 的 `permissionMode` 取一次值（缺省回退到 `default_mode`），整个生命周期固定不变——子 agent 无 plan 能力（四个 plan 工具标记 `subagent=False` 强制排除），故并发子 agent 互不干扰。参见 [roles-subagents-skills.md](roles-subagents-skills.md)。
-
-## 六种权限模式
-
-模式常量定义在 `permission_mgr.py:94-117`。
-
-| 模式 (`value`) | 常量 | 只读工具 | 编辑工具 (`kind="edit"`) | shell / 其他 |
-|---|---|---|---|---|
-| `default` | `DEFAULT_MODE` | 自动放行 | 询问（可被 allow 规则放行） | 询问 |
-| `acceptEdits` | `ACCEPT_EDITS_MODE` | 自动放行 | 自动放行 | 询问 |
-| `plan` | `PLAN_MODE` | 自动放行 | 询问 | 询问 |
-| `bypassPermissions` | `BYPASS_MODE` | 自动放行 | 自动放行 | 自动放行（但 `deny`/`ask` 规则、含 mcp 层仍生效） |
-| `auto` | `AUTO_MODE` | 自动放行 | 自动放行（安全关键文件除外→人工） | 只读命令放行、安全文件操作放行、安全关键写入→人工；其余模糊操作交 **LLM 判官**（见「auto 模式 LLM 判官」） |
-| `dontAsk` | `DONT_ASK_MODE` | 自动放行 | 拒绝 | 从不弹窗：一律拒绝 |
-
-模式默认策略的实现是 `_mode_default()`（`permission_mgr.py:590-622`），按工具的 `kind`（`"readonly"`/`"edit"`/`None`）分派。
-
-**模式切换集合**（`permission_mgr.py:120-128`）：
-- `CAROUSEL_MODES`（Shift+Tab 轮转）：`default → acceptEdits → plan → default`。
-- `MENU_MODES`（`/mode` 菜单，全部六种）：`default`、`acceptEdits`、`plan`、`bypassPermissions`、`auto`、`dontAsk`。
-- `parse_permission_mode(text)`（`:134`）支持按编号（1–6）或模式名解析。
-
-## 六步评估顺序
-
-`check(tool_name, tool_input, mode)`（`permission_mgr.py:446-559`）按固定顺序求值，命中即返回 `(decision, reason)`，`decision ∈ {allow, deny, ask, auto_allow}`：
-
-| 步骤 | 内容 | 命中结果 |
-|---|---|---|
-| **Step 1** | `deny_rules` 匹配（`specifier` 见下）。shell 复合命令另有 Step 1.5 逐段检查 `_check_compound_against_deny_rules` | `deny` |
-| **Step 2** | `ask_rules` 匹配。**bypass-immune**：任何模式（含 bypass）都不跳过 | `ask` |
-| **Step 3** | 工具自检 `check_permissions(tool_input, ctx)`：`deny`→拒绝；`ask`+`bypass_immune`→询问（`dontAsk` 模式转 `deny`）；`ask`+非 immune→记录原因后**穿透**到 Step 4；`allow`→放行 | 见描述 |
-| **Step 4** | `allow_rules` + `session_allow` 匹配。shell 复合命令须**每一段**都被 allow 覆盖（`_check_compound_against_allow_rules`）；简单命令额外尝试剥离安全包装后的候选 | `allow` |
-| **Step 4.5** | 处理 Step 3 记录的非 immune ask：`dontAsk`→`deny`；`bypassPermissions`→穿透继续；其他模式→`ask` | 见描述 |
-| **Step 4.7** | `mcp_servers.json` 声明的 server 级规则（**最低优先级层**）：`mcp_deny → mcp_ask → mcp_allow`。置于 bypass 之前，故 BYPASS 模式下 mcp 的 `deny`/`ask` 仍生效 | `deny`/`ask`/`allow` |
-| **Step 5** | `bypassPermissions` 模式 | `auto_allow` |
-| **Step 6** | 模式默认策略 `_mode_default()`（按 `kind`） | `allow`/`ask`/`deny` |
-
-**关键含义**：`settings.json` 的规则（Step 1–4）先于 `mcp_servers.json` 的 server 级规则（Step 4.7）评估。只要 `settings.json` 有规则命中即由它决定，否则才落到 `mcp_servers.json`。因此 `settings.json` 的 `allow`（含"信任整个 server"写入 `session_allow` 的 `mcp__<server>__*`）能**覆盖** `mcp_servers.json` 的 `deny`。两层共用同一 `PermissionRule` 表示与匹配引擎，仅优先级不同（`permission_mgr.py:1-11` 模块文档）。
-
-## auto 模式 LLM 判官
-
-同步 `check()` 引擎跑**确定性快路径**（不调 LLM）；**仅在 auto 模式**下，当 `check()` 判为 `ask`（且非 hook 触发的 ask）时，`ToolsMgr.execute` 在**已是 async 的执行链**上插入 LLM 判官（`auto_judge`），替代人工审批对模糊操作做放行/拒绝/交人工三选一。其余模式（default/acceptEdits/plan/bypass/dontAsk）完全不经判官，行为不变。
-
-### 分层（对齐 Claude Code auto mode）
-
-判官只承接下表最后一层「其余模糊操作」；前面几层由 `check()` 与工具自检确定性处理、不调 LLM：
-
-| 层 | 内容 | 处理 | 调 LLM |
-|---|---|---|---|
-| 硬底线 | `deny` 规则、`_is_dangerous_command`、`ask` 规则 | `deny` / `ask` | 否 |
-| Tier 1 | 只读工具/命令、显式 `allow`/`session_allow` 规则 | `allow` | 否 |
-| Tier 2 | 工作区/可信目录内文件编辑、`_is_accept_edits_command`（`mkdir`/`touch`/`cp`/`mv`/`sed` 等） | `allow` | 否 |
-| 安全关键 | 两根 `.agent/{settings.json,mcp_servers.json,config.yaml}`、`.env`/凭证/shell 配置/`.gitconfig`、`.git` 内部、`.vscode`/`.idea`（`is_security_critical_path`） | 强制人工确认（`bypass_immune` ask，判官不得静默放行） | 否 |
-| Tier 3 | 其余会 `ask` 的模糊动作：状态变更 shell、工作区外操作、MCP、网络等 | **LLM 判官** → `allow` / `ask`（人工）/ `deny`（回落 agent 重试） | 是 |
-
-### 判官流程 `auto_judge`
-
-`auto_judge(tool_name, tool_input, mode, deps, agent)`（`permission_mgr.py`）返回 `(decision, reason)`，处理顺序：
-
-1. **安全关键自守**：先用 `_judge_security_critical_hit` 扫描目标路径（文件工具取 `path`/`file_path`/`source`/`destination`；shell 复用 `_check_security_critical_paths` 分词扫描）。命中即直接返回 `("ask", …)`、**绝不调 LLM**——防提示注入诱导判官静默放行两根 `.agent` 核心配置写入（自我提权）。
-2. **升级阈值**：累计拒绝达 `maxTotalDenials`（缺省 20，会话级硬底线，不重置）→ 转人工；连续拒绝达 `maxConsecutiveDenials`（缺省 3）→ 清零连续计数并转人工（交人工后判官恢复）。
-3. **会话缓存**：键为 `(tool_name, 规范化参数)`（`_judge_cache_key`：优先 `specifier`，否则 `json.dumps(sort_keys=True)`）。命中直接复用，不二次调 LLM。
-4. **调判官**：`_call_judge` 用快模型（`autoJudge.model`，缺省别名 `fast`，未配回落 `default`）以 `temperature=0.0`、`enable_thinking=False`、`reasoning_effort_override="low"` 调用；用**强制工具调用** `record_verdict(decision, reason)` 取回结构化裁决（无 JSON-mode helper），`_parse_verdict` 解析，解析失败回落 `ask`。
-5. **计数更新**：裁决 `deny` 自增连续与累计计数；`allow` 清零连续计数。
-
-**失败即回落人工**：判官出错/超时/不可用/无效裁决一律返回 `("ask", …)`，**绝不 error→allow**（`_call_judge` 的异常由 `auto_judge` 以 `except Exception` 兜底；`CancelledError`/`KeyboardInterrupt` 属 `BaseException`，正常向上传播）。
-
-### execute 侧分流
-
-`ToolsMgr.execute` 在同步 `check()` 之后、`resolve_ask` 之前插入分流（仅当 `decision == "ask" and not hook_has_ask and mode is AUTO_MODE and judge_enabled`）：
-
-- 判官 `allow` → 置 `decision="allow"`，**静默执行**（不弹窗、不额外通知，工具面板已展示调用）。
-- 判官 `deny` → 经 `notify_decision(..., "deny")` 透明告知，`return f"判官拦截：{reason}。请改用更安全的做法后重试。"` **回落 agent**（作为工具结果返回，agent 可换更安全做法重试）。
-- 判官 `ask`（不确定或已达升级阈值）→ 保持 `decision=="ask"`，落入下方 `resolve_ask` 人工确认。
-
-### 配置与 reload
-
-判官配置就近放 `settings.json` 的 `permissions.autoJudge`（`_load_judge_config` 消费，schema 见 [configuration-reference.md](configuration-reference.md)）：`enabled`（缺省 `true`）、`model`（缺省 `fast`）、`maxConsecutiveDenials`（缺省 3）、`maxTotalDenials`（缺省 20）；`settings.json` 无内置层，缺省在代码兜底。`reload()`（`/clear`）把这四项重置为缺省、清空 `_judge_cache` 与两个拒绝计数器，再 `_load_config` 按最新 `settings.json` 覆盖——故**编辑 `autoJudge` 随 `/clear` 生效**。
-
-## 规则格式 `PermissionRule`
-
-规则文本形如 `工具名` 或 `工具名(specifier)`（`parse_rule`，`permission_mgr.py:232`；正则 `_RULE_PATTERN` 见 `:152`）。
-
-- **工具名段**支持 `*`/`?` 通配（`_RULE_PATTERN` 允许 `[\w*?-]`）。`_get_rules()`（`:426`）在调用期先取精确键，再对含通配的键做 `fnmatch`。故可写 `mcp__github__*` 一次性覆盖整个 server，或 `mcp__github__get_*` 按前缀放行。
-- **specifier** 三种匹配类型（`PermissionRule.rule_type`，`:175`）：
-  | 类型 | 写法 | 匹配语义 |
-  |---|---|---|
-  | `exact` | `git status` | 精确相等 |
-  | `prefix` | `git commit:*`（以 `:*` 结尾） | 前缀后须是空格或结尾（词边界），如匹配 `git commit -m x` |
-  | `wildcard` | `npm *` / `*`（含 `*`/`?`） | `fnmatch` 通配；`*` 匹配该工具全部调用 |
-- specifier 值从 `tool_input` 中按工具的 `specifier_arg` 提取（`_extract_specifier`，`:574`）；未声明 `specifier_arg` 的工具按空串处理（即只能用 `工具名` 无参形式匹配）。
-- 示例：`shell(git commit:*)`、`write_file`、`mcp__mijia__*`、`shell(npm *)`。三类规则字典按 `deny`/`ask`/`allow` 分开维护（`deny_rules`/`ask_rules`/`allow_rules`，`:272-274`）。
-
-## `resolve_ask` — 弹窗与"记住选择"
-
-当 `check()` 返回 `ask` 时，`ToolsMgr.execute` 调用 `resolve_ask()`（`permission_mgr.py:624-685`）经 `event_bus.request_permission(...)` 向 UI 请求确认。用户回答（归一化小写）与效果：
-
-| 回答 | 效果 |
+| 字段 | 含义 |
 |---|---|
-| `y` / `yes` | 本次放行 |
-| `session` | 加入 `session_allow`（仅本会话内存，不落盘） |
-| `always` | 加入 `session_allow` **并**持久化到 `settings.json`（`_persist_allow_rule` → `config_mgr.append_permission_list("allow", ...)`) |
-| `session_server` | 信任整个 MCP server：把 `mcp__<server>__*` 加入 `session_allow`（仅当该工具有 `mcp_server`） |
-| `always_server` | 信任整个 server 并持久化到 `settings.json` |
-| 其他 | 拒绝 |
+| `access` | `LOCAL_READ`、`INTERNAL`、`WORKSPACE_WRITE` 或 `REVIEW` |
+| `data_flow` | `LOCAL`、`EXTERNAL` 或 `DYNAMIC` |
+| `path_args` | 一个或多个 `PathArgument(name, role)`；role 为 read/write/source/destination |
+| `plan_safe` | INTERNAL 工具是否可在 Plan 激活时执行 |
+| `detail_template` | 仅用于经 DataGuard 脱敏后的 UI 展示 |
 
-要点：
-- 建议规则由 `_build_session_rule`（`:687`）智能生成——shell 优先生成前缀规则（如 `git commit:*`），减少后续同类弹窗；复合命令由 `_build_compound_session_rules`（`:719`）为每段生成前缀规则。
-- **持久化只落 `settings.json`**；框架永不写回 `mcp_servers.json`。
-- MCP 工具的 server 名经 `ToolPermission.mcp_server` 透传到 `_mcp_servers`（`:309`），据此提供 `mcp__<server>__*` 的"信任整个 server"选项（`:653-658`）。
+`ToolOrigin` 记录 builtin、mcp 或 dynamic 来源。只有仓库内可信的 builtin 注册代码能获得确定性放行；非 builtin 工具即使传入更宽松策略，也会降级到 REVIEW。未声明策略的工具使用 `REVIEW + DYNAMIC`。
 
-## 其他方法与 reload
+MCP 工具固定为 `REVIEW + EXTERNAL`。上游 annotation（包括 `readOnlyHint`）不改变策略。
 
-- `notify_decision()`（`:847`）：对 `deny`/`auto_allow` 决策经 `event_bus.notify_permission` 发通知（`allow` 不通知）。auto 判官放行走 `allow` 分支故静默，判官拦截走 `deny` 分支发通知。
-- `reload()`：`/clear` 时把 `default_mode` 重置为 `DEFAULT_MODE`，清空 `session_allow` 与全部规则字典，并把 auto 判官的四项配置重置为缺省、清空 `_judge_cache` 与两个拒绝计数器，再 `_load_config()` 重新加载——`_load_config` 会重放 `settings.json`（含 `autoJudge`）与 role（`_role_default_mode` 快照不清空），故 `/clear` 后 `default_mode` 仍保持上述优先级（role 值不丢）。因此**编辑 `settings.json` 的权限规则与 `autoJudge` 可随 `/clear` 生效**；而 `mcp_servers.json` 的 per-server 规则由 `McpMgr` 在启动时抽取，`McpMgr` 无 `reload`，故**编辑需重启**（见 [mcp-and-hooks.md](mcp-and-hooks.md)）。role.md 的 `permissionMode` 在 `create_app()` 构造时注入一次，故**编辑 role.md 需重启**才刷新。
+## 授权顺序
+
+`ToolsMgr.execute()` 的顺序不可交换：
+
+1. 用 Pydantic 校验原始参数并展开默认值。
+2. 运行已经过项目启动信任门的 `PreToolUse` Hook。
+3. Hook 修改参数后重新校验。
+4. 用 `PathResolver` 提取、规范化并分类全部路径；移动操作额外解析最终目标。
+5. 运行 `HardDenyDetector` 和秘密外发检查。
+6. 若 `agent.plan_active`，先执行独立 Plan 约束。
+7. LOCAL_READ 和 INTERNAL 走确定性放行。
+8. WORKSPACE_WRITE 仅在全部写目标为普通工作区或计划目录时确定性放行。
+9. 其余调用交 LLM 判官。
+10. 判官返回 ask、异常、超时或无效响应时，只进行一次 yes/no 人工确认；无 TTY、取消或拒绝均为 deny。
+11. 工具执行结果立即经 DataGuard 脱敏和限长，再进入 PostToolUse、事件、分页和 Agent 历史。
+
+`AuthorizationResult.source` 标明裁决来源：`hard_rule`、`plan`、`policy`、`judge`、`user` 或 `failure`。`reason` 和 `safe_detail` 在返回前再次脱敏并限长。允许结果还包含冻结的 `path_grants`，只记录参数名、角色、授权时规范路径和分类；FileMgr 在每次实际 I/O 前复检规范路径与分类，移动操作同时复检 source、destination 与最终目标。
+
+## 路径解析
+
+`PathResolver` 是授权层和 `FileMgr` 的共同路径语义：
+
+- 相对路径始终基于 Agent workdir，而非进程当前目录。
+- 展开 `~` 和 `..`，解析已有符号链接；新路径通过最近存在父目录得到真实目标。
+- 可选读取路径为 `None` 时解释为 workdir。
+- 移动同时解析 source、destination；若 destination 是已有目录，再追加源文件名形成 `destination_final`。
+- FileMgr 在创建父目录后和实际 I/O 前重新解析，降低检查后路径替换风险。
+
+普通工作区快速写入排除 `.git/**`、`.agent/**`、`.vscode/**`、`.idea/**`、`.env*`、私钥和常见凭证路径；`.agent/plans/**` 单独分类为 PLAN。受保护路径、工作区外写入和移动操作进入 REVIEW。
+
+LOCAL_READ 可以读取工作区外的普通文件或目录，但拒绝设备、FIFO、socket、`/dev`、`/proc`、`/sys` 等伪文件。单文件上限 8 MiB；单次工具结果上限 1 MiB 或 20,000 行。目录展开不跟随目录符号链接，深度最多 8、累计最多 10,000 项、最长 10 秒；grep/glob 子进程同样限制为 10 秒。
+
+## Hard Deny
+
+`HardDenyDetector` 只保留可高置信静态识别、且不能由判官或用户覆盖的危险操作：
+
+- sudo、su、doas、pkexec 等提权。
+- 根目录、主目录或系统目录级递归删除。
+- mkfs、分区擦除、危险 dd 和块设备写入。
+- shutdown、reboot、halt、poweroff 和 fork bomb。
+- 下载内容直接交给 shell、解释器或动态执行入口。
+- 未限定范围的 `git clean -fdx`。
+- 凭证文件、环境变量或已登记秘密向网络工具外传。
+- 修改 `trusted_projects.json`、关闭脱敏或绕过授权门控。
+
+普通构建、测试、安装依赖、项目内删除、Git 推送和重置等不在代码中预判，统一进入 REVIEW。
+
+## LLM 判官
+
+`LLMJudgeClient` 使用 `llm.fast`，由 `LLMMgr` 在未配置 fast 时回退 default。调用最长 15 秒，并强制通过 `record_verdict` 工具返回 allow、deny 或 ask。
+
+判官请求只包含：工具名和来源、动作类别、数据流、规范化路径分类、网络主机、参数类型与长度、风险标志、最多 2 KiB 的脱敏用户意图。Shell 额外发送最多 8 KiB 的脱敏命令。文件正文、待写内容、完整 body、header、cookie、环境变量和值、完整 URL query 都不会进入请求。参数摘要在系统提示词中明确标记为不可信数据。
+
+判官 allow/deny 直接成为本次裁决；ask、异常、超时、缺失或无效输出进入一次性确认。确认只接受 yes/no，不产生任何后续调用权限。
+
+## DataGuard
+
+共享 `DataGuard` 登记 Provider key、可信环境文件和 MCP header/env 中的确切秘密，并检测 Authorization、cookie、password、token、API key、JWT、平台 token 和私钥块。它递归处理结构化数据，也会清理 URL userinfo、敏感 query、命令、异常和普通文本中的 URL。
+
+EXTERNAL 工具在执行前发现秘密即 Hard Deny；DYNAMIC Shell 还会运行结构性外传检测。读取层允许读取凭证文件，但正文在离开读取层前脱敏。Shell、Hook 和 stdio MCP 子进程使用 `safe_environment()`，模型 key、token、cookie 和密码不会从父进程环境继承；MCP 只额外获得可信配置显式声明的 env。
+
+工具开始/完成事件、权限通知、日志、UI 预览、PostToolUse、分页缓存、Agent history、子 Agent transcript、session、compact 和工作区 transcript 只能接收已经脱敏的数据。Session、transcript 和信任库使用原子写入和 owner-only 权限。
+
+## 项目启动信任
+
+`ProjectTrustGate` 在项目环境、Provider/URL 配置、Hook、Plugin Hook 和 MCP 激活前运行。信任键是规范化 workdir，指纹覆盖受控文件的相对路径、类型、符号链接目标和内容。
+
+首次进入或指纹变化时要求确认；首次启动由独立的 prompt-toolkit 会话读取，运行中的 `/clear` 由 EventBus 选择菜单读取，避免与常驻 UI 争抢 stdin。两条通道都默认拒绝，仅明确选择信任才允许加载；确认后、加载前重新计算，防止确认期间文件变化。拒绝、取消、确认失败或非 TTY 进入受限模式：忽略项目 `.env`、模型/Provider 配置、项目角色、项目 Hook、项目/角色 Plugin Hook 和项目 MCP。普通 AGENTS、agents、skills 和 memory 仍作为数据加载。
+
+记录保存在全局 `trusted_projects.json`，原子写入并设置为 `0600`。`/clear` 重新检查指纹并按结果重载配置、Hook 和 MCP；运行中修改受控文件不会自动激活。
+
+## Plan
+
+Plan 是 `Agent.plan_active: bool`，不是授权策略变体。`PlanModeController` 只管理入口 Agent 的 Shift+Tab 双向切换和 `PlanStateChanged`；`/plan` 与 `enter_plan_mode` 进入 Plan，`exit_plan_mode` 提供展示与审核工作流，但不是唯一退出方式。活动计划路径在快捷键退出时保留。
+
+Plan 激活时只允许：
+
+- LOCAL_READ。
+- `plan_safe=True` 的 INTERNAL 工具。
+- 规范化后位于 `.agent/plans/**` 的 WORKSPACE_WRITE。
+
+其他调用直接以 `source="plan"` 拒绝，不调用判官。子 Agent 在构造时继承父 Agent 当前 Plan 状态。
+
+## 安全边界
+
+判官是风险分类器，不是 OS 沙箱。明确高危操作、已识别秘密外发、项目启动信任、路径复检、结果脱敏和安全子进程环境由代码保证；无法可靠静态判断的 Shell、网络、MCP、移动和动态工具交判官，并在不确定时回到一次性人工确认。

@@ -143,11 +143,11 @@ class InlineInterface(UserInterface):
         """
         return self._controller.reset_session_interactions()
 
-    def set_permission_mode_provider(
+    def set_plan_state_provider(
         self,
-        provider: Callable[[], str] | None,
+        provider: Callable[[], bool] | None,
     ) -> None:
-        """Install the explicit root permission-mode provider.
+        """Install the explicit root Plan-state provider.
 
         Args:
             provider: Callable returning the current mode, or None to remove it.
@@ -155,29 +155,29 @@ class InlineInterface(UserInterface):
         Returns:
             None.
         """
-        self._controller.set_permission_mode_provider(provider)
+        self._controller.set_plan_state_provider(provider)
 
-    def set_permission_mode_toggle_handler(
+    def set_plan_toggle_handler(
         self,
         handler: Callable[[], None] | None,
     ) -> None:
         """Install the normal-input Shift+Tab callback.
 
         Args:
-            handler: Permission mode rotation callback, or None to disable it.
+            handler: Plan toggle callback, or None to disable it.
 
         Returns:
             None.
         """
-        self._controller.set_permission_mode_toggle_handler(handler)
+        self._controller.set_plan_toggle_handler(handler)
 
-    def on_permission_mode_changed(self) -> None:
-        """Request redraw after the permission mode changes.
+    def on_plan_state_changed(self) -> None:
+        """Request redraw after the Plan state changes.
 
         Returns:
             None.
         """
-        self._controller.on_permission_mode_changed()
+        self._controller.on_plan_state_changed()
 
     async def _write(self, message: str | Text, markdown: bool = False) -> None:
         """Write content through the composed output frontend.
@@ -213,26 +213,17 @@ class InlineInterface(UserInterface):
         self,
         tool_name: str,
         detail: str,
-        suggested_rules: list[str] | None = None,
-        mcp_server_rule: str | None = None,
     ) -> str:
         """Read one permission decision through the menu controller.
 
         Args:
             tool_name: Requested tool name.
             detail: Permission detail text.
-            suggested_rules: Optional suggested allow rules.
-            mcp_server_rule: Optional server-wide MCP rule.
 
         Returns:
             Permission decision wire value.
         """
-        return await self._controller._read_permission(
-            tool_name,
-            detail,
-            suggested_rules,
-            mcp_server_rule,
-        )
+        return await self._controller._read_permission(tool_name, detail)
 
     async def _read_choice(
         self,

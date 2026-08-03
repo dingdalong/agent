@@ -3,7 +3,6 @@ agent_type: dimension-classifier
 description: REDUCE 阶段的维度归类员，按主 agent 指定的维度从证据卡跨模块归类，产出该维度证据报告。
 tools: list_directory, glob, grep, get_file_info, read_file, create_directory, write_file, move_file, shell, mcp__codebase-memory__search_graph, mcp__codebase-memory__query_graph, mcp__codebase-memory__get_code_snippet, mcp__codebase-memory__search_code, mcp__codebase-memory__trace_path
 model: best
-permissionMode: acceptEdits
 features: [file]
 ---
 

@@ -2,12 +2,15 @@
 
 import logging
 import time
+from dataclasses import replace
 from typing import Any, Dict, TYPE_CHECKING
 
+from pydantic import ValidationError
+
 from src.events.types import ToolCallCompleted, ToolCallStarted, caller_identity
-from src.mgr.permission_mgr import AUTO_MODE, tool_sort_order
+from src.mgr.permission_mgr import tool_sort_order
 from src.tools import ToolDict, ToolEntry
-from src.tools.decorator import format_tool_tips
+from src.tools import AccessKind, ToolPolicy
 
 if TYPE_CHECKING:
     from src.llm.base import LLMProvider
@@ -16,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 def _tool_sort_key(tool: ToolEntry) -> tuple[int, str]:
-    """工具排序键：只读工具优先，非只读次之，无权限元数据的排最后。
+    """按声明式访问类别稳定排序。
 
     Args:
         tool: 工具条目。
@@ -24,9 +27,7 @@ def _tool_sort_key(tool: ToolEntry) -> tuple[int, str]:
     Returns:
         (排序权重, 工具名) 元组。
     """
-    if tool.permission is None:
-        return tool_sort_order(None, has_permission=False), tool.name
-    return tool_sort_order(tool.permission.kind), tool.name
+    return tool_sort_order(tool.policy.access), tool.name
 
 
 class ToolsMgr:
@@ -50,11 +51,28 @@ class ToolsMgr:
         if tool.name in self._tools:
             logger.warning(f"工具 '{tool.name}' 已注册，跳过")
             return
+        if tool.origin.kind != "builtin" and tool.policy.access is not AccessKind.REVIEW:
+            tool = replace(tool, policy=ToolPolicy(
+                AccessKind.REVIEW,
+                tool.policy.data_flow,
+                tool.policy.path_args,
+                False,
+                tool.policy.detail_template,
+            ))
         self._tools[tool.name] = tool
 
     def get(self, name: str) -> ToolEntry | None:
         """按名称获取工具。"""
         return self._tools.get(name)
+
+    def unregister_origin(self, kind: str) -> None:
+        """移除指定来源的动态工具。"""
+        self._tools = {
+            name: entry for name, entry in self._tools.items() if entry.origin.kind != kind
+        }
+
+    def reload(self) -> None:
+        self._result_store.clear()
 
     def has(self, name: str) -> bool:
         """检查工具是否已注册。"""
@@ -191,7 +209,7 @@ class ToolsMgr:
         deps: Any,
         agent: Any,
         tool: ToolEntry,
-        arguments: dict[str, Any],
+        safe_detail: str,
         current_tool_call_id: str,
     ) -> None:
         """发出工具调用开始事件。"""
@@ -204,7 +222,7 @@ class ToolsMgr:
             source="tools",
             tool_name=tool.name,
             tool_call_id=current_tool_call_id,
-            detail=format_tool_tips(tool.permission.tips if tool.permission else None, arguments, tool.description),
+            detail=safe_detail,
             caller_agent_type=caller_agent_type,
             caller_uuid=caller_uuid,
         ))
@@ -223,6 +241,8 @@ class ToolsMgr:
         event_bus = getattr(deps, "event_bus", None) if deps is not None else None
         if event_bus is None or not hasattr(event_bus, "emit"):
             return
+        data_guard = getattr(deps, "data_guard", None) if deps is not None else None
+        safe_result = data_guard.redact(result) if data_guard is not None else result
         caller_agent_type, caller_uuid = caller_identity(agent)
         await event_bus.emit(ToolCallCompleted(
             timestamp=time.time(),
@@ -231,7 +251,7 @@ class ToolsMgr:
             tool_call_id=current_tool_call_id,
             status=status,
             duration_seconds=duration_seconds,
-            result_preview=self._result_preview(result),
+            result_preview=self._result_preview(str(safe_result)),
             caller_agent_type=caller_agent_type,
             caller_uuid=caller_uuid,
         ))
@@ -247,7 +267,7 @@ class ToolsMgr:
     ) -> str:
         """执行工具调用，返回结果字符串。
 
-        完整流程：PreToolUse hook → 权限检查 → 执行 → PostToolUse hook → 分页。
+        完整流程：参数校验 → PreToolUse hook → 再校验 → authorize → 执行 → 脱敏 → PostToolUse → 事件/分页。
 
         Args:
             tool_name: 工具名称。
@@ -263,6 +283,16 @@ class ToolsMgr:
             return f"错误：未知工具 '{tool_name}'"
 
         tool = self._tools[tool_name]
+        data_guard = getattr(deps, "data_guard", None) if deps is not None else None
+        if data_guard is None:
+            from src.mgr.data_guard import DataGuard
+            data_guard = DataGuard()
+
+        try:
+            arguments = tool.validate_arguments(arguments)
+        except ValidationError as error:
+            return tool.format_validation_error(error)
+
         hooks_mgr = getattr(deps, "hooks_mgr", None) if deps is not None else None
         hook_kwargs = {}
         if hooks_mgr is not None:
@@ -283,59 +313,54 @@ class ToolsMgr:
                 **hook_kwargs,
             )
             if pre_hook_result.blocked:
-                return f"权限拒绝：{pre_hook_result.block_reason or 'hook blocked'}"
+                reason = data_guard.redact(pre_hook_result.block_reason or "hook blocked")
+                return f"权限拒绝：{reason}"
             for decision, reason in pre_hook_result.permission_decisions:
                 if decision == "deny":
-                    return f"权限拒绝：{reason}"
+                    return f"权限拒绝：{data_guard.redact(reason)}"
             if pre_hook_result.updated_input is not None:
-                arguments = pre_hook_result.updated_input
+                try:
+                    arguments = tool.validate_arguments(pre_hook_result.updated_input)
+                except ValidationError as error:
+                    return tool.format_validation_error(error)
 
-        # 2. 权限检查
+        # 2. 唯一授权入口
         permission_mgr = getattr(deps, "permission_mgr", None) if deps is not None else None
-        if permission_mgr is not None:
-            mode = getattr(agent, "permission_mode", None) or permission_mgr.default_mode
-            decision, reason = permission_mgr.check(tool_name, arguments, mode)
+        if permission_mgr is None:
+            return "权限拒绝：授权服务不可用"
 
-            hook_has_ask = pre_hook_result is not None and any(
-                d == "ask" for d, _ in pre_hook_result.permission_decisions
-            )
-
-            # auto 模式：check() 判 ask 且非 hook 触发时，交 LLM 判官（Tier 3）分流。
-            # 判官 allow→静默放行；deny→回落 agent 重试；ask→保持 ask 落入下方人工确认。
-            if (
-                decision == "ask"
-                and not hook_has_ask
-                and mode is AUTO_MODE
-                and permission_mgr.judge_enabled
-            ):
-                judge_decision, judge_reason = await permission_mgr.auto_judge(
-                    tool_name, arguments, mode, deps, agent=agent,
+        user_intent = self._latest_user_intent(agent)
+        authorization = await permission_mgr.authorize(
+            tool_name,
+            tool.policy,
+            arguments,
+            origin=tool.origin,
+            plan_active=bool(getattr(agent, "plan_active", False)),
+            user_intent=user_intent,
+        )
+        if not authorization.allowed:
+            event_bus = getattr(deps, "event_bus", None) if deps is not None else None
+            if event_bus is not None and hasattr(event_bus, "notify_permission"):
+                caller_agent_type, caller_uuid = caller_identity(agent)
+                await event_bus.notify_permission(
+                    status="deny",
+                    tool_name=tool_name,
+                    detail=authorization.safe_detail or authorization.reason,
+                    caller_agent_type=caller_agent_type,
+                    caller_uuid=caller_uuid,
                 )
-                if judge_decision == "allow":
-                    decision = "allow"  # 判官放行：静默执行（与 auto_allow 一致，工具面板已展示调用）
-                elif judge_decision == "deny":
-                    await permission_mgr.notify_decision(tool_name, arguments, deps, "deny", agent=agent)
-                    return f"判官拦截：{judge_reason}。请改用更安全的做法后重试。"
-                # judge_decision == "ask"：保持 decision=="ask"，落入下方 resolve_ask 人工确认
+            return f"权限拒绝：{authorization.reason}"
 
-            if decision == "deny":
-                await permission_mgr.notify_decision(tool_name, arguments, deps, "deny", agent=agent)
-                return f"权限拒绝：{reason}"
-
-            if decision == "ask" or hook_has_ask:
-                resolved_decision, resolved_reason = await permission_mgr.resolve_ask(
-                    tool_name, arguments, deps, agent=agent,
-                )
-                if resolved_decision == "deny":
-                    await permission_mgr.notify_decision(tool_name, arguments, deps, "deny", agent=agent)
-                    return f"权限拒绝：{resolved_reason}"
-            else:
-                # allow 或 auto_allow
-                await permission_mgr.notify_decision(tool_name, arguments, deps, decision, agent=agent)
-
-        await self._emit_tool_started(deps, agent, tool, arguments, current_tool_call_id)
+        await self._emit_tool_started(
+            deps, agent, tool, authorization.safe_detail, current_tool_call_id
+        )
         started_at = time.time()
-        context = {"current_tool_call_id": current_tool_call_id, "deps": deps, "agent": agent}
+        context = {
+            "current_tool_call_id": current_tool_call_id,
+            "deps": deps,
+            "agent": agent,
+            "authorization": authorization,
+        }
         # 叶子工具执行期间计入回合「活跃计算」，供状态栏耗时判定是否处于纯人工等待（暂停）。
         # 委派型/纯人工等待型工具（counts_as_work=False）不计，避免其嵌套的人工等待被误判为在计算。
         turn_clock = getattr(deps, "turn_clock", None) if deps is not None else None
@@ -343,21 +368,26 @@ class ToolsMgr:
         if track_work:
             turn_clock.enter_work()
         try:
-            result = await tool(context, **arguments)
+            result = await tool(context, validated=True, **arguments)
         finally:
             if track_work:
                 turn_clock.exit_work()
+        result = self._limit_result(str(data_guard.redact(result)))
+        safe_arguments = data_guard.redact(arguments)
         if hooks_mgr is not None:
             post_hook_result = await hooks_mgr.run_event(
                 "PostToolUse",
                 tool.name,
-                {"tool_name": tool.name, "tool_input": arguments, "tool_response": result, "tool_use_id": current_tool_call_id},
+                {"tool_name": tool.name, "tool_input": safe_arguments, "tool_response": result, "tool_use_id": current_tool_call_id},
                 **hook_kwargs,
             )
             if post_hook_result.blocked:
                 result = f"权限拒绝：{post_hook_result.block_reason or 'hook blocked'}"
             elif post_hook_result.additional_context:
-                result = result + "\n\n" + "\n\n".join(str(item) for item in post_hook_result.additional_context)
+                result = result + "\n\n" + "\n\n".join(
+                    str(data_guard.redact(item)) for item in post_hook_result.additional_context
+                )
+        result = self._limit_result(str(data_guard.redact(result)))
         status = self._result_status(result)
         await self._emit_tool_completed(
             deps,
@@ -378,3 +408,25 @@ class ToolsMgr:
             return result
 
         return self._truncate(result, current_tool_call_id, llm)
+
+    @staticmethod
+    def _latest_user_intent(agent: Any) -> str:
+        history = getattr(agent, "history", None)
+        if not isinstance(history, list):
+            return ""
+        for message in reversed(history):
+            if not isinstance(message, dict) or message.get("role") != "user":
+                continue
+            content = message.get("content", "")
+            return content if isinstance(content, str) else str(content)
+        return ""
+
+    @staticmethod
+    def _limit_result(result: str) -> str:
+        lines = result.splitlines(keepends=True)
+        if len(lines) > 20_000:
+            result = "".join(lines[:20_000]) + "\n[结果已截断]"
+        encoded = result.encode()
+        if len(encoded) > 1024 * 1024:
+            result = encoded[:1024 * 1024].decode(errors="replace") + "\n[结果已截断]"
+        return result

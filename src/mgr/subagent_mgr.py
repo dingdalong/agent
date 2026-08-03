@@ -175,6 +175,7 @@ class SubAgentMgr:
                 enable_thinking=enable_thinking,
                 reasoning_effort=reasoning_effort,
                 features=features,
+                plan_active=bool(getattr(parent_agent, "plan_active", False)),
             )
 
             hooks_mgr = self.deps.hooks_mgr

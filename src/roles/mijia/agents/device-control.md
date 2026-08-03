@@ -5,7 +5,6 @@ description: |
   当主 agent 需要调整设备状态时委派给它。不负责场景/自动化管理，不负责只读查询。
 tools: list_directory, glob, grep, get_file_info, read_file
 model: default
-permissionMode: default
 memory: project
 ---
 

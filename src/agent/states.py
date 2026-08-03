@@ -10,7 +10,6 @@ from src.llm.errors import LLMErrorInfo
 # 斜杠命令元数据（名称, 描述）的唯一来源：供输入框自动补全展示，与 agent.py 的命令分发保持一致（仅列已实现命令）。
 SLASH_COMMANDS: list[tuple[str, str]] = [
     ("plan", "进入计划模式"),
-    ("mode", "切换权限模式"),
     ("clear", "清空会话"),
     ("resume", "恢复历史会话"),
     ("agents", "查看本会话子 agent"),
@@ -129,7 +128,7 @@ class RunContext:
 class RunResult:
     """Agent.run() 的返回值。
 
-    /plan 和 /mode 在 agent 内部处理，不会出现在 command 中。
+    /plan 在 agent 内部处理，不会出现在 command 中。
     /clear 与 /agents 会通过 command 字段上抛给 app 层处理。
 
     Attributes:

@@ -11,7 +11,8 @@ from html.parser import HTMLParser
 
 from pydantic import BaseModel, Field
 
-from src.tools.decorator import ToolPermission, tool
+from src.tools import AccessKind, DataFlow, ToolPolicy
+from src.tools.decorator import tool
 
 
 DEFAULT_MAX_BYTES = 1_000_000
@@ -244,7 +245,7 @@ def _decode_body(data: bytes, content_type: str) -> str:
 
 
 @tool(model=WebFetchInput, description="访问指定URL，返回网页正文内容。",
-      permission=ToolPermission(kind="readonly", specifier_arg="url", tips="访问网页：{url}"))
+      policy=ToolPolicy(AccessKind.REVIEW, DataFlow.EXTERNAL, detail_template="访问网页：{url}"))
 def web_fetch(url: str) -> str:
     normalized_url = validate_public_url(url)
     if normalized_url.startswith(("错误", "访问失败")):

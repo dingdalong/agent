@@ -29,19 +29,19 @@ class StatusBarController:
     def __init__(
         self,
         store: AgentViewStore,
-        permission_mode: Callable[[], str],
+        plan_active: Callable[[], bool],
     ) -> None:
         """Initialize a status controller.
 
         Args:
             store: Shared session/agent read model.
-            permission_mode: Provider for the current root permission mode.
+            plan_active: Provider for the current root Plan state.
 
         Returns:
             None.
         """
         self._store = store
-        self._permission_mode = permission_mode
+        self._plan_active = plan_active
 
     def present(
         self,
@@ -64,7 +64,7 @@ class StatusBarController:
             if snapshot is not None:
                 return present_agent(snapshot)
             return present_ended_agent(agent_uuid)
-        line = Text(self._permission_mode())
+        line = Text("plan" if self._plan_active() else "normal")
         if toggle_available:
             line.append(" (Shift+Tab 切换)", style="bright_black")
         line.append("  ·  ", style="bright_black")
@@ -333,7 +333,7 @@ class StatusBarActions:
         """
         line.append_text(self._status_bar.present(
             elapsed,
-            self._permission_mode_toggle_handler is not None,
+            self._plan_toggle_handler is not None,
             self._viewing_uuid if self._transcript_visible else None,
         ))
 
@@ -480,11 +480,11 @@ class StatusBarActions:
         self._current_agent_type = agent_type
         self._current_agent_uuid = agent_uuid
 
-    def on_permission_mode_changed(self) -> None:
-        """权限模式变化：重绘状态条以立即反映新模式。"""
+    def on_plan_state_changed(self) -> None:
+        """Plan 状态变化时重绘状态条。"""
         if self._app_running:
             self._app.invalidate()
 
-    def set_permission_mode_toggle_handler(self, handler: Callable[[], None] | None) -> None:
-        """登记输入态 Shift+Tab 的权限模式切换回调（None 表示不可用，状态栏据此决定是否提示）。"""
-        self._permission_mode_toggle_handler = handler
+    def set_plan_toggle_handler(self, handler: Callable[[], None] | None) -> None:
+        """登记输入态 Shift+Tab 的 Plan 切换回调。"""
+        self._plan_toggle_handler = handler

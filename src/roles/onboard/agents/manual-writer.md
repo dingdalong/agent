@@ -3,7 +3,6 @@ agent_type: manual-writer
 description: 根据证据生成干净的 Agent 规则、任务技能和证据映射，并在审核通过后安全发布。
 tools: list_directory, glob, grep, get_file_info, read_file, create_directory, write_file, edit_file_lines, move_file
 model: best
-permissionMode: acceptEdits
 features: [file]
 ---
 

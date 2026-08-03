@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
-import os
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
+
+from src.mgr.secure_io import atomic_write_text
 
 
 @dataclass
@@ -93,7 +94,7 @@ class TaskManager:
     _TOOL_NAMES = frozenset({"task_create", "task_update", "task_list", "task_get"})
     _HIGHWATERMARK_FILE = ".highwatermark"
 
-    def __init__(self, tasks_dir: Path | None = None) -> None:
+    def __init__(self, tasks_dir: Path | None = None, data_guard: Any = None) -> None:
         """初始化任务管理器。
 
         tasks_dir 不为 None 时自动加载已有的任务文件。
@@ -105,6 +106,7 @@ class TaskManager:
         self._next_id: int = 1
         self._rounds_without_update: int = 0
         self._tasks_dir: Path | None = tasks_dir
+        self._data_guard = data_guard
         if self._tasks_dir is not None:
             self._load()
 
@@ -131,6 +133,8 @@ class TaskManager:
         for f in self._tasks_dir.glob("*.json"):
             try:
                 data = json.loads(f.read_text(encoding="utf-8"))
+                if self._data_guard is not None:
+                    data = self._data_guard.redact(data)
                 task = Task(
                     id=data["id"],
                     subject=data["subject"],
@@ -156,7 +160,7 @@ class TaskManager:
     def _flush_task(self, task_id: str) -> None:
         """将单个 task 原子写入磁盘。
 
-        先写临时文件再 os.replace，防止崩溃时文件损坏。
+        使用 owner-only 原子写入，防止崩溃时文件损坏。
 
         Args:
             task_id: 要写入的任务 ID。
@@ -165,10 +169,11 @@ class TaskManager:
             return
         self._tasks_dir.mkdir(parents=True, exist_ok=True)
         task_path = self._tasks_dir / f"{task_id}.json"
-        tmp_path = task_path.with_suffix(".tmp")
-        data = json.dumps(self._tasks[task_id].to_detail(), ensure_ascii=False, indent=2)
-        tmp_path.write_text(data, encoding="utf-8")
-        os.replace(tmp_path, task_path)
+        detail = self._tasks[task_id].to_detail()
+        if self._data_guard is not None:
+            detail = self._data_guard.redact(detail)
+        data = json.dumps(detail, ensure_ascii=False, indent=2)
+        atomic_write_text(task_path, data)
 
     def _delete_task_file(self, task_id: str) -> None:
         """删除磁盘上的单个 task 文件。
@@ -187,7 +192,7 @@ class TaskManager:
             return
         self._tasks_dir.mkdir(parents=True, exist_ok=True)
         hwm_path = self._tasks_dir / self._HIGHWATERMARK_FILE
-        hwm_path.write_text(str(self._next_id - 1), encoding="utf-8")
+        atomic_write_text(hwm_path, str(self._next_id - 1))
 
     def _auto_cleanup(self) -> None:
         """当所有任务都已完成时，删除整个 tasks_dir 目录。"""
@@ -239,6 +244,13 @@ class TaskManager:
         task_id = str(self._next_id)
         self._next_id += 1
 
+        if self._data_guard is not None:
+            subject = str(self._data_guard.redact(subject))
+            description = str(self._data_guard.redact(description))
+            active_form = (
+                str(self._data_guard.redact(active_form)) if active_form is not None else None
+            )
+            metadata = self._data_guard.redact(metadata) if metadata is not None else None
         task = Task(
             id=task_id,
             subject=subject,
@@ -299,14 +311,20 @@ class TaskManager:
         updated: list[str] = []
 
         if subject is not None:
+            if self._data_guard is not None:
+                subject = str(self._data_guard.redact(subject))
             task.subject = subject
             updated.append("subject")
 
         if description is not None:
+            if self._data_guard is not None:
+                description = str(self._data_guard.redact(description))
             task.description = description
             updated.append("description")
 
         if active_form is not None:
+            if self._data_guard is not None:
+                active_form = str(self._data_guard.redact(active_form))
             task.active_form = active_form
             updated.append("active_form")
 
@@ -317,6 +335,8 @@ class TaskManager:
             updated.append("status")
 
         if owner is not None:
+            if self._data_guard is not None:
+                owner = str(self._data_guard.redact(owner))
             self._claim_task(task, owner)
             updated.append("owner")
 
@@ -329,6 +349,8 @@ class TaskManager:
             updated.append("blocked_by")
 
         if metadata is not None:
+            if self._data_guard is not None:
+                metadata = self._data_guard.redact(metadata)
             self._merge_metadata(task, metadata)
             updated.append("metadata")
 

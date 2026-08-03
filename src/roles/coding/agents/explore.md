@@ -4,7 +4,6 @@ description: |
   专用于只读探索代码库的子任务 agent，服务编码前的事实收集。覆盖：了解项目结构、目录布局、架构边界与模块关系；查找相关文件并总结关键实现；搜索可复用的现有函数/工具类/基类/模式；定位将被修改的函数/类的全部调用方以确定影响面；识别对应测试文件与测试约定。代码无法回答时可联网查第三方库 API、版本变化或官方文档作为补充。当任务需要在实现、修改、审查前先收集事实和证据时，总控 agent 应优先委派给它。
 tools: list_directory, glob, grep, get_file_info, read_file, web_search, web_fetch
 model: default
-permissionMode: dontAsk
 memory: project
 ---
 

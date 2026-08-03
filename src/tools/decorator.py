@@ -4,39 +4,16 @@ from __future__ import annotations
 
 import asyncio, inspect
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Literal, TYPE_CHECKING, TypedDict
+from typing import Any, Callable, Dict, TypedDict
 from pydantic import BaseModel, ValidationError
 
-if TYPE_CHECKING:
-    from src.mgr.permission_mgr import PermissionCheckResult, PermissionContext
+from src.tools.policy import BUILTIN_ORIGIN, DEFAULT_POLICY, ToolOrigin, ToolPolicy
 
 
 class ToolDict(TypedDict):
     """OpenAI function-calling 格式的工具 schema"""
     type: str
     function: Dict[str, Any]
-
-
-@dataclass
-class ToolPermission:
-    """工具权限元数据。
-
-    Attributes:
-        kind: 工具类别。"readonly"=只读（所有模式自动放行且始终可见），
-            "edit"=文件编辑（acceptEdits 模式下自动放行），None=其他（如 shell）。
-        specifier_arg: 用于内容级规则匹配的参数名。check() 自动提取该参数值做 fnmatch 匹配，
-            同时用于构建 "always allow" session 规则。None 表示无内容级匹配。
-        tips: 权限提示模板，如 "写入文件：{path}"，用于向用户展示操作详情。
-        check_permissions: 工具自身安全逻辑检查函数，接收 (tool_input, ctx) 返回 PermissionCheckResult。
-            仅处理工具特有的安全逻辑（如 shell 危险命令检测、file 敏感路径检查），
-            不负责规则匹配——规则匹配由 check() 根据 specifier_arg 统一处理。None 表示无特殊检查。
-        mcp_server: 该工具所属的 MCP server 名（仅 MCP 工具非空），用于 ask 弹窗提供"信任整个 server"选项。
-    """
-    kind: Literal["readonly", "edit"] | None = None
-    specifier_arg: str | None = None
-    tips: str | None = None
-    check_permissions: Callable[[dict[str, Any], PermissionContext], PermissionCheckResult] | None = None
-    mcp_server: str | None = None
 
 
 @dataclass
@@ -49,7 +26,8 @@ class ToolEntry:
         model: Pydantic 参数模型类。
         description: 工具描述（发送给 LLM）。
         parameters_schema: OpenAI 格式的参数 schema。
-        permission: 权限元数据，None 表示无特殊声明。
+        policy: 声明式授权策略；未声明时使用 REVIEW + DYNAMIC。
+        origin: 工具注册来源，不参与确定性放行。
         raw_output: 是否跳过结果分页截断。
         subagent: 子 agent 可见性控制。True=自动注入（即使 agent 定义未列出）；
                   False=强制排除（即使 agent 定义为全量）；None=按 agent 的 tools 集合决定。
@@ -64,14 +42,30 @@ class ToolEntry:
     model: type[BaseModel]
     description: str
     parameters_schema: dict[str, Any]
-    permission: ToolPermission | None = None
+    policy: ToolPolicy = DEFAULT_POLICY
+    origin: ToolOrigin = ToolOrigin("dynamic")
     raw_output: bool = False
     subagent: bool | None = None
     feature: str | None = None
     counts_as_work: bool = True
 
-    async def __call__(self, context: Dict[str, Any], **kwds: Any) -> Any:
-        """验证参数并执行工具函数。
+    def validate_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """应用 Pydantic 默认值并返回授权和执行共用的参数。"""
+        return self.model(**arguments).model_dump()
+
+    @staticmethod
+    def format_validation_error(error: ValidationError) -> str:
+        messages = []
+        for item in error.errors()[:3]:
+            loc = ".".join(str(x) for x in item["loc"])
+            messages.append(f"{loc}: {item['msg']}")
+        result = "; ".join(messages)
+        if len(error.errors()) > 3:
+            result += f"... 等{len(error.errors())}个错误"
+        return f"参数验证失败: {result}"
+
+    async def __call__(self, context: Dict[str, Any], *, validated: bool = False, **kwds: Any) -> Any:
+        """执行工具函数；调用方可传入已经验证的参数。
 
         Args:
             context: 包含 current_tool_call_id、deps、agent 等注入信息的上下文。
@@ -81,17 +75,9 @@ class ToolEntry:
             工具执行结果字符串。
         """
         try:
-            validated_args = self.model(**kwds).model_dump()
-        except ValidationError as e:
-            messages = []
-            for err in e.errors()[:3]:
-                loc = ".".join(str(x) for x in err["loc"])
-                msg = err["msg"]
-                messages.append(f"{loc}: {msg}")
-            result = "; ".join(messages)
-            if len(e.errors()) > 3:
-                result += f"... 等{len(e.errors())}个错误"
-            return f"参数验证失败: {result}"
+            validated_args = kwds if validated else self.validate_arguments(kwds)
+        except ValidationError as error:
+            return self.format_validation_error(error)
 
         try:
             sig = inspect.signature(self.func)
@@ -109,32 +95,13 @@ class ToolEntry:
                 error_msg = error_msg[:200] + "..."
             return f"工具执行出错: {error_msg}"
 
-def format_tool_tips(tips: str | None, tool_input: dict[str, Any], fallback: str = "") -> str:
-    """格式化工具提示模板，失败时返回 fallback。
-
-    Args:
-        tips: 提示模板字符串，如 "写入文件：{path}"。None 或空字符串时直接返回 fallback。
-        tool_input: 工具调用参数，用于模板变量替换。
-        fallback: 模板为空或格式化失败时的回退文本。
-
-    Returns:
-        格式化后的提示文本。
-    """
-    if not tips:
-        return fallback
-    try:
-        return tips.format(**tool_input)
-    except (AttributeError, IndexError, KeyError, ValueError):
-        return tips
-
-
 _registry: list[ToolEntry] = []
 
 def tool(
     model: type[BaseModel],
     description: str,
     name: str | None = None,
-    permission: ToolPermission | None = None,
+    policy: ToolPolicy | None = None,
     raw_output: bool = False,
     subagent: bool | None = None,
     feature: str | None = None,
@@ -146,7 +113,7 @@ def tool(
         model: Pydantic 参数模型类。
         description: 工具描述。
         name: 工具名称，默认使用函数名。
-        permission: 权限元数据。
+        policy: 声明式授权策略，未声明时保守使用 REVIEW + DYNAMIC。
         raw_output: 是否跳过结果分页。
         subagent: 子 agent 可见性。True=自动注入；False=强制排除；None=按 agent 定义决定。
         feature: 所属可插拔 feature 名。None 表示无归属、恒可用；非 None 时随该 feature 的启用与否注入或排除。
@@ -175,7 +142,8 @@ def tool(
             model=model,
             description=description,
             parameters_schema=parameters_schema,
-            permission=permission,
+            policy=policy or DEFAULT_POLICY,
+            origin=BUILTIN_ORIGIN,
             raw_output=raw_output,
             subagent=subagent,
             feature=feature,

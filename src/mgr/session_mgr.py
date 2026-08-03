@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from src.mgr.secure_io import atomic_write_text
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +26,7 @@ class ResumeResult:
     Attributes:
         session_id: 目标会话 UUID。
         messages: 加载的完整对话历史。
-        metadata: 目标会话的元数据字典（含 permission_mode、pre_plan_mode、topic 等）。
+        metadata: 目标会话的元数据字典（含 plan_active、topic 等）。
     """
     session_id: str
     messages: list[dict[str, Any]]
@@ -40,7 +41,7 @@ class SessionMgr:
         _workdir: 当前工作目录，记录到元数据中。
     """
 
-    def __init__(self, global_dir: Path, workdir: Path) -> None:
+    def __init__(self, global_dir: Path, workdir: Path, data_guard: Any = None) -> None:
         """初始化会话管理器。
 
         Args:
@@ -49,6 +50,7 @@ class SessionMgr:
         """
         self._sessions_dir: Path = global_dir / "sessions"
         self._workdir: Path = workdir
+        self._data_guard = data_guard
 
     def save_metadata(
         self,
@@ -56,8 +58,7 @@ class SessionMgr:
         *,
         is_new: bool = False,
         topic: str = "",
-        permission_mode: str = "",
-        pre_plan_mode: str = "",
+        plan_active: bool = False,
     ) -> None:
         """保存或更新会话元数据文件。
 
@@ -67,8 +68,7 @@ class SessionMgr:
             session_id: 会话 UUID。
             is_new: 是否为新会话首次写入。
             topic: 会话主题（截取前 100 字符）。非空时写入或覆盖 topic 字段。
-            permission_mode: 当前权限模式的 value 字符串（如 "default", "plan"）。
-            pre_plan_mode: plan 模式下进入前的权限模式 value 字符串，非 plan 模式时传空。
+            plan_active: 当前会话是否处于 Plan。
         """
         self._sessions_dir.mkdir(parents=True, exist_ok=True)
         meta_path = self._sessions_dir / f"{session_id}.json"
@@ -89,18 +89,11 @@ class SessionMgr:
         meta["updated_at"] = now
         if topic:
             meta["topic"] = topic[:100]
-        if permission_mode:
-            meta["permission_mode"] = permission_mode
-        if pre_plan_mode:
-            meta["pre_plan_mode"] = pre_plan_mode
-        elif "pre_plan_mode" in meta:
-            del meta["pre_plan_mode"]
+        meta["plan_active"] = plan_active
 
         try:
-            meta_path.write_text(
-                json.dumps(meta, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            safe_meta = self._data_guard.redact(meta) if self._data_guard is not None else meta
+            atomic_write_text(meta_path, json.dumps(safe_meta, ensure_ascii=False, indent=2))
         except OSError as e:
             logger.warning("写入会话元数据失败: %s", e)
 
@@ -117,11 +110,9 @@ class SessionMgr:
             return
         self._sessions_dir.mkdir(parents=True, exist_ok=True)
         history_path = self._sessions_dir / f"{session_id}.hist.json"
-        tmp_path = history_path.with_suffix(".tmp")
         try:
-            data = json.dumps(messages, ensure_ascii=False)
-            tmp_path.write_text(data, encoding="utf-8")
-            os.replace(tmp_path, history_path)
+            safe_messages = self._data_guard.redact(messages) if self._data_guard is not None else messages
+            atomic_write_text(history_path, json.dumps(safe_messages, ensure_ascii=False))
         except OSError as e:
             logger.warning("写入会话历史失败: %s", e)
 
@@ -143,7 +134,8 @@ class SessionMgr:
             try:
                 meta = json.loads(f.read_text(encoding="utf-8"))
                 if "session_id" in meta:
-                    sessions.append(meta)
+                    safe_meta = self._data_guard.redact(meta) if self._data_guard is not None else meta
+                    sessions.append(safe_meta)
             except (json.JSONDecodeError, OSError):
                 continue
         sessions.sort(key=lambda s: s.get("updated_at", ""), reverse=True)
@@ -176,7 +168,7 @@ class SessionMgr:
         try:
             data = json.loads(history_path.read_text(encoding="utf-8"))
             if isinstance(data, list):
-                return data
+                return self._data_guard.redact(data) if self._data_guard is not None else data
         except (json.JSONDecodeError, OSError) as e:
             logger.warning("加载会话历史失败: %s", e)
         return []
@@ -260,6 +252,7 @@ class SessionMgr:
         if not meta_path.exists():
             return None
         try:
-            return json.loads(meta_path.read_text(encoding="utf-8"))
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            return self._data_guard.redact(meta) if self._data_guard is not None else meta
         except (json.JSONDecodeError, OSError):
             return None

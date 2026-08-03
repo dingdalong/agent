@@ -9,9 +9,24 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import time
+
+from src.mgr.path_resolver import PathGrant, PathResolutionError, PathResolver
 
 if TYPE_CHECKING:
     from src.agent import AgentDeps
+    from src.mgr.permission_mgr import AuthorizationResult
+
+
+_MAX_DIRECTORY_ITEMS = 10_000
+_DIRECTORY_TIMEOUT_SECONDS = 10.0
+
+
+@dataclass
+class _TreeBudget:
+    remaining: int
+    deadline: float
+    stopped: bool = False
 
 
 @lru_cache(maxsize=1)
@@ -39,6 +54,11 @@ def _resolve_rg() -> str | None:
 class FileMgr:
     workdir: Path
     deps: AgentDeps = field(repr=False)
+    _path_resolver: PathResolver = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self.workdir = Path(self.workdir).resolve(strict=True)
+        self._path_resolver = PathResolver(self.workdir)
 
     # 设计约定：本类所有公开方法均为「阻塞型」——内部做同步文件 I/O（read_text/
     # write_text/glob/rglob 等），因此一律声明为普通 def。卸载到线程由 @tool 装饰器
@@ -49,7 +69,7 @@ class FileMgr:
         """将路径字符串解析为绝对 Path。
 
         仅做路径解析，不做访问控制。
-        工作区外路径的访问控制由 check_permissions 回调在权限层处理。
+        所有相对路径基于 workdir；授权层与 I/O 层共用 PathResolver。
 
         Args:
             path_str: 文件或目录的路径字符串。
@@ -57,7 +77,34 @@ class FileMgr:
         Returns:
             解析后的绝对 Path 对象。
         """
-        return Path(path_str).resolve()
+        return self._path_resolver.resolve(path_str)
+
+    @staticmethod
+    def _grant(authorization: AuthorizationResult, argument: str) -> PathGrant:
+        if not authorization.allowed:
+            raise PathResolutionError("缺少有效路径授权")
+        for grant in authorization.path_grants:
+            if grant.argument == argument:
+                return grant
+        raise PathResolutionError(f"缺少路径授权：{argument}")
+
+    def _authorized_path(
+        self,
+        authorization: AuthorizationResult,
+        argument: str,
+        value: str | Path,
+        *,
+        read: bool = False,
+    ) -> Path:
+        path = self._path_resolver.revalidate(self._grant(authorization, argument), value)
+        if read:
+            self._path_resolver.validate_local_read(path)
+        return path
+
+    def _read_path(
+        self, path_str: str, authorization: AuthorizationResult, argument: str = "path"
+    ) -> Path:
+        return self._authorized_path(authorization, argument, path_str, read=True)
 
     def _display_path(self, path: Path) -> str:
         """将路径转为显示用字符串：工作区内返回相对路径，工作区外返回绝对路径。
@@ -74,6 +121,7 @@ class FileMgr:
             return str(path)
 
     def read_file(self, path: str,
+                  authorization: AuthorizationResult,
                   start_line: int | None = None,
                   end_line: int | None = None) -> str:
         """读取文件内容并附带行号，可指定行范围。
@@ -87,7 +135,9 @@ class FileMgr:
             带行号的文件内容文本，或错误描述字符串。
         """
         try:
-            all_lines = self.safe_path(path).read_text().splitlines()
+            all_lines = self._read_path(path, authorization).read_text().splitlines()
+            if len(all_lines) > 20_000 and start_line is None and end_line is None:
+                all_lines = all_lines[:20_000]
             total = len(all_lines)
             if start_line is None and end_line is None:
                 selected_lines = all_lines
@@ -107,7 +157,9 @@ class FileMgr:
             parts = [header]
             if rendered:
                 parts.append(rendered)
-            return "\n".join(parts)
+            result = "\n".join(parts)
+            guard = getattr(self.deps, "data_guard", None)
+            return str(guard.redact(result)) if guard is not None else result
         except Exception as exc:
             return f"Error: {exc}"
 
@@ -118,6 +170,7 @@ class FileMgr:
         )
 
     def write_file(self, path: str, content: str,
+                   authorization: AuthorizationResult,
                    append: bool = False,
                    chunk_index: int | None = None,
                    total_chunks: int | None = None) -> str:
@@ -134,8 +187,9 @@ class FileMgr:
             写入结果描述字符串，或错误描述字符串。
         """
         try:
-            file_path = self.safe_path(path)
+            file_path = self._authorized_path(authorization, "path", path)
             file_path.parent.mkdir(parents=True, exist_ok=True)
+            file_path = self._authorized_path(authorization, "path", path)
 
             is_chunked = chunk_index is not None and total_chunks is not None
 
@@ -146,7 +200,7 @@ class FileMgr:
                 file_path.write_text(content)
 
             written = len(content)
-            total = len(file_path.read_text())
+            total = len(self._authorized_path(authorization, "path", path).read_text())
 
             if is_chunked:
                 if chunk_index < total_chunks:
@@ -164,6 +218,7 @@ class FileMgr:
             return f"Error: {exc}"
 
     def edit_file_lines(self, path: str, start_line: int,
+                        authorization: AuthorizationResult,
                         new_text: str = "", end_line: int | None = None) -> str:
         """按行号编辑文件：替换、插入或删除。
 
@@ -182,7 +237,7 @@ class FileMgr:
             操作结果描述字符串。
         """
         try:
-            file_path = self.safe_path(path)
+            file_path = self._authorized_path(authorization, "file_path", path, read=True)
             lines = file_path.read_text().splitlines(keepends=True)
             total = len(lines)
 
@@ -195,7 +250,7 @@ class FileMgr:
                     return f"Error: 行号无效 (文件共 {total} 行, 可插入范围 1-{total + 1})"
                 insert = self._split_edit_lines(new_text)
                 result_lines = lines[:start_line - 1] + insert + lines[start_line - 1:]
-                file_path.write_text("".join(result_lines))
+                self._authorized_path(authorization, "file_path", path).write_text("".join(result_lines))
                 return (f"已在第 {start_line} 行前插入 {len(insert)} 行 "
                         f"| 文件: {path} | 总行数: {len(result_lines)}")
 
@@ -205,7 +260,7 @@ class FileMgr:
             if not new_text:
                 # 删除模式
                 result_lines = lines[:start_line - 1] + lines[end_line:]
-                file_path.write_text("".join(result_lines))
+                self._authorized_path(authorization, "file_path", path).write_text("".join(result_lines))
                 removed = end_line - start_line + 1
                 return (f"已删除第 {start_line}-{end_line} 行 ({removed} 行) "
                         f"| 文件: {path} | 总行数: {len(result_lines)}")
@@ -215,7 +270,7 @@ class FileMgr:
             after = lines[end_line:]
             insert = self._split_edit_lines(new_text)
             result_lines = before + insert + after
-            file_path.write_text("".join(result_lines))
+            self._authorized_path(authorization, "file_path", path).write_text("".join(result_lines))
             removed = end_line - start_line + 1
             added = len(insert)
             return (f"已替换第 {start_line}-{end_line} 行 ({removed} 行 -> {added} 行) "
@@ -224,7 +279,13 @@ class FileMgr:
         except Exception as exc:
             return f"Error: {exc}"
 
-    def replace_all_in_file(self, path: str, old_text: str, new_text: str) -> str:
+    def replace_all_in_file(
+        self,
+        path: str,
+        old_text: str,
+        new_text: str,
+        authorization: AuthorizationResult,
+    ) -> str:
         """替换文件中所有匹配的文本。
 
         Args:
@@ -236,7 +297,7 @@ class FileMgr:
             操作结果描述字符串。
         """
         try:
-            file_path = self.safe_path(path)
+            file_path = self._authorized_path(authorization, "file_path", path, read=True)
             content = file_path.read_text()
             if not old_text:
                 return "Error: old_text 不能为空"
@@ -245,7 +306,7 @@ class FileMgr:
                 total = len(content.splitlines())
                 return f"Error: 未找到匹配文本 (文件共 {total} 行)"
             result = content.replace(old_text, new_text)
-            file_path.write_text(result)
+            self._authorized_path(authorization, "file_path", path).write_text(result)
             return f"已替换 {found} 处匹配 | 文件: {path} | 总行数: {len(result.splitlines())}"
 
         except Exception as exc:
@@ -257,7 +318,7 @@ class FileMgr:
             lines[-1] += "\n"
         return lines
 
-    def get_file_info(self, path: str) -> str:
+    def get_file_info(self, path: str, authorization: AuthorizationResult) -> str:
         """获取文件或目录的元信息。
 
         Args:
@@ -267,7 +328,7 @@ class FileMgr:
             元信息描述文本，或错误描述字符串。
         """
         try:
-            file_path = self.safe_path(path)
+            file_path = self._read_path(path, authorization)
             if not file_path.exists():
                 return f"Error: 路径不存在: {path}"
 
@@ -307,12 +368,23 @@ class FileMgr:
             return f"{size / (1024 * 1024):.1f}MB"
 
     def _build_tree(self, dir_path: Path, prefix: str,
-                    current_depth: int, max_depth: int) -> tuple[list[str], int, int]:
+                    current_depth: int, max_depth: int,
+                    budget: _TreeBudget) -> tuple[list[str], int, int]:
         lines: list[str] = []
         dir_count = 0
         file_count = 0
         try:
-            entries = sorted(dir_path.iterdir(), key=lambda e: (not e.is_dir(), e.name))
+            entries: list[Path] = []
+            for entry in dir_path.iterdir():
+                if time.monotonic() >= budget.deadline:
+                    budget.stopped = True
+                    break
+                if budget.remaining <= 0:
+                    budget.stopped = True
+                    break
+                budget.remaining -= 1
+                entries.append(entry)
+            entries.sort(key=lambda entry: (not entry.is_dir(), entry.name))
         except PermissionError:
             lines.append(f"{prefix}[权限不足]")
             return lines, 0, 0
@@ -321,13 +393,13 @@ class FileMgr:
             is_last = (i == len(entries) - 1)
             connector = "└── " if is_last else "├── "
 
-            if entry.is_dir():
+            if entry.is_dir() and not entry.is_symlink():
                 dir_count += 1
                 if current_depth < max_depth:
                     lines.append(f"{prefix}{connector}[DIR]  {entry.name}/")
                     child_prefix = prefix + ("    " if is_last else "│   ")
                     child_lines, cd, cf = self._build_tree(
-                        entry, child_prefix, current_depth + 1, max_depth)
+                        entry, child_prefix, current_depth + 1, max_depth, budget)
                     lines.extend(child_lines)
                     dir_count += cd
                     file_count += cf
@@ -338,9 +410,14 @@ class FileMgr:
                 size = self._format_size(entry.stat().st_size)
                 lines.append(f"{prefix}{connector}[FILE] {entry.name} ({size})")
 
+            if budget.stopped:
+                break
+
         return lines, dir_count, file_count
 
-    def list_directory(self, path: str, max_depth: int = 3) -> str:
+    def list_directory(
+        self, path: str, authorization: AuthorizationResult, max_depth: int = 3
+    ) -> str:
         """以树状结构列出目录内容。
 
         Args:
@@ -351,7 +428,7 @@ class FileMgr:
             目录树文本，或错误描述字符串。
         """
         try:
-            dir_path = self.safe_path(path)
+            dir_path = self._read_path(path, authorization)
             if not dir_path.exists():
                 return f"Error: 目录不存在: {path}"
             if not dir_path.is_dir():
@@ -359,16 +436,22 @@ class FileMgr:
 
             rel = self._display_path(dir_path)
             lines = [f"目录: {rel}/"]
+            budget = _TreeBudget(
+                remaining=_MAX_DIRECTORY_ITEMS,
+                deadline=time.monotonic() + _DIRECTORY_TIMEOUT_SECONDS,
+            )
             tree_lines, dir_count, file_count = self._build_tree(
-                dir_path, "", 1, max_depth)
+                dir_path, "", 1, min(max(max_depth, 0), 8), budget)
             lines.extend(tree_lines)
+            if budget.stopped:
+                lines.append("... 目录结果已达到 10,000 项或 10 秒限制")
             lines.append(f"共 {dir_count} 个目录, {file_count} 个文件")
 
             return "\n".join(lines)
         except Exception as exc:
             return f"Error: {exc}"
 
-    def create_directory(self, path: str) -> str:
+    def create_directory(self, path: str, authorization: AuthorizationResult) -> str:
         """创建目录（含父目录）。
 
         Args:
@@ -378,7 +461,7 @@ class FileMgr:
             创建结果描述字符串。
         """
         try:
-            dir_path = self.safe_path(path)
+            dir_path = self._authorized_path(authorization, "path", path)
             if dir_path.exists():
                 return f"目录已存在: {path}"
             dir_path.mkdir(parents=True, exist_ok=True)
@@ -386,7 +469,9 @@ class FileMgr:
         except Exception as exc:
             return f"Error: {exc}"
 
-    def move_file(self, source: str, destination: str) -> str:
+    def move_file(
+        self, source: str, destination: str, authorization: AuthorizationResult
+    ) -> str:
         """移动或重命名文件/目录。
 
         Args:
@@ -397,13 +482,22 @@ class FileMgr:
             移动结果描述字符串。
         """
         try:
-            src_path = self.safe_path(source)
-            dst_path = self.safe_path(destination)
+            src_path = self._authorized_path(authorization, "source", source)
+            self._authorized_path(authorization, "destination", destination)
+            dst_path = self._path_resolver.resolve_move_target(source, destination)
+            dst_path = self._authorized_path(
+                authorization, "destination_final", dst_path
+            )
             if not src_path.exists():
                 return f"Error: 源路径不存在: {source}"
-            if dst_path.is_dir():
-                dst_path = dst_path / src_path.name
             dst_path.parent.mkdir(parents=True, exist_ok=True)
+            src_path = self._authorized_path(authorization, "source", source)
+            self._authorized_path(authorization, "destination", destination)
+            dst_path = self._authorized_path(
+                authorization,
+                "destination_final",
+                self._path_resolver.resolve_move_target(source, destination),
+            )
             src_path.rename(dst_path)
             dst_rel = self._display_path(dst_path)
             kind = "目录" if dst_path.is_dir() else "文件"
@@ -411,7 +505,9 @@ class FileMgr:
         except Exception as exc:
             return f"Error: {exc}"
 
-    def grep(self, pattern: str, path: str = ".") -> str:
+    def grep(
+        self, pattern: str, authorization: AuthorizationResult, path: str = "."
+    ) -> str:
         """用 ripgrep 按正则搜索文件内容，返回匹配的文件、行号与行文本。
 
         Args:
@@ -422,7 +518,7 @@ class FileMgr:
             每行为 "路径:行号:行文本" 的匹配结果，无命中或出错时返回相应提示。
         """
         try:
-            search_root = self.safe_path(path)
+            search_root = self._read_path(path, authorization)
             if not search_root.exists():
                 return f"Error: 路径不存在: {path}"
 
@@ -443,7 +539,9 @@ class FileMgr:
         except Exception as exc:
             return f"Error: {exc}"
 
-    def glob(self, pattern: str, path: str = ".") -> str:
+    def glob(
+        self, pattern: str, authorization: AuthorizationResult, path: str = "."
+    ) -> str:
         """用 ripgrep 按 glob 模式查找文件（遵守 .gitignore，排除隐藏文件，不含目录）。
 
         Args:
@@ -454,7 +552,7 @@ class FileMgr:
             匹配文件的相对路径列表，无命中或出错时返回相应提示。
         """
         try:
-            search_root = self.safe_path(path)
+            search_root = self._read_path(path, authorization)
             if not search_root.exists():
                 return f"Error: 路径不存在: {path}"
             if not search_root.is_dir():
@@ -492,7 +590,7 @@ class FileMgr:
             return 2, "", "未找到 rg（ripgrep），请确认 ripgrep 依赖已安装"
         try:
             proc = subprocess.run(
-                [rg, *rg_args], capture_output=True, text=True, timeout=30
+                [rg, *rg_args], capture_output=True, text=True, timeout=10
             )
             return proc.returncode, proc.stdout, proc.stderr
         except subprocess.TimeoutExpired:

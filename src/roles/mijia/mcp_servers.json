@@ -3,10 +3,7 @@
     "mijia": {
       "transport": "stdio",
       "command": "uv",
-      "args": ["--directory", "/Users/dingdalong/github/mijia-mcp", "run", "mijia-mcp", "serve"],
-      "permissions": {
-        "allow": ["*"]
-      }
+      "args": ["--directory", "/Users/dingdalong/github/mijia-mcp", "run", "mijia-mcp", "serve"]
     }
   }
 }

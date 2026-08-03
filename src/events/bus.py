@@ -354,7 +354,7 @@ class EventBus:
 
     async def notify_permission(
         self,
-        status: Literal["allow", "deny", "auto_allow"],
+        status: Literal["allow", "deny"],
         tool_name: str,
         detail: str = "",
         source: str = "permission",
@@ -364,7 +364,7 @@ class EventBus:
         """通过事件队列发布工具权限状态通知。
 
         Args:
-            status: 权限决策结果（allow 静默 / deny / auto_allow）。
+            status: 权限决策结果（allow 静默 / deny）。
             tool_name: 工具名。
             detail: 通知详情文本。
             source: 事件来源标识。
@@ -386,8 +386,6 @@ class EventBus:
         tool_name: str,
         detail: str,
         source: str = "permission",
-        suggested_rules: list[str] | None = None,
-        mcp_server_rule: str | None = None,
         caller_agent_type: str | None = None,
         caller_uuid: str | None = None,
     ) -> str:
@@ -397,13 +395,11 @@ class EventBus:
             tool_name: 工具名。
             detail: 权限请求的详细说明。
             source: 事件来源标识。
-            suggested_rules: 建议的 allow 规则列表，供 UI 展示给用户。
-            mcp_server_rule: MCP 工具的 server 级通配规则（mcp__<server>__*）；非空时 UI 提供"信任整个 server"选项。
             caller_agent_type: 发起该工具调用的 agent 类型（主 agent 为「main」），供 UI 标注是哪个 agent 请求授权。
             caller_uuid: 发起该工具调用的 agent 实例 uuid。
 
         Returns:
-            用户的确认结果（yes/session/always/session_server/always_server/deny）。
+            用户的一次性确认结果（yes/deny）。
         """
         return await self._request(
             PermissionMenu(
@@ -411,8 +407,6 @@ class EventBus:
                 source=source,
                 tool_name=tool_name,
                 detail=detail,
-                suggested_rules=suggested_rules or [],
-                mcp_server_rule=mcp_server_rule,
                 caller_agent_type=caller_agent_type,
                 caller_uuid=caller_uuid,
             ),

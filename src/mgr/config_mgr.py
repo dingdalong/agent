@@ -5,15 +5,15 @@ from __future__ import annotations
 import json
 import logging
 import os
-import tempfile
 import threading
 from pathlib import Path
 from typing import Any
 
 import yaml
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 
 from src.mgr.paths import builtin_root
+from src.mgr.secure_io import atomic_write_text
 
 logger = logging.getLogger(__name__)
 
@@ -92,13 +92,16 @@ class ConfigManager:
         self,
         global_dir: Path,
         workdir: Path,
+        project_trusted: bool = False,
     ) -> None:
         self.global_dir = Path(global_dir)
         self.workdir = Path(workdir)
         self.project_dir = self.workdir / ".agent"
+        self.project_trusted = project_trusted
         # settings.json 写入位置固定为项目级
         self.settings_path = self.project_dir / "settings.json"
         self._lock = threading.RLock()
+        self._environment: dict[str, str] = {}
         self._config: dict[str, Any] = self.load_config()
         self._user_settings: dict[str, Any] = self.load_user_settings()
 
@@ -108,26 +111,41 @@ class ConfigManager:
             self._config = self.load_config()
             self._user_settings = self.load_user_settings()
 
+    def set_project_trusted(self, trusted: bool) -> None:
+        self.project_trusted = trusted
+        self.reload()
+
     def load_config(self) -> dict[str, Any]:
-        """加载三层配置并深度合并，同时加载三层 .env。
+        """加载三层配置并深度合并，同时构造私有有效环境。
 
         Returns:
             合并后的配置 dict。
         """
-        # .env 加载优先级（低→高，override=True 后加载者覆盖同名变量）：
+        # .env 加载优先级（低→高）：
         # 全局 ~/.agent/.env → 仓库根 {workdir}/.env → 项目 {workdir}/.agent/.env
         # 仓库根 .env 是最常见的放置位置，纳入加载以避免配置读取不到。
         global_env = self.global_dir / ".env"
         root_env = self.workdir / ".env"
         project_env = self.project_dir / ".env"
-        for env_path in (global_env, root_env, project_env):
-            if env_path.exists():
-                load_dotenv(env_path, override=True)
+        env_paths = (global_env, root_env, project_env) if self.project_trusted else (global_env,)
+        environment = {str(key): str(value) for key, value in os.environ.items()}
+        for env_path in env_paths:
+            try:
+                values = dotenv_values(env_path)
+            except (OSError, ValueError):
+                continue
+            environment.update(
+                {str(key): str(value) for key, value in values.items() if value is not None}
+            )
+        self._environment = environment
 
         # 三层 config.yaml 深度合并
         builtin_config = _load_yaml(builtin_root() / "config.yaml")
         global_config = _load_yaml(self.global_dir / "config.yaml")
         project_config = _load_yaml(self.project_dir / "config.yaml")
+        if not self.project_trusted:
+            project_config.pop("llm_provider", None)
+            project_config.pop("llm", None)
 
         config = _deep_merge(builtin_config, global_config)
         config = _deep_merge(config, project_config)
@@ -135,12 +153,17 @@ class ConfigManager:
         # 环境变量覆盖 provider 的 API key 和 base_url
         for key, provider in config.get("llm_provider", {}).items():
             for env_suffix, field in (("API_KEY", "api_key"), ("API_URL", "base_url")):
-                value = os.environ.get(f"{key.upper()}_{env_suffix}")
+                value = environment.get(f"{key.upper()}_{env_suffix}")
                 if value is not None:
                     provider[field] = value
 
         self._config = config
         return config
+
+    @property
+    def environment(self) -> dict[str, str]:
+        """返回本次信任状态对应的私有有效环境副本。"""
+        return dict(self._environment)
 
     def load_mcp_servers(self) -> dict[str, dict[str, Any]]:
         """读取并合并两层 mcp_servers.json，返回 {server_name: spec}。
@@ -152,7 +175,10 @@ class ConfigManager:
             合并后的 MCP server 配置字典，键为 server 名，值为该 server 的连接配置。
         """
         global_servers = _load_json(self.global_dir / "mcp_servers.json").get("mcpServers", {})
-        project_servers = _load_json(self.workdir / ".agent" / "mcp_servers.json").get("mcpServers", {})
+        project_servers = (
+            _load_json(self.workdir / ".agent" / "mcp_servers.json").get("mcpServers", {})
+            if self.project_trusted else {}
+        )
         if not isinstance(global_servers, dict):
             global_servers = {}
         if not isinstance(project_servers, dict):
@@ -160,42 +186,21 @@ class ConfigManager:
         return _deep_merge(global_servers, project_servers)
 
     def load_user_settings(self) -> dict[str, Any]:
-        """加载双层 settings.json 并合并 permissions 列表。
-
-        全局和项目的 allow/deny 列表合并（去重），其余字段项目层覆盖全局层。
+        """加载双层 settings.json；受限模式忽略项目 Hook 配置。
 
         Returns:
             合并后的用户设置 dict。
         """
         with self._lock:
             global_settings = _load_json(self.global_dir / "settings.json")
-            project_settings = _load_json(self.settings_path)
+            project_settings = _load_json(self.settings_path) if self.project_trusted else {}
 
             if not global_settings:
                 return project_settings
             if not project_settings:
                 return global_settings
 
-            merged = _deep_merge(global_settings, project_settings)
-
-            # permissions.allow 和 permissions.deny 合并去重
-            global_perms = global_settings.get("permissions", {})
-            project_perms = project_settings.get("permissions", {})
-            if global_perms or project_perms:
-                merged_perms = merged.setdefault("permissions", {})
-                for list_name in ("allow", "deny"):
-                    global_list = global_perms.get(list_name, [])
-                    project_list = project_perms.get(list_name, [])
-                    if isinstance(global_list, list) and isinstance(project_list, list):
-                        seen = set()
-                        combined = []
-                        for item in global_list + project_list:
-                            if item not in seen:
-                                seen.add(item)
-                                combined.append(item)
-                        merged_perms[list_name] = combined
-
-            return merged
+            return _deep_merge(global_settings, project_settings)
 
     def _get_value(self, source: dict[str, Any], key: str, default: Any = None) -> Any:
         """按点分隔路径从嵌套 dict 中取值。
@@ -251,49 +256,6 @@ class ConfigManager:
             settings: 要写入的完整设置 dict。
         """
         with self._lock:
-            self.settings_path.parent.mkdir(parents=True, exist_ok=True)
             content = json.dumps(settings, ensure_ascii=False, indent=2) + "\n"
-            fd, tmp_name = tempfile.mkstemp(
-                dir=self.settings_path.parent,
-                prefix=f".{self.settings_path.name}.",
-                suffix=".tmp",
-                text=True,
-            )
-            tmp_path = Path(tmp_name)
-            try:
-                with os.fdopen(fd, "w") as f:
-                    f.write(content)
-                    f.flush()
-                    os.fsync(f.fileno())
-                tmp_path.replace(self.settings_path)
-            except Exception:
-                try:
-                    tmp_path.unlink()
-                except FileNotFoundError:
-                    pass
-                raise
+            atomic_write_text(self.settings_path, content)
             self._user_settings = settings
-
-    def append_permission_list(self, list_name: str, rule_text: str) -> None:
-        """向项目级 permissions 下指定列表追加规则。
-
-        Args:
-            list_name: "allow" 或 "deny"。
-            rule_text: 规则文本。
-        """
-        with self._lock:
-            settings = _load_json(self.settings_path)
-            permissions = settings.get("permissions")
-            if not isinstance(permissions, dict):
-                permissions = {}
-                settings["permissions"] = permissions
-
-            rules = permissions.get(list_name)
-            if not isinstance(rules, list):
-                rules = []
-                permissions[list_name] = rules
-
-            if rule_text not in rules:
-                rules.append(rule_text)
-
-            self._save_user_settings(settings)

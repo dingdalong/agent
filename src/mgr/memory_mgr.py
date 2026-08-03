@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import re
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal, get_args
+from typing import Any, Literal, get_args
 
 import yaml
+
+from src.mgr.secure_io import atomic_write_text
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +31,7 @@ class MemoryEntry:
 class MemoryMgr:
     workdir: Path
     max_prompt_entries: int = 50
+    data_guard: Any = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         self.workdir = Path(self.workdir)
@@ -103,6 +106,10 @@ class MemoryMgr:
         type: str,
         body: str,
     ) -> str:
+        if self.data_guard is not None:
+            title, description, body = (
+                str(self.data_guard.redact(item)) for item in (title, description, body)
+            )
         title = title.strip()
         validation_error = self._validate_title(title)
         if validation_error:
@@ -122,6 +129,8 @@ class MemoryMgr:
             path=path,
         )
         self._write_entry(entry)
+        self.entries[entry.title] = entry
+        self.entries = self._sort_entries(self.entries)
         return title
 
     def read(self, title: str) -> str:
@@ -165,7 +174,7 @@ class MemoryMgr:
         if self._validate_type(memory_type):
             logger.warning("跳过项目记忆文件 %s：type 无效：%s", path, memory_type)
             return None
-        return MemoryEntry(
+        entry = MemoryEntry(
             title=title,
             description=str(meta["description"] or "").strip(),
             type=memory_type,  # type: ignore[arg-type]
@@ -173,6 +182,11 @@ class MemoryMgr:
             body=body.strip(),
             path=path,
         )
+        if self.data_guard is not None:
+            entry.title = str(self.data_guard.redact(entry.title))
+            entry.description = str(self.data_guard.redact(entry.description))
+            entry.body = str(self.data_guard.redact(entry.body))
+        return entry
 
     def _parse_frontmatter(self, text: str) -> tuple[dict, str] | None:
         match = re.match(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", text, re.DOTALL)
@@ -192,7 +206,10 @@ class MemoryMgr:
             "update_at": entry.update_at,
         }
         frontmatter = yaml.safe_dump(data, sort_keys=False, allow_unicode=True).strip()
-        entry.path.write_text(f"---\n{frontmatter}\n---\n\n{entry.body.rstrip()}\n")
+        atomic_write_text(
+            entry.path,
+            f"---\n{frontmatter}\n---\n\n{entry.body.rstrip()}\n",
+        )
 
     def _sort_entries(self, entries: dict[str, MemoryEntry]) -> dict[str, MemoryEntry]:
         return dict(

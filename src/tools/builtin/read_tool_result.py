@@ -1,7 +1,8 @@
 from __future__ import annotations
 from typing import TYPE_CHECKING
 
-from src.tools.decorator import ToolPermission, tool
+from src.tools import AccessKind, DataFlow, ToolPolicy
+from src.tools.decorator import tool
 from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
@@ -14,7 +15,7 @@ class ReadToolResult(BaseModel):
 @tool(
     model=ReadToolResult,
     description="读取分页工具结果的后续页。",
-    permission=ToolPermission(kind="readonly"),
+    policy=ToolPolicy(AccessKind.INTERNAL, DataFlow.LOCAL, plan_safe=True),
     raw_output=True,
     subagent=True,
 )

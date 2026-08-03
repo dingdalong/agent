@@ -218,10 +218,10 @@ class InlineController(
         self._plain = PlainFrontend()
         self._status_bar = StatusBarController(
             agent_view_store,
-            self.get_permission_mode,
+            self.get_plan_state,
         )
         self._slash_commands: list[tuple[str, str]] = slash_commands or []
-        self._permission_mode_toggle_handler: Callable[[], None] | None = None
+        self._plan_toggle_handler: Callable[[], None] | None = None
         # 输出渲染用 Console。
         self._rich_console = self._make_console(None)
         self._status_console = self._rich_console  # 状态块捕获用 Console。
@@ -937,7 +937,6 @@ class InlineController(
             恒为空串（只读查看）。
         """
         return ""
-
 
 
 

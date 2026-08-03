@@ -3,7 +3,6 @@ agent_type: general-purpose
 description: |
   通用任务执行 agent，仅在没有其他更匹配的专用子 agent 时使用。用于执行总控委派的单个完整任务 prompt。
 model: default
-permissionMode: default
 memory: project
 ---
 

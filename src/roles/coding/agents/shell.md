@@ -8,7 +8,6 @@ description: |
   当任务需要运行命令、查看 Git 状态、执行测试或收集命令行输出时，总控 agent 应该委派给它。
 tools: shell
 model: fast
-permissionMode: default
 memory: project
 ---
 

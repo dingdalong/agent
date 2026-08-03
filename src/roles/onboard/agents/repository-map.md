@@ -3,7 +3,6 @@ agent_type: repository-map
 description: 建立仓库快照、索引代码图、产出模块分层地图与分片计划。
 tools: list_directory, glob, grep, get_file_info, read_file, create_directory, write_file, move_file, shell, mcp__codebase-memory__index_repository, mcp__codebase-memory__get_architecture, mcp__codebase-memory__get_graph_schema, mcp__codebase-memory__search_graph, mcp__codebase-memory__query_graph
 model: best
-permissionMode: acceptEdits
 features: [file]
 ---
 

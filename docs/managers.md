@@ -2,7 +2,7 @@
 
 本文档面向开发者与运维者，逐一说明 `src/mgr/` 下的各 Manager 类：单一职责、消费的配置/文件、公共方法、是否受 feature 门控、是否实现 `reload()`、持有的关键状态。所有事实以源码为准，方法名/字段名/配置键均保留英文。
 
-术语沿用四层架构中的约定（详见 [architecture.md](architecture.md)）：**四层架构**（入口组装层 / 应用主循环层 / Agent 状态机层 / Manager 服务层）、**feature 门控**（角色声明启用哪些可插拔 Manager）、**6 步权限检查**（`PermissionManager.check()` 的评估顺序，详见 [permissions.md](permissions.md)）。
+术语沿用四层架构中的约定（详见 [architecture.md](architecture.md)）：四层架构、feature 门控和 `PermissionManager.authorize()` 单一授权入口。安全顺序见 [permissions.md](permissions.md)。
 
 ## Manager 服务层是什么
 
@@ -27,18 +27,16 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 
 ### reload 协议
 
-有会话级可变状态、需在 `/clear` 时重置的 Manager 实现 `reload()` 方法。`/clear`（`src/app/app.py:210-215`）只对**固定的 deps 层 Manager 列表**用 `hasattr(mgr, "reload")` 发现并调用：`memory_mgr`、`tools_mgr`、`permission_mgr`、`config_mgr`、`plugin_mgr`、`hooks_mgr`、`plan_mgr`、`ui`（其中 `tools_mgr` 无 `reload()`，被 `hasattr` 跳过；`ui.reload()` 清理交互态）。每 agent 层 Manager（`CompactMgr`/`PromptMgr`/`SkillMgr`/`SubAgentMgr`/`TaskManager`/`ReminderMgr`/`FileMgr`）在 `/clear` 时随新 `Agent` 实例整体重建，不走 `reload()`。
-
-> 注意：`McpMgr` **无** `reload()`——`/clear` 不重连 MCP server，故 `mcp_servers.json` 的编辑需重启进程才生效。详见 [mcp-and-hooks.md](mcp-and-hooks.md)。
+有会话级可变状态、需在 `/clear` 时重置的 Manager 实现 `reload()`。`/clear` 先通过 EventBus 菜单确认变化后的项目指纹，进入 reset gate 后按安全依赖顺序显式停止 MCP、更新信任与配置、重建秘密集、重载角色/插件/Hook、重配 LLM 并重启 MCP。每 Agent 层 Manager 随新 Agent 实例整体重建。
 
 ## Manager 一览表
 
 | Manager | 职责一句话 | feature 门控 | reload |
 |---|---|---|---|
-| `RoleMgr` (`role_mgr.py`) | 三层发现并激活角色，暴露角色资产路径 | 否 | 无 |
+| `RoleMgr` (`role_mgr.py`) | 按信任状态发现并激活角色，暴露角色资产路径 | 否 | 有 |
 | `LLMMgr` (`llm_mgr.py`) | 按模型名/别名返回可用的 LLMProvider | 否 | 无 |
 | `ToolsMgr` (`tools_mgr.py`) | 工具注册、执行、分页结果存储 | 否 | 无 |
-| `PermissionManager` (`permission_mgr.py`) | 6 步权限检查、规则引擎 | 否 | 有 |
+| `PermissionManager` (`permission_mgr.py`) | 路径解析、代码硬拒绝、Plan 约束、判官和一次性确认 | 否 | 无 |
 | `CompactMgr` (`compact_mgr.py`) | 上下文压缩与 transcript 落盘 | 否 | 无 |
 | `PromptMgr` (`prompt_mgr.py`) | 分层拼装系统提示词 | 否 | 无（缓存可 invalidate） |
 | `SubAgentMgr` (`subagent_mgr.py`) | 四层扫描子 agent，调度委派 | `subagent` | 无 |
@@ -75,7 +73,7 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 | `parse_frontmatter` | `text: str` | `tuple[dict, str]` | 从 `.md` 文本分离 YAML frontmatter 与 body |
 | `extract_manifest` | `meta: dict`, `path: Path`, `prompt`, `id_field`, `default_id`, `default_description` | `AgentManifest` | 从 frontmatter+body 构造 `AgentManifest` |
 
-**`AgentManifest` 数据类字段**（`role_mgr.py:150-168`）：`agent_type`（角色固定 `"main"`）、`description`、`path`、`prompt`、`tools`、`memory`、`model`、`permission_mode`、`enable_thinking`、`reasoning_effort`、`features`。
+**`AgentManifest` 数据类字段**：`agent_type`（角色固定 `"main"`）、`description`、`path`、`prompt`、`tools`、`memory`、`model`、`start_in_plan_mode`、`enable_thinking`、`reasoning_effort`、`features`。
 
 **公共方法/属性**：
 
@@ -94,7 +92,7 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 | `common_skills_dir` | — | `Path \| None` | 共享 `skills/` 目录 |
 | `common_agent_md_path` | — | `Path \| None` | 跨角色共享 `AGENTS.md` 文件 |
 
-**feature 门控**：否。 **reload**：无（角色在启动时一次性发现与解析）。
+**feature 门控**：否。 **reload**：有；按当前信任状态重新发现并解析角色。
 
 **持有的关键状态**：`_role_path`（激活角色目录）、`_manifest`（激活角色 manifest）、`_all_roles`（角色名 → 目录）。
 
@@ -119,12 +117,13 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 | 方法 | 关键参数 | 返回 | 作用 |
 |---|---|---|---|
 | `load_models` (async) | — | `None` | 并发发现模型；单个 provider 失败时记录 `provider_errors`，仅在静态 `models` 非空时回退；跨 provider 的同名模型归属冲突会抛配置错误 |
+| `reconfigure` (async) | — | `None` | 清理旧 provider/model 缓存，重新解析配置、发现模型并校验默认模型 |
 | `resolve_model` | `model: str \| None` | `str` | 解析顺序：`None`→`"default"`→CC 别名→config 别名→精确匹配→子串模糊匹配（多个取最短）→回退 `default` |
 | `ensure_default_available` | — | `None` | 启动前精确校验配置的默认模型；不可用时携安全化的 provider 发现错误抛 `ModelUnavailableError`，不切换到其他 provider |
 | `get` | `model: str \| None` | `LLMProvider` | 解析并返回缓存的 provider 实例（未知模型抛 `ValueError`） |
 | `list_models` | — | `list[str]` | 已加载可用模型名（排序） |
 
-**feature 门控**：否。 **reload**：无。
+**feature 门控**：否。 **reload**：通过异步 `reconfigure()` 显式完成。
 
 **模型发现规则**（`llm_mgr.py:121-223`）：每个 provider 独立调用 `list_models()`；发现响应同样执行严格模型列表校验。失败信息经统一分类后写入 `provider_errors`，静态 `models` 为空时该 provider 不注册模型。模型 ID 只能归属一个 provider，冲突会终止启动。
 
@@ -157,16 +156,9 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 | `get_page` | `tool_call_id: str`, `page: int` | `str` | 返回缓存分页结果的指定页 |
 | `execute` (async) | `tool_name`, `arguments`, `current_tool_call_id`, `deps`, `agent` | `str` | 执行工具全流程（见下） |
 
-**`execute()` 完整流程**（`tools_mgr.py:243-356`）：
-1. PreToolUse hook（`blocked`/`deny` 决策则直接拒绝；`updated_input` 覆盖参数）；
-2. 权限检查——取 `agent.permission_mode`（缺省 `permission_mgr.default_mode`），`check()` 返回 `deny` 直接拒并 `notify_decision`，`ask`（或 hook 要求 ask）走 `resolve_ask` 弹窗，否则 `notify_decision`；
-3. `ToolCallStarted` 事件；
-4. 调用工具本体；
-5. PostToolUse hook（`blocked` 覆盖为拒绝、`additional_context` 追加到结果）；
-6. `ToolCallCompleted` 事件（附 `status`、耗时、`result_preview`）；
-7. `_truncate` 分页：结果 token 超 `llm.page_token_budget` 时切页存入 `_result_store`，返回首页提示（`tool.raw_output` 为真则跳过分页）。
+**`execute()` 完整流程**：Pydantic 校验 → PreToolUse Hook → 修改后重校验 → `authorize()` → 脱敏的 `ToolCallStarted` → 调用工具 → 立即脱敏和限长 → PostToolUse → 再次脱敏 → `ToolCallCompleted` → 分页。分页缓存、Hook payload 和事件预览都只接收脱敏数据。
 
-**feature 门控**：否（但 `excluded_tool_names`/`resolve_subagent_tools` 是 feature 门控的执行点）。 **reload**：无。
+**feature 门控**：否（但 `excluded_tool_names`/`resolve_subagent_tools` 是 feature 门控的执行点）。 **reload**：有，仅清空分页结果缓存。
 
 **持有的关键状态**：`_tools`（工具名→`ToolEntry`）、`_result_store`（`tool_call_id`→分页列表）。
 
@@ -174,34 +166,19 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 
 ---
 
-## PermissionManager — 权限模式与规则引擎
+## PermissionManager — 单一授权服务
 
 `src/mgr/permission_mgr.py`
 
-**单一职责**：对每次工具调用做**6 步权限检查**，返回 `allow`/`deny`/`ask`/`auto_allow`；管理规则集与会话级放行、驱动 UI 确认弹窗。权限模式按 agent 独立（模式作为 `check()` 参数传入，此处只保留全局规则、`session_allow` 与不可变 `default_mode`）。
+**单一职责**：对一次已经校验的工具调用执行路径解析、Hard Deny、Plan 约束、确定性策略、LLM 判官和一次性人工确认，返回冻结的 `AuthorizationResult`。
 
-**消费的配置或文件**：
-- `settings.json` 的 `permissions`（`_load_config` `permission_mgr.py:312-329`）：`defaultMode`、`allow`、`deny`、`ask` 列表。
-- 构造参数 `role_default_mode`（`bootstrap.create_app()` 传入 `role_mgr.manifest.permission_mode`）：`_load_config` 末尾最后套用，使 `default_mode` 解析优先级为 role.md `permissionMode` → `settings.json` `defaultMode` → 内置 `DEFAULT_MODE`（详见 [permissions.md](permissions.md)）。
-- `mcp_servers.json` 各 server 的 `permissions` 块（`_load_mcp_server_rules` `permission_mgr.py:331-359`，经 `McpMgr.server_permissions()` 拉取）——最低优先级层。
-- 工具自身的权限元数据（`_load_tool_metadata`）：`kind`、`tips`、`check_permissions`、`specifier_arg`、`mcp_server`。
-
-**公共方法**（签名概览，评估细节见 [permissions.md](permissions.md)）：
+**构造依赖**：规范化 workdir、`JudgeClient`、一次性 yes/no 确认回调和共享 `DataGuard`。工具策略由调用方显式传入；授权服务不读取用户授权配置，也不依赖 EventBus、MCP Manager、ToolEntry 或 Agent。
 
 | 方法 | 关键参数 | 返回 | 作用 |
 |---|---|---|---|
-| `check` | `tool_name`, `tool_input`, `mode` | `PermissionDecision` | 6 步评估：deny→ask→工具自检→allow(含 session_allow)→处理穿透 ask→mcp 层规则→bypass→模式默认 |
-| `resolve_ask` (async) | `tool_name`, `tool_input`, `deps` | `PermissionDecision` | 弹窗确认；支持 session/always 与 MCP“信任整个 server”（写 `session_allow`，always 落 `settings.json`） |
-| `notify_decision` (async) | `tool_name`, `tool_input`, `deps`, `decision` | `None` | 向 UI 通知非 allow 决策 |
-| `reload` | — | `None` | 清空规则、`session_allow`、重置 `default_mode`，重载配置 |
+| `authorize` (async) | `tool_name`, `policy`, `arguments`, `origin`, `plan_active`, `user_intent` | `AuthorizationResult` | 每次调用独立裁决；不缓存、不创建后续放行 |
 
-**权限模式常量**（`permission_mgr.py:94-117`）：`DEFAULT_MODE`、`ACCEPT_EDITS_MODE`、`PLAN_MODE`、`BYPASS_MODE`、`AUTO_MODE`、`DONT_ASK_MODE`。Shift+Tab 轮转为 `CAROUSEL_MODES`（default/acceptEdits/plan），`/mode` 菜单为 `MENU_MODES`（全部 6 种）。
-
-**feature 门控**：否。 **reload**：有（`/clear` 调用；注意会同时清空并重载 `settings.json` 权限，但不重连 MCP，故 mcp 层规则的编辑需重启）。
-
-**持有的关键状态**：`deny_rules`/`ask_rules`/`allow_rules`/`session_allow`、`mcp_deny_rules`/`mcp_ask_rules`/`mcp_allow_rules`、`default_mode`、工具元数据映射（`_tool_kinds`/`_tool_tips`/`_check_permissions_fns`/`_specifier_args`/`_mcp_servers`）。
-
-完整 6 步评估顺序、复合命令逐段匹配、规则通配语义见 [permissions.md](permissions.md)。
+**关键协作者**：`PathResolver` 统一规范化和分类路径，`HardDenyDetector` 处理不可覆盖的高危动作，`LLMJudgeClient` 通过 `llm.fast` 返回结构化裁决，`DataGuard` 保证判官请求、原因和展示详情不含原始秘密。**feature 门控**：否。**reload**：无。
 
 ---
 
@@ -296,7 +273,7 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 
 **持有的关键状态**：`_documents`（`agent_type` → `AgentManifest`）。
 
-子 agent 定义格式、feature 继承、权限模式固定见 [roles-subagents-skills.md](roles-subagents-skills.md)。
+子 Agent 定义格式、feature 与 Plan 继承见 [roles-subagents-skills.md](roles-subagents-skills.md)。
 
 ---
 
@@ -334,23 +311,21 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 **消费的配置或文件**：
 - 三层合并 server（低→高，`start()` `mcp_mgr.py:131-153`）：角色 `mcp_servers.json` → 全局+项目（`config_mgr.load_mcp_servers()`，项目覆盖全局，二者覆盖角色层）。
 - `settings.json` 的 `mcp.enabledServers`（非空作白名单）/ `mcp.disabledServers`（始终剔除）——`_apply_server_policy`。
-- 每个 server 的 `permissions` 块被抽取存入 `_server_permissions`，供 `PermissionManager` 拉取。
 
-**transport 支持**（`_open_session` `mcp_mgr.py:256-297`）：`stdio`（默认，叠加默认环境含 PATH）、`sse`、`http`/`streamable-http`/`streamable_http`（httpx AsyncClient）。工具命名 `mcp__<server>__<tool>` 经 `_safe_tool_name` 清洗为 `[A-Za-z0-9_-]` 并截断到 64；`readOnlyHint` 为真→`kind=readonly`（全模式可见、自动放行），否则保守按非只读处理。
+**transport 支持**：`stdio`、`sse`、`http`/`streamable-http`/`streamable_http`。stdio 使用 DataGuard 安全环境；工具名 `mcp__<server>__<tool>` 清洗限长。所有工具无条件注册为 `REVIEW + EXTERNAL`，annotation 不能提升权限。
 
 **公共方法**：
 
 | 方法 | 关键参数 | 返回 | 作用 |
 |---|---|---|---|
-| `start` (async) | — | `None` | 合并/过滤 server，抽取 permissions，为每个 server 起常驻任务并等待就绪 |
+| `start` (async) | — | `None` | 合并/过滤 server，为每个 server 起常驻任务并等待就绪 |
 | `stop` (async) | — | `None` | 置停止事件，等待任务清退（超时强制取消） |
-| `server_permissions` | — | `dict[str, dict]` | 各生效 server 声明的只读 permissions 块 |
 
-**feature 门控**：否。 **reload**：**无**——`/clear` 不重连，故 `mcp_servers.json` 与其 per-server 权限块的编辑需重启进程生效。
+**feature 门控**：否。 **reload**：无；`/clear` 由 AgentApp 显式 stop/start 重连。
 
-**持有的关键状态**：`_conns`（server 名→`_ServerConn`）、`_tasks`（常驻连接任务）、`_stop_event`、`_server_permissions`。
+**持有的关键状态**：`_conns`（server 名→`_ServerConn`）、`_tasks`（常驻连接任务）、`_stop_event`。
 
-MCP 连接配置格式、per-server 权限分层见 [mcp-and-hooks.md](mcp-and-hooks.md)。
+MCP 连接配置和授权边界见 [mcp-and-hooks.md](mcp-and-hooks.md)。
 
 ---
 
@@ -381,7 +356,7 @@ MCP 连接配置格式、per-server 权限分层见 [mcp-and-hooks.md](mcp-and-h
 
 `src/mgr/plan_mgr.py`
 
-**单一职责**：管理计划模式的进入/退出（切换 agent 的 `permission_mode`）、管理计划目录路径，并作为提醒源向 `ReminderMgr` 注入 plan 指令。计划模式下的行为约束（只允许只读工具和编辑计划文件）完全通过提示词实现。
+**单一职责**：管理计划目录、计划内容与进入/展示/审核/执行工作流，并作为提醒源向 `ReminderMgr` 注入 Plan 指令。`agent.plan_active` 是状态权威；允许哪些工具由 `PermissionManager` 的独立 Plan 约束保证。
 
 **消费的配置或文件**：计划文件目录 `{workdir}/.agent/plans/`。
 
@@ -389,8 +364,8 @@ MCP 连接配置格式、per-server 权限分层见 [mcp-and-hooks.md](mcp-and-h
 
 | 方法 | 关键参数 | 返回 | 作用 |
 |---|---|---|---|
-| `enter_mode` | `agent`, `reminder_mgr` | `bool` | 切 agent 到 PLAN_MODE，注册提醒源；已在 plan 返回 False |
-| `exit_mode` | `agent`, `reminder_mgr` | `bool` | 恢复进入前模式，置退出提醒标志；不在 plan 返回 False |
+| `enter_mode` | `agent`, `reminder_mgr` | `bool` | 设置 `plan_active=True` 并注册提醒源；已激活时返回 False |
+| `exit_mode` | `agent`, `reminder_mgr` | `bool` | 设置 `plan_active=False` 并置退出提醒标志；未激活时返回 False |
 | `set_last_plan_path` | `path: str` | `None` | 记录最后提交的计划文件路径（供重入提示词引用） |
 | `get_turn_start_reminder` | `mode` | `str` | turn 开始时注入 plan 指令，或退出后一次性退出提醒 |
 | `pop_post_round_reminder` | `mode` | `str \| None` | 轮中进入 plan 时注入指令 |
@@ -400,7 +375,7 @@ MCP 连接配置格式、per-server 权限分层见 [mcp-and-hooks.md](mcp-and-h
 
 **持有的关键状态**：`_plan_dir`、`_pending_injection`、`_need_exit_reminder`、`_last_plan_path`。
 
-计划工作流与权限模式交互见 [permissions.md](permissions.md) 与 [agent-runtime.md](agent-runtime.md)。
+计划工作流与授权约束见 [permissions.md](permissions.md) 与 [agent-runtime.md](agent-runtime.md)。
 
 ---
 
@@ -471,13 +446,13 @@ MCP 连接配置格式、per-server 权限分层见 [mcp-and-hooks.md](mcp-and-h
 
 **单一职责**：持久化会话元数据与对话历史，支持 `/resume` 恢复。
 
-**消费的配置或文件**：`{global_dir}/sessions/` 下——`{id}.json`（元数据：`workdir`/时间戳/`topic`/`permission_mode`/`pre_plan_mode`）、`{id}.hist.json`（历史快照，覆写式原子写）。
+**消费的配置或文件**：`{global_dir}/sessions/` 下——`{id}.json`（元数据：`workdir`/时间戳/`topic`/`plan_active`）、`{id}.hist.json`（脱敏历史快照，覆写式原子写）。
 
 **公共方法**：
 
 | 方法 | 关键参数 | 返回 | 作用 |
 |---|---|---|---|
-| `save_metadata` | `session_id`, `is_new`, `topic`, `permission_mode`, `pre_plan_mode` | `None` | 写/更新元数据（首次写 `created_at`，后续更 `updated_at`） |
+| `save_metadata` | `session_id`, `is_new`, `topic`, `plan_active` | `None` | 原子写/更新元数据（首次写 `created_at`，后续更 `updated_at`） |
 | `save_history` | `session_id`, `messages` | `None` | 原子覆写历史快照（正确处理 compact 后缩短） |
 | `list_sessions` | `limit` | `list[dict]` | 按 `updated_at` 降序列出会话元数据 |
 | `list_resumable` | `current_session_id`, `limit` | `list[dict]` | 同上但排除当前会话 |
@@ -526,25 +501,25 @@ hook 协议、JSON 字段与插件 `CLAUDE_PLUGIN_ROOT` 环境变量见 [mcp-and
 
 `src/mgr/config_mgr.py`
 
-**单一职责**：三层深度合并 `config.yaml`、双层合并 `settings.json`、加载三层 `.env`，并提供点路径取值与项目级 settings 原子写入。
+**单一职责**：按项目启动信任结果合并 `config.yaml`、`settings.json`、`.env` 和 MCP server 配置，并提供点路径取值。
 
 **消费的配置或文件**：
 - `config.yaml` 三层深合并（低→高，`load_config` `config_mgr.py:111-143`）：内置 `builtin_root()/config.yaml` → 全局 `~/.agent/config.yaml` → 项目 `.agent/config.yaml`。
-- `.env` 三层（`override=True` 后者覆盖）：全局 `~/.agent/.env` → 仓库根 `{workdir}/.env` → 项目 `.agent/.env`；环境变量 `{PROVIDER}_API_KEY`/`{PROVIDER}_API_URL` 覆盖对应 provider 的 `api_key`/`base_url`。
-- `settings.json` 双层（`load_user_settings` `config_mgr.py:162-198`）：`permissions.allow`/`permissions.deny` 列表合并去重，其余键项目覆盖全局。
-- `mcp_servers.json` 双层（`load_mcp_servers`）：全局 → 项目（顶层 `mcpServers`，项目覆盖全局）。**写入位置固定为项目级 `.agent/settings.json`**。
+- `.env` 三层：全局 `~/.agent/.env` → 仓库根 `{workdir}/.env` → 项目 `.agent/.env`；`dotenv_values()` 构造私有有效环境且后者覆盖前者，不修改 `os.environ`。`{PROVIDER}_API_KEY`/`{PROVIDER}_API_URL` 覆盖对应 provider 字段。
+- `settings.json` 双层深合并；受限模式忽略项目层。
+- `mcp_servers.json` 双层（`load_mcp_servers`）：全局 → 项目；受限模式忽略项目层。
 
 **公共方法**：
 
 | 方法 | 关键参数 | 返回 | 作用 |
 |---|---|---|---|
 | `reload` | — | `None` | 重载 config 与 user settings |
-| `load_config` | — | `dict` | 三层合并 config + 加载 .env + provider env 覆盖 |
+| `load_config` | — | `dict` | 三层合并 config + 构造私有环境 + provider env 覆盖 |
 | `load_mcp_servers` | — | `dict` | 双层合并 `mcpServers` |
-| `load_user_settings` | — | `dict` | 双层合并 settings（allow/deny 并集去重） |
+| `load_user_settings` | — | `dict` | 按信任状态深合并 settings |
 | `get_config` | `key`（点路径） | `Any` | 取配置值（缺失抛 `KeyError`） |
 | `get_user_setting` | `key`（点路径） | `Any` | 取设置值（缺失返回空 dict） |
-| `append_permission_list` | `list_name`, `rule_text` | `None` | 向项目 settings 的 allow/deny 追加规则（原子写、去重） |
+| `set_project_trusted` | `trusted` | `None` | 更新信任状态并重载配置 |
 
 **feature 门控**：否。 **reload**：有。
 

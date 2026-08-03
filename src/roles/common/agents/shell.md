@@ -4,7 +4,6 @@ description: |
   在独立上下文中运行 Shell 命令并汇总输出的命令执行子任务 agent。用于运行诊断命令、查看环境状态、确认依赖版本、收集命令行输出等。当任务需要运行命令或收集命令行输出时，总控 agent 应该委派给它。
 tools: shell
 model: fast
-permissionMode: default
 memory: project
 ---
 

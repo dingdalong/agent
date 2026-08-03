@@ -223,6 +223,15 @@ class LLMMgr:
         self.provider_errors = next_provider_errors
         self._cache.clear()
 
+    async def reconfigure(self) -> None:
+        """重新读取运行配置并重建 provider/model 缓存。"""
+        self._model_to_provider.clear()
+        self.provider_errors.clear()
+        self._cache.clear()
+        self.__post_init__()
+        await self.load_models()
+        self.ensure_default_available()
+
     def _log_model_discovery_failure(
         self,
         *,

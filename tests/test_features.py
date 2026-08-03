@@ -7,7 +7,6 @@ from pathlib import Path
 import src.tools  # noqa: F401  导入触发内置工具注册到 _registry
 from src.mgr.features import ALL_FEATURES, resolve_features
 from src.mgr.paths import builtin_root
-from src.mgr.permission_mgr import DEFAULT_MODE, PLAN_MODE
 from src.mgr.role_mgr import AgentManifest, extract_manifest, parse_frontmatter
 from src.mgr.tools_mgr import ToolsMgr
 from src.tools.decorator import _registry
@@ -134,7 +133,7 @@ def test_coding_role_configuration_contract():
     manifest = _load_role_manifest("coding")
 
     assert manifest.model == "best"
-    assert manifest.permission_mode is PLAN_MODE
+    assert manifest.start_in_plan_mode is True
     assert manifest.enable_thinking is True
     assert manifest.reasoning_effort == "max"
     assert manifest.memory == "project"
@@ -153,7 +152,7 @@ def test_mijia_role_configuration_contract():
     manifest = _load_role_manifest("mijia")
 
     assert manifest.model == "fast"
-    assert manifest.permission_mode is DEFAULT_MODE
+    assert manifest.start_in_plan_mode is False
     assert manifest.enable_thinking is False
     assert manifest.features == {"subagent"}
     assert manifest.tools is None

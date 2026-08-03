@@ -7,7 +7,6 @@ description: |
   当任务需要在处理、修改、审查、回答之前先收集事实和证据，或需要联网查找外部资料时，总控 agent 应该优先委派给它。
 tools: list_directory, glob, grep, get_file_info, read_file, web_search, web_fetch
 model: default
-permissionMode: dontAsk
 memory: project
 ---
 

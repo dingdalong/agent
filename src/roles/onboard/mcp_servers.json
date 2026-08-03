@@ -6,10 +6,6 @@
       "args": [],
       "env": {
         "CBM_CACHE_DIR": "${workdir}/.agent/codebase-memory"
-      },
-      "permissions": {
-        "allow": ["*"],
-        "deny": ["delete_project", "manage_adr", "ingest_traces"]
       }
     }
   }

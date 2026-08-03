@@ -19,13 +19,13 @@ def can_insert_newline(buffer_editable: bool) -> bool:
     return buffer_editable
 
 
-def can_toggle_permission_mode(
+def can_toggle_plan(
     top_window_kind: str | None,
     transcript_visible: bool,
     completion_visible: bool,
     agent_list_focused: bool,
 ) -> bool:
-    """Return whether Shift+Tab may rotate the permission mode.
+    """Return whether Shift+Tab may toggle Plan.
 
     Args:
         top_window_kind: Current WindowManager top-window kind.
@@ -140,7 +140,7 @@ class KeymapActions:
                 event.current_buffer.insert_text("\n")
 
         self._try_add_binding(bindings, "s-enter", insert_newline)
-        self._try_add_binding(bindings, "s-tab", self._handle_permission_mode_toggle)
+        self._try_add_binding(bindings, "s-tab", self._handle_plan_toggle)
 
         # Ctrl+C：中断当前
         @bindings.add("c-c")
@@ -398,8 +398,8 @@ class KeymapActions:
             return
         self._request_user_interrupt()
 
-    def _handle_permission_mode_toggle(self, event) -> None:
-        """Shift+Tab：切换权限模式并 invalidate 触发状态条重绘，立即反映新模式。
+    def _handle_plan_toggle(self, event) -> None:
+        """Shift+Tab：切换 Plan 并重绘状态条。
 
         Args:
             event: prompt_toolkit 按键事件。
@@ -413,8 +413,8 @@ class KeymapActions:
             and self._buffer.complete_state is not None
         )
         if (
-            self._permission_mode_toggle_handler is None
-            or not can_toggle_permission_mode(
+            self._plan_toggle_handler is None
+            or not can_toggle_plan(
                 top_window_kind=self._top_window_kind,
                 transcript_visible=self._transcript_visible,
                 completion_visible=completion_visible,
@@ -422,7 +422,7 @@ class KeymapActions:
             )
         ):
             return
-        self._permission_mode_toggle_handler()
+        self._plan_toggle_handler()
         event.app.invalidate()
 
     def _try_add_binding(self, bindings: KeyBindings, key: str, handler: Callable) -> None:

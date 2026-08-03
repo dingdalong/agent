@@ -6,20 +6,17 @@
 - tool round: 通知各提醒源更新内部状态
 - post round: 收集需要追加到 messages 的提醒消息
 
-提醒源通过 duck typing 识别（与代码库中 hasattr(mgr, "reload") 模式一致）：
-- get_turn_start_reminder(mode) -> str: 返回纯文本内容
+提醒源通过 duck typing 识别：
+- get_turn_start_reminder(plan_active) -> str: 返回纯文本内容
 - notify_tool_round(tool_names) -> None
-- pop_post_round_reminder(mode) -> str | None: 返回纯文本内容
+- pop_post_round_reminder(plan_active) -> str | None: 返回纯文本内容
 提醒源只需实现所需的方法，未实现的方法会被跳过。
 所有注入内容统一用 <reminder> 标签包装，由 ReminderMgr 处理。
 """
 
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from src.mgr.permission_mgr import PermissionMode
+from typing import Any
 
 
 class ReminderMgr:
@@ -53,14 +50,14 @@ class ReminderMgr:
             pass
 
     def build_turn_start_instructions(
-        self, mode: PermissionMode | None,
+        self, plan_active: bool,
     ) -> str:
         """收集所有提醒源的 turn start 注入文本，用 <reminder> 标签包装后拼接。
 
         在 _on_request_input 和 run() 子智能体路径中调用。
 
         Args:
-            mode: 调用方 agent 的权限模式，传递给需要它的提醒源。可为 None。
+            plan_active: 调用方 agent 是否处于 Plan。
 
         Returns:
             用 <reminder> 包装并拼接后的注入文本。无注入时返回空串。
@@ -70,7 +67,7 @@ class ReminderMgr:
             fn = getattr(p, "get_turn_start_reminder", None)
             if fn is None:
                 continue
-            text = fn(mode)
+            text = fn(plan_active)
             if text:
                 parts.append(f"<reminder>{text}</reminder>")
         return "\n\n".join(parts)
@@ -89,7 +86,7 @@ class ReminderMgr:
                 fn(tool_names)
 
     def collect_post_round_messages(
-        self, mode: PermissionMode | None,
+        self, plan_active: bool,
     ) -> list[dict]:
         """收集所有提醒源的 post-round 消息，用 <reminder> 标签包装后构造消息字典。
 
@@ -97,7 +94,7 @@ class ReminderMgr:
         提醒源只需返回纯文本内容（str），格式包装由本方法统一处理。
 
         Args:
-            mode: 调用方 agent 的权限模式，传递给需要它的提醒源。可为 None。
+            plan_active: 调用方 agent 是否处于 Plan。
 
         Returns:
             需追加到 messages 的消息字典列表。
@@ -107,7 +104,7 @@ class ReminderMgr:
             fn = getattr(p, "pop_post_round_reminder", None)
             if fn is None:
                 continue
-            text = fn(mode)
+            text = fn(plan_active)
             if text:
                 msgs.append({
                     "role": "user",

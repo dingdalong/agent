@@ -348,7 +348,7 @@ class OutputActions:
         self._print_rich(f"[compact] {prefix}{detail}", style="bright_black")
 
     async def on_permission_notice(self, event: PermissionNotice) -> None:
-        """工具权限状态通知：仅 deny 打印 [deny] 行；allow / auto_allow 静默（工具本身已由本轮面板/定稿块呈现）。
+        """工具权限状态通知：仅 deny 打印 [deny] 行；allow 静默。
 
         Args:
             event: 权限状态通知事件，含 caller_agent_type / caller_uuid。

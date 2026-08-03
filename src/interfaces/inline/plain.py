@@ -64,24 +64,22 @@ class PlainActions:
             prompt, default=default, multiline=True, prompt_continuation="... ", handle_sigint=True
         )
 
-    async def _read_permission_plain(self, tool_name: str, detail: str, suggested_rules: list[str] | None, mcp_server_rule: str | None = None) -> str:
-        """非 TTY 降级权限确认：打印说明块后用 PromptSession 循环读取 y/s/a/n（MCP 工具另加 ss/aa）。
+    async def _read_permission_plain(self, tool_name: str, detail: str) -> str:
+        """非 TTY 降级权限确认：打印说明块后读取 y/n。
 
         Args:
             tool_name: 工具名。
             detail: 权限请求详情。
-            suggested_rules: 建议的 allow 规则列表，供展示。
-            mcp_server_rule: MCP 工具的 server 级通配规则；非空时接受 ss/aa 信任整 server。
         Returns:
-            "yes" / "session" / "always" / "session_server" / "always_server" / "deny"。
+            "yes" 或 "deny"。
         """
-        self._print_rich(self._permission_prompt_text(tool_name, detail, suggested_rules, mcp_server_rule), end="")
+        self._print_rich(self._permission_prompt_text(tool_name, detail), end="")
         if self._fallback_session is None:
             self._fallback_session = PromptSession()
-        hint = "请输入 y、s、a、ss、aa 或 n。" if mcp_server_rule else "请输入 y、s、a 或 n。"
+        hint = "请输入 y 或 n。"
         while True:
             answer = (await self._fallback_session.prompt_async("选择: ", handle_sigint=True)).strip().lower()
-            decision = self._normalize_permission_answer(answer, mcp_server_rule)
+            decision = self._normalize_permission_answer(answer)
             if decision is not None:
                 return decision
             self._print_rich(hint, style="red")
@@ -221,4 +219,3 @@ class PlainActions:
                     values.append(options[idx][0])
             return "、".join(values)
         return answer  # 含非编号内容：整行作自定义文本
-

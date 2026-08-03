@@ -13,9 +13,10 @@ from src.agent.states import RunResult
 from src.interfaces.output_router import OutputRouter
 from src.interfaces.agent_view_store import AgentViewStore
 from src.interfaces.status_presenter import present_agent
-from src.app.permission_mode_controller import PermissionModeController
+from src.app.plan_mode_controller import PlanModeController
 from src.events import NoEventSubscribers
 from src.events.types import InterruptRequested
+from src.mgr.data_guard import register_runtime_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +29,7 @@ class AgentApp:
     agent_view_store: AgentViewStore = field(repr=False)
     output_router: OutputRouter = field(repr=False)
     _work_task: asyncio.Task | None = field(default=None, init=False, repr=False)
-    _permission_mode_controller: PermissionModeController | None = field(default=None, init=False, repr=False)
+    _plan_mode_controller: PlanModeController | None = field(default=None, init=False, repr=False)
 
     async def run(self) -> None:
         """启动主 REPL 循环。
@@ -165,22 +166,17 @@ class AgentApp:
         """
         asyncio.create_task(self.deps.event_bus.request_interrupt(source="ui"))
 
-    def _install_permission_mode_controller(self) -> None:
-        """为当前会话安装入口主 agent 的权限模式协调器。
+    def _install_plan_mode_controller(self) -> None:
+        """为当前会话安装入口主 agent 的 Plan 协调器。
 
         Returns:
             None.
         """
-        permission_mgr = getattr(self.deps, "permission_mgr", None)
         ui = getattr(self.deps, "ui", None)
         event_bus = getattr(self.deps, "event_bus", None)
-        if permission_mgr is None or ui is None or event_bus is None:
+        if ui is None or event_bus is None:
             return
-        self._permission_mode_controller = PermissionModeController(
-            permission_mgr=permission_mgr,
-            ui=ui,
-            event_bus=event_bus,
-        )
+        self._plan_mode_controller = PlanModeController(ui=ui, event_bus=event_bus)
 
     async def _reset_session(
         self,
@@ -200,6 +196,26 @@ class AgentApp:
         Returns:
             Newly constructed foreground Agent.
         """
+        trust_gate = getattr(self.deps, "trust_gate", None)
+        pending_trust: bool | None = None
+        if source == "clear" and trust_gate is not None:
+            async def confirm_project_trust(prompt: str) -> bool:
+                event_bus = getattr(self.deps, "event_bus", None)
+                if event_bus is None:
+                    return False
+                choice = await event_bus.request_choice(
+                    prompt,
+                    [
+                        ("restricted", "以受限模式继续"),
+                        ("trust", "信任并加载"),
+                    ],
+                    0,
+                    source="project_trust",
+                )
+                return choice == "trust"
+
+            pending_trust = await trust_gate.ensure_trusted(confirm_project_trust)
+
         event_bus = getattr(self.deps, "event_bus", None)
         bus_gate = event_bus.reject_ui_requests() if event_bus is not None else nullcontext()
         async with self.deps.ui.reset_session_interactions():
@@ -208,26 +224,68 @@ class AgentApp:
                     if event_bus is not None:
                         await event_bus.join()
                     self.deps.session_id = str(uuid.uuid4())
-                    # UI 清理交互态；AgentViewStore 单独原子清空全部会话状态。
-                    for attr in ("memory_mgr", "tools_mgr", "permission_mgr",
-                                 "config_mgr", "plugin_mgr", "hooks_mgr", "plan_mgr",
-                                 "ui"):
+                    data_guard = getattr(self.deps, "data_guard", None)
+                    config_mgr = getattr(self.deps, "config_mgr", None)
+                    global_dir = getattr(self.deps, "global_dir", None)
+                    workdir = getattr(self.deps, "workdir", None)
+                    mcp_mgr = getattr(self.deps, "mcp_mgr", None)
+                    tools_mgr = getattr(self.deps, "tools_mgr", None)
+
+                    if source == "clear":
+                        if mcp_mgr is not None:
+                            await mcp_mgr.stop()
+                        if tools_mgr is not None:
+                            tools_mgr.unregister_origin("mcp")
+
+                        if pending_trust is not None and config_mgr is not None:
+                            config_mgr.set_project_trusted(pending_trust)
+                        trusted = bool(getattr(config_mgr, "project_trusted", False))
+                        if data_guard is not None and config_mgr is not None and global_dir is not None and workdir is not None:
+                            register_runtime_secrets(
+                                data_guard, config_mgr, global_dir, workdir, trusted
+                            )
+
+                        role_mgr = getattr(self.deps, "role_mgr", None)
+                        if role_mgr is not None and hasattr(role_mgr, "reload"):
+                            role_mgr.reload()
+                        plugin_mgr = getattr(self.deps, "plugin_mgr", None)
+                        if plugin_mgr is not None:
+                            plugin_mgr.project_trusted = trusted
+                            plugin_mgr.reload()
+                        hooks_mgr = getattr(self.deps, "hooks_mgr", None)
+                        if hooks_mgr is not None:
+                            hooks_mgr.project_trusted = trusted
+                            hooks_mgr.base_environment = config_mgr.environment
+                            hooks_mgr.reload()
+                        llm_mgr = getattr(self.deps, "llm_mgr", None)
+                        if llm_mgr is not None and hasattr(llm_mgr, "reconfigure"):
+                            await llm_mgr.reconfigure()
+                        if mcp_mgr is not None:
+                            mcp_mgr.project_trusted = trusted
+                            await mcp_mgr.start()
+                    elif data_guard is not None and config_mgr is not None and global_dir is not None and workdir is not None:
+                        register_runtime_secrets(
+                            data_guard, config_mgr, global_dir, workdir,
+                            bool(getattr(config_mgr, "project_trusted", False)),
+                        )
+
+                    for attr in ("memory_mgr", "tools_mgr", "plan_mgr", "ui"):
                         mgr = getattr(self.deps, attr, None)
                         if mgr is not None and hasattr(mgr, "reload"):
                             mgr.reload()
                     self.agent_view_store.reset()
                     self.deps.session_context.clear()
-                    self._install_permission_mode_controller()
-                    self.deps.permission_mode_controller = self._permission_mode_controller
+                    self._install_plan_mode_controller()
+                    self.deps.plan_mode_controller = self._plan_mode_controller
                     agent = Agent.from_manifest(
                         manifest=self.deps.role_mgr.manifest if self.deps.role_mgr else None,
                         deps=self.deps,
                         is_subagent=False,
                     )
                     self.agent_view_store.register_foreground(str(agent.uuid), agent.agent_type)
-                    if self._permission_mode_controller is not None:
-                        self._permission_mode_controller.install_shortcut(agent)
-                        self._permission_mode_controller.notify_state_changed()
+                    if self._plan_mode_controller is not None:
+                        self._plan_mode_controller.install_shortcut(agent)
+                        self._plan_mode_controller.notify_state_changed()
                     await self._run_session_start_hooks(source=source)
                     return agent
                 finally:
@@ -318,9 +376,7 @@ class AgentApp:
         else:
             description = " ".join(str(getattr(manifest, "description", "") or "").split())
             role = role_name
-        permission_mode = "unknown"
-        if getattr(self.deps, "permission_mgr", None) is not None:
-            permission_mode = self.deps.permission_mgr.default_mode.value
+        plan_state = "active" if getattr(manifest, "start_in_plan_mode", False) else "inactive"
 
         banner = Text()
         banner.append("╭─ ◆ 智能体工作台", style="bold cyan")
@@ -333,8 +389,8 @@ class AgentApp:
         banner.append(str(role), style="bold")
         if description:
             banner.append(f"  {description}", style="dim")
-        banner.append("\n│  权限  ", style="bold cyan")
-        banner.append(str(permission_mode), style="bold yellow")
+        banner.append("\n│  Plan  ", style="bold cyan")
+        banner.append(plan_state, style="bold yellow")
         banner.append("\n│  工作目录  ", style="bold cyan")
         banner.append(str(self.deps.workdir), style="dim")
         banner.append("\n╰─ ", style="bold cyan")
