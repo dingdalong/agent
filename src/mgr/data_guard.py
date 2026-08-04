@@ -152,7 +152,7 @@ class DataGuard:
         return f"搜索网页：<query:length={len(query)}>"
 
     def shell_summary(self, command: str) -> str:
-        """生成不含请求数据的 Shell 摘要，供判官和人工确认复用。"""
+        """生成不含请求数据的 Shell 摘要，供智能权限和人工确认复用。"""
         try:
             lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()")
             lexer.whitespace_split = True

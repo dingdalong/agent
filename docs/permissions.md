@@ -30,8 +30,8 @@ MCP 工具固定为 `REVIEW + EXTERNAL`。上游 annotation（包括 `readOnlyHi
 6. 若 `agent.plan_active`，先执行独立 Plan 约束。
 7. LOCAL_READ 和 INTERNAL 走确定性放行；EXTERNAL_READ 进入 Web 专用隐私预检和安全审查。
 8. WORKSPACE_WRITE 仅在全部写目标为普通工作区或计划目录时确定性放行。
-9. 其余调用交通用 LLM 判官。
-10. 判官返回 ask、异常、超时或无效响应时，只进行一次 yes/no 人工确认；无 TTY、取消或拒绝均为 deny。
+9. 其余调用交通用 LLM 智能权限审查。
+10. 智能权限返回 ask、异常、超时或无效响应时，只进行一次 yes/no 人工确认；无 TTY、取消或拒绝均为 deny。
 11. 工具执行结果立即经 DataGuard 脱敏和限长，再进入 PostToolUse、事件、分页和 Agent 历史。
 
 `AuthorizationResult.source` 标明裁决来源：`hard_rule`、`plan`、`policy`、`judge`、`web_safety`、`user` 或 `failure`。`reason` 和 `safe_detail` 在返回前再次脱敏并限长。允许结果还包含冻结的 `path_grants`，只记录参数名、角色、授权时规范路径和分类；FileMgr 在每次实际 I/O 前复检规范路径与分类，移动操作同时复检 source、destination 与最终目标。
@@ -52,7 +52,7 @@ LOCAL_READ 可以读取工作区外的普通文件或目录，但拒绝设备、
 
 ## Hard Deny
 
-`HardDenyDetector` 只保留可高置信静态识别、且不能由判官或用户覆盖的危险操作：
+`HardDenyDetector` 只保留可高置信静态识别、且不能由智能权限或用户覆盖的危险操作：
 
 - sudo、su、doas、pkexec 等提权。
 - 根目录、主目录或系统目录级递归删除。
@@ -65,13 +65,15 @@ LOCAL_READ 可以读取工作区外的普通文件或目录，但拒绝设备、
 
 普通构建、测试、安装依赖、项目内删除、Git 推送和重置等不在代码中预判，统一进入 REVIEW。
 
-## LLM 判官
+## LLM 智能权限审查
 
 `LLMJudgeClient` 使用 `llm.fast`，由 `LLMMgr` 在未配置 fast 时回退 default。调用最长 15 秒，并强制通过 `record_verdict` 工具返回 allow、deny 或 ask。
 
-判官请求只包含：工具名和来源、动作类别、数据流、规范化路径分类、网络主机、参数类型与长度、风险标志、最多 2 KiB 的脱敏用户意图。Shell 额外发送最多 8 KiB 的脱敏命令。文件正文、待写内容、完整 body、header、cookie、环境变量和值、完整 URL query 都不会进入请求。参数摘要在系统提示词中明确标记为不可信数据。
+智能权限请求只包含：工具名和来源、动作类别、数据流、规范化路径分类、网络主机、参数类型与长度、风险标志、最多 2 KiB 的脱敏用户意图。Shell 额外发送最多 8 KiB 的脱敏命令。文件正文、待写内容、完整 body、header、cookie、环境变量和值、完整 URL query 都不会进入请求。参数摘要在系统提示词中明确标记为不可信数据。
 
-判官 allow/deny 直接成为本次裁决；ask、异常、超时、缺失或无效输出进入一次性确认。确认只接受 yes/no，不产生任何后续调用权限。
+智能权限 allow/deny 直接成为本次裁决；ask、异常、超时、缺失或无效输出进入一次性确认。确认只接受 yes/no，不产生任何后续调用权限。
+
+智能权限的裁决理由会以一行提示展示给用户（格式 `智能权限 · 中文工具名 · 结论(理由)`）：放行亮黄、拒绝亮红，均走 `PermissionNotice`；ask 的理由则在确认弹窗之前的输出区提示。仅智能权限裁决（`source="judge"`）的放行会提示，本地读取、普通工作区写入等策略放行不打断输出。
 
 Web 外部读取另使用 `WebPrivacyGuard` 与 `LLMWebSafetyClient`。本地预检先拒绝秘密、URL userinfo 和认证/签名 query；疑似个人信息、源代码、专有文本或高熵私有标识符不进入 LLM，直接一次性确认。其余请求由当前 Agent 模型审查，不切换到 `llm.fast`；搜索只发送最多 2 KiB 的脱敏查询，抓取只发送 scheme、host、path 和 query key，不发送 query value。两种审查共用 15 秒超时、结构化 `allow/deny/ask` 和失败后一次性确认逻辑。
 
@@ -102,8 +104,8 @@ Plan 激活时只允许：
 - `plan_safe=True` 的 INTERNAL 工具。
 - 规范化后位于 `.agent/plans/**` 的 WORKSPACE_WRITE。
 
-其他调用直接以 `source="plan"` 拒绝，不调用判官。子 Agent 在构造时继承父 Agent 当前 Plan 状态。
+其他调用直接以 `source="plan"` 拒绝，不调用智能权限。子 Agent 在构造时继承父 Agent 当前 Plan 状态。
 
 ## 安全边界
 
-判官是风险分类器，不是 OS 沙箱。明确高危操作、已识别秘密外发、项目启动信任、路径复检、结果脱敏和安全子进程环境由代码保证；无法可靠静态判断的 Shell、网络、MCP、移动和动态工具交判官，并在不确定时回到一次性人工确认。
+智能权限是风险分类器，不是 OS 沙箱。明确高危操作、已识别秘密外发、项目启动信任、路径复检、结果脱敏和安全子进程环境由代码保证；无法可靠静态判断的 Shell、网络、MCP、移动和动态工具交智能权限审查，并在不确定时回到一次性人工确认。

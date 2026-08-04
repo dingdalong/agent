@@ -57,7 +57,7 @@ ToolPolicy(
 2. Pydantic 校验原始参数。
 3. 运行可信 `PreToolUse` Hook；blocked 或 deny 立即拒绝。
 4. Hook 改写参数后重新校验。
-5. 调用 `PermissionManager.authorize()`；拒绝时只发布脱敏的 PermissionNotice。
+5. 调用 `PermissionManager.authorize()`；按裁决结果发布脱敏的 PermissionNotice（放行/拒绝/需确认一行提示，含理由）。
 6. 发布脱敏的 `ToolCallStarted`，携带 `ToolDisplay`（中文标题 + 参数摘要）。
 7. 执行工具，并把结果立即经 DataGuard 递归脱敏、限制到 1 MiB/20,000 行。
 8. 提取 `ToolResult`：若工具函数返回 `ToolResult`，分离 `.display`（展示侧）和 `.text`（LLM 侧）。
@@ -101,7 +101,7 @@ ToolPolicy(
 
 ## Shell
 
-Shell 固定为 `REVIEW + DYNAMIC`，不会因命令看似只读而绕过判官。代码层只拦截高置信危险命令和外传模式，其他构建、测试、依赖安装与 Git 操作交判官。
+Shell 固定为 `REVIEW + DYNAMIC`，不会因命令看似只读而绕过智能权限。代码层只拦截高置信危险命令和外传模式，其他构建、测试、依赖安装与 Git 操作交智能权限审查。
 
 执行 cwd 固定为 workdir，timeout 由 Pydantic 限制在 1–600 秒。子进程创建独立进程组；超时或取消后终止并回收整个进程组。环境由 DataGuard 构造，不继承模型密钥、token、cookie 或密码。stdout/stderr 并发读取并共享 1 MiB/20,000 行预算。
 

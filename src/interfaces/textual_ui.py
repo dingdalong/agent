@@ -31,6 +31,7 @@ from src.interfaces.base import UserInterface
 from src.interfaces.turn_clock import TurnClock
 from src.interfaces.tui.app import AgentTuiApp
 from src.interfaces.tui.diagnostics import TuiDiagnostics
+from src.tools.display import tool_title
 from src.interfaces.tui.dialogs import PendingInteractions
 from src.interfaces.tui.history_journal import PlainHistoryJournal
 from src.interfaces.tui.plain import PlainFrontend
@@ -505,8 +506,8 @@ class TextualInterface(UserInterface):
         del markdown
         return await self._plain.read_input(prompt, default)
 
-    async def _read_permission(self, tool_name: str, detail: str) -> str:
-        return await self._plain.read_permission(tool_name, detail)
+    async def _read_permission(self, tool_name: str, detail: str, reason: str = "") -> str:
+        return await self._plain.read_permission(tool_name, detail, reason)
 
     async def _read_choice(
         self,
@@ -637,7 +638,9 @@ class TextualInterface(UserInterface):
             if await self._invoke(lambda: self._app.on_permission_notice(event)):
                 return
         if event.status == "deny":
-            self._plain.write(f"[deny] {event.detail or event.tool_name}\n")
+            self._plain.write(f"智能权限 · {tool_title(event.tool_name)} · 已拒绝({event.detail[:60]})\n")
+        elif event.status == "allow":
+            self._plain.write(f"智能权限 · {tool_title(event.tool_name)} · 已放行({event.detail[:60]})\n")
 
     async def on_tool_call_started(self, event: ToolCallStarted) -> None:
         if self.is_tty:

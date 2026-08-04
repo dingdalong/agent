@@ -386,11 +386,23 @@ class ToolsMgr:
                 await event_bus.notify_permission(
                     status="deny",
                     tool_name=tool_name,
-                    detail=authorization.safe_detail or authorization.reason,
+                    detail=authorization.reason or authorization.safe_detail,
                     caller_agent_type=caller_agent_type,
                     caller_uuid=caller_uuid,
                 )
             return f"权限拒绝：{authorization.reason}"
+        elif authorization.source == "judge":
+            # 智能权限放行：把放行理由提示给用户（纯展示，不影响执行）
+            event_bus = getattr(deps, "event_bus", None) if deps is not None else None
+            if event_bus is not None and hasattr(event_bus, "notify_permission"):
+                caller_agent_type, caller_uuid = caller_identity(agent)
+                await event_bus.notify_permission(
+                    status="allow",
+                    tool_name=tool_name,
+                    detail=authorization.reason,
+                    caller_agent_type=caller_agent_type,
+                    caller_uuid=caller_uuid,
+                )
 
         await self._emit_tool_started(
             deps, agent, tool, authorization.safe_detail, current_tool_call_id,

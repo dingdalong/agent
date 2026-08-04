@@ -36,7 +36,7 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 | `RoleMgr` (`role_mgr.py`) | 按信任状态发现并激活角色，暴露角色资产路径 | 否 | 有 |
 | `LLMMgr` (`llm_mgr.py`) | 按模型名/别名返回可用的 LLMProvider | 否 | 无 |
 | `ToolsMgr` (`tools_mgr.py`) | 工具注册、执行、分页结果存储 | 否 | 无 |
-| `PermissionManager` (`permission_mgr.py`) | 路径解析、代码硬拒绝、Plan 约束、判官和一次性确认 | 否 | 无 |
+| `PermissionManager` (`permission_mgr.py`) | 路径解析、代码硬拒绝、Plan 约束、智能权限和一次性确认 | 否 | 无 |
 | `WebAccessMgr` (`web_access_mgr.py`) | 按当前模型和统一配置路由本地或 provider 原生 Web 能力 | 否 | 无 |
 | `CompactMgr` (`compact_mgr.py`) | 上下文压缩与 transcript 落盘 | 否 | 无 |
 | `PromptMgr` (`prompt_mgr.py`) | 分层拼装系统提示词 | 否 | 无（缓存可 invalidate） |
@@ -175,7 +175,7 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 
 `src/mgr/permission_mgr.py`
 
-**单一职责**：对一次已经校验的工具调用执行路径解析、Hard Deny、Plan 约束、确定性策略、LLM 判官和一次性人工确认，返回冻结的 `AuthorizationResult`。
+**单一职责**：对一次已经校验的工具调用执行路径解析、Hard Deny、Plan 约束、确定性策略、LLM 智能权限审查和一次性人工确认，返回冻结的 `AuthorizationResult`。
 
 **构造依赖**：规范化 workdir、`JudgeClient`、一次性 yes/no 确认回调和共享 `DataGuard`。工具策略由调用方显式传入；授权服务不读取用户授权配置，也不依赖 EventBus、MCP Manager、ToolEntry 或 Agent。
 

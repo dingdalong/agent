@@ -55,7 +55,7 @@ def test_personal_search_skips_llm_and_asks_once(tmp_path: Path):
     reviewer = WebReviewer()
     confirmations = []
 
-    async def confirm(tool_name: str, detail: str) -> bool:
+    async def confirm(tool_name: str, detail: str, reason: str = "") -> bool:
         confirmations.append((tool_name, detail))
         return True
 

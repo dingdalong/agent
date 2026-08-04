@@ -204,12 +204,14 @@ class UserInterface(ABC):
         self,
         tool_name: str,
         detail: str,
+        reason: str = "",
     ) -> str:
         """读取权限确认结果。
 
         Args:
             tool_name: 工具名。
             detail: 权限请求详情。
+            reason: 智能权限/预检拿不准的理由，弹窗前提示给用户。
         """
         ...
 
@@ -341,10 +343,11 @@ class UserInterface(ABC):
             case PermissionMenu(
                 tool_name=tool_name,
                 detail=detail,
+                reason=reason,
             ):
                 await self._emit_caller_banner(request.caller_agent_type, request.caller_uuid)
                 return await self._read_nonempty_answer(
-                    lambda: self._read_permission(tool_name, detail),
+                    lambda: self._read_permission(tool_name, detail, reason),
                 )
             case _:
                 raise TypeError(f"unsupported answer request: {type(request)!r}")

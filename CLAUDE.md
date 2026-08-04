@@ -83,7 +83,7 @@ MCP server 连接配置在独立的 `mcp_servers.json`（角色 `src/roles/<role
 
 **子智能体** — 定义为 `*.md`（YAML frontmatter 声明 `agent_type`、`tools`、`model`、`memory`、`startInPlanMode`、`thinking`、`reasoning_effort`、`features` 等 + body 作提示词），由 `SubAgentMgr` 四层扫描加载。主 Agent 通过 `task_delegator` 调度子智能体；子智能体继承父 Agent 当前的 `plan_active`，并共享 `AgentDeps`。
 
-**统一授权与 Plan** — `PermissionManager.authorize()` 是唯一授权入口；工具声明冻结的 `ToolPolicy`，不从用户配置提升权限。`Agent.plan_active` 是独立状态，Shift+Tab 可双向切换；Plan 激活时只允许本地读取、明确安全的内部工具和 `.agent/plans/**` 写入，其余操作直接拒绝且不调用判官。
+**统一授权与 Plan** — `PermissionManager.authorize()` 是唯一授权入口；工具声明冻结的 `ToolPolicy`，不从用户配置提升权限。`Agent.plan_active` 是独立状态，Shift+Tab 可双向切换；Plan 激活时只允许本地读取、明确安全的内部工具和 `.agent/plans/**` 写入，其余操作直接拒绝且不调用智能权限。
 
 **技能系统** — `SkillMgr` 四层扫描 `SKILL.md`（共享 → 角色 → 全局 → 项目，插件技能穿插其间），同名后者覆盖；通过 `load_skill` 工具按需注入系统提示词。
 

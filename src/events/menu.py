@@ -81,6 +81,7 @@ class PermissionMenu(MenuRequest):
     """
     tool_name: str = ""
     detail: str = ""
+    reason: str = ""
     level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
     type: Literal["permission_menu"] = field(default="permission_menu", init=False)
 

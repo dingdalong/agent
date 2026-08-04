@@ -43,7 +43,7 @@ uv run pytest                            # 运行全部测试
 | [llm.md](llm.md) | `LLMProvider` 调用模板、统一错误分类与重试、流式协议、模型发现及五个 provider（Anthropic/OpenAI/DeepSeek/Ollama/Moonshot）差异 |
 | [tools.md](tools.md) | `@tool` 装饰器、`ToolEntry`/`ToolPolicy`、`subagent`/`feature` 门控、`ToolsMgr.execute` 流水线、内置工具清单 |
 | [roles-subagents-skills.md](roles-subagents-skills.md) | 角色系统（三层发现、`role.md`、`common/`）、子智能体（四层扫描、frontmatter、委派）、技能系统、内置 agent 清单 |
-| [permissions.md](permissions.md) | 单一授权入口、工具策略、路径分类、Hard Deny、LLM 判官、DataGuard、项目启动信任与 Plan 约束 |
+| [permissions.md](permissions.md) | 单一授权入口、工具策略、路径分类、Hard Deny、LLM 智能权限审查、DataGuard、项目启动信任与 Plan 约束 |
 | [mcp-and-hooks.md](mcp-and-hooks.md) | MCP 三层合并/三种 transport/工具命名/server 开关；Hooks 8 事件/配置格式/JSON 协议/退出码 |
 | [events-and-ui.md](events-and-ui.md) | `EventBus` API、`EventLevel` 门控、事件目录表、`UserInterface`/`TextualInterface`、多 Agent 路由、流式 Markdown、响应式布局与交互协调 |
 | [configuration-reference.md](configuration-reference.md) | 配置总参考：三层合并规则、`config.yaml`/`settings.json`/`mcp_servers.json` 完整 schema、环境变量、目录布局 |

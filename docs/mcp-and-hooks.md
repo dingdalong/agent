@@ -51,7 +51,7 @@ MCP server 连接配置写在 `mcp_servers.json`，格式为 `{"mcpServers": {"<
 | `mcp.enabledServers` | 非空时作**白名单**，只连其中的 server |
 | `mcp.disabledServers` | 始终剔除（优先于白名单） |
 
-这是连接前的硬开关：被禁用的 server 不连接、其工具不注册、不进 LLM schema。它只控制连接，不改变工具授权；所有已连接 MCP 工具仍逐次进入判官。
+这是连接前的硬开关：被禁用的 server 不连接、其工具不注册、不进 LLM schema。它只控制连接，不改变工具授权；所有已连接 MCP 工具仍逐次进入智能权限审查。
 
 当前 `src/roles/mijia/mcp_servers.json` 示例：
 

@@ -38,7 +38,7 @@ class RecordingJudge:
 
 
 def make_manager(tmp_path: Path, judge=None, answer=False, guard=None):
-    async def confirm(_tool: str, _detail: str) -> bool:
+    async def confirm(_tool: str, _detail: str, _reason: str = "") -> bool:
         return answer
 
     return PermissionManager(

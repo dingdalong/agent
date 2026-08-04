@@ -385,6 +385,7 @@ class EventBus:
         self,
         tool_name: str,
         detail: str,
+        reason: str = "",
         source: str = "permission",
         caller_agent_type: str | None = None,
         caller_uuid: str | None = None,
@@ -394,6 +395,7 @@ class EventBus:
         Args:
             tool_name: 工具名。
             detail: 权限请求的详细说明。
+            reason: 智能权限/预检拿不准的理由，弹窗前在输出区提示给用户。
             source: 事件来源标识。
             caller_agent_type: 发起该工具调用的 agent 类型（主 agent 为「main」），供 UI 标注是哪个 agent 请求授权。
             caller_uuid: 发起该工具调用的 agent 实例 uuid。
@@ -407,6 +409,7 @@ class EventBus:
                 source=source,
                 tool_name=tool_name,
                 detail=detail,
+                reason=reason,
                 caller_agent_type=caller_agent_type,
                 caller_uuid=caller_uuid,
             ),

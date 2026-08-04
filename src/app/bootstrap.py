@@ -131,10 +131,10 @@ async def create_app(
     # 清晰退出（提示而非深层堆栈）。须在 UI 启动前完成。
     llm_mgr.ensure_default_available()
 
-    async def confirm_once(tool_name: str, detail: str) -> bool:
+    async def confirm_once(tool_name: str, detail: str, reason: str = "") -> bool:
         if not ui.is_tty:
             return False
-        answer = await event_bus.request_permission(tool_name=tool_name, detail=detail)
+        answer = await event_bus.request_permission(tool_name=tool_name, detail=detail, reason=reason)
         return answer.strip().lower() in {"y", "yes"}
 
     permission_mgr = PermissionManager(

@@ -11,6 +11,7 @@ from typing import TextIO
 from rich.text import Text
 
 from src.events.menu import FormQuestion
+from src.tools.display import tool_title
 
 
 LineReader = Callable[[str], Awaitable[str]]
@@ -53,8 +54,11 @@ class PlainFrontend:
         value = await self.reader(prompt)
         return value if value else default
 
-    async def read_permission(self, tool_name: str, detail: str) -> str:
-        self.write(f"\n工具请求权限\n工具: {tool_name}\n内容: {detail}\n")
+    async def read_permission(self, tool_name: str, detail: str, reason: str = "") -> str:
+        prompt = f"\n工具请求权限\n工具: {tool_name}\n内容: {detail}\n"
+        if reason:
+            prompt += f"智能权限 · {tool_title(tool_name)} · 需确认({reason[:60]})\n"
+        self.write(prompt)
         answer = (await self.reader("允许一次？[y/N] ")).strip().lower()
         return "yes" if answer in {"y", "yes"} else "deny"
 
