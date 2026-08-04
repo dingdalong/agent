@@ -3,6 +3,7 @@ from typing import TYPE_CHECKING
 
 import datetime
 import os
+import platform
 from pathlib import Path
 from dataclasses import dataclass, field
 
@@ -85,7 +86,7 @@ class PromptMgr:
 
     def _build_environment(self) -> str:
         lines = [
-            f"运行平台：`{os.uname().sysname}`",
+            f"运行平台：`{platform.system()}`",
             f"llm模型：`{self.model}`",
             f"工作目录：`{self.workdir}`",
         ]
