@@ -74,7 +74,7 @@ def test_openai_native_search_is_isolated_and_bounded():
     assert "messages" not in request and "previous_response_id" not in request
 
 
-def test_openai_fetch_and_deepseek_native_web_are_capability_errors():
+def test_openai_fetch_and_deepseek_fetch_are_capability_errors():
     openai = openai_provider()
     deepseek = DeepSeekProvider(
         api_key="test",
@@ -86,9 +86,48 @@ def test_openai_fetch_and_deepseek_native_web_are_capability_errors():
     with pytest.raises(NativeWebCapabilityError):
         run(openai.native_web_fetch("https://example.test/"))
     with pytest.raises(NativeWebCapabilityError):
-        run(deepseek.native_web_search("query"))
-    with pytest.raises(NativeWebCapabilityError):
         run(deepseek.native_web_fetch("https://example.test/"))
+
+
+def test_deepseek_native_search_is_isolated_and_bounded():
+    provider = DeepSeekProvider(
+        api_key="test",
+        base_url="https://api.example.test",
+        model="deepseek-test",
+        event_bus=None,
+        max_attempts=1,
+    )
+    requests = []
+
+    async def create(**kwargs):
+        requests.append(kwargs)
+        return SimpleNamespace(
+            output_text="answer",
+            output=[{
+                "type": "message",
+                "content": [{
+                    "type": "output_text",
+                    "text": "answer",
+                    "annotations": [{
+                        "type": "url_citation",
+                        "url": "https://source.test/",
+                        "title": "source",
+                    }],
+                }],
+            }],
+            usage=None,
+        )
+
+    provider._client = SimpleNamespace(responses=SimpleNamespace(create=create))
+    response = run(provider.native_web_search("query", max_results=3))
+    request = requests[0]
+    assert response.summary == "answer"
+    assert response.sources[0].url == "https://source.test/"
+    assert request["tools"] == [{"type": "web_search"}]
+    assert request["tool_choice"] == {"type": "web_search"}
+    assert request["store"] is False
+    assert len(request["input"]) == 1 and request["input"][0]["role"] == "user"
+    assert "query" in request["input"][0]["content"]
 
 
 def test_anthropic_native_search_uses_one_server_tool():

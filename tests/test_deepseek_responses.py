@@ -213,8 +213,8 @@ def test_deepseek_request_uses_responses_input_and_supported_runtime_fields() ->
     }.intersection(request)
 
 
-def test_deepseek_request_omits_reasoning_when_thinking_is_disabled() -> None:
-    """关闭思考时不应发送 reasoning，也不应伪造 disabled 扩展字段。"""
+def test_deepseek_request_disables_reasoning_when_thinking_is_disabled() -> None:
+    """关闭思考时应显式发送 reasoning.effort='none'（DeepSeek 默认 thinking 常驻开启）。"""
     provider = _bare_provider()
     create = CapturingCreate(_completed_stream())
     provider._client = SimpleNamespace(responses=create)
@@ -227,7 +227,7 @@ def test_deepseek_request_omits_reasoning_when_thinking_is_disabled() -> None:
         )
     )
 
-    assert "reasoning" not in create.requests[0]
+    assert create.requests[0]["reasoning"] == {"effort": "none"}
     assert "extra_body" not in create.requests[0]
 
 
