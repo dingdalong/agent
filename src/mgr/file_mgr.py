@@ -412,7 +412,8 @@ class FileMgr:
 
     def _build_tree(self, dir_path: Path, prefix: str,
                     current_depth: int, max_depth: int,
-                    budget: _TreeBudget) -> tuple[list[str], int, int]:
+                    budget: _TreeBudget, include_hidden: bool,
+                    omitted: list[int]) -> tuple[list[str], int, int]:
         lines: list[str] = []
         dir_count = 0
         file_count = 0
@@ -425,6 +426,9 @@ class FileMgr:
                 if budget.remaining <= 0:
                     budget.stopped = True
                     break
+                if not include_hidden and entry.name.startswith("."):
+                    omitted[0] += 1
+                    continue
                 budget.remaining -= 1
                 entries.append(entry)
             entries.sort(key=lambda entry: (not entry.is_dir(), entry.name))
@@ -442,7 +446,8 @@ class FileMgr:
                     lines.append(f"{prefix}{connector}[DIR]  {entry.name}/")
                     child_prefix = prefix + ("    " if is_last else "│   ")
                     child_lines, cd, cf = self._build_tree(
-                        entry, child_prefix, current_depth + 1, max_depth, budget)
+                        entry, child_prefix, current_depth + 1, max_depth, budget,
+                        include_hidden, omitted)
                     lines.extend(child_lines)
                     dir_count += cd
                     file_count += cf
@@ -459,13 +464,15 @@ class FileMgr:
         return lines, dir_count, file_count
 
     def list_directory(
-        self, path: str, authorization: AuthorizationResult, max_depth: int = 3
+        self, path: str, authorization: AuthorizationResult, max_depth: int = 3,
+        include_hidden: bool = False,
     ) -> str:
         """以树状结构列出目录内容。
 
         Args:
             path: 目录路径。
             max_depth: 递归展开的最大深度。
+            include_hidden: 是否显示以 . 开头的隐藏文件/目录。
 
         Returns:
             目录树文本，或错误描述字符串。
@@ -483,11 +490,16 @@ class FileMgr:
                 remaining=_MAX_DIRECTORY_ITEMS,
                 deadline=time.monotonic() + _DIRECTORY_TIMEOUT_SECONDS,
             )
+            omitted = [0]
             tree_lines, dir_count, file_count = self._build_tree(
-                dir_path, "", 1, min(max(max_depth, 0), 8), budget)
+                dir_path, "", 1, min(max(max_depth, 0), 8), budget,
+                include_hidden, omitted)
             lines.extend(tree_lines)
             if budget.stopped:
                 lines.append("... 目录结果已达到 10,000 项或 10 秒限制")
+            if omitted[0]:
+                lines.append(
+                    f"已省略 {omitted[0]} 个隐藏文件/目录，传 include_hidden=True 查看")
             lines.append(f"共 {dir_count} 个目录, {file_count} 个文件")
 
             return "\n".join(lines)

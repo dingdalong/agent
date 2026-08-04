@@ -17,14 +17,17 @@ WRITE_FILE_PATH = (PathArgument("file_path", PathRole.WRITE),)
 class ListDirectory(BaseModel):
     path: Optional[str] = Field(None, description="目录绝对路径，不提供时默认为工作目录。")
     max_depth: Optional[int] = Field(3, description="递归列出子目录的最大深度，默认为3。")
+    include_hidden: Optional[bool] = Field(False, description="是否显示以 . 开头的隐藏文件/目录，默认 False 不显示。")
 
 @tool(model=ListDirectory, description="列出目录结构，显示文件和子目录的树形结构。",
       policy=ToolPolicy(AccessKind.LOCAL_READ, DataFlow.LOCAL, READ_PATH, True, "列出目录：{path}"), feature="file")
-def list_directory(path: str | None, agent: Agent, authorization, max_depth: int = 3) -> str:
+def list_directory(path: str | None, agent: Agent, authorization, max_depth: int = 3,
+                   include_hidden: bool = False) -> str:
     return agent._file_mgr.list_directory(
         path or str(agent._file_mgr.workdir),
         authorization,
         max_depth=max_depth,
+        include_hidden=include_hidden,
     )
 
 class Glob(BaseModel):
