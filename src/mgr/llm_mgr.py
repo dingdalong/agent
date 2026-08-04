@@ -415,6 +415,17 @@ class LLMMgr:
     def list_models(self) -> list[str]:
         return sorted(self._model_to_provider.keys())
 
+    def models_by_provider(self) -> dict[str, list[str]]:
+        """按 provider 配置名分组返回已注册模型。
+
+        Returns:
+            以 provider 配置名为键（升序）、对应模型 ID 升序列表为值的字典。
+        """
+        grouped: dict[str, list[str]] = {}
+        for model, provider in self._model_to_provider.items():
+            grouped.setdefault(provider, []).append(model)
+        return {provider: sorted(models) for provider, models in sorted(grouped.items())}
+
 
 def _positive_finite_number(value: Any, *, key: str) -> float:
     """把配置值校验并转换为有限正浮点数。

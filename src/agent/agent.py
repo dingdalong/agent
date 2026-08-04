@@ -526,6 +526,9 @@ class Agent:
             if cmd_name == "resume":
                 await self._handle_resume_command(cmd_args)
                 return AgentState.REQUEST_INPUT
+            if cmd_name == "models":
+                await self._handle_models_command()
+                return AgentState.REQUEST_INPUT
             await self.deps.event_bus.request_output(f"未知命令: /{cmd_name}\n")
             return AgentState.REQUEST_INPUT
 
@@ -569,6 +572,30 @@ class Agent:
             timestamp=time.time(), source=self.agent_type, active=True,
         ))
         await self.deps.event_bus.request_output("已进入计划模式。\n")
+
+    async def _handle_models_command(self) -> None:
+        """处理 /models 命令：按 provider 分组列出已发现模型并标注 default/best/fast。"""
+        llm = self.deps.llm_mgr
+        grouped = llm.models_by_provider()
+
+        # 解析配置别名到真实模型 ID 并反向标注；best/fast 缺省或与 default 相同时合并到同一模型
+        labels: dict[str, list[str]] = {}
+        for alias in ("default", "best", "fast"):
+            labels.setdefault(llm.resolve_model(alias), []).append(alias)
+
+        lines: list[str] = []
+        if grouped:
+            lines.append("支持的模型（按 provider 分组）:")
+            for provider, models in grouped.items():
+                lines.append("")
+                lines.append(f"{provider}:")
+                for model in models:
+                    suffix = f" [{', '.join(labels[model])}]" if model in labels else ""
+                    lines.append(f"  - {model}{suffix}")
+        else:
+            lines.append("当前没有可用模型。")
+
+        await self.deps.event_bus.request_output("\n".join(lines) + "\n")
 
     async def _handle_resume_command(self, cmd_args: list[str]) -> None:
         """处理 /resume 命令：无参时弹出会话选择菜单，再委托 SessionMgr 解析会话并应用状态变更。

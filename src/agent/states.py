@@ -13,6 +13,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("clear", "清空会话"),
     ("resume", "恢复历史会话"),
     ("agents", "查看本会话子 agent"),
+    ("models", "查看支持的模型列表"),
 ]
 
 

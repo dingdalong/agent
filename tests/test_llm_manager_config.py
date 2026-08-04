@@ -1354,3 +1354,31 @@ def test_cli_exits_cleanly_for_llm_startup_errors(
     assert exc_info.value.code != 0
     assert "启动失败" in stderr
     assert "Traceback" not in stderr
+
+
+def test_models_by_provider_groups_and_sorts() -> None:
+    """models_by_provider 应按 provider 升序分组且组内模型升序。"""
+    manager = _manager()
+    manager._model_to_provider.update(
+        {
+            "deepseek-v4-pro": "deepseek",
+            "claude-opus-4-8": "anthropic",
+            "deepseek-v4-flash": "deepseek",
+            "claude-sonnet-5": "anthropic",
+            "gpt-5.6-sol": "openai",
+        }
+    )
+
+    grouped = manager.models_by_provider()
+
+    assert list(grouped.keys()) == ["anthropic", "deepseek", "openai"]
+    assert grouped["anthropic"] == ["claude-opus-4-8", "claude-sonnet-5"]
+    assert grouped["deepseek"] == ["deepseek-v4-flash", "deepseek-v4-pro"]
+    assert grouped["openai"] == ["gpt-5.6-sol"]
+
+
+def test_models_by_provider_empty() -> None:
+    """空注册表应返回空字典。"""
+    manager = _manager()
+
+    assert manager.models_by_provider() == {}
