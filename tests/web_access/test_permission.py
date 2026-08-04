@@ -32,7 +32,8 @@ def policy() -> ToolPolicy:
     return ToolPolicy(AccessKind.EXTERNAL_READ, DataFlow.EXTERNAL)
 
 
-def test_web_review_uses_current_model_and_minimized_fetch_url(tmp_path: Path):
+def test_safe_web_fetch_is_allowed_by_privacy_precheck(tmp_path: Path):
+    """隐私预检通过的安全 URL 应直接放行，不调用 LLM 审查。"""
     reviewer = WebReviewer()
     manager = PermissionManager(
         str(tmp_path), None, None, DataGuard(), web_safety_client=reviewer
@@ -40,17 +41,14 @@ def test_web_review_uses_current_model_and_minimized_fetch_url(tmp_path: Path):
     result = run(manager.authorize(
         "web_fetch",
         policy(),
-        {"url": "https://example.test/doc?lang=zh&topic=secret-value#fragment"},
+        {"url": "https://example.test/doc?lang=zh"},
         origin=ToolOrigin("builtin"),
         plan_active=True,
         user_intent="读取这份公开文档",
         review_model="current-model",
     ))
-    request, model = reviewer.calls[0]
     assert result.allowed and result.source == "web_safety"
-    assert model == "current-model"
-    assert request["url"] == "https://example.test/doc?keys=lang,topic"
-    assert "secret-value" not in repr(request)
+    assert reviewer.calls == []
 
 
 def test_personal_search_skips_llm_and_asks_once(tmp_path: Path):
@@ -112,7 +110,9 @@ def test_normal_long_search_does_not_trigger_false_private_identifier(tmp_path: 
         user_intent="research",
         review_model="current-model",
     ))
-    assert result.allowed and reviewer.calls
+    assert result.allowed
+    # 隐私预检通过直接放行，不调用 LLM 审查
+    assert reviewer.calls == []
 
 
 def test_invalid_or_private_fetch_is_denied_before_web_reviewer(tmp_path: Path):
@@ -183,6 +183,7 @@ def test_tools_mgr_passes_current_model_and_omits_web_result_preview(tmp_path: P
     ))
     completed = next(event for event in bus.events if isinstance(event, ToolCallCompleted))
     assert "private web content" in result
-    assert reviewer.calls[0][1] == "current-model"
+    # 隐私预检通过直接放行，不调用 LLM 审查
+    assert reviewer.calls == []
     assert completed.result_preview.startswith("status=success, length=")
     assert "private web content" not in completed.result_preview
