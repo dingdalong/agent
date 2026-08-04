@@ -16,7 +16,9 @@ def atomic_write_text(path: Path, content: str, *, encoding: str = "utf-8") -> N
     fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
     tmp_path = Path(tmp_name)
     try:
-        os.fchmod(fd, 0o600)
+        # os.fchmod 仅 POSIX 提供，Windows 上无此属性（AttributeError），需守护
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w", encoding=encoding) as stream:
             stream.write(content)
             stream.flush()
