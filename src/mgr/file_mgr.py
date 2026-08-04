@@ -132,7 +132,7 @@ class FileMgr:
             end_line: 结束行号（包含该行）；None 表示读到文件末尾。
 
         Returns:
-            带行号的文件内容文本，或错误描述字符串。
+            ToolResult（LLM 文本 + UI 展示分离），或错误描述字符串。
         """
         try:
             all_lines = self._read_path(path, authorization).read_text().splitlines()
@@ -153,13 +153,23 @@ class FileMgr:
                 range_info = f" | 行范围: {start}-{end}"
 
             rendered = self._render_numbered_lines(selected_lines, first_line_no)
+            # LLM 侧：完整 header（含路径）+ 内容
             header = f"文件: {path} | 总行数: {total}{range_info} | 内容格式: 行号 | 内容"
             parts = [header]
             if rendered:
                 parts.append(rendered)
-            result = "\n".join(parts)
+            llm_text = "\n".join(parts)
             guard = getattr(self.deps, "data_guard", None)
-            return str(guard.redact(result)) if guard is not None else result
+            llm_text = str(guard.redact(llm_text)) if guard is not None else llm_text
+
+            # UI 侧：不重复路径，只显示行数摘要 + 内容预览
+            from src.tools.display import ToolResult, ToolDisplay
+            display_header = f"总行数: {total}{range_info}"
+            display_parts = [display_header]
+            if rendered:
+                display_parts.append(rendered)
+            display = ToolDisplay(title="", content="\n".join(display_parts))
+            return ToolResult(text=llm_text, display=display)
         except Exception as exc:
             return f"Error: {exc}"
 
