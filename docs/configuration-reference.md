@@ -101,6 +101,7 @@
 |----|------|--------|--------|------|
 | `llm_provider.<name>.base_url` | str | 见下方各 provider | 非空字符串 | provider API 端点；加载模型前严格校验。可被 `{NAME}_API_URL` 覆盖 |
 | `llm_provider.<name>.api_key` | str | 无（通常来自 `.env`） | — | API key；`_create_provider` 读取，默认 `""`。通常经 `{NAME}_API_KEY` 注入 |
+| `llm_provider.<name>.web` | str | `local` | `local` \| `provider` | `web_search` 与 `web_fetch` 共用的路由。`provider` 优先当前模型 provider 的原生能力，仅能力不支持时回退本地；其他错误不回退 |
 | `llm_provider.<name>.reasoning_effort` | str | 见下方 | provider 相关（如 `low`/`medium`/`high`/`max`/`xhigh`） | 推理力度，传给 provider；缺省回退 `"max"`（`llm_mgr.py:376`） |
 | `llm_provider.<name>.context_limit` | int | 见下方 | 正整数 | 上下文窗口 token 上限；缺省 `0`（`llm_mgr.py:383`）。**压缩阈值由此换算**（见 3.4） |
 | `llm_provider.<name>.preserve_thinking` | bool | `ollama` 为 `true`，其余无 | `true`/`false` | 是否在历史中保留 reasoning 内容；缺省 `false`（`llm_mgr.py:377`）。Qwen 类 agent 场景需保留 |
@@ -176,17 +177,20 @@
 # <name> 须为框架已知 provider；api_key 通常经 .env 的 {NAME}_API_KEY 注入。
 llm_provider:
   deepseek:
+    web: local                            # local 本地；provider 优先原生能力
     base_url: https://api.deepseek.com   # Responses API 根地址，可被 DEEPSEEK_API_URL 覆盖
     reasoning_effort: high               # 推理力度
     context_limit: 400000                # 上下文窗口 token 上限（压缩阈值据此换算）
     # api_key: 通常放 .env：DEEPSEEK_API_KEY=sk-...
   openai:
+    web: local
     models:                              # API 拉取失败时的回退模型清单
       - gpt-5.5
     base_url: https://api.openai.com/v1
     reasoning_effort: medium
     context_limit: 262144
   anthropic:
+    web: local
     base_url: https://api.anthropic.com
     max_pause_turn_continuations: 5      # pause_turn 协议终态的单轮最大自动续接次数
     reasoning_effort: high
@@ -194,11 +198,13 @@ llm_provider:
     models:
       - k3
   ollama:
+    web: local
     base_url: http://127.0.0.1:8001/v1
     reasoning_effort: high
     preserve_thinking: true              # 保留历史 reasoning（Qwen 类 agent 场景）
     context_limit: 262144
   moonshot:
+    web: local
     base_url: https://api.moonshot.cn/v1 # 可被 MOONSHOT_API_URL 覆盖
     reasoning_effort: max                # 恒开思考，当前仅支持 max
     context_limit: 262144

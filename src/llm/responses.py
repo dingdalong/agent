@@ -15,6 +15,61 @@ if TYPE_CHECKING:
 _RESPONSE_FINISH_REASONS = frozenset({"stop", "tool_calls"})
 
 
+def dump_response_output(response: Any) -> list[dict[str, Any]]:
+    """将非流式 Responses 输出项转换为独立字典。"""
+    output: list[dict[str, Any]] = []
+    for item in getattr(response, "output", None) or []:
+        if hasattr(item, "model_dump"):
+            dumped = item.model_dump(exclude_none=True)
+        elif isinstance(item, dict):
+            dumped = dict(item)
+        else:
+            continue
+        if isinstance(dumped, dict):
+            output.append(dumped)
+    return output
+
+
+def response_output_text(response: Any, output: list[dict[str, Any]]) -> str:
+    """提取非流式 Responses 的可见正文。"""
+    direct = getattr(response, "output_text", None)
+    if isinstance(direct, str) and direct.strip():
+        return direct.strip()
+    parts: list[str] = []
+    for item in output:
+        if item.get("type") != "message":
+            continue
+        for block in item.get("content", []) or []:
+            if isinstance(block, dict) and isinstance(block.get("text"), str):
+                parts.append(block["text"])
+    return "\n".join(parts).strip()
+
+
+def response_web_sources(output: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """从 Responses Web 输出和引用标注中提取去重 URL。"""
+    sources: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            url = value.get("url")
+            if isinstance(url, str) and url.startswith(("http://", "https://")) and url not in seen:
+                seen.add(url)
+                sources.append({
+                    "url": url,
+                    "title": str(value.get("title") or ""),
+                    "snippet": str(value.get("snippet") or value.get("text") or "")[:1000],
+                })
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(output)
+    return sources
+
+
 def response_stream_error(
     source: Any,
     *,
@@ -247,11 +302,7 @@ class ResponsesStreamMixin:
                 code="invalid_response",
             )
 
-        for item in getattr(terminal_response, "output", []) or []:
-            if hasattr(item, "model_dump"):
-                output_items.append(item.model_dump(exclude_none=True))
-            elif isinstance(item, dict):
-                output_items.append(item)
+        output_items = dump_response_output(terminal_response)
         self._validate_response_output(output_items, terminal_response)
 
         if finish_reason != "length":

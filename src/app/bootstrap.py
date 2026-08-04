@@ -8,9 +8,10 @@ from pathlib import Path
 from src.interfaces import AgentViewStore, OutputRouter, TextualInterface, TurnClock
 from src.interfaces.tui.plain import LineReader, read_console_line
 from src.events import EventBus, EventLevel
-from src.mgr import ConfigManager, HooksMgr, LLMMgr, McpMgr, MemoryMgr, PermissionManager, PlanMgr, PluginMgr, RoleMgr, SessionMgr, ToolsMgr, resolve_features
+from src.mgr import ConfigManager, HooksMgr, LLMMgr, McpMgr, MemoryMgr, PermissionManager, PlanMgr, PluginMgr, RoleMgr, SessionMgr, ToolsMgr, WebAccessMgr, resolve_features
 from src.mgr.data_guard import DataGuard, register_runtime_secrets
 from src.mgr.permission_mgr import LLMJudgeClient
+from src.mgr.web_safety_mgr import LLMWebSafetyClient
 from src.mgr.project_trust import ProjectTrustGate
 from src.mgr.paths import global_data_dir, workdir as resolve_workdir
 from src.agent import AgentDeps
@@ -119,13 +120,16 @@ async def create_app(
         judge_client=LLMJudgeClient(llm_mgr, data_guard),
         confirm=confirm_once,
         data_guard=data_guard,
+        web_safety_client=LLMWebSafetyClient(llm_mgr, data_guard),
     )
+    web_access_mgr = WebAccessMgr(llm_mgr)
     deps = AgentDeps(
         llm_mgr=llm_mgr,
         ui=ui,
         event_bus=event_bus,
         tools_mgr=tools_mgr,
         permission_mgr=permission_mgr,
+        web_access_mgr=web_access_mgr,
         config_mgr=config_mgr,
         memory_mgr=memory_mgr,
         hooks_mgr=hooks_mgr,

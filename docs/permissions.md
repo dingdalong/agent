@@ -8,7 +8,7 @@
 
 | 字段 | 含义 |
 |---|---|
-| `access` | `LOCAL_READ`、`INTERNAL`、`WORKSPACE_WRITE` 或 `REVIEW` |
+| `access` | `LOCAL_READ`、`EXTERNAL_READ`、`INTERNAL`、`WORKSPACE_WRITE` 或 `REVIEW` |
 | `data_flow` | `LOCAL`、`EXTERNAL` 或 `DYNAMIC` |
 | `path_args` | 一个或多个 `PathArgument(name, role)`；role 为 read/write/source/destination |
 | `plan_safe` | INTERNAL 工具是否可在 Plan 激活时执行 |
@@ -28,13 +28,13 @@ MCP 工具固定为 `REVIEW + EXTERNAL`。上游 annotation（包括 `readOnlyHi
 4. 用 `PathResolver` 提取、规范化并分类全部路径；移动操作额外解析最终目标。
 5. 运行 `HardDenyDetector` 和秘密外发检查。
 6. 若 `agent.plan_active`，先执行独立 Plan 约束。
-7. LOCAL_READ 和 INTERNAL 走确定性放行。
+7. LOCAL_READ 和 INTERNAL 走确定性放行；EXTERNAL_READ 进入 Web 专用隐私预检和安全审查。
 8. WORKSPACE_WRITE 仅在全部写目标为普通工作区或计划目录时确定性放行。
-9. 其余调用交 LLM 判官。
+9. 其余调用交通用 LLM 判官。
 10. 判官返回 ask、异常、超时或无效响应时，只进行一次 yes/no 人工确认；无 TTY、取消或拒绝均为 deny。
 11. 工具执行结果立即经 DataGuard 脱敏和限长，再进入 PostToolUse、事件、分页和 Agent 历史。
 
-`AuthorizationResult.source` 标明裁决来源：`hard_rule`、`plan`、`policy`、`judge`、`user` 或 `failure`。`reason` 和 `safe_detail` 在返回前再次脱敏并限长。允许结果还包含冻结的 `path_grants`，只记录参数名、角色、授权时规范路径和分类；FileMgr 在每次实际 I/O 前复检规范路径与分类，移动操作同时复检 source、destination 与最终目标。
+`AuthorizationResult.source` 标明裁决来源：`hard_rule`、`plan`、`policy`、`judge`、`web_safety`、`user` 或 `failure`。`reason` 和 `safe_detail` 在返回前再次脱敏并限长。允许结果还包含冻结的 `path_grants`，只记录参数名、角色、授权时规范路径和分类；FileMgr 在每次实际 I/O 前复检规范路径与分类，移动操作同时复检 source、destination 与最终目标。
 
 ## 路径解析
 
@@ -73,6 +73,8 @@ LOCAL_READ 可以读取工作区外的普通文件或目录，但拒绝设备、
 
 判官 allow/deny 直接成为本次裁决；ask、异常、超时、缺失或无效输出进入一次性确认。确认只接受 yes/no，不产生任何后续调用权限。
 
+Web 外部读取另使用 `WebPrivacyGuard` 与 `LLMWebSafetyClient`。本地预检先拒绝秘密、URL userinfo 和认证/签名 query；疑似个人信息、源代码、专有文本或高熵私有标识符不进入 LLM，直接一次性确认。其余请求由当前 Agent 模型审查，不切换到 `llm.fast`；搜索只发送最多 2 KiB 的脱敏查询，抓取只发送 scheme、host、path 和 query key，不发送 query value。两种审查共用 15 秒超时、结构化 `allow/deny/ask` 和失败后一次性确认逻辑。
+
 ## DataGuard
 
 共享 `DataGuard` 登记 Provider key、可信环境文件和 MCP header/env 中的确切秘密，并检测 Authorization、cookie、password、token、API key、JWT、平台 token 和私钥块。它递归处理结构化数据，也会清理 URL userinfo、敏感 query、命令、异常和普通文本中的 URL。
@@ -96,6 +98,7 @@ Plan 是 `Agent.plan_active: bool`，不是授权策略变体。`PlanModeControl
 Plan 激活时只允许：
 
 - LOCAL_READ。
+- EXTERNAL_READ，但仍须通过 Web 隐私预检和安全审查。
 - `plan_safe=True` 的 INTERNAL 工具。
 - 规范化后位于 `.agent/plans/**` 的 WORKSPACE_WRITE。
 

@@ -6,6 +6,7 @@ from src.mgr.prompt_mgr import PromptMgr
 from src.mgr.skill_mgr import SkillMgr
 from src.mgr.subagent_mgr import SubAgentMgr
 from src.mgr.permission_mgr import PermissionManager
+from src.mgr.web_access_mgr import WebAccessMgr
 from src.mgr.config_mgr import ConfigManager
 from src.mgr.memory_mgr import MemoryMgr
 from src.mgr.hooks_mgr import HooksMgr
@@ -18,4 +19,4 @@ from src.mgr.mcp_mgr import McpMgr
 from src.mgr.role_mgr import RoleMgr
 from src.mgr.features import ALL_FEATURES, resolve_features
 
-__all__ = ["FileMgr", "CompactMgr", "CompactResult", "TaskManager", "ToolsMgr", "PromptMgr", "SkillMgr", "SubAgentMgr", "PermissionManager", "ConfigManager", "MemoryMgr", "HooksMgr", "LLMMgr", "ModelUnavailableError", "PlanMgr", "PluginMgr", "PluginInfo", "PluginLayer", "ReminderMgr", "SessionMgr", "ResumeResult", "McpMgr", "RoleMgr", "ALL_FEATURES", "resolve_features"]
+__all__ = ["FileMgr", "CompactMgr", "CompactResult", "TaskManager", "ToolsMgr", "PromptMgr", "SkillMgr", "SubAgentMgr", "PermissionManager", "WebAccessMgr", "ConfigManager", "MemoryMgr", "HooksMgr", "LLMMgr", "ModelUnavailableError", "PlanMgr", "PluginMgr", "PluginInfo", "PluginLayer", "ReminderMgr", "SessionMgr", "ResumeResult", "McpMgr", "RoleMgr", "ALL_FEATURES", "resolve_features"]

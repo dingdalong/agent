@@ -12,7 +12,7 @@ Manager 服务层是框架的横切能力层：每个 Manager 类各司其职（
 
 Manager 分两批被构造：
 
-1. **deps 层 Manager**（进程级、跨 agent 共享）——在 `src/app/bootstrap.py` 的 `create_app()` 中手动构造并注入 `AgentDeps` dataclass。包括：`ConfigManager`、`RoleMgr`、`ToolsMgr`、`MemoryMgr`、`PluginMgr`、`HooksMgr`、`PlanMgr`、`McpMgr`、`PermissionManager`、`SessionMgr`、`LLMMgr`。
+1. **deps 层 Manager**（进程级、跨 agent 共享）——在 `src/app/bootstrap.py` 的 `create_app()` 中手动构造并注入 `AgentDeps` dataclass。包括：`ConfigManager`、`RoleMgr`、`ToolsMgr`、`MemoryMgr`、`PluginMgr`、`HooksMgr`、`PlanMgr`、`McpMgr`、`PermissionManager`、`WebAccessMgr`、`SessionMgr`、`LLMMgr`。
 2. **每 agent 层 Manager**（随 `Agent` 实例创建，主/子 agent 各自独立）——在 `Agent.__post_init__`（`src/agent/agent.py:113-160`）中构造。包括：`CompactMgr`、`FileMgr`、`SkillMgr`、`SubAgentMgr`、`PromptMgr`、`TaskManager`、`ReminderMgr`。子 agent 是共享同一份 `AgentDeps` 的完整 `Agent` 实例，因此复用 deps 层 Manager，但拥有自己的每 agent 层 Manager。
 
 ### feature 门控哪些 Manager
@@ -37,6 +37,7 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 | `LLMMgr` (`llm_mgr.py`) | 按模型名/别名返回可用的 LLMProvider | 否 | 无 |
 | `ToolsMgr` (`tools_mgr.py`) | 工具注册、执行、分页结果存储 | 否 | 无 |
 | `PermissionManager` (`permission_mgr.py`) | 路径解析、代码硬拒绝、Plan 约束、判官和一次性确认 | 否 | 无 |
+| `WebAccessMgr` (`web_access_mgr.py`) | 按当前模型和统一配置路由本地或 provider 原生 Web 能力 | 否 | 无 |
 | `CompactMgr` (`compact_mgr.py`) | 上下文压缩与 transcript 落盘 | 否 | 无 |
 | `PromptMgr` (`prompt_mgr.py`) | 分层拼装系统提示词 | 否 | 无（缓存可 invalidate） |
 | `SubAgentMgr` (`subagent_mgr.py`) | 四层扫描子 agent，调度委派 | `subagent` | 无 |
@@ -176,9 +177,9 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 
 | 方法 | 关键参数 | 返回 | 作用 |
 |---|---|---|---|
-| `authorize` (async) | `tool_name`, `policy`, `arguments`, `origin`, `plan_active`, `user_intent` | `AuthorizationResult` | 每次调用独立裁决；不缓存、不创建后续放行 |
+| `authorize` (async) | `tool_name`, `policy`, `arguments`, `origin`, `plan_active`, `user_intent`, `review_model` | `AuthorizationResult` | 每次调用独立裁决；不缓存、不创建后续放行 |
 
-**关键协作者**：`PathResolver` 统一规范化和分类路径，`HardDenyDetector` 处理不可覆盖的高危动作，`LLMJudgeClient` 通过 `llm.fast` 返回结构化裁决，`DataGuard` 保证判官请求、原因和展示详情不含原始秘密。**feature 门控**：否。**reload**：无。
+**关键协作者**：`PathResolver` 统一规范化和分类路径，`HardDenyDetector` 处理不可覆盖的高危动作，`LLMJudgeClient` 通过 `llm.fast` 返回通用结构化裁决，`WebPrivacyGuard` 与 `LLMWebSafetyClient` 用当前 Agent 模型审查最小化 Web 请求，`DataGuard` 保证审查请求、原因和展示详情不含原始秘密。**feature 门控**：否。**reload**：无。
 
 ---
 

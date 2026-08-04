@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -14,7 +13,9 @@ from urllib.parse import urlsplit
 from src.mgr.data_guard import DataGuard
 from src.mgr.hard_deny import HardDenyDetector
 from src.mgr.path_resolver import PathClass, PathGrant, PathResolutionError, PathResolver, ResolvedPath
-from src.tools import AccessKind, DataFlow, PathRole, ToolDict, ToolOrigin, ToolPolicy
+from src.mgr.review import ReviewVerdict, StructuredVerdictRunner
+from src.tools import AccessKind, DataFlow, PathRole, ToolOrigin, ToolPolicy
+from src.web.privacy import WebPrivacyGuard
 
 logger = logging.getLogger(__name__)
 
@@ -26,21 +27,28 @@ _MAX_SHAPE_ITEMS = 128
 @dataclass(frozen=True, slots=True)
 class AuthorizationResult:
     allowed: bool
-    source: Literal["hard_rule", "plan", "policy", "judge", "user", "failure"]
+    source: Literal["hard_rule", "plan", "policy", "judge", "web_safety", "user", "failure"]
     reason: str
     safe_detail: str
     path_grants: tuple[PathGrant, ...] = ()
 
 
-@dataclass(frozen=True, slots=True)
-class JudgeVerdict:
-    decision: Literal["allow", "deny", "ask"]
-    reason: str = ""
+JudgeVerdict = ReviewVerdict
 
 
 class JudgeClient(Protocol):
     async def judge(self, request: Mapping[str, Any]) -> JudgeVerdict:
         """返回一次无缓存的结构化裁决。"""
+
+
+class WebSafetyClient(Protocol):
+    async def review(
+        self,
+        request: Mapping[str, Any],
+        *,
+        model: str | None,
+    ) -> ReviewVerdict:
+        """使用当前 Agent 模型审查最小化的 Web 请求。"""
 
 
 ConfirmCallback = Callable[[str, str], Awaitable[bool]]
@@ -51,55 +59,16 @@ _JUDGE_SYSTEM_PROMPT = """你是自主软件工程代理的权限风险分类器
 allow 仅用于任务范围内的常规操作；deny 用于明显有害、越权或不必要外传；无法可靠判断时 ask。
 必须调用 record_verdict，reason 使用一句简短说明。"""
 
-_JUDGE_TOOL: ToolDict = {
-    "type": "function",
-    "function": {
-        "name": "record_verdict",
-        "description": "记录本次调用的风险裁决。",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "decision": {"type": "string", "enum": ["allow", "deny", "ask"]},
-                "reason": {"type": "string", "maxLength": 500},
-            },
-            "required": ["decision", "reason"],
-            "additionalProperties": False,
-        },
-    },
-}
-
-
 class LLMJudgeClient:
     """使用 `llm.fast`（由 LLMMgr 的 fast 别名回退 default）执行裁决。"""
 
     def __init__(self, llm_mgr: Any, data_guard: DataGuard) -> None:
         self.llm_mgr = llm_mgr
-        self.data_guard = data_guard
+        self.runner = StructuredVerdictRunner(data_guard)
 
     async def judge(self, request: Mapping[str, Any]) -> JudgeVerdict:
         provider = self.llm_mgr.get("fast")
-        response = await provider.chat(
-            messages=[{"role": "user", "content": json.dumps(request, ensure_ascii=False)}],
-            prompt=[{"role": "system", "content": _JUDGE_SYSTEM_PROMPT}],
-            tools=[_JUDGE_TOOL],
-            tool_choice={"type": "function", "function": {"name": "record_verdict"}},
-            temperature=0.0,
-            enable_thinking=False,
-            reasoning_effort_override="low",
-        )
-        tool_calls = getattr(response, "tool_calls", None) or {}
-        for call in tool_calls.values():
-            if call.get("name") != "record_verdict":
-                continue
-            try:
-                payload = json.loads(call.get("arguments") or "{}")
-            except (TypeError, ValueError):
-                continue
-            decision = payload.get("decision")
-            if decision in {"allow", "deny", "ask"}:
-                reason = str(self.data_guard.redact(payload.get("reason") or ""))[:500]
-                return JudgeVerdict(decision, reason)
-        raise ValueError("判官未返回有效结构化裁决")
+        return await self.runner.run(provider, request, _JUDGE_SYSTEM_PROMPT)
 
 
 class PermissionManager:
@@ -111,6 +80,7 @@ class PermissionManager:
         judge_client: JudgeClient | None,
         confirm: ConfirmCallback | None,
         data_guard: DataGuard,
+        web_safety_client: WebSafetyClient | None = None,
     ) -> None:
         self.path_resolver = PathResolver(workdir)
         self.workdir = self.path_resolver.workdir
@@ -118,6 +88,8 @@ class PermissionManager:
         self.confirm = confirm
         self.data_guard = data_guard
         self.hard_deny = HardDenyDetector(data_guard)
+        self.web_safety_client = web_safety_client
+        self.web_privacy = WebPrivacyGuard(data_guard)
 
     async def authorize(
         self,
@@ -128,6 +100,7 @@ class PermissionManager:
         origin: ToolOrigin,
         plan_active: bool,
         user_intent: str,
+        review_model: str | None = None,
     ) -> AuthorizationResult:
         if origin.kind != "builtin" and policy.access is not AccessKind.REVIEW:
             policy = ToolPolicy(
@@ -170,6 +143,18 @@ class PermissionManager:
         if policy.access is AccessKind.WORKSPACE_WRITE and self._ordinary_workspace_targets(paths):
             return self._result(True, "policy", "普通工作区写入", safe_detail, grants)
 
+        if policy.access is AccessKind.EXTERNAL_READ:
+            return await self._review_web(
+                tool_name,
+                policy,
+                arguments,
+                origin,
+                paths,
+                user_intent,
+                safe_detail,
+                review_model,
+            )
+
         return await self._review(
             tool_name,
             policy,
@@ -188,6 +173,8 @@ class PermissionManager:
         grants: tuple[PathGrant, ...],
     ) -> AuthorizationResult | None:
         if policy.access is AccessKind.LOCAL_READ:
+            return None
+        if policy.access is AccessKind.EXTERNAL_READ:
             return None
         if policy.access is AccessKind.INTERNAL and policy.plan_safe:
             return None
@@ -210,31 +197,97 @@ class PermissionManager:
         user_intent: str,
         safe_detail: str,
     ) -> AuthorizationResult:
-        grants = tuple(self.path_resolver.grant(item) for item in paths)
         request = self._judge_request(tool_name, policy, arguments, origin, paths, user_intent)
-        verdict: JudgeVerdict | None = None
-        failure_reason = ""
-        if self.judge_client is not None:
+        reviewer = self.judge_client.judge if self.judge_client is not None else None
+        return await self._resolve_review(
+            tool_name,
+            safe_detail,
+            tuple(self.path_resolver.grant(item) for item in paths),
+            reviewer,
+            request,
+            source="judge",
+            unavailable_reason="判官不可用",
+        )
+
+    async def _review_web(
+        self,
+        tool_name: str,
+        policy: ToolPolicy,
+        arguments: Mapping[str, Any],
+        origin: ToolOrigin,
+        paths: Sequence[ResolvedPath],
+        user_intent: str,
+        safe_detail: str,
+        review_model: str | None,
+    ) -> AuthorizationResult:
+        grants = tuple(self.path_resolver.grant(item) for item in paths)
+        privacy = self.web_privacy.assess(tool_name, arguments)
+        if privacy.decision == "deny":
+            return self._result(False, "hard_rule", privacy.reason, safe_detail)
+        if privacy.decision == "ask":
+            return await self._confirm_once(tool_name, safe_detail, privacy.reason, grants)
+
+        request = self._web_review_request(
+            tool_name, policy, arguments, origin, paths, user_intent
+        )
+        review_fn = None
+        if self.web_safety_client is not None:
+            async def review_fn(payload: Mapping[str, Any]) -> ReviewVerdict:
+                return await self.web_safety_client.review(payload, model=review_model)
+        return await self._resolve_review(
+            tool_name,
+            safe_detail,
+            grants,
+            review_fn,
+            request,
+            source="web_safety",
+            unavailable_reason="Web 安全审查不可用",
+        )
+
+    async def _resolve_review(
+        self,
+        tool_name: str,
+        safe_detail: str,
+        grants: tuple[PathGrant, ...],
+        reviewer: Callable[[Mapping[str, Any]], Awaitable[ReviewVerdict]] | None,
+        request: Mapping[str, Any],
+        *,
+        source: Literal["judge", "web_safety"],
+        unavailable_reason: str,
+    ) -> AuthorizationResult:
+        verdict: ReviewVerdict | None = None
+        failure_reason = unavailable_reason
+        if reviewer is not None:
             try:
-                verdict = await asyncio.wait_for(self.judge_client.judge(request), timeout=15.0)
+                verdict = await asyncio.wait_for(reviewer(request), timeout=15.0)
                 if verdict.decision not in {"allow", "deny", "ask"}:
-                    raise ValueError("无效判官裁决")
+                    raise ValueError("无效审查裁决")
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 failure_reason = str(self.data_guard.redact(exc))[:300]
-                logger.warning("权限判官失败，转一次性人工确认：%s", failure_reason)
-        else:
-            failure_reason = "判官不可用"
+                logger.warning("%s 失败，转一次性人工确认：%s", source, failure_reason)
 
         if verdict is not None and verdict.decision == "allow":
-            return self._result(True, "judge", verdict.reason or "判官允许", safe_detail, grants)
+            return self._result(True, source, verdict.reason or "安全审查允许", safe_detail, grants)
         if verdict is not None and verdict.decision == "deny":
-            return self._result(False, "judge", verdict.reason or "判官拒绝", safe_detail)
+            return self._result(False, source, verdict.reason or "安全审查拒绝", safe_detail)
+        return await self._confirm_once(
+            tool_name,
+            safe_detail,
+            verdict.reason if verdict is not None else failure_reason,
+            grants,
+        )
 
-        prompt_reason = verdict.reason if verdict is not None else failure_reason
+    async def _confirm_once(
+        self,
+        tool_name: str,
+        safe_detail: str,
+        reason: str,
+        grants: tuple[PathGrant, ...],
+    ) -> AuthorizationResult:
         if self.confirm is None:
-            return self._result(False, "failure", prompt_reason or "无法进行人工确认", safe_detail)
+            return self._result(False, "failure", reason or "无法进行人工确认", safe_detail)
         try:
             allowed = await self.confirm(tool_name, safe_detail)
         except (asyncio.CancelledError, KeyboardInterrupt):
@@ -259,10 +312,45 @@ class PermissionManager:
         paths: Sequence[ResolvedPath],
         user_intent: str,
     ) -> dict[str, Any]:
+        request = self._review_request_base(
+            tool_name, policy, arguments, origin, paths, user_intent
+        )
+        if tool_name == "shell":
+            command = arguments.get("command", "")
+            request["redacted_command"] = self.data_guard.shell_summary(str(command))
+        return request
+
+    def _web_review_request(
+        self,
+        tool_name: str,
+        policy: ToolPolicy,
+        arguments: Mapping[str, Any],
+        origin: ToolOrigin,
+        paths: Sequence[ResolvedPath],
+        user_intent: str,
+    ) -> dict[str, Any]:
+        request = self._review_request_base(
+            tool_name, policy, arguments, origin, paths, user_intent
+        )
+        if tool_name == "web_search":
+            request["query"] = str(self.data_guard.redact(arguments.get("query", "")))[:2048]
+        elif tool_name == "web_fetch":
+            request["url"] = self.data_guard.url_summary(str(arguments.get("url", "")))
+        return request
+
+    def _review_request_base(
+        self,
+        tool_name: str,
+        policy: ToolPolicy,
+        arguments: Mapping[str, Any],
+        origin: ToolOrigin,
+        paths: Sequence[ResolvedPath],
+        user_intent: str,
+    ) -> dict[str, Any]:
         hosts: set[str] = set()
         budget = [_MAX_SHAPE_ITEMS]
         shape = self._argument_shape(arguments, hosts, budget, 0)
-        request: dict[str, Any] = {
+        return {
             "tool": tool_name,
             "origin": {"kind": origin.kind, "name": origin.name},
             "action": policy.access.value,
@@ -280,10 +368,6 @@ class PermissionManager:
             },
             "user_intent": str(self.data_guard.redact(user_intent))[:2048],
         }
-        if tool_name == "shell":
-            command = arguments.get("command", "")
-            request["redacted_command"] = self.data_guard.shell_summary(str(command))
-        return request
 
     def _argument_shape(
         self,
@@ -367,6 +451,10 @@ class PermissionManager:
     ) -> str:
         if tool_name == "shell":
             return self.data_guard.shell_summary(str(arguments.get("command", "")))
+        if tool_name == "web_search":
+            return self.data_guard.web_search_summary(str(arguments.get("query", "")))
+        if tool_name == "web_fetch":
+            return f"访问网页：{self.data_guard.url_summary(str(arguments.get('url', '')))}"
         if not policy.detail_template:
             return ""
         try:
@@ -378,7 +466,7 @@ class PermissionManager:
     def _result(
         self,
         allowed: bool,
-        source: Literal["hard_rule", "plan", "policy", "judge", "user", "failure"],
+        source: Literal["hard_rule", "plan", "policy", "judge", "web_safety", "user", "failure"],
         reason: str,
         safe_detail: str,
         path_grants: tuple[PathGrant, ...] = (),
@@ -393,10 +481,11 @@ class PermissionManager:
 
 
 def tool_sort_order(access: AccessKind) -> int:
-    """工具 schema 稳定排序：读取、内部、工作区写入、评审。"""
+    """工具 schema 稳定排序：本地读取、外部读取、内部、写入、评审。"""
     return {
         AccessKind.LOCAL_READ: 0,
-        AccessKind.INTERNAL: 1,
-        AccessKind.WORKSPACE_WRITE: 2,
-        AccessKind.REVIEW: 3,
+        AccessKind.EXTERNAL_READ: 1,
+        AccessKind.INTERNAL: 2,
+        AccessKind.WORKSPACE_WRITE: 3,
+        AccessKind.REVIEW: 4,
     }[access]

@@ -50,6 +50,7 @@ class LLMMgr:
 
     _model_to_provider: dict[str, str] = field(init=False, default_factory=dict)
     _cache: dict[str, LLMProvider] = field(init=False, default_factory=dict)
+    _provider_web_mode: dict[str, str] = field(init=False, default_factory=dict)
     provider_errors: dict[str, LLMErrorInfo] = field(init=False, default_factory=dict)
     _default_concurrency: int = field(init=False)
     _timeout_seconds: float = field(init=False)
@@ -221,6 +222,9 @@ class LLMMgr:
 
         self._model_to_provider = next_model_to_provider
         self.provider_errors = next_provider_errors
+        self._provider_web_mode = {
+            name: cfg["web"] for name, cfg in providers_cfg.items()
+        }
         self._cache.clear()
 
     async def reconfigure(self) -> None:
@@ -361,6 +365,19 @@ class LLMMgr:
         self._cache[resolved] = instance
         return instance
 
+    def provider_name_for_model(self, model: str) -> str:
+        """返回精确或别名模型所属的 provider 配置名。"""
+        resolved = self.resolve_model(model)
+        provider_name = self._model_to_provider.get(resolved)
+        if provider_name is None:
+            raise ValueError(f"未知模型所属 provider：{model!r}")
+        return provider_name
+
+    def web_mode_for_model(self, model: str) -> str:
+        """返回模型所属 provider 的统一 Web 路由模式。"""
+        provider_name = self.provider_name_for_model(model)
+        return self._provider_web_mode.get(provider_name, "local")
+
     def _create_provider(self, provider_name: str, model: str) -> LLMProvider:
         """用已校验的统一运行参数创建 provider。
 
@@ -448,6 +465,12 @@ def _normalize_provider_configs(value: Any) -> dict[str, dict[str, Any]]:
             raise LLMConfigurationError(f"{provider_key}.base_url 必须是非空 str")
 
         copied_config = dict(provider_config)
+        web_mode = provider_config.get("web", "local")
+        if web_mode not in {"local", "provider"}:
+            raise LLMConfigurationError(
+                f"{provider_key}.web 必须是 'local' 或 'provider'"
+            )
+        copied_config["web"] = web_mode
         copied_config["models"] = _normalize_model_list(
             provider_config.get("models", []),
             key=f"{provider_key}.models",

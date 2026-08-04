@@ -183,6 +183,7 @@ assistant 的 provider 专属字段在判断“真正为空”之前由 `_normal
 | 结构化输出标记 | 是 | 是 | 是 | 否 | 否 |
 | token 估算 | `cl100k_base`，失败时字符估算 | 模型编码，未知模型用 `o200k_base` | 本地 tokenizer | 字符估算 | 字符估算 |
 | 历史专属字段 | `_anthropic_content` | `_response_output` | `_response_output` | `reasoning`、`reasoning_content` | `reasoning_content` |
+| 原生 Web | 搜索、抓取 | 搜索 | 未启用 | 未启用 | 未启用 |
 | temperature | 不下发 | 下发 | 下发 | 下发 | 不下发 |
 | 输出上限 | 固定传入 128,000 | 不下发（provider 默认） | 不下发（provider 默认） | 不下发（provider 默认） | 不下发（provider 默认） |
 
@@ -191,6 +192,7 @@ assistant 的 provider 专属字段在判断“真正为空”之前由 `_normal
 - Anthropic 转换 system、messages、tools 和 tool choice，合并连续同角色消息；历史 `_anthropic_content` 使用深拷贝原样往返。稳定 system 与最新消息设置缓存断点，但只向 SDK 明确允许 `cache_control` 的 block 类型写入该字段；思考结束后可从历史剥离（`src/llm/anthropic.py:231-403`）。
 - OpenAI 把 system/developer 合并为 Responses API 首条 developer input；`prompt_cache_key` 使用模型与 agent 类型构造稳定键；历史用 `_response_output` 原样往返（`src/llm/openai.py:132-259`）。
 - DeepSeek 把 system/developer 内容合并到 `instructions`，并把完整的 user/assistant/function call/function output 历史作为 `input` 发送；不使用 `previous_response_id` 或 conversation 状态。开启思考时下发 `reasoning.effort`，关闭时省略 `reasoning`。最终 `output` 通过 `_response_output` 原样往返，因而 reasoning、服务端工具和未来新增 item 都可跨轮保留；框架当前注册的 function schema 与指定工具选择会转换成 Responses 格式（检索 `_convert_to_input`、`convert_function_tools`、`convert_tool_choice`）。
+- 原生 Web 调用与主对话隔离，不携带历史、系统提示词或 `previous_response_id`。OpenAI 用独立 Responses `web_search` 请求；Anthropic 用最多一次 server tool 的独立 Messages 请求并有限续接 `pause_turn`。它们复用 provider 并发、错误分类与重试，但不因认证、网络、限流、超时或协议错误转本地；只有 `NativeWebCapabilityError` 允许 `WebAccessMgr` 本地回退。DeepSeek 虽使用 Responses API，未声明 hosted Web 能力，故保持关闭。
 - Ollama 可把 developer 归为 system，同时兼容 `reasoning` 与 `reasoning_content`；`preserve_thinking` 控制 chat template 历史思考保留（`src/llm/ollama.py:79-147`）。
 - Moonshot/Kimi K3 保留跨轮 `reasoning_content`，带工具调用的 assistant 即使无思考正文也补空字符串；不下发 temperature，思考力度走顶层字段（`src/llm/moonshot.py:114-175,240-276`）。
 

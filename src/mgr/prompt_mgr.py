@@ -123,6 +123,10 @@ class PromptMgr:
 
         sections.append(self._build_environment())
 
+        web_access_mgr = getattr(getattr(self.agent, "deps", None), "web_access_mgr", None)
+        if web_access_mgr is not None:
+            sections.append(web_access_mgr.describe())
+
         # —— 任务管理指导（task feature）——
         task_mgr = getattr(self.agent, "_task_mgr", None)
         if task_mgr is not None:

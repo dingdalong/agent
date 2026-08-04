@@ -203,6 +203,11 @@ class ToolsMgr:
             return preview
         return preview[: limit - 3] + "..."
 
+    @staticmethod
+    def _external_read_preview(result: str, status: str) -> str:
+        """外部读取事件只记录状态和长度，不保留网页内容。"""
+        return f"status={status}, length={len(result)}"
+
 
     async def _emit_tool_started(
         self,
@@ -242,7 +247,11 @@ class ToolsMgr:
         if event_bus is None or not hasattr(event_bus, "emit"):
             return
         data_guard = getattr(deps, "data_guard", None) if deps is not None else None
-        safe_result = data_guard.redact(result) if data_guard is not None else result
+        if tool.policy.access is AccessKind.EXTERNAL_READ:
+            result_preview = self._external_read_preview(result, status)
+        else:
+            safe_result = data_guard.redact(result) if data_guard is not None else result
+            result_preview = self._result_preview(str(safe_result))
         caller_agent_type, caller_uuid = caller_identity(agent)
         await event_bus.emit(ToolCallCompleted(
             timestamp=time.time(),
@@ -251,7 +260,7 @@ class ToolsMgr:
             tool_call_id=current_tool_call_id,
             status=status,
             duration_seconds=duration_seconds,
-            result_preview=self._result_preview(str(safe_result)),
+            result_preview=result_preview,
             caller_agent_type=caller_agent_type,
             caller_uuid=caller_uuid,
         ))
@@ -337,6 +346,7 @@ class ToolsMgr:
             origin=tool.origin,
             plan_active=bool(getattr(agent, "plan_active", False)),
             user_intent=user_intent,
+            review_model=getattr(getattr(agent, "llm", None), "model", None),
         )
         if not authorization.allowed:
             event_bus = getattr(deps, "event_bus", None) if deps is not None else None

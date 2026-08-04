@@ -125,6 +125,32 @@ class DataGuard:
 
         return _URL.sub(self._redact_url_match, text)
 
+    def url_summary(self, raw: str) -> str:
+        """生成不包含凭据、fragment 或 query value 的 URL 摘要。"""
+        try:
+            parsed = urlsplit(raw)
+        except ValueError:
+            return "<url>"
+        if not parsed.scheme or not parsed.hostname:
+            return "<url>"
+        host = parsed.hostname
+        try:
+            port = parsed.port
+        except ValueError:
+            return "<url>"
+        if port:
+            host += f":{port}"
+        query_keys = sorted({key for key, _ in parse_qsl(parsed.query, keep_blank_values=True)})
+        query = "keys=" + ",".join(query_keys[:16]) if query_keys else ""
+        if len(query_keys) > 16:
+            query += ",..."
+        return urlunsplit((parsed.scheme, host, parsed.path or "/", query, ""))
+
+    @staticmethod
+    def web_search_summary(query: str) -> str:
+        """生成不保留搜索正文的审计摘要。"""
+        return f"搜索网页：<query:length={len(query)}>"
+
     def shell_summary(self, command: str) -> str:
         """生成不含请求数据的 Shell 摘要，供判官和人工确认复用。"""
         try:

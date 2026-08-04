@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from src.mgr.mcp_mgr import McpMgr
     from src.mgr.role_mgr import RoleMgr, AgentManifest
     from src.interfaces.turn_clock import TurnClock
+    from src.mgr.web_access_mgr import WebAccessMgr
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +132,7 @@ class AgentDeps:
     event_bus: EventBus = None
     tools_mgr: ToolsMgr = None
     permission_mgr: PermissionManager | None = None
+    web_access_mgr: WebAccessMgr | None = None
     config_mgr: ConfigManager = None
     memory_mgr: MemoryMgr | None = None
     hooks_mgr: HooksMgr | None = None

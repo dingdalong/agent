@@ -9,6 +9,7 @@ from typing import Literal
 
 class AccessKind(StrEnum):
     LOCAL_READ = "local_read"
+    EXTERNAL_READ = "external_read"
     INTERNAL = "internal"
     WORKSPACE_WRITE = "workspace_write"
     REVIEW = "review"

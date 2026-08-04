@@ -76,7 +76,7 @@
 | 5 | `ToolsMgr` / feature Managers / Hooks | 注册内置工具；项目 Hook 仅在受信任时加载 |
 | 6 | `McpMgr.start()` | 按信任和连接开关启动 server；动态工具强制 `REVIEW + EXTERNAL` |
 | 7 | `SessionMgr` / `LLMMgr` | 构造持久化服务、发现模型并验证 default |
-| 8 | `PermissionManager` | 注入 workdir、JudgeClient、一次性确认回调与 DataGuard |
+| 8 | `PermissionManager` / `WebAccessMgr` | 注入通用判官、Web 安全审查、一次性确认回调与 Web 路由依赖 |
 | 9 | `AgentDeps` / `AgentApp` | 组装共享依赖并返回应用实例 |
 
 启动信任必须先于 ConfigManager、Hook 和 MCP；这是防止未信任项目通过环境、模型端点或子进程在确认前执行的硬顺序。PermissionManager 不快照工具元数据，ToolsMgr 每次调用都把当前 ToolEntry 的 policy 与 origin 传给 `authorize()`，因此动态 MCP 工具可在运行时注册和重连。
@@ -100,6 +100,7 @@
 | `event_bus` | `EventBus` | 否 | 类型化事件总线 |
 | `tools_mgr` | `ToolsMgr` | 否 | 工具注册与执行 |
 | `permission_mgr` | `PermissionManager \| None` | 否 | 权限检查（无 permission 时可为 None） |
+| `web_access_mgr` | `WebAccessMgr` | 否 | 本地/provider 原生 Web 统一路由 |
 | `config_mgr` | `ConfigManager` | 否 | 三层配置合并 |
 | `memory_mgr` | `MemoryMgr \| None` | **memory** | 记忆读写，未启用注入 None |
 | `hooks_mgr` | `HooksMgr \| None` | 否 | 生命周期钩子 |

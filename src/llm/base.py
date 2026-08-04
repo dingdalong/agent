@@ -11,6 +11,8 @@ from typing import (
     Any,
     AsyncIterable,
     AsyncIterator,
+    Awaitable,
+    Callable,
     ClassVar,
     Collection,
     Mapping,
@@ -41,6 +43,11 @@ from src.llm.errors import (
     safe_exception_traceback,
 )
 from src.llm.retry import RetryConfig, RetryPolicy
+from src.web.types import (
+    NativeWebCapabilityError,
+    WebFetchResponse,
+    WebSearchResponse,
+)
 
 if TYPE_CHECKING:
     from src.tools import ToolDict
@@ -455,6 +462,45 @@ class LLMProvider(ABC):
             非协议续接 provider 固定返回 0。
         """
         return 0
+
+    async def native_web_search(
+        self,
+        query: str,
+        *,
+        max_results: int = 5,
+    ) -> WebSearchResponse:
+        """执行 provider 原生搜索；不支持时只抛能力异常供本地回退。"""
+        raise NativeWebCapabilityError(f"{type(self).__name__} 不支持原生 Web 搜索")
+
+    async def native_web_fetch(self, url: str) -> WebFetchResponse:
+        """执行 provider 原生抓取；不支持时只抛能力异常供本地回退。"""
+        raise NativeWebCapabilityError(f"{type(self).__name__} 不支持原生 Web 抓取")
+
+    async def _run_auxiliary(self, operation: Callable[[], Awaitable[Any]]) -> Any:
+        """为不进入主对话的 provider 辅助调用复用并发、分类与重试策略。"""
+        async with self._semaphore:
+            for attempt in range(1, self.max_attempts + 1):
+                try:
+                    return await operation()
+                except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
+                    raise
+                except Exception as exc:
+                    info = classify_llm_error(exc)
+                    diagnostic_id = f"llm_{uuid.uuid4().hex[:12]}"
+                    self._log_llm_failure(
+                        info=info,
+                        attempt=attempt,
+                        diagnostic_id=diagnostic_id,
+                        exc=exc,
+                    )
+                    if not self._retry_policy.should_retry(info, attempt):
+                        raise LLMCallError(
+                            info=info,
+                            attempts=attempt,
+                            diagnostic_id=diagnostic_id,
+                        ) from exc
+                    await self._sleep(self._retry_policy.delay(info, attempt=attempt))
+        raise AssertionError("辅助调用重试循环应成功返回或抛出终态异常")
 
     @staticmethod
     def _ua_headers(user_agent: str) -> dict[str, str] | None:

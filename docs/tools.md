@@ -43,7 +43,7 @@ ToolPolicy(
 | create/write/edit/replace | `WORKSPACE_WRITE + LOCAL` |
 | move/rename | `REVIEW + LOCAL`，声明 source 和 destination |
 | shell | `REVIEW + DYNAMIC` |
-| web search/fetch | `REVIEW + EXTERNAL` |
+| web search/fetch | `EXTERNAL_READ + EXTERNAL` |
 | MCP | 强制 `REVIEW + EXTERNAL` |
 | calculator、ask_user、compact、任务/计划状态 | `INTERNAL + LOCAL`，按需声明 `plan_safe` |
 
@@ -88,7 +88,11 @@ Shell 固定为 `REVIEW + DYNAMIC`，不会因命令看似只读而绕过判官�
 
 ## Web 与 MCP
 
-`web_search` 和 `web_fetch` 是 `REVIEW + EXTERNAL`。执行前若参数含已识别秘密，授权层直接拒绝。
+`web_search` 和 `web_fetch` 共用 provider 级 `llm_provider.<name>.web` 路由配置。`local` 使用本地后端；`provider` 优先使用当前 Agent 模型所属 provider 的原生能力。OpenAI 原生提供搜索、抓取回退本地；Anthropic 原生提供搜索和抓取；DeepSeek 与其他未声明能力的 provider 回退本地。只有明确的“能力不支持”会回退，认证、网络、限流、超时和响应协议错误不会再次外发。
+
+两者固定为 `EXTERNAL_READ + EXTERNAL`，可在 Plan 中使用，但每次仍经过 Web 隐私预检与安全审查。查询/URL 含已识别秘密时本地拒绝；疑似个人信息、专有代码或私有标识符时不发送给审查模型，直接请求一次性确认。Web 安全审查使用发起调用的 Agent 当前模型，不使用 `llm.fast`，请求只包含脱敏查询或不含 query value 的 URL 摘要。
+
+本地抓取只允许标准端口 HTTP/HTTPS，拒绝 URL 凭据和非公网 IPv4/IPv6；DNS 解析结果检查后固定连接 IP，HTTPS 仍按原主机名执行 SNI 与证书校验。重定向最多 5 次，只允许同主机且禁止 HTTPS 降级；不使用系统代理、cookie、认证或 referer，解压后正文上限 1 MiB。Web 完成事件只记录状态和结果长度，不记录搜索结果、网页正文或 URL query value；原始 Web 内容不建立额外磁盘缓存。
 
 MCP 工具通过 `_PassThroughArgs(extra="allow")` 接收上游 schema 所描述的参数，名称格式为 `mcp__<server>__<tool>` 并清洗限长。无论上游如何标注，只能注册为 `REVIEW + EXTERNAL`。结果先由 `_format_result()` 转为文本，再进入统一脱敏、Hook、事件和分页流程。
 
