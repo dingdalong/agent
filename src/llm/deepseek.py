@@ -1,36 +1,33 @@
-"""DeepSeek LLM Provider。"""
+"""DeepSeek Responses API LLM Provider。"""
 
 from __future__ import annotations
 
-import logging
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, AsyncIterable
-from openai import AsyncOpenAI
-from src.llm.base import (
-    LLMCallContext,
-    LLMProvider,
-    LLMResponse,
-    iter_llm_stream,
-    validate_chat_completion_stream,
-)
-from src.llm.errors import LLMStreamResponseError
+from typing import TYPE_CHECKING, Any
+
 import transformers
+from openai import AsyncOpenAI
+
+from src.llm.base import LLMCallContext, LLMProvider, LLMResponse
+from src.llm.responses import (
+    ResponsesStreamMixin,
+    convert_function_tools,
+    convert_tool_choice,
+)
 
 if TYPE_CHECKING:
     from src.tools import ToolDict
 
-logger = logging.getLogger(__name__)
 
-_DEEPSEEK_FINISH_REASONS = frozenset({"stop", "length", "tool_calls"})
-
-class DeepSeekProvider(LLMProvider):
-    """基于 OpenAI SDK 的 LLM Provider。"""
+class DeepSeekProvider(ResponsesStreamMixin, LLMProvider):
+    """基于 OpenAI SDK Responses API 的 DeepSeek Provider。"""
 
     _EFFORT_DOWNGRADE = {"max": "high"}
+    _RESPONSE_REASONING_DELTA_EVENTS = frozenset({"response.reasoning_text.delta"})
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         super().__post_init__()
-        self.supports_native_structured_output = False
+        self.supports_native_structured_output = True
         self._client = AsyncOpenAI(
             api_key=self.api_key,
             base_url=self.base_url,
@@ -39,15 +36,26 @@ class DeepSeekProvider(LLMProvider):
             default_headers=self._ua_headers(self.user_agent),
         )
 
-    def clear_reasoning_content(self, messages):
-        """清理思考内容"""
+    def clear_reasoning_content(self, messages: list[Any]) -> None:
+        """清除无工具轮次的已知思考载体并保留其他输出 item。"""
         for message in messages:
-            # 处理对象（有 reasoning_content 属性）
-            if hasattr(message, 'reasoning_content'):
-                message.reasoning_content = None
-            # 处理字典（有 'reasoning_content' 键）
-            elif isinstance(message, dict) and 'reasoning_content' in message:
-                message['reasoning_content'] = None
+            if not isinstance(message, dict):
+                if hasattr(message, "reasoning_content"):
+                    message.reasoning_content = None
+                continue
+            message.pop("reasoning_content", None)
+            output_items = message.get("_response_output")
+            if not isinstance(output_items, list):
+                continue
+            retained_items = [
+                item
+                for item in output_items
+                if not isinstance(item, dict) or item.get("type") != "reasoning"
+            ]
+            if retained_items:
+                message["_response_output"] = retained_items
+            else:
+                message.pop("_response_output", None)
 
     def estimate_tokens(
         self,
@@ -55,15 +63,18 @@ class DeepSeekProvider(LLMProvider):
         prompt: list[dict] | None = None,
         tools: list[ToolDict] | None = None,
     ) -> int:
-        all_messages = (prompt or []) + messages
-        messages_for_estimate = [{
-            "messages": all_messages,
-            "tools": tools,
-        }] if tools else all_messages
-        return len(self._tokenizer.encode(str(messages_for_estimate)))
+        """估算 DeepSeek Responses API 实际请求载荷的 token 数。"""
+        instructions, input_items = self._convert_to_input(messages, prompt)
+        payload: dict[str, object] = {"input": input_items}
+        if instructions:
+            payload["instructions"] = instructions
+        converted_tools = convert_function_tools(tools)
+        if converted_tools:
+            payload["tools"] = converted_tools
+        return len(self._tokenizer.encode(str(payload)))
 
     @cached_property
-    def _tokenizer(self):
+    def _tokenizer(self) -> Any:
         return transformers.AutoTokenizer.from_pretrained(
             "src/llm/tokenizer/deepseek", trust_remote_code=True
         )
@@ -72,17 +83,19 @@ class DeepSeekProvider(LLMProvider):
         self,
         usage: object | None,
     ) -> dict[str, int | None] | None:
+        """把 Responses usage 归一为框架公共 token 字段。"""
         if usage is None:
             return None
+        input_details = getattr(usage, "input_tokens_details", None)
         return {
-            "input_tokens": getattr(usage, "prompt_tokens", None),
-            "output_tokens": getattr(usage, "completion_tokens", None),
+            "input_tokens": getattr(usage, "input_tokens", None),
+            "output_tokens": getattr(usage, "output_tokens", None),
             "total_tokens": getattr(usage, "total_tokens", None),
-            "cache_read_input_tokens": getattr(usage, "prompt_cache_hit_tokens", None),
-            "cache_creation_input_tokens": getattr(usage, "prompt_cache_miss_tokens", None),
+            "cache_read_input_tokens": getattr(input_details, "cached_tokens", None),
+            "cache_creation_input_tokens": None,
         }
 
-    def _normalize_content(self, content) -> str | list[dict]:
+    def _normalize_content(self, content: Any) -> str | list[dict]:
         if isinstance(content, list):
             parts = []
             for part in content:
@@ -97,13 +110,96 @@ class DeepSeekProvider(LLMProvider):
             return str(content)
         return ""
 
-    def _normalize_assistant_extra(self, msg: dict, norm_msg: dict, role: str) -> None:
-        if role != "assistant":
-            return
-        if msg.get("prefix") is True:
-            norm_msg["prefix"] = True
-        if msg.get("reasoning_content"):
-            norm_msg["reasoning_content"] = msg["reasoning_content"]
+    def _normalize_assistant_extra(
+        self,
+        msg: dict,
+        norm_msg: dict,
+        role: str,
+    ) -> None:
+        if role == "assistant" and msg.get("_response_output"):
+            norm_msg["_response_output"] = msg["_response_output"]
+
+    @staticmethod
+    def _content_text(content: Any) -> str:
+        if isinstance(content, str):
+            return content
+        if not isinstance(content, list):
+            return "" if content is None else str(content)
+        return "".join(
+            part.get("text", "")
+            for part in content
+            if isinstance(part, dict) and isinstance(part.get("text"), str)
+        )
+
+    @staticmethod
+    def _message_content(content: Any, *, block_type: str) -> Any:
+        if not isinstance(content, list):
+            return content
+        converted: list[Any] = []
+        for part in content:
+            if not isinstance(part, dict):
+                converted.append(part)
+                continue
+            if part.get("type") == "text":
+                converted.append({"type": block_type, "text": part.get("text", "")})
+            else:
+                converted.append(part)
+        return converted
+
+    def _convert_to_input(
+        self,
+        messages: list[dict],
+        prompt: list[dict] | None,
+    ) -> tuple[str, list[dict]]:
+        """将框架消息转换为无状态 Responses instructions 与 input items。"""
+        instructions_parts: list[str] = []
+        input_items: list[dict] = []
+
+        for message in (prompt or []) + messages:
+            role = message.get("role")
+            if role in {"system", "developer"}:
+                text = self._content_text(message.get("content", ""))
+                if text:
+                    instructions_parts.append(text)
+            elif role == "user":
+                input_items.append({
+                    "role": "user",
+                    "content": self._message_content(
+                        message.get("content", ""),
+                        block_type="input_text",
+                    ),
+                })
+            elif role == "assistant":
+                response_output = message.get("_response_output")
+                if isinstance(response_output, list):
+                    input_items.extend(response_output)
+                    continue
+                content = message.get("content")
+                if content:
+                    input_items.append({
+                        "type": "message",
+                        "role": "assistant",
+                        "content": self._message_content(
+                            content,
+                            block_type="output_text",
+                        ),
+                    })
+                for tool_call in message.get("tool_calls", []):
+                    function = tool_call.get("function", {})
+                    input_items.append({
+                        "type": "function_call",
+                        "call_id": tool_call.get("id", ""),
+                        "name": function.get("name", ""),
+                        "arguments": function.get("arguments", ""),
+                    })
+            elif role == "tool":
+                input_items.append({
+                    "type": "function_call_output",
+                    "call_id": message.get("tool_call_id", ""),
+                    "output": message.get("content", ""),
+                })
+
+        return "\n\n".join(instructions_parts), input_items
 
     async def _do_chat(
         self,
@@ -117,153 +213,25 @@ class DeepSeekProvider(LLMProvider):
         *,
         call: LLMCallContext,
     ) -> LLMResponse:
-        """向 DeepSeek 兼容接口发起一次流式调用。
-
-        Args:
-            messages: 会话消息列表。
-            prompt: 可选系统提示词列表。
-            tools: 可选工具 schema 列表。
-            temperature: 采样温度。
-            tool_choice: 工具选择策略。
-            enable_thinking: 是否启用思考。
-            reasoning_effort_override: 本次调用临时替换的推理力度档位；
-                None 时沿用 provider 的 reasoning_effort。
-            call: 当前独立调用尝试上下文。
-
-        Returns:
-            归一化后的 LLM 响应。
-        """
-        kwargs: dict = {
+        """向 DeepSeek Responses API 发起一次流式调用。"""
+        instructions, input_items = self._convert_to_input(messages, prompt)
+        converted_tools = convert_function_tools(tools)
+        request: dict[str, Any] = {
             "model": self.model,
-            "messages": prompt + messages if prompt is not None else messages,
-            "tools": tools,
             "stream": True,
-            "stream_options": {"include_usage": True},
             "temperature": temperature,
-            "tool_choice": tool_choice or ("auto" if tools else None),
         }
+        if instructions:
+            request["instructions"] = instructions
+        if input_items:
+            request["input"] = input_items
         if enable_thinking:
-            kwargs["reasoning_effort"] = reasoning_effort_override or self.reasoning_effort
-            kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
-        else:
-            kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
-        response = await self._client.chat.completions.create(**kwargs)
-        return await self._parse_stream(
-            response,
-            call=call,
-        )
+            request["reasoning"] = {
+                "effort": reasoning_effort_override or self.reasoning_effort
+            }
+        if converted_tools:
+            request["tools"] = converted_tools
+            request["tool_choice"] = convert_tool_choice(tool_choice) or "auto"
 
-    async def _parse_stream(
-        self,
-        stream: AsyncIterable[Any],
-        *,
-        call: LLMCallContext,
-    ) -> LLMResponse:
-        """解析流式响应并即时记录工具片段。
-
-        Args:
-            stream: OpenAI 兼容异步响应流。
-            call: 当前独立调用尝试上下文。
-
-        Returns:
-            归一化后的 LLM 响应。
-        """
-        tool_calls: dict[int, dict[str, str]] = {}
-        content_parts: list[str] = []
-        reasoning_parts: list[str] = []
-        finish_reason = None
-        usage = None
-
-        async for chunk in iter_llm_stream(stream):
-            chunk_usage = getattr(chunk, "usage", None)
-            if chunk_usage is not None:
-                usage = chunk_usage
-
-            if not getattr(chunk, "choices", None):
-                continue
-
-            if finish_reason is not None:
-                raise LLMStreamResponseError(
-                    "业务终态后收到额外 choice",
-                    code="invalid_response",
-                )
-
-            choice = chunk.choices[0]
-            delta = choice.delta
-
-            reasoning = getattr(delta, "reasoning_content", None)
-            if reasoning is not None:
-                reasoning_parts.append(reasoning)
-                await self.emit_thinking_delta(reasoning, call=call)
-
-            if delta.content:
-                if not (delta.tool_calls and delta.content.isspace()):
-                    content_parts.append(delta.content)
-                    await self.emit_response_delta(delta.content, call=call)
-
-            if delta.tool_calls:
-                for tool_chunk in delta.tool_calls:
-                    idx = tool_chunk.index
-                    call_id = tool_chunk.id or ""
-                    name = tool_chunk.function.name or ""
-                    arguments = tool_chunk.function.arguments or ""
-                    call.record_tool_fragment(
-                        idx,
-                        call_id=call_id,
-                        name=name,
-                        arguments=arguments,
-                    )
-                    if idx not in tool_calls:
-                        tool_calls[idx] = {"id": "", "name": "", "arguments": ""}
-                    if call_id:
-                        tool_calls[idx]["id"] = call_id
-                    tool_calls[idx]["name"] += name
-                    tool_calls[idx]["arguments"] += arguments
-
-            if choice.finish_reason:
-                finish_reason = choice.finish_reason
-                if finish_reason == "insufficient_system_resource":
-                    raise LLMStreamResponseError(
-                        "推理系统资源不足导致响应中断",
-                        code="insufficient_system_resource",
-                    )
-                validate_chat_completion_stream(
-                    finish_reason,
-                    tool_calls,
-                    valid_finish_reasons=_DEEPSEEK_FINISH_REASONS,
-                )
-
-        validate_chat_completion_stream(
-            finish_reason,
-            tool_calls,
-            valid_finish_reasons=_DEEPSEEK_FINISH_REASONS,
-        )
-        content = "".join(content_parts) or ""
-        reasoning_content = "".join(reasoning_parts) or ""
-        if finish_reason != "length":
-            call.mark_tool_fragments_complete()
-
-        # 构造完整的 assistant 消息，包含 Provider 特有字段
-        assistant_message: dict = {
-            "role": "assistant",
-            "content": content,
-        }
-        if reasoning_content:
-            assistant_message["reasoning_content"] = reasoning_content
-        if tool_calls:
-            assistant_message["tool_calls"] = [
-                {
-                    "id": tc["id"],
-                    "type": "function",
-                    "function": {"name": tc["name"], "arguments": tc["arguments"]},
-                }
-                for tc in tool_calls.values()
-            ]
-
-        return LLMResponse(
-            content=content,
-            tool_calls=tool_calls,
-            finish_reason=finish_reason,
-            assistant_message=assistant_message,
-            token_usage=self._extract_token_usage(usage),
-        )
+        stream = await self._client.responses.create(**request)
+        return await self._parse_stream(stream, call=call)

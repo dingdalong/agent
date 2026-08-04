@@ -212,7 +212,7 @@ def _has_reasoning_carrier(assistant_message: dict | None) -> bool:
 
     Returns:
         含 reasoning_content / reasoning 文本、Anthropic thinking 块或
-        OpenAI Responses reasoning 项时为 True。
+        Responses API reasoning 项时为 True。
     """
     if not isinstance(assistant_message, dict):
         return False

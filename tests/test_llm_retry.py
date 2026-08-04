@@ -737,6 +737,23 @@ def test_deepseek_parser_records_tool_fragment_before_stream_failure() -> None:
     class BrokenToolStream:
         """产生一个工具片段后中断的异步流。"""
 
+        def __init__(self) -> None:
+            """初始化待发送的 Responses API 工具事件。"""
+            item = SimpleNamespace(
+                type="function_call",
+                id="output_1",
+                call_id="call_1",
+                name="lookup",
+            )
+            self._events = iter([
+                SimpleNamespace(type="response.output_item.added", item=item),
+                SimpleNamespace(
+                    type="response.function_call_arguments.delta",
+                    item_id="output_1",
+                    delta='{"q":',
+                ),
+            ])
+
         def __aiter__(self):
             """返回异步迭代器自身。
 
@@ -746,22 +763,18 @@ def test_deepseek_parser_records_tool_fragment_before_stream_failure() -> None:
             return self
 
         async def __anext__(self):
-            """首次返回工具片段，第二次抛出流协议异常。
+            """依次返回工具事件，随后抛出流协议异常。
 
             Returns:
-                模拟 Chat Completions 数据块。
+                模拟 Responses API 事件。
 
             Raises:
                 LLMStreamResponseError: 工具参数尚未完成时模拟连接中断。
             """
-            if hasattr(self, "_sent"):
+            try:
+                return next(self._events)
+            except StopIteration:
                 raise LLMStreamResponseError("stream interrupted")
-            self._sent = True
-            function = SimpleNamespace(name="lookup", arguments='{"q":')
-            tool_chunk = SimpleNamespace(index=0, id="call_1", function=function)
-            delta = SimpleNamespace(reasoning_content=None, content=None, tool_calls=[tool_chunk])
-            choice = SimpleNamespace(delta=delta, finish_reason=None)
-            return SimpleNamespace(usage=None, choices=[choice])
 
     provider = DeepSeekProvider(
         api_key="test",

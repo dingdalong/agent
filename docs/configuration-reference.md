@@ -111,7 +111,7 @@
 
 | provider | base_url | reasoning_effort | context_limit | 其他 |
 |----------|----------|------------------|---------------|------|
-| `deepseek` | `https://api.deepseek.com` | `high` | `400000` | — |
+| `deepseek` | `https://api.deepseek.com` | `high` | `400000` | Responses API 根地址，不追加 `/v1` 或 `/beta` |
 | `openai` | `https://api.openai.com/v1` | `medium` | `262144` | `models: [gpt-5.5]` |
 | `anthropic` | `https://api.anthropic.com` | `high` | `262144` | `models: [k3]`；`max_pause_turn_continuations: 5` |
 | `ollama` | `http://127.0.0.1:8001/v1` | `high` | `262144` | `preserve_thinking: true` |
@@ -176,7 +176,7 @@
 # <name> 须为框架已知 provider；api_key 通常经 .env 的 {NAME}_API_KEY 注入。
 llm_provider:
   deepseek:
-    base_url: https://api.deepseek.com   # API 端点，可被 DEEPSEEK_API_URL 覆盖
+    base_url: https://api.deepseek.com   # Responses API 根地址，可被 DEEPSEEK_API_URL 覆盖
     reasoning_effort: high               # 推理力度
     context_limit: 400000                # 上下文窗口 token 上限（压缩阈值据此换算）
     # api_key: 通常放 .env：DEEPSEEK_API_KEY=sk-...

@@ -664,7 +664,7 @@ def test_openai_allows_lifecycle_events_before_terminal() -> None:
     assert response.finish_reason == "stop"
 
 
-CHAT_PROVIDERS = [DeepSeekProvider, MoonshotProvider, OllamaProvider]
+CHAT_PROVIDERS = [MoonshotProvider, OllamaProvider]
 
 
 def _chat_chunk(
@@ -736,7 +736,7 @@ def test_chat_completion_requires_valid_finish_reason(
     provider_type: type[LLMProvider],
     chunks: list[SimpleNamespace],
 ) -> None:
-    """三个兼容 provider 缺终态或终态非法时应报可重试协议错误。
+    """两个兼容 provider 缺终态或终态非法时应报可重试协议错误。
 
     Args:
         provider_type: 待验证 provider 类型。
@@ -759,7 +759,7 @@ def test_chat_completion_requires_valid_finish_reason(
 def test_chat_completion_allows_usage_only_chunk_after_terminal(
     provider_type: type[LLMProvider],
 ) -> None:
-    """三个兼容 provider 的业务终态后应接受 usage-only 尾块。
+    """两个兼容 provider 的业务终态后应接受 usage-only 尾块。
 
     Args:
         provider_type: 待验证 provider 类型。
@@ -842,15 +842,6 @@ def test_chat_completion_rejects_choice_after_terminal_without_recording_delta(
             id=f"{provider_type.__name__}-unknown",
         )
         for provider_type in CHAT_PROVIDERS
-    ]
-    + [
-        pytest.param(
-            DeepSeekProvider,
-            "insufficient_system_resource",
-            LLMErrorKind.SERVICE,
-            "insufficient_system_resource",
-            id="DeepSeekProvider-insufficient-system-resource",
-        )
     ],
 )
 def test_chat_completion_preserves_first_special_terminal(
@@ -888,7 +879,7 @@ def test_chat_completion_preserves_first_special_terminal(
 def test_chat_completion_length_returns_partial_tool_call_without_json_validation(
     provider_type: type[LLMProvider],
 ) -> None:
-    """三个兼容 provider 的 length 应优先返回半截工具响应。
+    """两个兼容 provider 的 length 应优先返回半截工具响应。
 
     Args:
         provider_type: 待验证 provider 类型。
@@ -1014,7 +1005,7 @@ def test_provider_chat_keeps_length_tool_fragment_partial() -> None:
 def test_chat_completion_content_filter_is_non_retryable(
     provider_type: type[LLMProvider],
 ) -> None:
-    """三个兼容 provider 的 content_filter 应归内容政策错误。
+    """两个兼容 provider 的 content_filter 应归内容政策错误。
 
     Args:
         provider_type: 待验证 provider 类型。
@@ -1037,35 +1028,11 @@ def test_chat_completion_content_filter_is_non_retryable(
     assert info.retryable is False
 
 
-def test_deepseek_insufficient_system_resource_is_retryable_service_error() -> None:
-    """DeepSeek 合法资源不足终态应归为可重试服务错误。
-
-    Returns:
-        None。
-    """
-    provider = _bare_provider(DeepSeekProvider)
-
-    with pytest.raises(LLMStreamResponseError) as raised:
-        asyncio.run(
-            provider._parse_stream(
-                FakeAsyncStream(
-                    [_chat_chunk(finish_reason="insufficient_system_resource")]
-                ),
-                call=_call(),
-            )
-        )
-
-    info = classify_llm_error(raised.value)
-    assert info.kind is LLMErrorKind.SERVICE
-    assert info.retryable is True
-    assert info.provider_code == "insufficient_system_resource"
-
-
 @pytest.mark.parametrize("provider_type", CHAT_PROVIDERS)
 def test_chat_completion_accepts_normal_stop_without_tools(
     provider_type: type[LLMProvider],
 ) -> None:
-    """三个兼容 provider 的正常 stop 无工具响应应合法。
+    """两个兼容 provider 的正常 stop 无工具响应应合法。
 
     Args:
         provider_type: 待验证 provider 类型。
@@ -1090,7 +1057,7 @@ def test_chat_completion_accepts_normal_stop_without_tools(
 def test_chat_completion_accepts_valid_tool_call(
     provider_type: type[LLMProvider],
 ) -> None:
-    """三个兼容 provider 应接受字段完整且参数为 JSON object 的工具调用。
+    """两个兼容 provider 应接受字段完整且参数为 JSON object 的工具调用。
 
     Args:
         provider_type: 待验证 provider 类型。
@@ -1132,7 +1099,7 @@ def test_chat_completion_rejects_finish_reason_tool_mismatch(
     finish_reason: str,
     tool_call: dict[str, str] | None,
 ) -> None:
-    """三个兼容 provider 应拒绝工具终态与工具调用存在性不一致。
+    """两个兼容 provider 应拒绝工具终态与工具调用存在性不一致。
 
     Args:
         provider_type: 待验证 provider 类型。
@@ -1160,7 +1127,7 @@ def test_chat_completion_rejects_finish_reason_tool_mismatch(
 def test_chat_completion_rejects_duplicate_tool_call_ids(
     provider_type: type[LLMProvider],
 ) -> None:
-    """三个兼容 provider 应拒绝跨 index 重复的工具调用 ID。
+    """两个兼容 provider 应拒绝跨 index 重复的工具调用 ID。
 
     Args:
         provider_type: 待验证 provider 类型。
@@ -1277,7 +1244,7 @@ def test_chat_completion_rejects_malformed_tool_call(
     provider_type: type[LLMProvider],
     tool_call: dict[str, str],
 ) -> None:
-    """三个兼容 provider 应拒绝字段或 JSON object 参数畸形的工具调用。
+    """两个兼容 provider 应拒绝字段或 JSON object 参数畸形的工具调用。
 
     Args:
         provider_type: 待验证 provider 类型。
@@ -1326,7 +1293,7 @@ def test_additional_provider_keeps_tool_fragment_on_stream_failure(
     """
     provider = _bare_provider(provider_type)
     call = _call()
-    if provider_type is OpenAIProvider:
+    if provider_type in {OpenAIProvider, DeepSeekProvider}:
         events: list[Any] = _openai_tool_events(arguments='{"q":')
     else:
         events = [
@@ -1500,7 +1467,7 @@ def _capturing_chat_provider(
     """
     provider = _bare_provider(provider_type)
     create = CapturingAsyncCreate(stream)
-    if provider_type is OpenAIProvider:
+    if provider_type in {OpenAIProvider, DeepSeekProvider}:
         provider._client = SimpleNamespace(responses=create)
     else:
         provider._client = SimpleNamespace(
@@ -1584,7 +1551,7 @@ def test_non_anthropic_request_omits_output_limit(
         FakeAsyncStream(
             [_response_event("response.completed", response=_openai_response("completed"))]
         )
-        if provider_type is OpenAIProvider
+        if provider_type in {OpenAIProvider, DeepSeekProvider}
         else FakeAsyncStream([_chat_chunk(finish_reason="stop")])
     )
     provider, create = _capturing_chat_provider(provider_type, stream)

@@ -264,7 +264,10 @@ def test_strict_mode_rejects_invalid_tool_sequences(messages: list[dict]) -> Non
                 ]
             },
         ),
-        (DeepSeekProvider, {"reasoning_content": "reasoning"}),
+        (
+            DeepSeekProvider,
+            {"_response_output": [{"type": "reasoning", "id": "reasoning_1"}]},
+        ),
         (OllamaProvider, {"reasoning_content": "reasoning"}),
         (MoonshotProvider, {"reasoning_content": "reasoning"}),
     ],

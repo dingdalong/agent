@@ -10,7 +10,7 @@
 |---|---|---|
 | `anthropic` | `AnthropicProvider` | Anthropic Messages API |
 | `openai` | `OpenAIProvider` | OpenAI Responses API |
-| `deepseek` | `DeepSeekProvider` | OpenAI 兼容 Chat Completions |
+| `deepseek` | `DeepSeekProvider` | DeepSeek Responses API |
 | `ollama` | `OllamaProvider` | OpenAI 兼容 Chat Completions |
 | `moonshot` | `MoonshotProvider` | OpenAI 兼容 Chat Completions，适配 Kimi K3 |
 
@@ -28,9 +28,9 @@
 | `has_partial_data` | 本次成功尝试是否曾接收正文、思考或工具片段 |
 | `truncation_kind` | 仅 `finish_reason="length"` 时非空；`classify_truncation` 按 **工具 → 正文 → 思考 → 未知**（`tool_call`/`content`/`thinking`/`unknown`）判定的截断阶段，供 Agent 恢复链选择续写或丢弃重生成 |
 
-`classify_truncation(response, call=None)` 与 `_has_reasoning_carrier(assistant_message)`（`src/llm/base.py`）集中处理跨 provider 的截断分类：`has_tool` 看 `tool_calls` 或 `call.tool_fragment_state`；`has_content` 看正文或 `call.response_parts`；`has_thinking` 看各家推理载体（`reasoning_content` / `reasoning` 文本、Anthropic `_anthropic_content` 的 `thinking` 块、OpenAI `_response_output` 的 `reasoning` 项）或 `call.thinking_parts`。`chat()` 是唯一同时持有成品 `LLMResponse` 与 `LLMCallContext` 的位置，故分类只在此计算，五个 provider 的 `_build_response` 无需改动。
+`classify_truncation(response, call=None)` 与 `_has_reasoning_carrier(assistant_message)`（`src/llm/base.py`）集中处理跨 provider 的截断分类：`has_tool` 看 `tool_calls` 或 `call.tool_fragment_state`；`has_content` 看正文或 `call.response_parts`；`has_thinking` 看各家推理载体（`reasoning_content` / `reasoning` 文本、Anthropic `_anthropic_content` 的 `thinking` 块、Responses provider `_response_output` 的 `reasoning` 项）或 `call.thinking_parts`。`chat()` 是唯一同时持有成品 `LLMResponse` 与 `LLMCallContext` 的位置，故分类只在此计算，五个 provider 的 `_build_response` 无需改动。
 
-token 用量统一为 `input_tokens`、`output_tokens`、`total_tokens`、`cache_read_input_tokens`、`cache_creation_input_tokens`。Anthropic 将未缓存输入、缓存读取和缓存创建相加作为统一 `input_tokens`；其余实现按各 SDK 的输入总量字段归一（`src/llm/anthropic.py:202-229`、`src/llm/openai.py:139-165`）。
+token 用量统一为 `input_tokens`、`output_tokens`、`total_tokens`、`cache_read_input_tokens`、`cache_creation_input_tokens`。Anthropic 将未缓存输入、缓存读取和缓存创建相加作为统一 `input_tokens`；OpenAI 与 DeepSeek 从 Responses `input_tokens_details.cached_tokens` 读取缓存命中量；其余实现按各 SDK 的输入总量字段归一（检索各 provider 的 `_extract_token_usage`）。
 
 ## 2. `LLMProvider` 与模板方法
 
@@ -163,14 +163,15 @@ Chat Completions 风格的通用校验（`base.py:179-283`）要求：
 各 provider 还验证自身终态：
 
 - Anthropic 必须先收到 `message_stop`，之后不得有额外事件，且必须取得最终消息；`stop_reason` 映射为 `stop` / `tool_calls` / `length` / `pause_turn`，上下文、拒绝和内容政策终态转统一错误。parser 对最终 `content` 的每个 SDK block 调用 `model_dump(exclude_none=True)` 原样保存；空 block 列表或含客户端 `tool_use` 的 `pause_turn` 被视为协议错误，防止构造无法续接的载体（`src/llm/anthropic.py:501-579,581-695`）。
-- OpenAI Responses API 只接受一个合法的 `completed` 或 `incomplete` 终态，终态后不得出现事件；未知工具输出项、失败事件、未知 incomplete 原因和终态前 EOF 都转协议错误。流中的 `response.refusal.delta` / `done` 以及仅出现在最终嵌套 output 中的 refusal block 都转为 provider code `refusal`，统一分类为非重试 `content_policy`，不会返回空的成功响应或泄露拒绝正文（`src/llm/openai.py:58-94,300-466`）。
-- DeepSeek、Moonshot、Ollama 允许 `stop` / `length` / `tool_calls`，流结束后统一校验；DeepSeek 的 `insufficient_system_resource` 转 `service`（`src/llm/deepseek.py:151-227`）。
+- OpenAI 与 DeepSeek 共用 `ResponsesStreamMixin` 的终态和 function call 校验：只接受一个合法的 `completed` 或 `incomplete` 终态，终态后不得出现事件；失败事件、未知 incomplete 原因、工具参数引用未知输出项、工具调用不完整和终态前 EOF 都转协议错误。为兼容 Responses API 后续扩展，未知非终态事件会忽略，终态 `output` 中未知类型的 item 会原样保存在 `_response_output`，而不是用固定事件或 item 白名单拒绝。
+- OpenAI 额外把流中的 `response.refusal.delta` / `done` 以及仅出现在最终嵌套 output 中的 refusal block 转为 provider code `refusal`，统一分类为非重试 `content_policy`，不会返回空的成功响应或泄露拒绝正文（检索 `_openai_refusal_error`、`_validate_response_output`）。DeepSeek 从 `response.reasoning_text.delta` 发布思考增量，结构化失败元数据交给统一错误分类器处理。
+- Moonshot、Ollama 允许 `stop` / `length` / `tool_calls`，流结束后统一校验。
 
 ## 6. 消息归一化与分页
 
 `normalize_messages()`（`src/llm/base.py:453-660`）规范 role、content、assistant 工具调用和 tool 响应，并校验工具往返序列：调用 ID 必须非空且唯一，紧随的 tool 消息必须逐一且只响应一次。默认模式会删除无正文的非法 assistant 工具组及其 tool 消息；有正文时降级为纯文本 assistant。`strict=True` 时直接抛出类型或值错误。
 
-assistant 的 provider 专属字段在判断“真正为空”之前由 `_normalize_assistant_extra()` 保存（`src/llm/base.py:512-544`）。因此 OpenAI `_response_output`、Anthropic `_anthropic_content`，以及 DeepSeek、Ollama、Moonshot 的 reasoning-only carrier 即使正文为空也会保留；没有正文、工具调用或任何专属载体的空 assistant 才会删除。
+assistant 的 provider 专属字段在判断“真正为空”之前由 `_normalize_assistant_extra()` 保存。因此 OpenAI 与 DeepSeek 的 `_response_output`、Anthropic `_anthropic_content`，以及 Ollama、Moonshot 的 reasoning-only carrier 即使正文为空也会保留；没有正文、工具调用或任何专属载体的空 assistant 才会删除。
 
 工具结果分页由 `split_page()` / `_split_page_once()`（`src/llm/base.py:415-440`）提供：先按 provider token 估算判断整段是否可用，超预算时二分查找最大可容纳前缀，直至无损切完。实际分页缓存和读取由 `ToolsMgr` 完成。
 
@@ -178,10 +179,10 @@ assistant 的 provider 专属字段在判断“真正为空”之前由 `_normal
 
 | 维度 | Anthropic | OpenAI | DeepSeek | Ollama | Moonshot |
 |---|---|---|---|---|---|
-| 请求 API | Messages | Responses | Chat Completions | Chat Completions | Chat Completions |
-| 结构化输出标记 | 是 | 是 | 否 | 否 | 否 |
+| 请求 API | Messages | Responses | Responses | Chat Completions | Chat Completions |
+| 结构化输出标记 | 是 | 是 | 是 | 否 | 否 |
 | token 估算 | `cl100k_base`，失败时字符估算 | 模型编码，未知模型用 `o200k_base` | 本地 tokenizer | 字符估算 | 字符估算 |
-| 历史专属字段 | `_anthropic_content` | `_response_output` | `reasoning_content`、`prefix` | `reasoning`、`reasoning_content` | `reasoning_content` |
+| 历史专属字段 | `_anthropic_content` | `_response_output` | `_response_output` | `reasoning`、`reasoning_content` | `reasoning_content` |
 | temperature | 不下发 | 下发 | 下发 | 下发 | 不下发 |
 | 输出上限 | 固定传入 128,000 | 不下发（provider 默认） | 不下发（provider 默认） | 不下发（provider 默认） | 不下发（provider 默认） |
 
@@ -189,11 +190,11 @@ assistant 的 provider 专属字段在判断“真正为空”之前由 `_normal
 
 - Anthropic 转换 system、messages、tools 和 tool choice，合并连续同角色消息；历史 `_anthropic_content` 使用深拷贝原样往返。稳定 system 与最新消息设置缓存断点，但只向 SDK 明确允许 `cache_control` 的 block 类型写入该字段；思考结束后可从历史剥离（`src/llm/anthropic.py:231-403`）。
 - OpenAI 把 system/developer 合并为 Responses API 首条 developer input；`prompt_cache_key` 使用模型与 agent 类型构造稳定键；历史用 `_response_output` 原样往返（`src/llm/openai.py:132-259`）。
-- DeepSeek 支持 `prefix`，开启思考时下发 `reasoning_effort` 与 thinking enabled，关闭时显式 disabled；工具增量伴随的纯空白正文不计入内容（`src/llm/deepseek.py:83-149,151-252`）。
+- DeepSeek 把 system/developer 内容合并到 `instructions`，并把完整的 user/assistant/function call/function output 历史作为 `input` 发送；不使用 `previous_response_id` 或 conversation 状态。开启思考时下发 `reasoning.effort`，关闭时省略 `reasoning`。最终 `output` 通过 `_response_output` 原样往返，因而 reasoning、服务端工具和未来新增 item 都可跨轮保留；框架当前注册的 function schema 与指定工具选择会转换成 Responses 格式（检索 `_convert_to_input`、`convert_function_tools`、`convert_tool_choice`）。
 - Ollama 可把 developer 归为 system，同时兼容 `reasoning` 与 `reasoning_content`；`preserve_thinking` 控制 chat template 历史思考保留（`src/llm/ollama.py:79-147`）。
 - Moonshot/Kimi K3 保留跨轮 `reasoning_content`，带工具调用的 assistant 即使无思考正文也补空字符串；不下发 temperature，思考力度走顶层字段（`src/llm/moonshot.py:114-175,240-276`）。
 
-`enable_thinking=False` 时，Anthropic 显式 disabled，OpenAI 不传 reasoning，DeepSeek 显式 disabled，Ollama 关闭 chat template thinking，Moonshot 不传 reasoning effort。此时各 provider 都不下发推理力度，故 `reasoning_effort_override` 对本次调用是无害 no-op；关闭思考时也不会出现思考阶段截断。
+`enable_thinking=False` 时，Anthropic 显式 disabled，OpenAI 与 DeepSeek 不传 `reasoning`，Ollama 关闭 chat template thinking，Moonshot 不传 reasoning effort。此时各 provider 都不下发推理力度，故 `reasoning_effort_override` 对本次调用是无害 no-op；关闭思考时也不会出现思考阶段截断。
 
 ## 8. 模型发现
 
