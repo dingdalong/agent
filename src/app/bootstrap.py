@@ -17,7 +17,7 @@ from src.mgr.web_safety_mgr import LLMWebSafetyClient
 from src.mgr.project_trust import ProjectTrustGate
 from src.mgr.paths import global_data_dir, workdir as resolve_workdir
 from src.agent import AgentDeps
-from src.agent.states import SLASH_COMMANDS
+from src.commands import CommandMgr
 from src.app.app import AgentApp
 
 logger = logging.getLogger(__name__)
@@ -80,12 +80,15 @@ async def create_app(
     data_guard = DataGuard()
     register_runtime_secrets(data_guard, config_mgr, global_dir, work_dir, project_trusted)
     role_mgr = RoleMgr(config_mgr=config_mgr, workdir=work_dir, global_dir=global_dir)
+    # 按激活角色的 feature 集门控 deps 层可插拔 Manager；未启用则注入 None，其工具从 schema 排除。
+    feats = resolve_features(role_mgr.manifest.features if role_mgr.manifest else None)
+    command_mgr = CommandMgr(workdir=work_dir, global_dir=global_dir, project_trusted=project_trusted)
     event_bus = EventBus(level=EventLevel.from_str(config_mgr.get_config("events").get("level", "progress")))
     agent_view_store = AgentViewStore()
     turn_clock = TurnClock()  # 工具执行层与 UI 交互层共享，用于耗时剔除纯人工等待时段
     ui = TextualInterface(
         agent_view_store=agent_view_store,
-        slash_commands=SLASH_COMMANDS,
+        slash_commands=command_mgr.completion_items(feats),
         turn_clock=turn_clock,
         copy_on_select=copy_on_select,
         diagnostic_dir=global_dir / "logs",
@@ -97,8 +100,6 @@ async def create_app(
         passthrough=not ui.is_tty,
     )
     tools_mgr = ToolsMgr()
-    # 按激活角色的 feature 集门控 deps 层可插拔 Manager；未启用则注入 None，其工具从 schema 排除。
-    feats = resolve_features(role_mgr.manifest.features if role_mgr.manifest else None)
     memory_mgr = MemoryMgr(work_dir, data_guard=data_guard) if "memory" in feats else None
     plugin_mgr = PluginMgr(
         workdir=work_dir,
@@ -161,6 +162,7 @@ async def create_app(
         mcp_mgr=mcp_mgr,
         role_mgr=role_mgr,
         turn_clock=turn_clock,
+        command_mgr=command_mgr,
         data_guard=data_guard,
         trust_gate=trust_gate,
         session_context=[],

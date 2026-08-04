@@ -31,11 +31,12 @@ if TYPE_CHECKING:
     from src.mgr.hooks_mgr import HooksMgr
     from src.mgr.plan_mgr import PlanMgr
     from src.mgr.plugin_mgr import PluginMgr
-    from src.mgr.session_mgr import SessionMgr
+    from src.mgr.session_mgr import SessionMgr, ResumeResult
     from src.mgr.mcp_mgr import McpMgr
     from src.mgr.role_mgr import RoleMgr, AgentManifest
     from src.interfaces.turn_clock import TurnClock
     from src.mgr.web_access_mgr import WebAccessMgr
+    from src.commands import CommandMgr
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +143,7 @@ class AgentDeps:
     mcp_mgr: McpMgr | None = None
     role_mgr: RoleMgr | None = None
     turn_clock: TurnClock | None = None
+    command_mgr: CommandMgr | None = None
     plan_mode_controller: Any = None
     data_guard: Any = None
     trust_gate: Any = None
@@ -512,24 +514,14 @@ class Agent:
 
         cmd = parse_command(user_input)
         if cmd is not None:
-            cmd_name, cmd_args = cmd
-            if cmd_name == "plan":
-                await self._handle_plan_command()
-                return AgentState.REQUEST_INPUT
-            if cmd_name == "clear":
-                ctx.command = cmd
+            from src.commands import CommandContext, CommandSignal
+            outcome = await self.deps.command_mgr.dispatch(
+                cmd[0], cmd[1],
+                CommandContext(deps=self.deps, agent=self),
+                run_ctx=ctx,
+            )
+            if outcome.signal is CommandSignal.DEFER_TO_APP:
                 return AgentState.DONE
-            if cmd_name == "agents":
-                # 子 agent 视图归 app 层 AgentViewStore 持有，上抛 app 层渲染摘要
-                ctx.command = cmd
-                return AgentState.DONE
-            if cmd_name == "resume":
-                await self._handle_resume_command(cmd_args)
-                return AgentState.REQUEST_INPUT
-            if cmd_name == "models":
-                await self._handle_models_command()
-                return AgentState.REQUEST_INPUT
-            await self.deps.event_bus.request_output(f"未知命令: /{cmd_name}\n")
             return AgentState.REQUEST_INPUT
 
         if self.deps.hooks_mgr is not None:
@@ -563,81 +555,19 @@ class Agent:
 
         return AgentState.CHECK_COMPACT
 
-    async def _handle_plan_command(self) -> None:
-        """处理 /plan 命令：进入计划模式。"""
-        if not self.set_plan_active(True):
-            await self.deps.event_bus.request_output("已在计划模式中。\n")
-            return
-        await self.deps.event_bus.emit(PlanStateChanged(
-            timestamp=time.time(), source=self.agent_type, active=True,
-        ))
-        await self.deps.event_bus.request_output("已进入计划模式。\n")
+    async def apply_resume(self, result: "ResumeResult") -> str:
+        """应用会话恢复结果：替换历史与 session_id、重建 TaskManager、恢复 plan 状态、
+        注入恢复上下文并使提示词缓存失效。
 
-    async def _handle_models_command(self) -> None:
-        """处理 /models 命令：按 provider 分组列出已发现模型并标注 default/best/fast。"""
-        llm = self.deps.llm_mgr
-        grouped = llm.models_by_provider()
-
-        # 解析配置别名到真实模型 ID 并反向标注；best/fast 缺省或与 default 相同时合并到同一模型
-        labels: dict[str, list[str]] = {}
-        for alias in ("default", "best", "fast"):
-            labels.setdefault(llm.resolve_model(alias), []).append(alias)
-
-        lines: list[str] = []
-        if grouped:
-            lines.append("支持的模型（按 provider 分组）:")
-            for provider, models in grouped.items():
-                lines.append("")
-                lines.append(f"{provider}:")
-                for model in models:
-                    suffix = f" [{', '.join(labels[model])}]" if model in labels else ""
-                    lines.append(f"  - {model}{suffix}")
-        else:
-            lines.append("当前没有可用模型。")
-
-        await self.deps.event_bus.request_output("\n".join(lines) + "\n")
-
-    async def _handle_resume_command(self, cmd_args: list[str]) -> None:
-        """处理 /resume 命令：无参时弹出会话选择菜单，再委托 SessionMgr 解析会话并应用状态变更。
+        由 /resume 命令 handler 在解析出目标会话后调用。
 
         Args:
-            cmd_args: 命令参数列表，可为空（弹出选择菜单）、序号或 session_id。
+            result: SessionMgr.resolve_resume 返回的恢复结果。
+
+        Returns:
+            恢复摘要文本（供调用方输出）。
         """
-        session_mgr = self.deps.session_mgr
-        if session_mgr is None:
-            await self.deps.event_bus.request_output("会话管理器未初始化。\n")
-            return
-
-        # 无参：弹出方向键选择菜单让用户挑选历史会话，选中后转为以 session_id 解析
-        if not cmd_args:
-            sessions = session_mgr.list_resumable(self.deps.session_id)
-            if not sessions:
-                await self.deps.event_bus.request_output("没有可恢复的历史会话。\n")
-                return
-            options: list[tuple[str, str]] = []
-            for s in sessions:
-                updated = s.get("updated_at", "?")[:19].replace("T", " ")
-                label = f"[{updated}] {s.get('topic') or s.get('workdir', '')}"
-                options.append((s["session_id"], label))
-            try:
-                picked = await self.deps.event_bus.request_choice("\n最近的历史会话", options, 0)
-            except (asyncio.CancelledError, KeyboardInterrupt, NoEventSubscribers):
-                return
-            if not picked:  # Esc 取消，静默
-                return
-            cmd_args = [picked]
-
-        from src.mgr.session_mgr import ResumeResult
-        result = session_mgr.resolve_resume(
-            cmd_args,
-            current_session_id=self.deps.session_id,
-            current_workdir=str(self.deps.workdir) if self.deps.workdir else "",
-        )
-
-        # 解析失败或列出会话：直接输出文本
-        if isinstance(result, str):
-            await self.deps.event_bus.request_output(result)
-            return
+        from src.mgr import TaskManager
 
         # 替换对话历史和 session_id
         self.history.clear()
@@ -647,14 +577,13 @@ class Agent:
         # 重建 TaskManager 指向恢复会话的 tasks 目录（仅在启用 task feature 时）
         if self.deps.global_dir and "task" in self.features:
             tasks_dir = self.deps.global_dir / "tasks" / result.session_id
-            from src.mgr import TaskManager
             self._task_mgr = TaskManager(tasks_dir=tasks_dir, data_guard=self.deps.data_guard)
             self._reminder_mgr = ReminderMgr()
             self._reminder_mgr.register(self._task_mgr)
 
         plan_info = await self._restore_plan_state(result.metadata)
 
-        # 构建并输出恢复摘要
+        # 构建恢复摘要
         topic = result.metadata.get("topic", "")
         msg_count = len(result.messages)
         task_info = ""
@@ -663,10 +592,6 @@ class Agent:
             open_count = sum(1 for t in task_list["tasks"] if t["status"] != "completed")
             task_info = f"，{open_count} 个未完成任务"
 
-        await self.deps.event_bus.request_output(
-            f"已恢复会话 {result.session_id[:8]}...（{msg_count} 条消息{task_info}{plan_info}）\n"
-        )
-
         # 注入 session_context 让 LLM 知道上下文来自恢复
         self.deps.session_context.append(
             f"当前会话已从历史会话恢复（session {result.session_id[:8]}...）。"
@@ -674,6 +599,8 @@ class Agent:
             "请基于恢复的上下文继续对话。"
         )
         self._prompt_mgr.invalidate_cache()
+
+        return f"已恢复会话 {result.session_id[:8]}...（{msg_count} 条消息{task_info}{plan_info}）\n"
 
     async def _restore_plan_state(self, metadata: dict) -> str:
         """从会话元数据恢复 Plan 状态。

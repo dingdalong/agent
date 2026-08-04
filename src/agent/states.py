@@ -7,16 +7,6 @@ from src.llm.base import LLMResponse
 from src.llm.errors import LLMErrorInfo
 
 
-# 斜杠命令元数据（名称, 描述）的唯一来源：供输入框自动补全展示，与 agent.py 的命令分发保持一致（仅列已实现命令）。
-SLASH_COMMANDS: list[tuple[str, str]] = [
-    ("plan", "进入计划模式"),
-    ("clear", "清空会话"),
-    ("resume", "恢复历史会话"),
-    ("agents", "查看本会话子 agent"),
-    ("models", "查看支持的模型列表"),
-]
-
-
 def parse_command(user_input: str) -> tuple[str, list[str]] | None:
     """尝试将用户输入解析为斜杠命令。
 
@@ -92,7 +82,7 @@ class RunContext:
         manual_compact: 当前工具轮是否请求手动 compact。
         compact_focus: 手动 compact 的可选关注点。
         user_input: 本轮用户原始输入。
-        command: 需要上抛应用层的斜杠命令。
+        command: app 层斜杠命令（由 CommandMgr defer 挂上，主循环二次 dispatch）。
         exit_requested: 用户是否请求退出。
         llm_error: 本轮终态 LLM 错误的安全结构化信息。
     """
@@ -129,12 +119,12 @@ class RunContext:
 class RunResult:
     """Agent.run() 的返回值。
 
-    /plan 在 agent 内部处理，不会出现在 command 中。
-    /clear 与 /agents 会通过 command 字段上抛给 app 层处理。
+    agent 层命令（plan/models/resume/help）在 agent 内由 CommandMgr 处理；
+    app 层命令（clear/agents）由 CommandMgr defer 后经 command 字段上抛给 app 主循环二次 dispatch。
 
     Attributes:
         final_text: LLM 最终输出文本。
-        command: 需要 app 层处理的斜杠命令（/clear 或 /agents），无命令时为 None。
+        command: 需要 app 层处理的斜杠命令（由 CommandMgr defer 上抛），无命令时为 None。
         exit_requested: 用户是否请求退出（输入 exit/quit 或输入被取消）。
         user_input: 用户原始输入文本。
         llm_error: 本轮终态 LLM 错误的安全结构化信息。

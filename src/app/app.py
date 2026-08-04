@@ -10,13 +10,13 @@ from rich.text import Text
 
 from src.agent import Agent, AgentDeps
 from src.agent.states import RunResult
+from src.commands import CommandContext
 from src.interfaces.output_router import OutputRouter
 from src.interfaces.agent_view_store import AgentViewStore
-from src.interfaces.status_presenter import present_agent
 from src.app.plan_mode_controller import PlanModeController
-from src.events import NoEventSubscribers
 from src.events.types import InterruptRequested
 from src.mgr.data_guard import register_runtime_secrets
+from src.mgr.features import resolve_features
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +49,7 @@ class AgentApp:
             await asyncio.sleep(0)
 
             await self.deps.event_bus.request_output(self._startup_banner())
-            agent = await self._reset_session(source="startup")
+            agent = await self.reset_session(source="startup")
             while True:
                 result = await self._run_agent_turn(agent)
                 if result is None:
@@ -57,15 +57,14 @@ class AgentApp:
                 if result.exit_requested:
                     break
                 if result.command is not None:
-                    cmd_name = result.command[0]
-                    if cmd_name == "clear":
-                        agent = await self._reset_session(source="clear")
-                        await self.deps.event_bus.request_output("上下文已清理，所有组件已重载。\n")
-                        continue
-                    if cmd_name == "agents":
-                        # 复用同一 agent（不 reset）：弹出可选列表并回看子 agent 完整消息记录，会话历史保留
-                        await self._browse_subagents()
-                        continue
+                    name, args = result.command
+                    outcome = await self.deps.command_mgr.dispatch(
+                        name, args,
+                        CommandContext(deps=self.deps, agent=agent, app=self),
+                    )
+                    if outcome.new_agent is not None:
+                        agent = outcome.new_agent
+                    continue
         finally:
             if self.deps.hooks_mgr is not None:
                 try:
@@ -83,56 +82,6 @@ class AgentApp:
                 consumer_task.cancel()
                 await asyncio.gather(consumer_task, return_exceptions=True)
             await self.deps.ui.stop()
-
-    async def _browse_subagents(self) -> None:
-        """处理 /agents 命令：弹出可方向键选择的子 agent 列表，选中后以只读面板回看其完整原始消息记录。
-
-        循环：每轮重取列表（运行中的子 agent 可能已完成）→ request_choice 选择 → 选中则
-        request_transcript_view 打开面板 → Esc 返回列表 → 直至列表 Esc 取消退出。非 TTY 环境
-        无富交互面板，退回打印纯文本摘要。
-
-        Returns:
-            None.
-        """
-        if not self.deps.ui.is_tty:
-            snapshots = self.agent_view_store.subagent_snapshots()
-            if not snapshots:
-                summary = "本会话尚未启动任何子 agent。"
-            else:
-                lines = [f"本会话子 agent（{len(snapshots)}）:"]
-                lines.extend(present_agent(snapshot).plain for snapshot in snapshots)
-                summary = "\n".join(lines)
-            await self.deps.event_bus.request_output(summary + "\n")
-            return
-        while True:
-            snapshots = self.agent_view_store.subagent_snapshots()
-            choices = [
-                (snapshot.uuid, present_agent(snapshot).plain)
-                for snapshot in snapshots
-            ]
-            if not choices:
-                await self.deps.event_bus.request_output("暂无子 agent 记录。\n")
-                return
-            try:
-                picked = await self.deps.event_bus.request_choice(
-                    "\n子 agent 历史（选择查看完整消息记录）", choices, 0
-                )
-            except asyncio.CancelledError:
-                if _current_task_is_cancelling():
-                    raise
-                return
-            except NoEventSubscribers:
-                return
-            if not picked:  # Esc 取消，退出浏览
-                return
-            try:
-                await self.deps.event_bus.request_transcript_view(picked)
-            except asyncio.CancelledError:
-                if _current_task_is_cancelling():
-                    raise
-                return
-            except NoEventSubscribers:
-                return
 
     async def _consume_events(self) -> None:
         """消费事件总线上的事件并通过 OutputRouter 分发。
@@ -196,7 +145,19 @@ class AgentApp:
             return
         self._plan_mode_controller = PlanModeController(ui=ui, event_bus=event_bus)
 
-    async def _reset_session(
+    def _refresh_slash_commands(self) -> None:
+        """用 CommandMgr 的最新命令集刷新 UI 补全数据源（feature 门控对齐当前角色）。"""
+        command_mgr = getattr(self.deps, "command_mgr", None)
+        ui = getattr(self.deps, "ui", None)
+        if command_mgr is None or ui is None or not hasattr(ui, "set_slash_commands"):
+            return
+        role_mgr = getattr(self.deps, "role_mgr", None)
+        feats = resolve_features(
+            role_mgr.manifest.features if role_mgr is not None and role_mgr.manifest else None
+        )
+        ui.set_slash_commands(command_mgr.completion_items(feats))
+
+    async def reset_session(
         self,
         *,
         source: str = "clear",
@@ -281,6 +242,13 @@ class AgentApp:
                         if mcp_mgr is not None:
                             mcp_mgr.project_trusted = trusted
                             await mcp_mgr.start()
+
+                        # 命令注册表随信任刷新重扫（项目层门控依赖 trusted），并刷新补全
+                        command_mgr = getattr(self.deps, "command_mgr", None)
+                        if command_mgr is not None:
+                            command_mgr.project_trusted = trusted
+                            command_mgr.reload()
+                            self._refresh_slash_commands()
                     elif data_guard is not None and config_mgr is not None and global_dir is not None and workdir is not None:
                         register_runtime_secrets(
                             data_guard, config_mgr, global_dir, workdir,

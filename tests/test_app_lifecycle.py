@@ -140,6 +140,9 @@ class _BrowsingBus:
 @pytest.mark.parametrize("block_on", ["choice", "transcript"])
 def test_agent_browser_propagates_outer_cancellation(block_on: str) -> None:
     async def scenario() -> None:
+        from src.commands.builtin.agents import agents as agents_run
+        from src.commands.context import CommandContext
+
         store = AgentViewStore()
         store.record(SubagentLifecycle(
             timestamp=1.0,
@@ -150,7 +153,8 @@ def test_agent_browser_propagates_outer_cancellation(block_on: str) -> None:
         ))
         event_bus = _BrowsingBus(block_on)
         app = _app(_RecordingUI(), event_bus, store)
-        browser = asyncio.create_task(app._browse_subagents())
+        ctx = CommandContext(deps=app.deps, app=app)
+        browser = asyncio.create_task(agents_run(ctx, []))
         await event_bus.blocked.wait()
 
         browser.cancel()

@@ -107,6 +107,10 @@ class TextualInterface(UserInterface):
         """返回已启动的 Textual App，供 headless 集成测试使用。"""
         return self._app
 
+    def set_slash_commands(self, items: list[tuple[str, str]]) -> None:
+        """原位更新补全数据源；运行中的 AgentTuiApp 持有同一 list 引用，即时生效。"""
+        self.slash_commands[:] = items
+
     async def start(self) -> None:
         if not self.is_tty or self._app_task is not None:
             return

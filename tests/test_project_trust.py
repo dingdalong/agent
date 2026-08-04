@@ -281,6 +281,7 @@ def test_clear_uses_choice_before_reset_gate_and_defaults_to_restricted(tmp_path
         plugin_mgr=None,
         plan_mgr=None,
         role_mgr=None,
+        command_mgr=None,
         plan_mode_controller=None,
     )
     app = AgentApp(deps, AgentViewStore(), output_router=object())
@@ -290,7 +291,7 @@ def test_clear_uses_choice_before_reset_gate_and_defaults_to_restricted(tmp_path
         patch("src.app.app.Agent.from_manifest", return_value=new_agent),
         patch.object(AgentApp, "_install_plan_mode_controller"),
     ):
-        assert asyncio.run(app._reset_session(source="clear")) is new_agent
+        assert asyncio.run(app.reset_session(source="clear")) is new_agent
 
     assert order[:4] == ["choice", "ui_gate", "gate", "join"]
     assert order.index("trusted:False") > order.index("join")
