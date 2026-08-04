@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 
 from src.events.types import caller_identity
 from src.mgr.path_resolver import PathClass, PathResolutionError
-from src.tools import AccessKind, DataFlow, PathArgument, PathRole, ToolPolicy
+from src.tools.policy import AccessKind, DataFlow, PathArgument, PathRole, ToolPolicy
 from src.tools.decorator import tool
 
 if TYPE_CHECKING:

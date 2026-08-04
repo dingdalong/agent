@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 
 from src.events.menu import FormQuestion
 from src.events.types import caller_identity
-from src.tools import AccessKind, DataFlow, ToolPolicy
+from src.tools.policy import AccessKind, DataFlow, ToolPolicy
 from src.tools.decorator import tool
 
 if TYPE_CHECKING:

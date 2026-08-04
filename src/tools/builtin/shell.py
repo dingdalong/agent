@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 
 from pydantic import BaseModel, Field
 
-from src.tools import AccessKind, DataFlow, ToolPolicy
+from src.tools.policy import AccessKind, DataFlow, ToolPolicy
 from src.tools.decorator import tool
 
 

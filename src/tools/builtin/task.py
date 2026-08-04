@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Literal, TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
-from src.tools import AccessKind, DataFlow, ToolPolicy
+from src.tools.policy import AccessKind, DataFlow, ToolPolicy
 from src.tools.decorator import tool
 
 if TYPE_CHECKING:

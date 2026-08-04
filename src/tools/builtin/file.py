@@ -1,7 +1,7 @@
 from __future__ import annotations
 from typing import TYPE_CHECKING, Optional
 
-from src.tools import AccessKind, DataFlow, PathArgument, PathRole, ToolPolicy
+from src.tools.policy import AccessKind, DataFlow, PathArgument, PathRole, ToolPolicy
 from src.tools.decorator import tool
 from pydantic import BaseModel, Field
 

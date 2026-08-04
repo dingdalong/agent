@@ -5,7 +5,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from src.mgr.memory_mgr import MemoryType
-from src.tools import AccessKind, DataFlow, ToolPolicy
+from src.tools.policy import AccessKind, DataFlow, ToolPolicy
 from src.tools.decorator import tool
 
 
