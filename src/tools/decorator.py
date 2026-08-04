@@ -88,6 +88,9 @@ class ToolEntry:
             else:
                 result = await asyncio.to_thread(self.func, **validated_args, **inject)
 
+            from src.tools.display import ToolResult
+            if isinstance(result, ToolResult):
+                return result  # 保留 ToolResult，ToolsMgr 提取 .text
             return str(result)
         except Exception as e:
             error_msg = f"{type(e).__name__}: {str(e)}"

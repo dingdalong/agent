@@ -157,7 +157,11 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 | `get_page` | `tool_call_id: str`, `page: int` | `str` | 返回缓存分页结果的指定页 |
 | `execute` (async) | `tool_name`, `arguments`, `current_tool_call_id`, `deps`, `agent` | `str` | 执行工具全流程（见下） |
 
-**`execute()` 完整流程**：Pydantic 校验 → PreToolUse Hook → 修改后重校验 → `authorize()` → 脱敏的 `ToolCallStarted` → 调用工具 → 立即脱敏和限长 → PostToolUse → 再次脱敏 → `ToolCallCompleted` → 分页。分页缓存、Hook payload 和事件预览都只接收脱敏数据。
+**`execute()` 完整流程**：Pydantic 校验 → PreToolUse Hook → 修改后重校验 → `authorize()` → 脱敏的 `ToolCallStarted`（含 `ToolDisplay`） → 调用工具 → 提取 `ToolResult` → 立即脱敏和限长 → PostToolUse → 再次脱敏 → `ToolCallCompleted`（含 `ToolDisplay`） → 分页。分页缓存、Hook payload 和事件预览都只接收脱敏数据。
+
+**展示数据生成逻辑**：
+- `_emit_tool_started()`：接收 `arguments`，使用 `tool_title()` 生成中文标题（`src/tools/display.py` 的 `TOOL_TITLES` 映射），使用 `format_params()` 按工具类型格式化参数摘要（shell 提取命令、文件工具提取路径、grep 提取 pattern+path 等）。`EXTERNAL_READ` 工具不生成参数展示。参数经 `DataGuard.redact()` 脱敏后传入 `ToolDisplay`。
+- `_emit_tool_completed()`：接收 `tool_display`（来自 `ToolResult`，如文件差异）。若存在则直接使用并对 `content` 脱敏；否则使用 `format_result()` 截断结果内容生成通用 `ToolDisplay`。`EXTERNAL_READ` 工具不生成结果展示（`display=None`）。
 
 **feature 门控**：否（但 `excluded_tool_names`/`resolve_subagent_tools` 是 feature 门控的执行点）。 **reload**：有，仅清空分页结果缓存。
 
@@ -394,9 +398,9 @@ MCP 连接配置和授权边界见 [mcp-and-hooks.md](mcp-and-hooks.md)。
 |---|---|---|---|
 | `safe_path` | `path_str` | `Path` | 解析为绝对路径 |
 | `read_file` | `path`, `start_line`, `end_line` | `str` | 带行号读取（可指定行范围） |
-| `write_file` | `path`, `content`, `append`, `chunk_index`, `total_chunks` | `str` | 写入/追加/分块写入 |
-| `edit_file_lines` | `path`, `start_line`, `new_text`, `end_line` | `str` | 按行号替换/插入/删除 |
-| `replace_all_in_file` | `path`, `old_text`, `new_text` | `str` | 全文替换所有匹配 |
+| `write_file` | `path`, `content`, `append`, `chunk_index`, `total_chunks` | `str \| ToolResult` | 写入/追加/分块写入；非分块时返回 `ToolResult` 携带文件差异 |
+| `edit_file_lines` | `path`, `start_line`, `new_text`, `end_line` | `str \| ToolResult` | 按行号替换/插入/删除；返回 `ToolResult` 携带文件差异 |
+| `replace_all_in_file` | `path`, `old_text`, `new_text` | `str \| ToolResult` | 全文替换所有匹配；返回 `ToolResult` 携带文件差异 |
 | `get_file_info` | `path` | `str` | 文件/目录元信息 |
 | `list_directory` | `path`, `max_depth` | `str` | 树状列目录 |
 | `create_directory` | `path` | `str` | 创建目录（含父级） |

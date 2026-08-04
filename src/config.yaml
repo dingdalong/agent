@@ -1,6 +1,6 @@
 llm_provider:
   deepseek:
-    web: local # local 使用本地后端；provider 优先原生能力，不支持时回退本地
+    web: provider # local 使用本地后端；provider 优先原生能力，不支持时回退本地
     models:
       - deepseek-v4-pro
       - deepseek-v4-flash

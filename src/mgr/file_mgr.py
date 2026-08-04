@@ -184,7 +184,7 @@ class FileMgr:
             total_chunks: 分块写入时总分块数；None 表示非分块。
 
         Returns:
-            写入结果描述字符串，或错误描述字符串。
+            写入结果描述字符串或 ToolResult（携带 diff 展示）。
         """
         try:
             file_path = self._authorized_path(authorization, "path", path)
@@ -192,6 +192,9 @@ class FileMgr:
             file_path = self._authorized_path(authorization, "path", path)
 
             is_chunked = chunk_index is not None and total_chunks is not None
+
+            # 写入前快照
+            old_lines = file_path.read_text().splitlines(keepends=True) if file_path.exists() else []
 
             if append or (is_chunked and chunk_index > 1):
                 with open(file_path, "a") as f:
@@ -213,7 +216,12 @@ class FileMgr:
                             f"总大小: {total} bytes")
 
             mode = "追加" if append else "写入"
-            return f"已{mode} {written} bytes 到 {path}, 文件总大小: {total} bytes"
+            text = f"已{mode} {written} bytes 到 {path}, 文件总大小: {total} bytes"
+
+            # 写入后快照并生成 diff
+            new_lines = self._authorized_path(authorization, "path", path).read_text().splitlines(keepends=True)
+            display_path = self._display_path(file_path)
+            return self._make_diff_result(text, old_lines, new_lines, display_path)
         except Exception as exc:
             return f"Error: {exc}"
 
@@ -234,11 +242,12 @@ class FileMgr:
             end_line: 结束行号（包含该行）；不传表示插入模式。
 
         Returns:
-            操作结果描述字符串。
+            操作结果描述字符串或 ToolResult（携带 diff 展示）。
         """
         try:
             file_path = self._authorized_path(authorization, "file_path", path, read=True)
             lines = file_path.read_text().splitlines(keepends=True)
+            old_lines = list(lines)  # 写入前快照
             total = len(lines)
 
             if not new_text and end_line is None:
@@ -251,8 +260,10 @@ class FileMgr:
                 insert = self._split_edit_lines(new_text)
                 result_lines = lines[:start_line - 1] + insert + lines[start_line - 1:]
                 self._authorized_path(authorization, "file_path", path).write_text("".join(result_lines))
-                return (f"已在第 {start_line} 行前插入 {len(insert)} 行 "
+                text = (f"已在第 {start_line} 行前插入 {len(insert)} 行 "
                         f"| 文件: {path} | 总行数: {len(result_lines)}")
+                display_path = self._display_path(file_path)
+                return self._make_diff_result(text, old_lines, result_lines, display_path)
 
             if start_line < 1 or end_line > total or start_line > end_line:
                 return f"Error: 行号范围无效 (文件共 {total} 行)"
@@ -262,8 +273,10 @@ class FileMgr:
                 result_lines = lines[:start_line - 1] + lines[end_line:]
                 self._authorized_path(authorization, "file_path", path).write_text("".join(result_lines))
                 removed = end_line - start_line + 1
-                return (f"已删除第 {start_line}-{end_line} 行 ({removed} 行) "
+                text = (f"已删除第 {start_line}-{end_line} 行 ({removed} 行) "
                         f"| 文件: {path} | 总行数: {len(result_lines)}")
+                display_path = self._display_path(file_path)
+                return self._make_diff_result(text, old_lines, result_lines, display_path)
 
             # 替换模式
             before = lines[:start_line - 1]
@@ -273,8 +286,10 @@ class FileMgr:
             self._authorized_path(authorization, "file_path", path).write_text("".join(result_lines))
             removed = end_line - start_line + 1
             added = len(insert)
-            return (f"已替换第 {start_line}-{end_line} 行 ({removed} 行 -> {added} 行) "
+            text = (f"已替换第 {start_line}-{end_line} 行 ({removed} 行 -> {added} 行) "
                     f"| 文件: {path} | 总行数: {len(result_lines)}")
+            display_path = self._display_path(file_path)
+            return self._make_diff_result(text, old_lines, result_lines, display_path)
 
         except Exception as exc:
             return f"Error: {exc}"
@@ -294,7 +309,7 @@ class FileMgr:
             new_text: 替换后的新文本。
 
         Returns:
-            操作结果描述字符串。
+            操作结果描述字符串或 ToolResult（携带 diff 展示）。
         """
         try:
             file_path = self._authorized_path(authorization, "file_path", path, read=True)
@@ -305,9 +320,15 @@ class FileMgr:
             if found == 0:
                 total = len(content.splitlines())
                 return f"Error: 未找到匹配文本 (文件共 {total} 行)"
+
+            old_lines = content.splitlines(keepends=True)
             result = content.replace(old_text, new_text)
             self._authorized_path(authorization, "file_path", path).write_text(result)
-            return f"已替换 {found} 处匹配 | 文件: {path} | 总行数: {len(result.splitlines())}"
+            new_lines = result.splitlines(keepends=True)
+
+            text = f"已替换 {found} 处匹配 | 文件: {path} | 总行数: {len(result.splitlines())}"
+            display_path = self._display_path(file_path)
+            return self._make_diff_result(text, old_lines, new_lines, display_path)
 
         except Exception as exc:
             return f"Error: {exc}"
@@ -317,6 +338,18 @@ class FileMgr:
         if lines and not lines[-1].endswith("\n"):
             lines[-1] += "\n"
         return lines
+
+    @staticmethod
+    def _make_diff_result(
+        text: str,
+        old_lines: list[str],
+        new_lines: list[str],
+        display_path: str,
+    ):
+        """将 LLM 结果字符串与 diff 展示包装为 ToolResult。"""
+        from src.tools.display import ToolResult, build_file_diff
+        display = build_file_diff(old_lines, new_lines, display_path)
+        return ToolResult(text=text, display=display)
 
     def get_file_info(self, path: str, authorization: AuthorizationResult) -> str:
         """获取文件或目录的元信息。

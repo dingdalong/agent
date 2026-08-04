@@ -41,8 +41,8 @@ LLM 调用使用 `emit_telemetry_safely()`（`src/events/bus.py:36-65`）发布�
 | `ResponseDelta` | `token_delta` | `content` |
 | `ThinkingDelta` | `thinking_delta` | `content` |
 | `CompactDelta` | `compact_delta` | `content` |
-| `ToolCallStarted` | `tool_call_started` | `tool_name`、`tool_call_id`、`detail` |
-| `ToolCallCompleted` | `tool_call_completed` | `status`、耗时、结果预览 |
+| `ToolCallStarted` | `tool_call_started` | `tool_name`、`tool_call_id`、`detail`、`display` |
+| `ToolCallCompleted` | `tool_call_completed` | `status`、耗时、结果预览、`display` |
 | `LLMCallStarted` | `llm_call_started` | 模型、窗口、输入估算、消息数、工具数、`attempt`、`max_attempts` |
 | `LLMCallCompleted` | `llm_call_completed` | 输入/输出/缓存 token、耗时与吞吐率 |
 | `LLMRetrying` | `llm_retrying` | `error_kind`、`safe_message`、`partial`、`tool_fragment_state`、`attempt`、`max_attempts`、`wait_seconds` |
@@ -123,7 +123,23 @@ TTY 收到 `LLMRetrying` 时：
 
 ## 8. 工具轮与状态栏
 
-TTY 只缓冲前台 Agent 当前一轮的工具。实时区优先级为“重试倒计时 > 本轮工具面板 > 单行活动”；轮边界把缓冲定稿为历史区工具块。边界是前台新一次 `LLMCallStarted` 或返回输入态，保证正文、工具块与下一轮正文顺序稳定。非 TTY 不缓冲工具，按开始/完成事件逐行打印。
+TTY 只缓冲前台 Agent 当前一轮的工具。实时区优先级为”重试倒计时 > 本轮工具面板 > 单行活动”；轮边界把缓冲定稿为历史区工具块。边界是前台新一次 `LLMCallStarted` 或返回输入态，保证正文、工具块与下一轮正文顺序稳定。非 TTY 不缓冲工具，按开始/完成事件逐行打印。
+
+### ToolDisplay 展示数据
+
+工具事件的 `display` 字段携带 `ToolDisplay` 数据（`src/tools/display.py`），为 UI 提供结构化的展示信息，不影响 LLM 侧结果。
+
+`ToolDisplay` 字段：
+- `title`（`str`）：中文动作标题，如”执行命令”、”• 已编辑 path (+3 -1)”。
+- `content`（`str`）：格式化的参数或结果文本。
+- `content_type`（`str`）：`”text”` | `”diff”` | `”json”`。
+- `truncated`（`bool`）：是否被截断。
+
+**隐私边界**：`display` 只供 UI 和 Store 消费，不进入 LLM 历史。`ToolCallStarted.display` 的参数内容经 `DataGuard.redact()` 脱敏；`EXTERNAL_READ` 工具（web_search/web_fetch）不生成参数展示。`ToolCallCompleted.display` 中来自 `ToolResult` 的文件差异内容同样经 `DataGuard` 脱敏；`EXTERNAL_READ` 工具不生成结果展示（`display=None`）。
+
+**历史区逐工具渲染**：`flush_round()` 将每个工具调用渲染为独立 Rich Text 块，包含标题行（状态标记 + 中文标题 + 耗时）、参数摘要（bright_black）和结果内容（diff 行 `|+` 绿色、`|-` 红色，普通文本 bright_black）。截断时附截断提示。
+
+**非 TTY 与 Store 转录**：非 TTY 输出使用 `display.title` 和内容的前 20 行（含截断提示）。`AgentViewStore` 转录使用 `display.title` 和前 10 行内容，回退到 `result_preview`。
 
 `StatusPresenter` 从不可变快照统一生成 token、上下文和 elapsed 文本。主会话 elapsed 是跨回合累计的有效耗时；纯人工等待仅在没有叶子工具继续计算时暂停。Agent 转录覆盖层显示当前 Agent 自身的生命周期、token 与上下文。
 

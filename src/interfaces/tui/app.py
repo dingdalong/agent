@@ -69,6 +69,8 @@ class RoundEntry:
     status: str = "running"
     preview: str = ""
     duration: float = 0.0
+    start_display: object | None = None   # ToolDisplay
+    result_display: object | None = None  # ToolDisplay
 
 
 @dataclass(slots=True)
@@ -1288,6 +1290,7 @@ class AgentTuiApp(App[None]):
                 tool_name=event.tool_name,
                 detail=event.detail.strip(),
                 started_monotonic=time.monotonic(),
+                start_display=event.display,
             )
         )
 
@@ -1297,40 +1300,87 @@ class AgentTuiApp(App[None]):
                 entry.status = "success" if event.status == "success" else "error"
                 entry.preview = (event.result_preview or "").strip()
                 entry.duration = event.duration_seconds
+                entry.result_display = event.display
                 break
 
     async def flush_round(self) -> None:
         if not self._round_entries:
             return
-        text = Text("● ", style="bold")
-        agent = self._agent_label(self._round_agent_type, self._round_agent_uuid)
-        if agent:
-            text.append(f"{agent} ", style="cyan")
-        text.append(f"· 本轮 {len(self._round_entries)} 工具", style="bold")
         for entry in self._round_entries:
-            text.append("\n")
+            text = Text()
             if entry.status == "running":
-                text.append(f"  ⋯ {entry.tool_name}", style="bright_black")
-                if entry.detail:
-                    text.append(f"  {entry.detail}", style="bright_black")
+                # 中断态
+                title = self._entry_title(entry)
+                text.append(f"⋯ {title}", style="bright_black")
                 text.append("  已中断", style="bright_black")
+                await self.append_output(text)
                 continue
             ok = entry.status == "success"
-            style = "green" if ok else "red"
-            preview_lines = entry.preview.splitlines()
-            first = preview_lines[0] if preview_lines else ("完成" if ok else "失败")
-            text.append(f"  {'✔' if ok else '✘'} {entry.tool_name}", style=style)
-            if entry.detail:
-                text.append(f"  {entry.detail}", style=style)
-            text.append("  ⎿ ", style="bright_black")
-            text.append(first, style=style)
+            mark = "✔" if ok else "✘"
+            title = self._entry_title(entry)
+            title_style = "green" if ok else "red"
+
+            # 标题行：{mark} {title}  右对齐耗时
+            text.append(f"{mark} {title}", style=title_style)
             text.append(f"  ({entry.duration:.2f}s)", style="bright_black")
-            if not ok and len(preview_lines) > 1:
-                text.append("\n" + "\n".join(preview_lines[1:]), style="red")
-        await self.append_output(text)
+
+            # 参数内容（来自 start_display）
+            start_content = self._display_content(entry.start_display)
+            if start_content:
+                text.append("\n")
+                for line in start_content.splitlines():
+                    text.append(f"  {line}\n", style="bright_black")
+
+            # 结果内容
+            result_display = entry.result_display
+            if result_display is not None and hasattr(result_display, "content_type"):
+                if result_display.content_type == "diff" and result_display.content:
+                    text.append("  ─────\n", style="bright_black")
+                    for line in result_display.content.splitlines():
+                        stripped = line.lstrip()
+                        if stripped.startswith("+ "):
+                            text.append(f"{line}\n", style="green on #1a2e1a")
+                        elif stripped.startswith("- "):
+                            text.append(f"{line}\n", style="red on #2e1a1a")
+                        else:
+                            text.append(f"{line}\n", style="bright_black")
+                    if result_display.truncated:
+                        text.append("  … (已截断)\n", style="bright_black")
+                elif result_display.content:
+                    text.append("  ─────\n", style="bright_black")
+                    for line in result_display.content.splitlines()[:20]:
+                        text.append(f"  {line}\n", style="bright_black" if ok else "red")
+                    if result_display.truncated:
+                        text.append("  … (已截断)\n", style="bright_black")
+            elif not ok:
+                # 降级：无 display 时用 preview
+                preview_lines = entry.preview.splitlines()
+                if preview_lines:
+                    text.append("\n")
+                    for line in preview_lines[:5]:
+                        text.append(f"  {line}\n", style="red")
+
+            await self.append_output(text)
         self._round_entries = []
         self._round_agent_type = None
         self._round_agent_uuid = None
+
+    @staticmethod
+    def _entry_title(entry: RoundEntry) -> str:
+        """返回 RoundEntry 的展示标题。"""
+        if entry.result_display is not None and hasattr(entry.result_display, "title"):
+            return entry.result_display.title
+        if entry.start_display is not None and hasattr(entry.start_display, "title"):
+            return entry.start_display.title
+        detail = f" {entry.detail}" if entry.detail else ""
+        return f"{entry.tool_name}{detail}"
+
+    @staticmethod
+    def _display_content(display: object | None) -> str:
+        """提取 ToolDisplay 的内容文本。"""
+        if display is None or not hasattr(display, "content"):
+            return ""
+        return (display.content or "").strip()
 
     def _set_activity(self, activity: str) -> None:
         left_retry = self._retry_deadline is not None

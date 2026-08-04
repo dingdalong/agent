@@ -58,11 +58,12 @@ ToolPolicy(
 3. 运行可信 `PreToolUse` Hook；blocked 或 deny 立即拒绝。
 4. Hook 改写参数后重新校验。
 5. 调用 `PermissionManager.authorize()`；拒绝时只发布脱敏的 PermissionNotice。
-6. 发布脱敏的 `ToolCallStarted`。
+6. 发布脱敏的 `ToolCallStarted`，携带 `ToolDisplay`（中文标题 + 参数摘要）。
 7. 执行工具，并把结果立即经 DataGuard 递归脱敏、限制到 1 MiB/20,000 行。
-8. 以脱敏参数和结果运行 `PostToolUse`。
-9. 再次脱敏和限长，发布 `ToolCallCompleted` 安全预览。
-10. 非 raw_output 结果按模型 token 预算分页；分页缓存只存已脱敏文本。
+8. 提取 `ToolResult`：若工具函数返回 `ToolResult`，分离 `.display`（展示侧）和 `.text`（LLM 侧）。
+9. 以脱敏参数和结果运行 `PostToolUse`。
+10. 再次脱敏和限长，发布 `ToolCallCompleted`，携带 `ToolDisplay`（文件 diff 或格式化结果）。
+11. 非 raw_output 结果按模型 token 预算分页；分页缓存只存已脱敏文本。
 
 授权流程详见 [permissions.md](permissions.md)。PreToolUse 可以读取和改写原始参数，因为项目 Hook 只有通过启动信任门后才会加载；任何离开执行边界的数据必须先脱敏。
 
@@ -79,6 +80,24 @@ ToolPolicy(
 - `move_file(source, destination)`：移动前同时解析源、声明目标和目录语义下的最终目标，始终 REVIEW。
 
 所有相对路径基于 Agent workdir。FileMgr 在实际 I/O 前重新解析路径；读取结果在返回前已经过 DataGuard。
+
+### ToolResult 返回协议与文件差异
+
+文件写入工具（`write_file`、`edit_file_lines`、`replace_all_in_file`）可返回 `ToolResult`（`src/tools/display.py`）而非普通字符串。`ToolResult` 携带 `.text`（LLM 侧结果，不变）和 `.display`（`ToolDisplay`，仅 UI 消费）。`ToolEntry.__call__()` 识别 `ToolResult` 并原样保留，`ToolsMgr.execute()` 提取 `.display` 后将 `.text` 作为常规字符串结果继续流水线。
+
+文件差异由 `build_file_diff()`（`display.py`）生成：在写入前捕获 `old_lines`，写入后捕获 `new_lines`，使用 `difflib.SequenceMatcher` 生成 2 行上下文的分组差异。差异格式为 `  {lineno:>4} |+ {line}`（新增）/ `|- {line}`（删除）/ `| {line}`（上下文），标题含 `(+A -D)` 统计。分块写入（`chunk_index`/`total_chunks`）不生成差异，仅在最终写入完成时由 `FileMgr._make_diff_result()` 返回。
+
+### 展示预算
+
+工具展示内容受以下预算约束（`src/tools/display.py`）：
+
+| 场景 | 行数上限 | 字节上限 |
+|---|---|---|
+| 参数摘要 (`format_params`) | 20 | 4 KiB |
+| 结果内容 (`format_result`) | 60 | 12 KiB |
+| 文件差异 (`build_file_diff`) | 60 | 12 KiB |
+
+超限时截断并附 `… (已截断)` 提示。字节截断保持 UTF-8 完整性（`errors="ignore"`）。
 
 ## Shell
 

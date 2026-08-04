@@ -643,19 +643,41 @@ class TextualInterface(UserInterface):
         if self.is_tty:
             if await self._invoke(lambda: self._app.on_tool_call_started(event)):
                 return
-        detail = f" {event.detail.strip()}" if event.detail.strip() else ""
-        self._plain.write(f"● {event.tool_name}{detail}\n")
+        # 非 TTY：优先使用 display
+        display = event.display
+        if display is not None and hasattr(display, "title"):
+            title = display.title
+            content = (display.content or "").strip()
+            line = f"● {title}"
+            if content:
+                line += f"  {content.splitlines()[0]}"
+            self._plain.write(f"{line}\n")
+        else:
+            detail = f" {event.detail.strip()}" if event.detail.strip() else ""
+            self._plain.write(f"● {event.tool_name}{detail}\n")
 
     async def on_tool_call_completed(self, event: ToolCallCompleted) -> None:
         if self.is_tty:
             if await self._invoke(lambda: self._app.on_tool_call_completed(event)):
                 return
         ok = event.status == "success"
-        preview = (event.result_preview or "").strip().splitlines()
-        first = preview[0] if preview else ("完成" if ok else "失败")
-        self._plain.write(f"  ⎿ {first}  ({event.duration_seconds:.2f}s)\n")
-        if not ok and len(preview) > 1:
-            self._plain.write("\n".join(preview[1:]) + "\n")
+        # 非 TTY：优先使用 display
+        display = event.display
+        if display is not None and hasattr(display, "title") and hasattr(display, "content"):
+            mark = "✔" if ok else "✘"
+            self._plain.write(f"  {mark} {display.title}  ({event.duration_seconds:.2f}s)\n")
+            content = (display.content or "").strip()
+            if content:
+                for line in content.splitlines()[:20]:
+                    self._plain.write(f"  {line}\n")
+                if getattr(display, "truncated", False):
+                    self._plain.write("  … (已截断)\n")
+        else:
+            preview = (event.result_preview or "").strip().splitlines()
+            first = preview[0] if preview else ("完成" if ok else "失败")
+            self._plain.write(f"  ⎿ {first}  ({event.duration_seconds:.2f}s)\n")
+            if not ok and len(preview) > 1:
+                self._plain.write("\n".join(preview[1:]) + "\n")
 
     async def _emit_caller_banner(
         self,

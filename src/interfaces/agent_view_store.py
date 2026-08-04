@@ -556,9 +556,15 @@ class AgentViewStore:
             return
         state.active_tools[event.tool_call_id] = event.tool_name
         state.activity = event.tool_name
-        detail = event.detail.strip()
-        suffix = f" {detail}" if detail else ""
-        state.transcript.append(("tool", f"● {event.tool_name}{suffix}\n"))
+        display = event.display
+        if display is not None and hasattr(display, "title"):
+            content = (display.content or "").strip()
+            suffix = f" {content.splitlines()[0]}" if content else ""
+            state.transcript.append(("tool", f"● {display.title}{suffix}\n"))
+        else:
+            detail = event.detail.strip()
+            suffix = f" {detail}" if detail else ""
+            state.transcript.append(("tool", f"● {event.tool_name}{suffix}\n"))
 
     def _append_tool_completion(self, event: ToolCallCompleted) -> None:
         """移除该在飞工具、据剩余在飞工具复位状态词，并追加紧凑的工具完成转录行。
@@ -579,13 +585,25 @@ class AgentViewStore:
         else:
             # 本轮工具全部完成：复位为「等待响应」，衔接紧随其后的下一次 LLM 调用
             state.activity = "等待响应"
-        preview_lines = (event.result_preview or "").strip().splitlines()
-        fallback = "完成" if event.status == "success" else "失败"
-        first = preview_lines[0] if preview_lines else fallback
-        state.transcript.append((
-            "tool",
-            f"  ⎿ {first}  ({event.duration_seconds:.2f}s)\n",
-        ))
+        display = event.display
+        if display is not None and hasattr(display, "title") and hasattr(display, "content"):
+            ok = event.status == "success"
+            mark = "✔" if ok else "✘"
+            line = f"  {mark} {display.title}  ({event.duration_seconds:.2f}s)\n"
+            content = (display.content or "").strip()
+            if content:
+                # 转录只取前 10 行避免膨胀
+                lines = content.splitlines()[:10]
+                line += "\n".join(f"  {l}" for l in lines) + "\n"
+            state.transcript.append(("tool", line))
+        else:
+            preview_lines = (event.result_preview or "").strip().splitlines()
+            fallback = "完成" if event.status == "success" else "失败"
+            first = preview_lines[0] if preview_lines else fallback
+            state.transcript.append((
+                "tool",
+                f"  ⎿ {first}  ({event.duration_seconds:.2f}s)\n",
+            ))
 
     def _snapshot(self, uuid: str, state: _AgentState) -> AgentSnapshot:
         """Freeze one mutable state for presentation.

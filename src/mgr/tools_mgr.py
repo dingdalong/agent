@@ -216,11 +216,26 @@ class ToolsMgr:
         tool: ToolEntry,
         safe_detail: str,
         current_tool_call_id: str,
+        arguments: Dict[str, Any] | None = None,
     ) -> None:
         """发出工具调用开始事件。"""
         event_bus = getattr(deps, "event_bus", None) if deps is not None else None
         if event_bus is None or not hasattr(event_bus, "emit"):
             return
+
+        # 生成展示数据
+        display = None
+        if arguments is not None:
+            from src.tools.display import ToolDisplay, tool_title, format_params
+            title = tool_title(tool.name)
+            if tool.policy.access is AccessKind.EXTERNAL_READ:
+                params_text = ""
+            else:
+                data_guard = getattr(deps, "data_guard", None) if deps is not None else None
+                safe_args = data_guard.redact(arguments) if data_guard is not None else arguments
+                params_text = format_params(tool.name, safe_args)
+            display = ToolDisplay(title=title, content=params_text)
+
         caller_agent_type, caller_uuid = caller_identity(agent)
         await event_bus.emit(ToolCallStarted(
             timestamp=time.time(),
@@ -228,6 +243,7 @@ class ToolsMgr:
             tool_name=tool.name,
             tool_call_id=current_tool_call_id,
             detail=safe_detail,
+            display=display,
             caller_agent_type=caller_agent_type,
             caller_uuid=caller_uuid,
         ))
@@ -241,6 +257,7 @@ class ToolsMgr:
         status: str,
         duration_seconds: float,
         result: str,
+        tool_display: object | None = None,
     ) -> None:
         """发出工具调用完成事件。"""
         event_bus = getattr(deps, "event_bus", None) if deps is not None else None
@@ -249,9 +266,22 @@ class ToolsMgr:
         data_guard = getattr(deps, "data_guard", None) if deps is not None else None
         if tool.policy.access is AccessKind.EXTERNAL_READ:
             result_preview = self._external_read_preview(result, status)
+            display = None  # EXTERNAL_READ 不展示详情
         else:
             safe_result = data_guard.redact(result) if data_guard is not None else result
             result_preview = self._result_preview(str(safe_result))
+            if tool_display is not None:
+                # 来自 ToolResult 的展示数据，内容须经 DataGuard 脱敏
+                display = tool_display
+                if data_guard is not None and hasattr(display, "content") and display.content:
+                    display.content = str(data_guard.redact(display.content))
+            else:
+                from src.tools.display import ToolDisplay, tool_title, format_result
+                title = tool_title(tool.name)
+                if status != "success":
+                    title = f"✘ {title}"
+                content, truncated = format_result(str(safe_result))
+                display = ToolDisplay(title=title, content=content, truncated=truncated)
         caller_agent_type, caller_uuid = caller_identity(agent)
         await event_bus.emit(ToolCallCompleted(
             timestamp=time.time(),
@@ -261,6 +291,7 @@ class ToolsMgr:
             status=status,
             duration_seconds=duration_seconds,
             result_preview=result_preview,
+            display=display,
             caller_agent_type=caller_agent_type,
             caller_uuid=caller_uuid,
         ))
@@ -362,7 +393,8 @@ class ToolsMgr:
             return f"权限拒绝：{authorization.reason}"
 
         await self._emit_tool_started(
-            deps, agent, tool, authorization.safe_detail, current_tool_call_id
+            deps, agent, tool, authorization.safe_detail, current_tool_call_id,
+            arguments=arguments,
         )
         started_at = time.time()
         context = {
@@ -382,6 +414,14 @@ class ToolsMgr:
         finally:
             if track_work:
                 turn_clock.exit_work()
+
+        # 提取 ToolResult：工具可返回 ToolResult 携带展示侧数据
+        tool_display_result = None
+        from src.tools.display import ToolResult as _ToolResult
+        if isinstance(result, _ToolResult):
+            tool_display_result = result.display
+            result = result.text
+
         result = self._limit_result(str(data_guard.redact(result)))
         safe_arguments = data_guard.redact(arguments)
         if hooks_mgr is not None:
@@ -407,6 +447,7 @@ class ToolsMgr:
             status,
             time.time() - started_at,
             result,
+            tool_display=tool_display_result,
         )
         if tool.raw_output:
             return result
