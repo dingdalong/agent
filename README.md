@@ -36,6 +36,29 @@ uv run python main.py
 uv run python main.py --workdir /path/to/project
 ```
 
+### 打包分发
+
+```bash
+# 构建（同时产出在线 wheel 和离线安装包）
+make build
+
+# 清理构建产物
+make clean
+```
+
+用户安装：
+
+```bash
+# 在线安装（自动从 PyPI 拉取依赖）
+pip install ./agent-0.1.0-py3-none-any.whl
+
+# 离线安装（无需网络）
+tar xzf agent-0.1.0-offline.tar.gz
+pip install --no-index --find-links deps/ agent-0.1.0-py3-none-any.whl
+```
+
+安装后直接运行 `agent` 命令即可。
+
 ### 配置 API Key
 
 通过环境变量或 `.env` 文件设置 LLM 提供商的 API Key：
@@ -88,6 +111,9 @@ MCP 连接开关和 Hooks 通过 `settings.json` 配置；工具授权使用内�
 ## 开发
 
 ```bash
+# 安装依赖（含 pytest 等开发工具）
+uv sync --extra dev
+
 uv run pytest                        # 运行全部测试
 uv run pytest -k "test_name"         # 运行匹配名称的测试
 uv run pytest tests/test_foo.py      # 运行单个测试文件

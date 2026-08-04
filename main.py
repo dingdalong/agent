@@ -4,7 +4,7 @@ import argparse
 import asyncio
 import sys
 
-from app.bootstrap import create_app
+from src.app.bootstrap import create_app
 from src.llm import LLMConfigurationError
 from src.mgr import ModelUnavailableError
 
