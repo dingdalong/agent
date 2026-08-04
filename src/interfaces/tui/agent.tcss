@@ -172,6 +172,14 @@ MarkdownFence {
     max-height: 4;
 }
 
+.short #form-split {
+    max-height: 14;
+}
+
+.short #form-preview-pane {
+    max-height: 14;
+}
+
 ModalScreen {
     align: center middle;
     background: rgba(0, 0, 0, 0.62);
@@ -183,7 +191,7 @@ ModalScreen {
     max-width: 96;
     height: auto;
     max-height: 88%;
-    padding: 1 2;
+    padding: 0 2;
     border: solid #6a7a84;
     background: #171c20;
     color: #d8dee4;
@@ -212,14 +220,92 @@ ModalScreen {
     background: #171c20;
 }
 
-#choice-input-options, #form-tabs, #form-body, #form-hint {
+#choice-input-options {
     height: auto;
     margin-bottom: 1;
+}
+
+#form-tabs, #form-body {
+    height: auto;
+}
+
+#form-hint {
+    height: auto;
+    margin-top: 1;
 }
 
 #form-tabs {
     color: #76d7c4;
     text-style: bold;
+    margin-top: 1;
+}
+
+#form-question-text {
+    height: auto;
+    color: #d8dee4;
+    margin-top: 1;
+}
+
+#form-body {
+    min-height: 3;
+}
+
+/* --- 选项预览分栏布局 --- */
+
+#form-split {
+    height: auto;
+    min-height: 5;
+    max-height: 24;
+    margin-top: 1;
+}
+
+#form-left {
+    width: auto;
+    min-width: 24;
+    height: auto;
+}
+
+#form-preview-pane {
+    width: 1fr;
+    min-width: 20;
+    height: auto;
+    min-height: 3;
+    max-height: 24;
+    border-left: solid #3b464f;
+    padding: 0 1;
+    background: #101315;
+    scrollbar-size: 1 1;
+    scrollbar-color: #53616c;
+    scrollbar-color-hover: #7a8b97;
+}
+
+#form-preview {
+    height: auto;
+    margin: 0;
+}
+
+.dialog-form-preview {
+    max-width: 140;
+}
+
+.compact .dialog-form-preview {
+    max-width: 96;
+}
+
+.compact #form-split {
+    layout: vertical;
+}
+
+.compact #form-left {
+    width: 100%;
+}
+
+.compact #form-preview-pane {
+    width: 100%;
+    max-height: 10;
+    border-left: none;
+    border-top: solid #3b464f;
+    margin-top: 1;
 }
 
 #dialog-input {
@@ -232,5 +318,5 @@ ModalScreen {
 .compact #dialog-shell {
     width: 96%;
     min-width: 20;
-    padding: 1;
+    padding: 0 1;
 }

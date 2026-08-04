@@ -132,12 +132,25 @@ class FormQuestion:
         multi_select: 有 options 时是否允许勾选多项（True 为多选，False 为单选）。
         header: 顶部标签栏用的简短标签（概括该题主旨），为空时标签栏回退显示「问题N」。
         descriptions: 与 options 等长对齐的选项参考说明，逐项为该选项下方展示的浅色说明（空串表示无说明）；None 表示无任何说明。
+        previews: 与 options 等长对齐的选项预览内容（Markdown 格式），非空时该题在 UI 中切换为
+                  左右分栏展示，右侧渲染当前光标所在选项的预览；None 或全空串表示无预览。
+                  仅在单选模式下生效。
     """
     question: str
     options: list[tuple[str, str]] | None = None
     multi_select: bool = False
     header: str = ""
     descriptions: list[str] | None = None
+    previews: list[str] | None = None
+
+    @property
+    def has_previews(self) -> bool:
+        """该题是否有至少一个非空 preview 且为单选模式。"""
+        return (
+            not self.multi_select
+            and self.previews is not None
+            and any(p.strip() for p in self.previews)
+        )
 
 
 @dataclass

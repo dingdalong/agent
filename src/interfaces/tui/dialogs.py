@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 from rich.markdown import Markdown as RichMarkdown
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Markdown, Static, TextArea
 from textual.widgets.option_list import Option
@@ -298,24 +298,49 @@ class FormDialog(KeyboardDialog):
         self.custom = ["" for _ in request.questions]
         self.discussion = ""
         self._loading_input = False
+        self._has_any_preview = any(q.has_previews for q in request.questions)
+
+    def _current_has_previews(self) -> bool:
+        """当前 tab 的问题是否应展示预览分栏。"""
+        if self.tab >= len(self.request.questions):
+            return False
+        return self.request.questions[self.tab].has_previews
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="dialog-shell", classes="dialog-form"):
-            yield Static("问题", classes="dialog-title", markup=False)
+        classes = "dialog-form dialog-form-preview" if self._has_any_preview else "dialog-form"
+        with Vertical(id="dialog-shell", classes=classes):
             source = _source_label(self.request)
             if source:
-                yield Static(f"发起 Agent  {source}", classes="dialog-source", markup=False)
-            if self.request.prompt:
-                yield _prompt_widget(self.request)
+                yield Static(
+                    f"[#efc36a bold]问题[/]  ·  {source}",
+                    classes="dialog-title",
+                )
+            else:
+                yield Static("问题", classes="dialog-title", markup=False)
             yield Static("", id="form-tabs", markup=False)
-            yield KeyboardNavigation("", id="form-body", markup=False)
-            yield KeyboardTextArea(
-                "",
-                id="dialog-input",
-                soft_wrap=True,
-                show_line_numbers=False,
-                placeholder="输入自定义回答…",
-            )
+            if self._has_any_preview:
+                yield Static("", id="form-question-text", markup=False)
+                with Horizontal(id="form-split"):
+                    with Vertical(id="form-left"):
+                        yield KeyboardNavigation("", id="form-body", markup=False)
+                        yield KeyboardTextArea(
+                            "",
+                            id="dialog-input",
+                            soft_wrap=True,
+                            show_line_numbers=False,
+                            placeholder="输入自定义回答…",
+                        )
+                    with VerticalScroll(id="form-preview-pane"):
+                        yield Markdown("", id="form-preview")
+            else:
+                yield KeyboardNavigation("", id="form-body", markup=False)
+                yield KeyboardTextArea(
+                    "",
+                    id="dialog-input",
+                    soft_wrap=True,
+                    show_line_numbers=False,
+                    placeholder="输入自定义回答…",
+                )
             yield Static("", id="form-hint", classes="dialog-hint", markup=False)
 
     def on_mount(self) -> None:
@@ -378,13 +403,29 @@ class FormDialog(KeyboardDialog):
                 )
                 cursor = "❯" if self.zone == "answer" and self.rows[self.tab] == index else " "
                 lines.append(f"{cursor} {mark} {index + 1}. {label}")
-                if index < len(descriptions) and descriptions[index]:
+                # 有 preview 时不展示 description 副行（预览区已提供详细信息）
+                if not self._current_has_previews() and index < len(descriptions) and descriptions[index]:
                     lines.append(f"      {descriptions[index]}")
             custom_cursor = (
                 "❯" if self.zone == "answer" and self.rows[self.tab] == len(options) else " "
             )
             lines.append(f"{custom_cursor} ⌨ 其他: {self.custom[self.tab] or '输入回答…'}")
-        self.query_one("#form-body", KeyboardNavigation).update("\n".join(lines))
+
+        # 有预览分栏时，问题文本全宽显示、选项列表进分栏左侧
+        if self._has_any_preview:
+            question_text_widget = self.query_one("#form-question-text", Static)
+            if self.tab < len(self.request.questions):
+                question_text_widget.update(lines[0])
+                self.query_one("#form-body", KeyboardNavigation).update(
+                    "\n".join(lines[1:])
+                )
+            else:
+                question_text_widget.update("")
+                self.query_one("#form-body", KeyboardNavigation).update(
+                    "\n".join(lines)
+                )
+        else:
+            self.query_one("#form-body", KeyboardNavigation).update("\n".join(lines))
 
         input_widget = self.query_one("#dialog-input", TextArea)
         editable = self._input_editable()
@@ -401,6 +442,24 @@ class FormDialog(KeyboardDialog):
             input_widget.placeholder = (
                 "讨论这几个问题…" if self.zone == "discussion" else "输入自定义回答…"
             )
+
+        # --- 预览窗格更新 ---
+        if self._has_any_preview:
+            pane = self.query_one("#form-preview-pane", VerticalScroll)
+            preview_widget = self.query_one("#form-preview", Markdown)
+            if self._current_has_previews():
+                question = self.request.questions[self.tab]
+                previews = question.previews or []
+                row = self.rows[self.tab]
+                if row < len(previews) and previews[row].strip():
+                    preview_widget.update(previews[row])
+                    pane.display = True
+                else:
+                    pane.display = False
+                pane.scroll_home(animate=False)
+            else:
+                pane.display = False
+
         self.restore_focus()
         hint = (
             "Tab 返回答题 · Enter 提交 · Shift+Enter 换行 · Esc 取消"

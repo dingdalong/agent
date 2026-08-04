@@ -20,6 +20,13 @@ class Option(BaseModel):
         default="",
         description="该选项的参考说明，解释其含义、取舍或影响，供用户判断时参考；选项自明时可省略",
     )
+    preview: str = Field(
+        default="",
+        description="该选项的预览内容（Markdown 格式），可包含代码块、ASCII 图、流程说明等，"
+                    "帮助用户直观对比不同选项的区别；当任一选项提供 preview 时，"
+                    "UI 切换为左右分栏布局，右侧实时展示当前光标所在选项的预览；"
+                    "仅在单选模式下生效（multi_select 为 false）",
+    )
 
 
 class Question(BaseModel):
@@ -74,6 +81,7 @@ async def ask_user(questions: list[dict], deps: AgentDeps, agent: Agent) -> str:
             question=q["question"],
             options=[(o["label"], o["label"]) for o in q["options"]] if q.get("options") else None,
             descriptions=[o.get("description", "") for o in q["options"]] if q.get("options") else None,
+            previews=[o.get("preview", "") for o in q["options"]] if q.get("options") else None,
             multi_select=q.get("multi_select", False),
             header=q.get("header", ""),
         )
