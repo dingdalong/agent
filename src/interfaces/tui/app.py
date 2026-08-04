@@ -1380,10 +1380,11 @@ class AgentTuiApp(App[None]):
     @staticmethod
     def _entry_title(entry: RoundEntry) -> str:
         """返回 RoundEntry 的展示标题。"""
-        if entry.result_display is not None and hasattr(entry.result_display, "title"):
-            return entry.result_display.title
-        if entry.start_display is not None and hasattr(entry.start_display, "title"):
-            return entry.start_display.title
+        for disp in (entry.result_display, entry.start_display):
+            if disp is not None:
+                title = getattr(disp, "title", "") or ""
+                if title:
+                    return title
         detail = f" {entry.detail}" if entry.detail else ""
         return f"{entry.tool_name}{detail}"
 

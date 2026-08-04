@@ -668,7 +668,8 @@ class TextualInterface(UserInterface):
         display = event.display
         if display is not None and hasattr(display, "title") and hasattr(display, "content"):
             mark = "✔" if ok else "✘"
-            self._plain.write(f"  {mark} {display.title}  ({event.duration_seconds:.2f}s)\n")
+            title = display.title or event.tool_name
+            self._plain.write(f"  {mark} {title}  ({event.duration_seconds:.2f}s)\n")
             content = (display.content or "").strip()
             if content:
                 for line in content.splitlines()[:20]:

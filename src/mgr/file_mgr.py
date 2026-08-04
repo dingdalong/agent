@@ -163,12 +163,12 @@ class FileMgr:
             llm_text = str(guard.redact(llm_text)) if guard is not None else llm_text
 
             # UI 侧：不重复路径，只显示行数摘要 + 内容预览
-            from src.tools.display import ToolResult, ToolDisplay
+            from src.tools.display import ToolResult, ToolDisplay, tool_title
             display_header = f"总行数: {total}{range_info}"
             display_parts = [display_header]
             if rendered:
                 display_parts.append(rendered)
-            display = ToolDisplay(title="", content="\n".join(display_parts))
+            display = ToolDisplay(title=tool_title("read_file"), content="\n".join(display_parts))
             return ToolResult(text=llm_text, display=display)
         except Exception as exc:
             return f"Error: {exc}"
