@@ -1,5 +1,5 @@
 from src.interfaces.base import UserInterface
-from src.interfaces.inline_ui import InlineInterface
+from src.interfaces.textual_ui import TextualInterface
 from src.interfaces.agent_view_store import (
     AgentSnapshot,
     AgentViewStore,
@@ -12,7 +12,7 @@ from src.interfaces.turn_clock import TurnClock
 
 __all__ = [
     "UserInterface",
-    "InlineInterface",
+    "TextualInterface",
     "OutputRouter",
     "AgentViewStore",
     "TokenUsage",

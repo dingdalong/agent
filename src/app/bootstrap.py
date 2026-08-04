@@ -5,9 +5,8 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from prompt_toolkit import PromptSession
-
-from src.interfaces import AgentViewStore, InlineInterface, OutputRouter, TurnClock
+from src.interfaces import AgentViewStore, OutputRouter, TextualInterface, TurnClock
+from src.interfaces.tui.plain import LineReader, read_console_line
 from src.events import EventBus, EventLevel
 from src.mgr import ConfigManager, HooksMgr, LLMMgr, McpMgr, MemoryMgr, PermissionManager, PlanMgr, PluginMgr, RoleMgr, SessionMgr, ToolsMgr, resolve_features
 from src.mgr.data_guard import DataGuard, register_runtime_secrets
@@ -23,21 +22,23 @@ logger = logging.getLogger(__name__)
 
 async def _confirm_project_trust(
     prompt: str,
-    session: PromptSession[str] | None = None,
+    reader: LineReader = read_console_line,
 ) -> bool:
-    """使用独立 prompt-toolkit 会话读取启动阶段的项目信任确认。"""
-    prompt_session = session or PromptSession()
-    answer = await prompt_session.prompt_async(f"{prompt}[y/N] ", handle_sigint=True)
+    """使用独立纯文本输入读取启动阶段的项目信任确认。"""
+    answer = await reader(f"{prompt}[y/N] ")
     return answer.strip().lower() in {"y", "yes"}
 
 
 async def create_app(
     workdir_override: str | None = None,
+    *,
+    copy_on_select: bool | None = None,
 ) -> AgentApp:
     """应用组装入口 — 整个框架唯一的具体实现实例化点。
 
     Args:
         workdir_override: 命令行传入的工作目录覆盖值，None 时使用 cwd。
+        copy_on_select: 是否在鼠标选中后立即复制；None 使用平台默认值。
 
     Returns:
         已完成依赖装配、尚未进入 REPL 的 AgentApp。
@@ -59,10 +60,13 @@ async def create_app(
     event_bus = EventBus(level=EventLevel.from_str(config_mgr.get_config("events").get("level", "progress")))
     agent_view_store = AgentViewStore()
     turn_clock = TurnClock()  # 工具执行层与 UI 交互层共享，用于耗时剔除纯人工等待时段
-    ui = InlineInterface(
+    ui = TextualInterface(
         agent_view_store=agent_view_store,
         slash_commands=SLASH_COMMANDS,
         turn_clock=turn_clock,
+        copy_on_select=copy_on_select,
+        diagnostic_dir=global_dir / "logs",
+        data_guard=data_guard,
     )
     output_router = OutputRouter(
         ui=ui,

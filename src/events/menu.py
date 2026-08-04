@@ -1,6 +1,6 @@
 """菜单/交互事件 — 阻塞等待用户经 TUI 作答、并通过 future 回传结果的事件。
 
-这些事件都是 UI 的"控制面"：EventBus 发布后，Inline WindowManager 选择对应窗口
+这些事件都是 UI 的"控制面"：EventBus 发布后，交互协调器选择对应输入或 Modal
 并安排渲染；用户完成或取消后经 future 回传。
 每个事件的注释给出其在组合式 TUI 上的具体呈现形态。
 """
@@ -69,8 +69,7 @@ class ViewRequest(UiRequest):
 class PermissionMenu(MenuRequest):
     """请求 UI 读取工具权限确认，并通过 future 返回结果。
 
-    TUI 由 `inline/menus.py` 的 `MenuActions` 呈现：权限上下文经
-    `_permission_context_text` 打印，选项经 `_permission_options` 生成：
+    TUI 由 `tui/dialogs.py` 的 `SelectionDialog` 呈现：
 
         工具请求权限
           工具: shell
@@ -90,15 +89,15 @@ class PermissionMenu(MenuRequest):
 class InputMenu(MenuRequest):
     """请求 UI 串行读取用户输入，并通过 future 返回结果。
 
-    TUI 由 `inline/controller.py` 的普通输入协调逻辑呈现：上文提示打印在滚动区，
-    可编辑输入行以 › 起头、行内为原生块光标，无占位符；Enter 提交：
+    TUI 由 `tui/app.py` 和 `Composer` 呈现：上文提示打印在历史区，
+    多行输入框中 Enter 提交、Shift+Enter/Ctrl+J 换行：
 
         你叫什么名字？
         ──────────────────────────────
         › Alice▮
         ──────────────────────────────
 
-    prompt 的末行被 › 前缀取代、其余行打印在上方；default 作预填文本而非占位符。
+    prompt 的上下文打印在上方；default 作预填文本而非占位符。
     这是文本输入而非选项菜单，作为交互事件与其它菜单同属控制面。
     """
     prompt: str = ""
@@ -112,7 +111,7 @@ class InputMenu(MenuRequest):
 class ChoiceMenu(MenuRequest):
     """请求 UI 以菜单读取一次选择，通过 future 返回所选 value（空串表示取消）。
 
-    TUI 由 `inline/menus.py` 的 `_render_select` 呈现。选中行带前缀且整行反显；
+    TUI 由 `tui/dialogs.py` 的 `SelectionDialog` 呈现。选中行反显；
     Esc 返回 ""（取消）。用于 resume 等通用选择器。
     """
     prompt: str = ""  # 菜单上文（打印到 scrollback 的提示）
@@ -145,7 +144,7 @@ class FormQuestion:
 class FormMenu(MenuRequest):
     """请求 UI 以单屏表单读取多个问题的作答，通过 future 返回 JSON 编码的答案列表（空串表示取消）。
 
-    TUI 由 `inline/form.py` 的 `FormActions` 呈现：顶部标签栏（已答 ☑ 未答 ☐ + header
+    TUI 由 `tui/dialogs.py` 的 `FormDialog` 呈现：顶部标签栏（已答 ☑ 未答 ☐ + header
     简介 + 末尾「提交」）、题干、单选 ●/○ 或多选 [x]/[ ] 选项行（可带浅色参考说明副行）、
     末行自定义输入行、底部操作提示与讨论栏：
 
@@ -174,8 +173,8 @@ class FormMenu(MenuRequest):
 class TranscriptView(ViewRequest):
     """请求 UI 以只读分页面板查看某子 agent 的完整原始消息记录，通过 future 回传结果（恒 ""）。
 
-    由 /agents 浏览器在用户选中某子 agent 后发起。TUI 由 `inline/agent_panel.py` 的
-    `_render_transcript_panel` / `_render_transcript_header` 呈现：面板按「是否已有完整原始记录」选源——已完成 agent 渲染其原始消息
+    由 /agents 浏览器在用户选中某子 agent 后发起。TUI 由 `AgentTuiApp` 的
+    转录面板呈现：面板按「是否已有完整原始记录」选源——已完成 agent 渲染其原始消息
     （user/assistant/thinking/工具调用完整参数/工具完整返回），↑/↓ 滚动，Esc 返回列表。下图为示意，
     标题在渲染时从共享 agent 快照现场生成，只显示身份、状态和操作提示；根据终端宽度自然换行，
     上下分隔线始终完整保留：
@@ -192,7 +191,7 @@ class TranscriptView(ViewRequest):
           ⚙ 结果 (…)
         <工具返回原文…>
 
-    这是只读查看而非作答菜单：无选项、无输入；Esc 经 WindowManager 移除窗口并完成 future，返回 ""。
+    这是只读查看而非作答菜单：无选项、无输入；Esc 经交互协调器关闭面板并完成 future，返回 ""。
     """
     uuid: str = ""  # 目标子 agent 的 uuid 字符串
     level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
@@ -204,9 +203,8 @@ class ChoiceInputMenu(MenuRequest):
     """请求 UI 以「选项列表 + 一行可编辑输入」读取一次作答，通过 future 返回 JSON
     {"choice": "<value|''>", "text": "<typed|''>"} 串（空串表示取消）。
 
-    TUI 由 `inline/menus.py` 的 `_render_choice_input` 呈现：上文为调用方 prompt（打印到
-    scrollback）；选项行（❯ 序号. 标签，可带浅色说明副行）与操作提示画在分割线上方的
-    choice_input_window，而「输入行」即分割线下方那条常驻输入框（› 前缀），并非窗口内的内联行。
+    TUI 由 `tui/dialogs.py` 的 `ChoiceInputDialog` 呈现：上文为调用方 prompt；
+    选项行（❯ 序号. 标签，可带说明副行）与自由输入位于同一 Modal。
     布局如下：
 
         计划审核

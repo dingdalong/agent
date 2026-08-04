@@ -21,6 +21,11 @@ from src.mgr.data_guard import register_runtime_secrets
 logger = logging.getLogger(__name__)
 
 
+def _current_task_is_cancelling() -> bool:
+    task = asyncio.current_task()
+    return task is not None and task.cancelling() > 0
+
+
 @dataclass
 class AgentApp:
     """应用主循环，管理 REPL 交互和 Agent 执行。"""
@@ -112,13 +117,21 @@ class AgentApp:
                 picked = await self.deps.event_bus.request_choice(
                     "\n子 agent 历史（选择查看完整消息记录）", choices, 0
                 )
-            except (asyncio.CancelledError, KeyboardInterrupt, NoEventSubscribers):
+            except asyncio.CancelledError:
+                if _current_task_is_cancelling():
+                    raise
+                return
+            except NoEventSubscribers:
                 return
             if not picked:  # Esc 取消，退出浏览
                 return
             try:
                 await self.deps.event_bus.request_transcript_view(picked)
-            except (asyncio.CancelledError, KeyboardInterrupt, NoEventSubscribers):
+            except asyncio.CancelledError:
+                if _current_task_is_cancelling():
+                    raise
+                return
+            except NoEventSubscribers:
                 return
 
     async def _consume_events(self) -> None:
@@ -151,8 +164,13 @@ class AgentApp:
         with self.deps.ui.watch_interrupt(self._request_interrupt):
             try:
                 result = await self._work_task
+                if _current_task_is_cancelling():
+                    raise asyncio.CancelledError
                 return result
-            except (asyncio.CancelledError, KeyboardInterrupt):
+            except asyncio.CancelledError:
+                if _current_task_is_cancelling():
+                    await self._cancel_and_wait_for_current_work()
+                    raise
                 await self._handle_interrupted_turn()
                 return None
             finally:
@@ -304,20 +322,21 @@ class AgentApp:
         self._work_task.cancel()
         return True
 
+    async def _cancel_and_wait_for_current_work(self) -> None:
+        """取消并等待当前 agent 任务完成。"""
+        task = self._work_task
+        self._cancel_current_work()
+        if task is not None:
+            await asyncio.gather(task, return_exceptions=True)
+
     async def _handle_interrupted_turn(self) -> None:
         """收束当前工作与输入任务并输出中断提示。
 
         Returns:
             None.
         """
-        current_task = asyncio.current_task()
-        if current_task is not None:
-            while current_task.cancelling():
-                current_task.uncancel()
-        self._cancel_current_work()
+        await self._cancel_and_wait_for_current_work()
         self.deps.ui.cancel_active_input()
-        if self._work_task:
-            await asyncio.gather(self._work_task, return_exceptions=True)
         await self.deps.event_bus.request_output("\n已中断当前任务。\n")
         await self.deps.event_bus.join()
         await self.deps.ui.wait_interactions_idle()

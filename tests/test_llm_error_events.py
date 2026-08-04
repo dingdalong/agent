@@ -11,8 +11,6 @@ from typing import Any, get_args
 import uuid
 
 import pytest
-from prompt_toolkit.formatted_text import fragment_list_to_text, to_formatted_text
-from rich.text import Text
 
 import src.events as events_package
 from src.agent.agent import Agent
@@ -33,9 +31,11 @@ from src.events.types import (
 )
 from src.interfaces.agent_view_store import AgentViewStore
 from src.interfaces.base import UserInterface
-from src.interfaces.inline.controller import InlineController
-from src.interfaces.inline.plain import PlainFrontend
 from src.interfaces.output_router import OutputRouter
+from src.interfaces.textual_ui import TextualInterface
+from src.interfaces.tui.app import AgentTuiApp
+from src.interfaces.tui.plain import PlainFrontend
+from src.interfaces.turn_clock import TurnClock
 from src.llm.base import LLMCallContext, LLMProvider, LLMResponse
 from src.llm.errors import LLMCallError, LLMErrorKind, LLMStreamResponseError
 from src.mgr.compact_mgr import CompactMgr, _SummaryRequest
@@ -1074,45 +1074,44 @@ def test_error_events_end_markdown_streams_before_ui_hook(event: Event, hook: st
 
 def test_tty_partial_retry_prints_separator_and_countdown_uses_safe_category() -> None:
     """TTY 有残片时永久打印尝试分隔，倒计时使用 kind 与安全摘要。"""
-    ui = InlineController(AgentViewStore())
-    ui._tty = True
-    printed: list[str] = []
+    async def scenario() -> None:
+        app = AgentTuiApp(
+            AgentViewStore(),
+            [],
+            TurnClock(),
+            lambda: None,
+            lambda: False,
+            lambda: None,
+            native_clipboard=False,
+        )
+        async with app.run_test(size=(100, 30)) as pilot:
+            event = _retry("foreground", partial=True)
+            await app.on_llm_retrying(event)
+            await pilot.pause()
 
-    def record_print(content: str | Text, *, style: str = "", end: str = "\n") -> None:
-        """保存 Rich 输出的纯文本。
+            assert app._retry_error_kind == "service"
+            assert app._retry_safe_message == "服务暂时不可用"
+            assert app._retry_attempt == 1
+            assert app._retry_max == 3
+            rendered = "\n".join(
+                getattr(child.render(), "plain", str(child.render()))
+                for child in app._history.children
+            )
+            assert "尝试 1/3 失败，将重试" in rendered
+            assert "service" in rendered
+            assert "服务暂时不可用" in rendered
 
-        Args:
-            content: 输出内容。
-            style: Rich 样式。
-            end: 输出结尾。
-
-        Returns:
-            None。
-        """
-        del style
-        printed.append((content.plain if isinstance(content, Text) else content) + end)
-
-    ui._print_rich = record_print  # type: ignore[method-assign]
-
-    asyncio.run(ui.on_llm_retrying(_retry("foreground", partial=True)))
-
-    assert any("尝试 1/3 失败，将重试" in line for line in printed)
-    assert any("service" in line and "服务暂时不可用" in line for line in printed)
-    countdown = Text()
-    ui._append_retry_countdown(countdown, time.monotonic())
-    assert "service" in countdown.plain
-    assert "服务暂时不可用" in countdown.plain
+    asyncio.run(scenario())
 
 
 def test_plain_retry_and_terminal_failure_are_permanent_safe_lines() -> None:
     """非 TTY 每次重试与终态失败各打印一行，并展示安全关联 ID。"""
     output = StringIO()
-    ui = InlineController(AgentViewStore())
-    ui._tty = False
+    ui = TextualInterface(AgentViewStore())
+    ui.is_tty = False
     ui._plain = PlainFrontend(output)
 
     asyncio.run(ui.on_llm_retrying(_retry("foreground", partial=False)))
-    ui._retry_deadline = time.monotonic() + 10
     asyncio.run(ui.on_llm_call_failed(_failed("foreground")))
 
     rendered = output.getvalue()
@@ -1123,8 +1122,6 @@ def test_plain_retry_and_terminal_failure_are_permanent_safe_lines() -> None:
     assert "request_id=req-safe" in rendered
     assert "diagnostic_id=diag-safe" in rendered
     assert "RuntimeError" not in rendered
-    assert ui._retry_deadline is None
-    assert ui._activity == "失败"
 
 
 def test_completed_agent_panel_keeps_error_diagnostics_without_stream_body_duplication() -> None:
@@ -1152,11 +1149,16 @@ def test_completed_agent_panel_keeps_error_diagnostics_without_stream_body_dupli
         ],
     ))
     store.flush_completed()
-    ui = InlineController(store)
-    ui._render_width = 120
-    ui._window_manager.open_live_transcript(subagent_uuid)
-
-    rendered = fragment_list_to_text(to_formatted_text(ui._render_transcript_panel()))
+    ui = AgentTuiApp(
+        store,
+        [],
+        TurnClock(),
+        lambda: None,
+        lambda: False,
+        lambda: None,
+        native_clipboard=False,
+    )
+    rendered = ui._transcript_source(subagent_uuid)
 
     assert "request_id=req-safe" in rendered
     assert "diagnostic_id=diag-safe" in rendered
@@ -1166,22 +1168,33 @@ def test_completed_agent_panel_keeps_error_diagnostics_without_stream_body_dupli
 
 def test_turn_reset_and_reload_clear_all_retry_status_fields() -> None:
     """回合重置与 /clear 均清空倒计时和全部 retry 文案、序号字段。"""
-    ui = InlineController(AgentViewStore())
+    async def scenario() -> None:
+        ui = AgentTuiApp(
+            AgentViewStore(),
+            [],
+            TurnClock(),
+            lambda: None,
+            lambda: False,
+            lambda: None,
+            native_clipboard=False,
+        )
+        async with ui.run_test():
+            for clear in (ui._reset_turn_status, ui.reload_session_state):
+                ui._retry_deadline = time.monotonic() + 10
+                ui._retry_error_kind = "service"
+                ui._retry_safe_message = "stale"
+                ui._retry_attempt = 2
+                ui._retry_max = 3
 
-    for clear in (ui._reset_turn_status, ui.reload):
-        ui._retry_deadline = time.monotonic() + 10
-        ui._retry_error_kind = "service"
-        ui._retry_safe_message = "stale"
-        ui._retry_attempt = 2
-        ui._retry_max = 3
+                clear()
 
-        clear()
+                assert ui._retry_deadline is None
+                assert ui._retry_error_kind == ""
+                assert ui._retry_safe_message == ""
+                assert ui._retry_attempt == 0
+                assert ui._retry_max == 0
 
-        assert ui._retry_deadline is None
-        assert ui._retry_error_kind == ""
-        assert ui._retry_safe_message == ""
-        assert ui._retry_attempt == 0
-        assert ui._retry_max == 0
+    asyncio.run(scenario())
 
 
 class IdentityNormalizer:

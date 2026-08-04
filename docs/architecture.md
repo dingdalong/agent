@@ -116,7 +116,7 @@
 
 > 说明：`memory_mgr` 与 `plan_mgr` 在 `bootstrap.create_app()` 处即按 feature 门控决定是否实例化（`bootstrap.py:50,53`）。而 `FileMgr`、`SkillMgr`、`SubAgentMgr`、`TaskManager` 则是在每个 `Agent.__post_init__` 内按该 agent 自身的 feature 集创建（见 [agent-runtime.md](./agent-runtime.md) 第 6 节），不进入 `AgentDeps`。
 
-`AgentViewStore` 与 `OutputRouter` 属于 app/UI 层，不进入业务依赖容器 `AgentDeps`。同一个 Store 实例由 `InlineInterface`、`OutputRouter` 和 `AgentApp` 共享，避免业务 Agent 持有展示状态。
+`AgentViewStore` 与 `OutputRouter` 属于 app/UI 层，不进入业务依赖容器 `AgentDeps`。同一个 Store 实例由 `TextualInterface`、`OutputRouter` 和 `AgentApp` 共享，避免业务 Agent 持有展示状态。
 
 ---
 

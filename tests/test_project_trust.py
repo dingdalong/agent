@@ -8,9 +8,6 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
-from prompt_toolkit import PromptSession
-from prompt_toolkit.input.defaults import create_pipe_input
-from prompt_toolkit.output import DummyOutput
 
 from src.app.app import AgentApp
 from src.app.bootstrap import _confirm_project_trust
@@ -81,14 +78,19 @@ def test_changed_fingerprint_requires_confirmation_and_store_is_owner_only(tmp_p
 
 @pytest.mark.parametrize(
     ("submitted", "expected"),
-    [("y\r", True), ("yes\r", True), ("\r", False), ("n\r", False)],
+    [("y", True), ("yes", True), ("", False), ("n", False)],
 )
-def test_startup_confirmation_accepts_prompt_toolkit_enter(submitted, expected):
+def test_startup_confirmation_accepts_plain_text_line(submitted, expected):
     async def scenario() -> bool:
-        with create_pipe_input() as pipe_input:
-            session = PromptSession(input=pipe_input, output=DummyOutput())
-            pipe_input.send_text(submitted)
-            return await _confirm_project_trust("Trust? [y/N] ", session)
+        prompts: list[str] = []
+
+        async def reader(prompt: str) -> str:
+            prompts.append(prompt)
+            return submitted
+
+        result = await _confirm_project_trust("Trust? ", reader)
+        assert prompts == ["Trust? [y/N] "]
+        return result
 
     assert asyncio.run(scenario()) is expected
 

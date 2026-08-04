@@ -358,6 +358,7 @@ OPENAI_API_KEY=sk-yyyyyyyyyyyyyyyy
 | `~/.agent/plugins/` | 全局插件 | 手工 |
 | `~/.agent/sessions/` | 会话历史与元数据 | `SessionMgr`（`session_mgr.py:50`，`global_dir / "sessions"`） |
 | `~/.agent/tasks/{session_id}/` | 主 agent 任务持久化（每 task 一个 JSON + highwatermark） | `TaskManager`，仅主 agent（`agent.py:151`，`global_dir / "tasks" / session_id`） |
+| `~/.agent/logs/tui.jsonl` | TUI 生命周期、降级与渲染诊断；2 MiB 轮转并保留两个备份 | `TuiDiagnostics`；生产装配注入 `global_dir / "logs"` |
 
 ### 项目 `{workdir}/.agent/`
 
@@ -377,7 +378,9 @@ OPENAI_API_KEY=sk-yyyyyyyyyyyyyyyy
 |------|------|------|
 | `{workdir}/.agent/transcripts/transcript_<time_ns>.jsonl` | 压缩前完整 Unicode 对话备份 | `CompactMgr.write_transcript`（`compact_mgr.py:279`，`project_data_dir(workdir) / "transcripts"`） |
 
-> 落盘目录要点：会话（`sessions/`）与主 agent 任务（`tasks/`）在**全局** `~/.agent/` 下；记忆（`memory/`）、plan（`plans/`）、transcript（`transcripts/`）在**项目** `{workdir}/.agent/` 下。子 agent 的 `TaskManager` 为纯内存模式（`tasks_dir=None`），不落盘（`agent.py:150`、`task_mgr.py:82`）。目录路径体系见 [architecture.md](architecture.md)。
+TUI 诊断路径随 `$AGENT_HOME` 改写，不提供独立配置项。`tui.jsonl` 及 `.1`、`.2` 总上限约 6 MiB；日志不包含对话正文、Markdown、用户输入或工具参数，异常文本和 traceback 在写入前经运行时 `DataGuard` 脱敏。
+
+> 落盘目录要点：会话（`sessions/`）、主 agent 任务（`tasks/`）和 TUI 诊断（`logs/`）在**全局** `~/.agent/` 下；记忆（`memory/`）、plan（`plans/`）、transcript（`transcripts/`）在**项目** `{workdir}/.agent/` 下。子 agent 的 `TaskManager` 为纯内存模式（`tasks_dir=None`），不落盘（`agent.py:150`、`task_mgr.py:82`）。目录路径体系见 [architecture.md](architecture.md)。
 
 ---
 

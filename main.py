@@ -27,6 +27,12 @@ def parse_args() -> argparse.Namespace:
         help="启用 asyncio 调试模式：事件循环被任一回调占用超过 0.1s 即打印慢回调告警，"
              "用于排查在 async 中误跑同步阻塞工作的代码。默认关闭。",
     )
+    parser.add_argument(
+        "--copy-on-select",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="鼠标选中文本后立即复制；macOS 默认启用，其他平台默认关闭",
+    )
     return parser.parse_args()
 
 
@@ -36,7 +42,10 @@ async def main(args: argparse.Namespace) -> None:
     Args:
         args: 命令行参数。
     """
-    app = await create_app(workdir_override=args.workdir)
+    app = await create_app(
+        workdir_override=args.workdir,
+        copy_on_select=args.copy_on_select,
+    )
     try:
         await app.run()
     finally:

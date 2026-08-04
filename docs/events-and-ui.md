@@ -100,15 +100,15 @@ Store 无 UUID 时只累计会话 token，不虚构 Agent。完成子 Agent 先�
 
 `UserInterface.on_event()` 在分派新事件前调用 `_end_streams_for()`：非思考事件收尾思考流，非正文事件收尾正文流（`src/interfaces/base.py:288-311`）。因此 retry、failure、工具或完成边界到达时，当前 Markdown 渲染器先 flush 并换行，不会把诊断文本并入正文块。
 
-TTY 的正文与思考各有独立 `MarkdownStreamRenderer`。首次增量打印一次 Agent 前缀，`append()` 只输出已完整的 Markdown 块，边界时 `flush()` 输出残留（`src/interfaces/inline/output.py:99-169`）。Store 同时按 `response` / `thinking` / `retry` / `error` 保留明确分段。
+TTY 的正文与思考各使用一个 Textual `Markdown` 流。首次增量挂载 Agent 前缀和 Markdown Widget，后续增量写入该 Widget 的 stream；边界时停止 stream。Store 同时按 `response` / `thinking` / `retry` / `error` 保留明确分段。
 
 非 TTY 不输出 ANSI；增量仍经过同一事件分派，但落到纯文本前端。重试与失败诊断是单独静态行，不参与 Markdown 块合并。
 
 ## 7. TTY 与非 TTY 的重试/失败展示
 
-`on_llm_call_started()` 将活动设为“等待响应”；后续思考、正文增量分别切到“思考中”“回应中”（`src/interfaces/inline/output.py:139-161,225-242`）。DETAIL 级能看到完整三段；PROGRESS 级思考事件被总线门控，等待状态持续到首个正文增量。
+`AgentTuiApp.on_llm_call_started()` 将活动设为“等待响应”；后续思考、正文增量分别切到“思考中”“回应中”。DETAIL 级能看到完整三段；PROGRESS 级思考事件被总线门控，等待状态持续到首个正文增量。
 
-TTY 收到 `LLMRetrying` 时（`output.py:244-277`）：
+TTY 收到 `LLMRetrying` 时：
 
 - 有任何失败尝试残片时，先永久写一条尝试分隔，含安全类别、摘要和工具片段状态；
 - 无残片时不额外污染 scrollback；
@@ -117,36 +117,48 @@ TTY 收到 `LLMRetrying` 时（`output.py:244-277`）：
 
 非 TTY 每次重试都打印静态黄色语义行，显示向上取整后的等待秒数，不做动态重绘。
 
-`on_llm_length_retrying()`（`output.py` `on_llm_length_retrying`）区别于重试：长度恢复不进退避等待，故只按 `strategy` 打印一行黄色标记「⚠ 输出截断（阶段）：<从中断处继续生成/降低推理力度至 X 后重生成/压缩思考后重生成> (attempt/max)」，不启动活动区倒计时。路由已保证只转发前台 agent，TTY 与非 TTY 同样处理。
+`on_llm_length_retrying()` 区别于重试：长度恢复不进退避等待，故只按 `strategy` 打印一行黄色标记「⚠ 输出截断（阶段）：<从中断处继续生成/降低推理力度至 X 后重生成/压缩思考后重生成> (attempt/max)」，不启动活动区倒计时。路由已保证只转发前台 agent，TTY 与非 TTY 同样处理。
 
-`on_llm_call_failed()` 在前台永久打印红色终态行，附可用的 request ID 与 diagnostic ID，并把活动设为“失败”（`output.py:279-299`）。Store 记录更完整的安全诊断元数据；后台失败只更新 Store。
+`on_llm_call_failed()` 在前台永久打印红色终态行，附可用的 request ID 与 diagnostic ID，并把活动设为“失败”。Store 记录更完整的安全诊断元数据；后台失败只更新 Store。
 
 ## 8. 工具轮与状态栏
 
-TTY 只缓冲前台 Agent 当前一轮的工具。实时区优先级为“重试倒计时 > 本轮工具面板 > 单行活动”；轮边界把缓冲定稿为 scrollback 工具块（`src/interfaces/inline/status_bar.py:103-166,191-273`）。边界是前台新一次 `LLMCallStarted` 或返回输入态，保证正文、工具块与下一轮正文顺序稳定。非 TTY 不缓冲工具，按开始/完成事件逐行打印。
+TTY 只缓冲前台 Agent 当前一轮的工具。实时区优先级为“重试倒计时 > 本轮工具面板 > 单行活动”；轮边界把缓冲定稿为历史区工具块。边界是前台新一次 `LLMCallStarted` 或返回输入态，保证正文、工具块与下一轮正文顺序稳定。非 TTY 不缓冲工具，按开始/完成事件逐行打印。
 
 `StatusPresenter` 从不可变快照统一生成 token、上下文和 elapsed 文本。主会话 elapsed 是跨回合累计的有效耗时；纯人工等待仅在没有叶子工具继续计算时暂停。Agent 转录覆盖层显示当前 Agent 自身的生命周期、token 与上下文。
 
-## 9. Inline UI 组件
+## 9. Textual UI 组件
 
-`src/interfaces/inline_ui.py` 是薄门面，实际组件位于 `src/interfaces/inline/`：
+`src/interfaces/textual_ui.py` 实现 `UserInterface` 门面，TTY 组件位于 `src/interfaces/tui/`：
 
 | 模块 | 职责 |
 |---|---|
-| `controller.py` | 组装 prompt-toolkit 布局和普通输入 |
-| `runtime.py` | 持有 Application、Buffer 与当前作答窗口的内部 future |
-| `window_manager.py` | 窗口栈、唯一键盘焦点、FIFO 作答队列和 runner 生命周期 |
-| `status_bar.py` | 活动、重试倒计时、工具轮与底部状态 |
-| `agent_panel.py` | Agent 列表和转录渲染缓存 |
-| `menus.py` / `form.py` | 选择、权限、组合输入和表单 |
-| `output.py` | Rich、流式 Markdown、LLM/工具进度展示 |
+| `app.py` | Textual App、历史/流输出、活动区、状态栏、Agent 与转录切换 |
+| `widgets.py` | 多行输入、历史锚定、跨视口选择补偿、系统剪贴板后端 |
+| `dialogs.py` | 权限、选择、组合输入、表单 Modal 与 FIFO 协调器 |
 | `plain.py` | 非 TTY 输入输出，保证无 ANSI |
-| `keymap.py` | 快捷键与覆盖层优先级 |
+| `diagnostics.py` | TUI 生命周期、降级和转录渲染的后台滚动诊断日志 |
+| `history_journal.py` | TUI 异常降级时一次性回放的普通文字历史 |
+| `agent.tcss` | 宽窄和高矮窗口的响应式布局 |
 
-TTY 的 `WindowManager` 是窗口状态与键盘焦点的唯一来源。它最多保留一个转录窗口和一个作答窗口：普通输入、权限、选择、表单和组合输入不会抢占已有作答窗口，而是按 FIFO 排队；状态栏显示“等待 N：来源”，来源优先使用发起 agent 类型、缺失时回退事件 source。只有真正开始运行的作答窗口才打印调用方标记和菜单上文。
+TTY 的 `InteractionCoordinator` 是交互请求状态权威写入者。它最多保留一个转录视图和一个活动作答窗口：普通输入、权限、选择、表单和组合输入不会抢占已有作答窗口，而是按 FIFO 排队；状态栏显示“等待 N：来源”，来源优先使用发起 agent 类型、缺失时回退事件 source。只有真正激活的请求才打印调用方标记和菜单上文。
 
-转录是只读窗口，不占用 `InlineRuntime.interaction()` 的内部 future。`/agents` 创建带 future 的 `TranscriptView`，Esc 移除窗口后才完成该 future；实时查看则创建无 future 的同类窗口。作答窗口位于转录之上时拥有键盘，结束后转录的 UUID 和滚动位置原样恢复。普通输入可以被实时转录临时覆盖，关闭后复用同一个 Buffer、文本和光标；权限、表单和选择期间不能进入 Agent 列表。
+转录是只读面板，不占用作答队列。`/agents` 创建带 future 的 `TranscriptView`，Esc 关闭后才完成该 future；Agent 列表实时查看不创建请求 future。Modal 覆盖转录时拥有键盘，结束后转录的 UUID 和每 Agent 独立滚动位置原样恢复。权限、表单和选择期间不能进入 Agent 列表。
 
-`UserInterface.on_event()` 先让 TTY 前端接受 `UiRequest`，成功后立即返回给事件消费者；非 TTY 仍串行读取。这样正在查看转录时，后续权限请求可马上进入 WindowManager，而不会被 `TranscriptView` 阻塞。`InlineRuntime.interaction()` 只排他服务当前作答窗口；下一个作答窗口必须等前一个 runner 清理完共享 UI 状态后才会启动，且对外 future 在清理后才落定。`EventBus.join()` 等待订阅队列处理完成，并通过 delivery revision 覆盖稳定检查前已经开始的投递，但不等待 WindowManager 自有的 dialog runner，因此中断收束会在 join 后额外等待 `ui.wait_interactions_idle()`；UI 停止时先关闭 WindowManager，取消活动、排队和只读请求，再退出 prompt-toolkit。`/clear` 的项目信任菜单在 reset gate 前完成；随后重载 Managers、清空 Store 和创建新 Agent 前，会同步取消旧 UI 请求并等待所有窗口 runner 清理完成。重置期间到达的 UI 请求同样会被取消，不会跨越 session 边界。
+转录数据来自 Agent 运行期间保存的原始消息，渲染层按不可信数据防御式处理：缺失或格式异常的消息、tool call 和参数会降级为可读文本，不应导致 Textual App 退出。已结束的子 Agent 在 Store 的有界历史中保留期间仍可浏览。初次打开、实时刷新和切换视图都进入同一个常驻渲染 worker；worker 串行完成当前 `Markdown.update()`，并只保留一个最新待处理目标。左右键立即更新目标索引和版本，连续输入会跳过中间展示；旧版本完成后不得恢复焦点、滚动位置或标题，关闭视图会使当前版本失效。渲染等待布局稳定期间不得采样滚动位置，避免把过渡几何覆盖到目标 Agent 的已保存位置。其他展示 worker 接收异步函数工厂，只在 worker 真正启动后创建 coroutine。
 
-键盘由栈顶窗口决定：栈顶为作答窗口时，其快捷键优先；栈顶为转录时才由转录处理滚动和 Esc；普通输入内部再按补全、Agent 列表和输入行处理。LLM 与工具活动只更新状态栏遥测，不得改变窗口栈或隐藏活动作答窗口。
+`UserInterface.on_event()` 先让 TTY 前端接受 `UiRequest`，成功后立即返回给事件消费者；非 TTY 仍串行读取。这样正在查看转录时，后续权限请求可马上进入 Modal，而不会被 `TranscriptView` 阻塞。协调器在清理活动 Modal、人工等待计时和焦点后才落定对外 future。`EventBus.join()` 不等待协调器自有的 Modal 生命周期，因此中断收束会在 join 后额外等待 `ui.wait_interactions_idle()`；UI 停止时取消活动、排队和只读请求，再退出 Textual。`/clear` 在重载 Managers、清空 Store 和创建新 Agent 前同步取消旧请求并等待交互清理，重置期间到达的新请求不会跨越 session 边界。
+
+Textual 进程意外结束后，门面会停止向旧 App 投递消息，等待 Textual 退出并恢复终端，然后永久切换到 `PlainFrontend`。切换提示之后，`PlainHistoryJournal` 把已展示的 Rich 文本转为无样式文字、按原文输出 Markdown，并把尚未结束的流式增量作为普通文字一次性回放。日志不保存控件树或视口状态，因此输入草稿、Modal 选择/编辑状态、主历史滚动位置和转录滚动位置不会恢复。
+
+降级时，活动和排队的作答请求按原 FIFO 顺序由文字前端从头询问，旧草稿和 Modal 内部状态不参与；活动 `TranscriptView` 直接以空结果完成。降级处理这些旧请求期间，新的 UI 事件等待文字前端就绪，避免并发读取 stdin。已经投递但尚未完成的 TUI 调用会同时监听 App Task，App 先结束时取消调用并等待降级完成，避免 future 永久悬挂。`stop()` 仍保持幂等，并恢复 VS Code 终端键盘协议。VS Code 的 debugpy 配置使用 `onTerminate: KeyboardInterrupt`，使停止调试进入应用清理流程；`AgentApp` 只把 `_work_task` 的取消视为轮次中断，外层任务取消必须向上传播到 `run()` 的 `finally`，否则 debugpy 硬杀会绕过终端恢复。
+
+Textual 8.2.8 可能在消息循环内部捕获 fatal exception 后以 `run_async()` 正常返回，因此 UI 生命周期同时检查 asyncio Task 异常、App 捕获的 fatal、内部 `_exception`、return code、退出标志和 UI 状态。无异常但非停止流程中的返回也作为 `unexpected_return` 记录，不构造替代真实原因的异常。Textual App 只创建一次；终止记录与降级最多执行一次，不会在同一终端原位重建 App。
+
+生产装配默认把结构化诊断写入 `$AGENT_HOME/logs/tui.jsonl`，降级提示包含本次进程的诊断 ID 和路径。日志由后台线程写入，单文件达到 2 MiB 时轮转，保留当前文件和两个备份；目录权限为 `0700`，文件权限为 `0600`。事件只包含生命周期、切换版本、渲染耗时、合并数、worker/流状态及异常类型；不写对话正文、Markdown、用户输入或工具参数。异常文本与 traceback 经共享 `DataGuard` 脱敏并限制字段长度。写入、轮转和关闭失败不能影响 TUI。
+
+键盘由当前 Textual Screen 和逻辑焦点决定：Modal 快捷键优先；转录有焦点时处理分页、切换和 Esc；普通输入内部再按补全、Agent 列表和输入行处理。逻辑焦点只随键盘导航变化，终端窗口重新激活、Modal 切换或转录关闭时恢复到 Modal 当前选项/输入区、转录面板或主界面先前的输入框/Agent 列表。处理态的主输入框保持只读但继续承接键盘焦点，并显示 Textual 原生常亮光标；字符与提交键无效，`↓` 仍可进入运行中 Agent 列表。鼠标只用于历史与转录的文本选择、复制和滚动；点击输入、选项、Agent 行或窗口空白不会切换焦点、移动输入光标、选择或提交。普通输入默认一行、按显式换行增高到八行，支持 `Shift+Enter`/`Ctrl+J` 换行；查看转录时隐藏主输入栏及其分隔线，转录或 Modal 覆盖期间隐藏整个 Agent 列表。`Ctrl+C` 在 Windows 有选区时复制，普通输入非空时清空、空时退出，处理态或 Modal 中请求中断；macOS 默认鼠标选中即复制，并保留 `Cmd+C` 显式复制。
+
+历史区只在位于底部时锚定新输出；用户上滚后保持当前视口，回到底部恢复跟随。鼠标选择开始时把选择起点归一到历史容器，并按滚动增量补偿 Textual 8.2.8 的选择状态，使起始行滚出视口后选区仍连续。`SelectionScreen` 把选区自动滚动限制为 20 Hz，同时保留每秒 60 行的最大速度；每个滚动步只重算一次选区，并在松开鼠标或到达边界时停止定时器。动态 Markdown 重建后，布局缓存可能短暂返回已卸载的段落，选择事件边界会丢弃这类陈旧命中。`HistoryPanel` 以 `Screen.set_reactive()` 静默补偿自动滚动中的起点，手动滚动仍显式刷新一次。该逻辑依赖固定版本的 Textual 私有 `_select_state`、`_selecting`、`_auto_select_scroll_timer` 和 `_update_select()`，升级 Textual 时必须重新运行双向跨视口选择、边界停止和连续拖选测试。
+
+macOS/Windows 原生剪贴板由单个异步 worker 串行写入；原生写入期间发生的多次复制只保留最新待处理文本，任意时刻最多运行一个 `pbcopy` 或 `clip.exe`。内部剪贴板状态仍立即更新；原生写入成功时不重复发送 OSC 52，后端不可用、禁用或最新一次原生写入失败时才回退一次 OSC 52。Linux 保持 OSC 52 行为。
