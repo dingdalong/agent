@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import logging.handlers
+import os
 from pathlib import Path
 
 from src.interfaces import AgentViewStore, OutputRouter, TextualInterface, TurnClock
@@ -55,6 +57,26 @@ async def create_app(
         workdir=work_dir,
         project_trusted=project_trusted,
     )
+
+    # 配置项目级日志：写入 {workdir}/.agent/logs/agent.log
+    log_dir = work_dir / ".agent" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(log_dir, 0o700)
+    log_level_str = config_mgr.get_config("logging").get("level", "info")
+    log_level = getattr(logging, log_level_str.upper(), logging.INFO)
+    file_handler = logging.handlers.RotatingFileHandler(
+        log_dir / "agent.log",
+        maxBytes=2 * 1024 * 1024,
+        backupCount=2,
+        encoding="utf-8",
+    )
+    os.chmod(log_dir / "agent.log", 0o600)
+    file_handler.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)s %(name)s: %(message)s"
+    ))
+    logging.root.addHandler(file_handler)
+    logging.root.setLevel(log_level)
+
     data_guard = DataGuard()
     register_runtime_secrets(data_guard, config_mgr, global_dir, work_dir, project_trusted)
     role_mgr = RoleMgr(config_mgr=config_mgr, workdir=work_dir, global_dir=global_dir)
