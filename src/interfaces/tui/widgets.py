@@ -201,6 +201,8 @@ class Composer(KeyboardTextArea):
         if getattr(self.app, "completion_visible", False):
             self.app.select_next_completion()
             return
+        if getattr(self.app, "history_next", lambda: False)():
+            return
         lines = self.text.split("\n")
         row, column = self.cursor_location
         if row == len(lines) - 1 and column >= len(lines[-1]):
@@ -212,6 +214,16 @@ class Composer(KeyboardTextArea):
         if getattr(self.app, "completion_visible", False):
             self.app.select_previous_completion()
             return
+        row, column = self.cursor_location
+        if row == 0 and not select:
+            if column == 0:
+                # 已在行首：进入历史回溯
+                if getattr(self.app, "history_prev", lambda: False)():
+                    return
+            else:
+                # 首行但非行首：先跳到行首
+                self.move_cursor((0, 0))
+                return
         super().action_cursor_up(select)
 
 

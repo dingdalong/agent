@@ -188,6 +188,7 @@ class Agent:
     _prompt_mgr: PromptMgr = field(init=False, repr=False)
     _reminder_mgr: ReminderMgr = field(init=False, repr=False)
     _pending_input: str = field(init=False, default="")
+    _input_history: list[str] = field(init=False, default_factory=list)
     _handlers: dict[AgentState, Callable] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -554,8 +555,41 @@ class Agent:
         ctx.turn_start_messages = list(self.history)
         ctx.round_start_idx = len(self.history)
         self._append_message(self.history, {"role": "user", "content": user_input})
+        self._record_input_history(ctx.user_input)
 
         return AgentState.CHECK_COMPACT
+
+    def _record_input_history(self, raw_input: str) -> None:
+        """把一条已提交的用户输入记入输入栏历史并持久化（供上键回溯）。
+
+        记录原始输入（不含 hook/turn 注入），连续去重；仅主 agent 持久化。
+        失败仅告警，不阻塞输入流程。
+
+        Args:
+            raw_input: 用户本轮提交的原始文本。
+        """
+        entry = raw_input.strip("\n")
+        if not entry.strip():
+            return
+        history = self.get_input_history()
+        if history and history[-1] == entry:
+            return
+        history.append(entry)
+        self._input_history = history
+        if self.is_subagent or self.deps.session_mgr is None or not self.deps.session_id:
+            return
+        self.deps.session_mgr.save_input_history(self.deps.session_id, self._input_history)
+
+    def get_input_history(self) -> list[str]:
+        """返回当前会话输入栏历史副本（时间正序）。
+
+        测试可能用 object.__new__ 绕过 dataclass 初始化，故防御缺省。
+        """
+        return list(getattr(self, "_input_history", []))
+
+    def set_input_history(self, inputs: list[str]) -> None:
+        """整体替换输入栏历史（供 resume/clear 后应用）。"""
+        self._input_history = list(inputs)
 
     async def apply_resume(self, result: "ResumeResult") -> str:
         """应用会话恢复结果：替换历史与 session_id、重建 TaskManager、恢复 plan 状态、
@@ -575,6 +609,16 @@ class Agent:
         self.history.clear()
         self._extend_messages(self.history, result.messages)
         self.deps.session_id = result.session_id
+
+        # 恢复目标会话的输入栏历史并通知 UI 刷新（resume 不换 Agent 实例，
+        # UI 的 reload_session_state 不会被触发，需显式刷新）。
+        if self.deps.session_mgr is not None:
+            self.set_input_history(
+                self.deps.session_mgr.load_input_history(result.session_id)
+            )
+        ui = getattr(self.deps, "ui", None)
+        if ui is not None and hasattr(ui, "refresh_input_history"):
+            ui.refresh_input_history()
 
         # 重建 TaskManager 指向恢复会话的 tasks 目录（仅在启用 task feature 时）
         if self.deps.global_dir and "task" in self.features:

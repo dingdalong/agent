@@ -99,6 +99,7 @@ class TextualInterface(UserInterface):
         self._pending_interactions: PendingInteractions | None = None
         self._plain = PlainFrontend()
         self._plan_toggle_handler: Callable[[], None] | None = None
+        self._input_history_provider: Callable[[], list[str]] | None = None
         self._plain_response_active = False
         self._plain_thinking_active = False
 
@@ -129,6 +130,7 @@ class TextualInterface(UserInterface):
             self._request_user_interrupt,
             self.get_plan_state,
             self._toggle_plan,
+            self._get_input_history,
             copy_on_select=self.copy_on_select,
             history_journal=self.history_journal,
             diagnostics=self.diagnostics,
@@ -401,6 +403,20 @@ class TextualInterface(UserInterface):
     def on_plan_state_changed(self) -> None:
         if self._ui_alive() and self._app is not None:
             self._app.call_later(self._app.on_plan_state_changed)
+
+    def set_input_history_provider(
+        self, provider: Callable[[], list[str]] | None
+    ) -> None:
+        self._input_history_provider = provider
+
+    def _get_input_history(self) -> list[str]:
+        if self._input_history_provider is None:
+            return []
+        return self._input_history_provider()
+
+    def refresh_input_history(self) -> None:
+        if self._ui_alive() and self._app is not None:
+            self._app.call_later(self._app.refresh_input_history)
 
     def cancel_active_input(self) -> bool:
         if self.is_tty and self._app is not None:

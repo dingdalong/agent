@@ -269,6 +269,9 @@ class AgentApp:
                         is_subagent=False,
                     )
                     self.agent_view_store.register_foreground(str(agent.uuid), agent.agent_type)
+                    set_history_provider = getattr(self.deps.ui, "set_input_history_provider", None)
+                    if set_history_provider is not None:
+                        set_history_provider(agent.get_input_history)
                     if self._plan_mode_controller is not None:
                         self._plan_mode_controller.install_shortcut(agent)
                         self._plan_mode_controller.notify_state_changed()

@@ -116,6 +116,41 @@ class SessionMgr:
         except OSError as e:
             logger.warning("写入会话历史失败: %s", e)
 
+    def save_input_history(self, session_id: str, inputs: list[str]) -> None:
+        """将输入栏历史写入磁盘（覆写式快照），供上键回溯。
+
+        Args:
+            session_id: 会话 UUID。
+            inputs: 已提交输入列表（时间正序）。空列表也写入，保持与新会话一致。
+        """
+        self._sessions_dir.mkdir(parents=True, exist_ok=True)
+        input_path = self._sessions_dir / f"{session_id}.input.json"
+        try:
+            safe_inputs = self._data_guard.redact(inputs) if self._data_guard is not None else inputs
+            atomic_write_text(input_path, json.dumps(safe_inputs, ensure_ascii=False))
+        except OSError as e:
+            logger.warning("写入输入历史失败: %s", e)
+
+    def load_input_history(self, session_id: str) -> list[str]:
+        """加载指定会话的输入栏历史。
+
+        Args:
+            session_id: 目标会话 UUID。
+
+        Returns:
+            输入字符串列表（时间正序）。文件缺失/损坏或非 list[str] 时返回空列表。
+        """
+        input_path = self._sessions_dir / f"{session_id}.input.json"
+        if not input_path.exists():
+            return []
+        try:
+            data = json.loads(input_path.read_text(encoding="utf-8"))
+            if isinstance(data, list) and all(isinstance(item, str) for item in data):
+                return self._data_guard.redact(data) if self._data_guard is not None else data
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning("加载输入历史失败: %s", e)
+        return []
+
     def list_sessions(self, limit: int = 10) -> list[dict[str, Any]]:
         """列出最近的会话，按 updated_at 降序排列。
 
@@ -129,7 +164,7 @@ class SessionMgr:
             return []
         sessions: list[dict[str, Any]] = []
         for f in self._sessions_dir.glob("*.json"):
-            if f.name.endswith(".hist.json"):
+            if f.name.endswith((".hist.json", ".input.json")):
                 continue
             try:
                 meta = json.loads(f.read_text(encoding="utf-8"))

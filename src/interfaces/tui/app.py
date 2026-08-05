@@ -136,6 +136,7 @@ class AgentTuiApp(App[None]):
         request_interrupt: Callable[[], None],
         get_plan_state: Callable[[], bool],
         toggle_plan: Callable[[], None],
+        get_input_history: Callable[[], list[str]] | None = None,
         *,
         copy_on_select: bool | None = None,
         platform_name: str | None = None,
@@ -150,6 +151,7 @@ class AgentTuiApp(App[None]):
         self.request_interrupt = request_interrupt
         self.get_plan_state = get_plan_state
         self.toggle_plan = toggle_plan
+        self.get_input_history = get_input_history or (lambda: [])
         self.target_platform = platform_name or sys.platform
         self.copy_on_select = (
             self.target_platform == "darwin"
@@ -207,6 +209,8 @@ class AgentTuiApp(App[None]):
         self._transcript_last_render_time = 0.0
         self._clipboard_pending: str | None = None
         self._clipboard_worker_task: asyncio.Task[None] | None = None
+        self._history_index: int | None = None
+        self._history_draft: str = ""
 
     def _handle_exception(self, error: Exception) -> None:
         """保留 Textual 吞掉的 fatal exception，供外层生命周期检测。"""
@@ -1587,7 +1591,61 @@ class AgentTuiApp(App[None]):
         self.coordinator.reset()
         self.clear_selection()
         self.hide_completion()
+        self.refresh_input_history()
         self.refresh_chrome()
+
+    def refresh_input_history(self) -> None:
+        """重置回溯游标（供 /clear、/resume 后调用）。
+
+        历史本身不缓存：history_prev/next 每次直接从 provider 实时取，
+        保证新提交的输入立即进入回溯，无需刷新快照。
+        """
+        self._history_index = None
+        self._history_draft = ""
+
+    def history_prev(self) -> bool:
+        """上键：回溯到更早的一条输入历史。
+
+        Returns:
+            True 表示已消费该按键（载入了历史条目）；
+            False 表示无历史或已在最早一条，交由光标正常上移。
+        """
+        history = self.get_input_history()
+        if not history:
+            return False
+        if self._history_index is None:
+            self._history_draft = self._composer.text
+            self._history_index = len(history) - 1
+        elif self._history_index > 0:
+            self._history_index -= 1
+        else:
+            return False
+        self._load_history_entry(history)
+        return True
+
+    def history_next(self) -> bool:
+        """下键：前进到更新的一条输入历史，越过最新条时还原草稿。
+
+        Returns:
+            True 表示已消费该按键；False 表示当前不在回溯态。
+        """
+        if self._history_index is None:
+            return False
+        history = self.get_input_history()
+        if self._history_index < len(history) - 1:
+            self._history_index += 1
+            self._load_history_entry(history)
+        else:
+            self._history_index = None
+            self._composer.load_text(self._history_draft)
+            self._composer.move_cursor((0, 0))
+        return True
+
+    def _load_history_entry(self, history: list[str]) -> None:
+        """把当前游标指向的历史条目载入输入框，光标停在首行。"""
+        text = history[self._history_index]
+        self._composer.load_text(text)
+        self._composer.move_cursor((0, 0))
 
     def on_plan_state_changed(self) -> None:
         self._mark_chrome_dirty()

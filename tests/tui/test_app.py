@@ -26,6 +26,7 @@ from src.interfaces.turn_clock import TurnClock
 from src.interfaces.tui.app import AgentTuiApp
 from src.interfaces.tui.dialogs import InlineSelectionWidget, SelectionDialog
 from src.interfaces.tui.widgets import (
+    Composer,
     KeyboardNavigation,
     KeyboardOptionList,
     SelectionScreen,
@@ -1196,5 +1197,119 @@ def test_stream_follow_and_dialog_text_inputs() -> None:
             await pilot.press("right", "2", "right", "enter")
             payload = await form.future
             assert '"answers": ["1 2\\nx", "fast"]' in payload
+
+    asyncio.run(scenario())
+
+
+def test_up_key_recalls_history_after_submit_without_refresh() -> None:
+    """回归：历史快照不在 refresh 之外缓存——提交后按上键应立刻回溯到新条目。
+
+    根因：若 history_prev 读的是 refresh_input_history 时拉取的旧快照，
+    运行中新提交的输入不会进入回溯，按上键无反应。
+
+    语义：光标在第一行行首按上才进历史；首行非行首按上先跳到行首。
+    """
+
+    submitted: list[str] = []
+
+    def provider() -> list[str]:
+        return list(submitted)
+
+    app = AgentTuiApp(
+        AgentViewStore(),
+        [],
+        TurnClock(),
+        lambda: None,
+        lambda: False,
+        lambda: None,
+        get_input_history=provider,
+        native_clipboard=False,
+    )
+
+    async def scenario() -> None:
+        async with app.run_test(size=(100, 30)) as pilot:
+            app.refresh_input_history()
+            composer = app.query_one("#input", Composer)
+            composer.read_only = False
+            composer.focus()
+            await pilot.pause()
+
+            # 空输入框（行首）按上：无历史，无反应
+            await pilot.press("up")
+            assert composer.text == ""
+
+            # 之后才有新提交（provider 数据变化，但不再 refresh）
+            submitted.append("第一条")
+            submitted.append("第二条")
+            await pilot.pause()
+
+            # 光标在行首按上：立刻回溯到最新条目
+            await pilot.press("up")
+            assert composer.text == "第二条"
+            # 载入历史后光标停在行首，连续按上逐条上溯
+            await pilot.press("up")
+            assert composer.text == "第一条"
+            # 已在最早一条，再按上键无变化
+            await pilot.press("up")
+            assert composer.text == "第一条"
+            # 下键前进，越过最新条还原草稿（空）
+            await pilot.press("down")
+            assert composer.text == "第二条"
+            await pilot.press("down")
+            assert composer.text == ""
+
+    asyncio.run(scenario())
+
+
+def test_up_key_on_first_line_moves_to_line_start_before_history() -> None:
+    """光标在首行非行首按上先跳到行首；行首再按上才进历史；多行非首行按上正常上移。"""
+
+    def provider() -> list[str]:
+        return ["历史一", "历史二"]
+
+    app = AgentTuiApp(
+        AgentViewStore(),
+        [],
+        TurnClock(),
+        lambda: None,
+        lambda: False,
+        lambda: None,
+        get_input_history=provider,
+        native_clipboard=False,
+    )
+
+    async def scenario() -> None:
+        async with app.run_test(size=(100, 30)) as pilot:
+            app.refresh_input_history()
+            composer = app.query_one("#input", Composer)
+            composer.read_only = False
+            composer.focus()
+            await pilot.pause()
+
+            # 单行输入，光标在行尾（首行非行首）按上 → 跳到行首，不进历史
+            composer.load_text("hello")
+            composer.move_cursor((0, 5))
+            await pilot.press("up")
+            assert composer.text == "hello"
+            assert composer.cursor_location == (0, 0)
+            # 行首再按上 → 进历史
+            await pilot.press("up")
+            assert composer.text == "历史二"
+
+            # 还原草稿后测多行：光标在第 2 行按上 → 上移到第 1 行（不进历史）
+            await pilot.press("down")  # 越过最新条还原草稿 "hello"
+            assert composer.text == "hello"
+            composer.load_text("第一行\n第二行")
+            composer.move_cursor((1, 3))
+            await pilot.press("up")
+            assert composer.text == "第一行\n第二行"
+            assert composer.cursor_location[0] == 0  # 上移到首行
+            # 首行非行首按上 → 跳到行首
+            await pilot.press("up")
+            assert composer.cursor_location == (0, 0)
+            assert composer.text == "第一行\n第二行"
+            # 行首再按上 → 进历史
+            await pilot.press("up")
+            assert composer.text == "历史二"
 
     asyncio.run(scenario())

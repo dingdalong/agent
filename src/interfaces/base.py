@@ -173,6 +173,29 @@ class UserInterface(ABC):
 
         pass
 
+    def set_input_history_provider(
+        self, provider: Callable[[], list[str]] | None
+    ) -> None:
+        """设置输入栏历史数据源（供上键回溯）。
+
+        Args:
+            provider: 返回当前会话输入历史（时间正序）的函数，None 表示移除。
+
+        Returns:
+            None.
+        """
+
+        pass
+
+    def refresh_input_history(self) -> None:
+        """会话切换（如 /resume）后通知 UI 重新拉取输入历史。
+
+        Returns:
+            None.
+        """
+
+        pass
+
     async def start(self) -> None:
         """启动 UI 生命周期钩子。默认实现供同步 UI 使用。
 
