@@ -100,10 +100,22 @@ def test_format_params_glob():
     assert format_params("glob", {"pattern": "*.py"}) == "*.py"
 
 
-def test_format_params_web_external_read():
-    # EXTERNAL_READ 工具不记录查询内容
-    assert format_params("web_search", {"query": "secret query"}) == ""
-    assert format_params("web_fetch", {"url": "http://secret.com"}) == ""
+def test_format_params_web_search():
+    """web_search 展示查询内容。"""
+    assert format_params("web_search", {"query": "python教程"}) == "python教程"
+
+
+def test_format_params_web_search_truncate():
+    """web_search 长查询截断到 100 字符。"""
+    long_query = "a" * 200
+    result = format_params("web_search", {"query": long_query})
+    assert len(result) <= 101 + len("…")
+    assert result.endswith("…")
+
+
+def test_format_params_web_fetch():
+    """web_fetch 展示 URL。"""
+    assert format_params("web_fetch", {"url": "https://example.com"}) == "https://example.com"
 
 
 def test_format_params_task_delegator():

@@ -228,12 +228,9 @@ class ToolsMgr:
         if arguments is not None:
             from src.tools.display import ToolDisplay, tool_title, format_params
             title = tool_title(tool.name)
-            if tool.policy.access is AccessKind.EXTERNAL_READ:
-                params_text = ""
-            else:
-                data_guard = getattr(deps, "data_guard", None) if deps is not None else None
-                safe_args = data_guard.redact(arguments) if data_guard is not None else arguments
-                params_text = format_params(tool.name, safe_args)
+            data_guard = getattr(deps, "data_guard", None) if deps is not None else None
+            safe_args = data_guard.redact(arguments) if data_guard is not None else arguments
+            params_text = format_params(tool.name, safe_args)
             display = ToolDisplay(title=title, content=params_text)
 
         caller_agent_type, caller_uuid = caller_identity(agent)
@@ -266,7 +263,11 @@ class ToolsMgr:
         data_guard = getattr(deps, "data_guard", None) if deps is not None else None
         if tool.policy.access is AccessKind.EXTERNAL_READ:
             result_preview = self._external_read_preview(result, status)
-            display = None  # EXTERNAL_READ 不展示详情
+            from src.tools.display import ToolDisplay, tool_title
+            title = tool_title(tool.name)
+            if status != "success":
+                title = f"✘ {title}"
+            display = ToolDisplay(title=title, content=result_preview)
         else:
             safe_result = data_guard.redact(result) if data_guard is not None else result
             result_preview = self._result_preview(str(safe_result))

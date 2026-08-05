@@ -502,8 +502,19 @@ class AgentTuiApp(App[None]):
                     mark = "✔" if entry.status == "success" else "✘"
                     elapsed = entry.duration
                 detail = f" {entry.detail}" if entry.detail else ""
+                start_display = entry.start_display
+                if start_display is not None and hasattr(start_display, "title"):
+                    title = start_display.title
+                    content = (getattr(start_display, "content", "") or "").strip()
+                    if content:
+                        first_line = content.splitlines()[0]
+                        if len(first_line) > 60:
+                            first_line = first_line[:60] + "…"
+                        title = f"{title}  {first_line}"
+                else:
+                    title = f"{entry.tool_name}{detail}"
                 lines.append(
-                    f"  {mark} {entry.tool_name}{detail} ({format_elapsed_time(elapsed)})"
+                    f"  {mark} {title} ({format_elapsed_time(elapsed)})"
                 )
             hidden = len(self._round_entries) - _ROUND_PANEL_MAX_ROWS
             if hidden > 0:

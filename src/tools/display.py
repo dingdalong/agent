@@ -123,9 +123,14 @@ def format_params(tool_name: str, args: dict[str, Any],
     if tool_name == "list_directory":
         return args.get("path", ".")
 
-    if tool_name in ("web_fetch", "web_search"):
-        # EXTERNAL_READ: 只记录安全请求摘要
-        return ""
+    if tool_name == "web_search":
+        query = args.get("query", "")
+        if len(query) > 100:
+            query = query[:100] + "…"
+        return query
+
+    if tool_name == "web_fetch":
+        return args.get("url", "")
 
     if tool_name == "task_delegator":
         desc = args.get("description", "")
