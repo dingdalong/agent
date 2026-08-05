@@ -79,6 +79,19 @@ def _source_label(request: UiRequest) -> str:
     return f"{agent_type} {short_uuid}" if short_uuid else agent_type
 
 
+def _form_source_label(request: UiRequest, task: str = "") -> str:
+    """ask_user 表单标题行的来源标签：主 agent 不带短 UUID，子 agent 用任务摘要。"""
+    agent_type = request.caller_agent_type
+    if not agent_type:
+        return request.source
+    if agent_type == "main":
+        return agent_type
+    if task:
+        return f"{agent_type}  {task}"
+    short_uuid = request.caller_uuid.split("-")[0] if request.caller_uuid else ""
+    return f"{agent_type} {short_uuid}" if short_uuid else agent_type
+
+
 def _option_prompt(index: int, label: str, markdown: bool) -> object:
     text = f"{index}. {label}"
     return RichMarkdown(text) if markdown else text
@@ -536,9 +549,10 @@ class FormDialog(KeyboardDialog):
         ],
     ]
 
-    def __init__(self, request: FormMenu) -> None:
+    def __init__(self, request: FormMenu, task: str = "") -> None:
         super().__init__()
         self.request = request
+        self._task = task
         self.tab = 0
         self.zone = "answer"
         self.rows = [0 for _ in request.questions]
@@ -557,7 +571,7 @@ class FormDialog(KeyboardDialog):
     def compose(self) -> ComposeResult:
         classes = "dialog-form dialog-form-preview" if self._has_any_preview else "dialog-form"
         with Vertical(id="dialog-shell", classes=classes):
-            source = _source_label(self.request)
+            source = _form_source_label(self.request, self._task)
             if source:
                 yield Static(
                     f"[#efc36a bold]问题[/]  ·  {source}",
@@ -565,6 +579,7 @@ class FormDialog(KeyboardDialog):
                 )
             else:
                 yield Static("问题", classes="dialog-title", markup=False)
+            yield Static("", id="form-hint", classes="dialog-hint", markup=False)
             yield Static("", id="form-tabs", markup=False)
             if self._has_any_preview:
                 yield Static("", id="form-question-text", markup=False)
@@ -589,7 +604,6 @@ class FormDialog(KeyboardDialog):
                     show_line_numbers=False,
                     placeholder="输入自定义回答…",
                 )
-            yield Static("", id="form-hint", classes="dialog-hint", markup=False)
 
     def on_mount(self) -> None:
         self._render_form()
@@ -864,9 +878,10 @@ class InlineFormWidget(InlineWidget):
         ],
     ]
 
-    def __init__(self, request: FormMenu) -> None:
+    def __init__(self, request: FormMenu, task: str = "") -> None:
         super().__init__()
         self.request = request
+        self._task = task
         self.tab = 0
         self.zone = "answer"
         self.rows = [0 for _ in request.questions]
@@ -884,7 +899,7 @@ class InlineFormWidget(InlineWidget):
     def compose(self) -> ComposeResult:
         classes = "dialog-form dialog-form-preview" if self._has_any_preview else "dialog-form"
         with Vertical(id="dialog-shell", classes=classes):
-            source = _source_label(self.request)
+            source = _form_source_label(self.request, self._task)
             if source:
                 yield Static(
                     f"[#efc36a bold]问题[/]  ·  {source}",
@@ -892,6 +907,7 @@ class InlineFormWidget(InlineWidget):
                 )
             else:
                 yield Static("问题", classes="dialog-title", markup=False)
+            yield Static("", id="form-hint", classes="dialog-hint", markup=False)
             yield Static("", id="form-tabs", markup=False)
             if self._has_any_preview:
                 yield Static("", id="form-question-text", markup=False)
@@ -916,7 +932,6 @@ class InlineFormWidget(InlineWidget):
                     show_line_numbers=False,
                     placeholder="输入自定义回答…",
                 )
-            yield Static("", id="form-hint", classes="dialog-hint", markup=False)
 
     def on_mount(self) -> None:
         self._render_form()
@@ -1185,9 +1200,9 @@ class InlineFormWidget(InlineWidget):
         return "\n".join(lines)
 
 
-def make_dialog(request: MenuRequest) -> KeyboardDialog:
+def make_dialog(request: MenuRequest, task: str = "") -> KeyboardDialog:
     if isinstance(request, FormMenu):
-        return FormDialog(request)
+        return FormDialog(request, task=task)
     if isinstance(request, ChoiceInputMenu):
         return ChoiceInputDialog(request)
     if isinstance(request, (PermissionMenu, ChoiceMenu)):
@@ -1195,9 +1210,9 @@ def make_dialog(request: MenuRequest) -> KeyboardDialog:
     raise TypeError(f"unsupported modal request: {type(request)!r}")
 
 
-def _make_inline_widget(request: MenuRequest) -> InlineWidget:
+def _make_inline_widget(request: MenuRequest, task: str = "") -> InlineWidget:
     if isinstance(request, FormMenu):
-        return InlineFormWidget(request)
+        return InlineFormWidget(request, task=task)
     if isinstance(request, ChoiceInputMenu):
         return InlineChoiceInputWidget(request)
     if isinstance(request, (PermissionMenu, ChoiceMenu)):
@@ -1283,7 +1298,9 @@ class InteractionCoordinator:
             return
         self.turn_clock.enter_human_wait()
         try:
-            self.inline_widget = _make_inline_widget(request)
+            snapshot = self.app.agent_view_store.agent_snapshot(request.caller_uuid or "")
+            task = snapshot.task if snapshot else ""
+            self.inline_widget = _make_inline_widget(request, task=task)
             await self.app.mount_inline_widget(self.inline_widget)
         except BaseException as exc:
             self.turn_clock.exit_human_wait()

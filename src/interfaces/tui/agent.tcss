@@ -241,7 +241,7 @@ ModalScreen {
 
 #form-hint {
     height: auto;
-    margin-top: 1;
+    color: #8d989f;
 }
 
 #form-tabs {
