@@ -218,7 +218,7 @@ def test_format_result_line_limit():
     lines = "\n".join(f"line {i}" for i in range(100))
     text, truncated = format_result(lines, budget_lines=10)
     assert truncated
-    assert "已截断" in text
+    assert "..." in text
     # 截断后不超过 10 行 + 截断提示行
     assert text.count("\n") <= 11
 

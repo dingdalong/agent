@@ -678,8 +678,6 @@ class TextualInterface(UserInterface):
             if content:
                 for line in content.splitlines()[:20]:
                     self._plain.write(f"  {line}\n")
-                if getattr(display, "truncated", False):
-                    self._plain.write("  … (已截断)\n")
         else:
             preview = (event.result_preview or "").strip().splitlines()
             first = preview[0] if preview else ("完成" if ok else "失败")

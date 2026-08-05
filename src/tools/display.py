@@ -321,6 +321,6 @@ def _truncate_text_with_flag(text: str, max_lines: int,
         truncated = True
 
     if truncated:
-        result += "\n… (已截断)"
+        result += "\n..."
 
     return result, truncated

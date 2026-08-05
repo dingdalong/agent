@@ -1477,14 +1477,10 @@ class AgentTuiApp(App[None]):
                             text.append(f"{line}\n", style="red on #2e1a1a")
                         else:
                             text.append(f"{line}\n", style="bright_black")
-                    if result_display.truncated:
-                        text.append("  … (已截断)\n", style="bright_black")
                 elif result_display.content:
                     text.append("  ─────\n", style="bright_black")
                     for line in result_display.content.splitlines()[:20]:
                         text.append(f"  {line}\n", style="bright_black" if ok else "red")
-                    if result_display.truncated:
-                        text.append("  … (已截断)\n", style="bright_black")
             elif not ok:
                 # 降级：无 display 时用 preview
                 preview_lines = entry.preview.splitlines()
