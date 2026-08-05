@@ -265,6 +265,27 @@ class AgentViewStore:
         )
         return snapshots
 
+    def has_subagents(self) -> bool:
+        """Return whether any non-main agents exist in history or active.
+
+        Returns:
+            True when at least one subagent is retained.
+        """
+        if self._history:
+            return True
+        return any(not state.is_main for state in self._active.values())
+
+    def has_running_subagents(self) -> bool:
+        """Return whether any non-main agents are currently running.
+
+        Returns:
+            True when at least one running subagent exists.
+        """
+        return any(
+            not state.is_main and state.running
+            for state in self._active.values()
+        )
+
     def transcript_segments(self, uuid: str) -> list[tuple[str, str]]:
         """Return a copy of one agent's incremental transcript segments.
 
@@ -276,6 +297,20 @@ class AgentViewStore:
         """
         state = self._find(uuid)
         return list(state.transcript) if state is not None else []
+
+    def transcript_tail(self, uuid: str) -> tuple[int, tuple[str, str] | None]:
+        """Return segment count and the last segment without copying the deque.
+
+        Args:
+            uuid: Target agent UUID.
+
+        Returns:
+            ``(count, last_segment)`` or ``(0, None)`` when empty/absent.
+        """
+        state = self._find(uuid)
+        if state is None or not state.transcript:
+            return (0, None)
+        return (len(state.transcript), state.transcript[-1])
 
     def transcript_messages(self, uuid: str) -> list[dict]:
         """Return a copy of one completed agent's raw message snapshot.

@@ -62,6 +62,7 @@ from src.interfaces.tui.widgets import (
 
 _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 _ROUND_PANEL_MAX_ROWS = 8
+_TRANSCRIPT_MIN_RENDER_INTERVAL = 0.5  # 秒：两次 transcript 渲染之间的最低间隔
 
 
 @dataclass(slots=True)
@@ -178,13 +179,14 @@ class AgentTuiApp(App[None]):
         self._round_entries: list[RoundEntry] = []
         self._round_agent_type: str | None = None
         self._round_agent_uuid: str | None = None
+        self._chrome_dirty = False
         self._response_stream: Any = None
         self._thinking_stream: Any = None
 
         self._completion_matches: list[tuple[str, str]] = []
         self._completion_index = 0
         self._agent_ids: list[str] = []
-        self._agent_signature: tuple[str, ...] = ()
+        self._agent_signature: tuple[Any, ...] = ()
         self._main_focus_target = "composer"
         self.viewing_agent_id: str | None = None
         self._transcript_ids: list[str] = []
@@ -200,6 +202,9 @@ class AgentTuiApp(App[None]):
         self._transcript_merged_requests = 0
         self._transcript_active_renders = 0
         self._transcript_max_concurrent_renders = 0
+        self._transcript_incremental_uuid: str | None = None
+        self._transcript_rendered_source_len = 0
+        self._transcript_last_render_time = 0.0
         self._clipboard_pending: str | None = None
         self._clipboard_worker_task: asyncio.Task[None] | None = None
 
@@ -318,12 +323,17 @@ class AgentTuiApp(App[None]):
         self._update_separators()
         self._schedule_agent_refresh()
         self._schedule_transcript_refresh()
+        self._chrome_dirty = False
         self.refresh_chrome()
 
     def _update_separators(self) -> None:
         if not hasattr(self, "_separator_top"):
             return
-        separator = "─" * max(1, self.screen.size.width)
+        width = max(1, self.screen.size.width)
+        if width == getattr(self, "_separator_width", 0):
+            return
+        self._separator_width = width
+        separator = "─" * width
         self._separator_top.update(separator)
         self._separator_bottom.update(separator)
 
@@ -460,6 +470,10 @@ class AgentTuiApp(App[None]):
             self._agent_list.focus()
         else:
             self.focus_composer()
+
+    def _mark_chrome_dirty(self) -> None:
+        """标记 chrome 需要刷新，由下一次 tick 合并执行。"""
+        self._chrome_dirty = True
 
     def refresh_chrome(self) -> None:
         if not hasattr(self, "_composer"):
@@ -681,7 +695,16 @@ class AgentTuiApp(App[None]):
     def _schedule_agent_refresh(self) -> None:
         snapshots = self._browser_snapshots()
         signature = tuple(
-            f"{snapshot.uuid}:{present_agent(snapshot).plain}"
+            (
+                snapshot.uuid,
+                snapshot.running,
+                snapshot.activity,
+                snapshot.task,
+                snapshot.usage.input_tokens,
+                snapshot.usage.output_tokens,
+                snapshot.context.used_tokens,
+                int(snapshot.elapsed_seconds),
+            )
             for snapshot in snapshots
         )
         if signature == self._agent_signature:
@@ -765,7 +788,7 @@ class AgentTuiApp(App[None]):
             self.focus_composer()
 
     def _has_sub_agents(self) -> bool:
-        return any(s.running for s in self.agent_view_store.subagent_snapshots())
+        return self.agent_view_store.has_running_subagents()
 
     def _browser_snapshots(self):
         snapshots = self.agent_view_store.active_agent_snapshots()
@@ -883,13 +906,11 @@ class AgentTuiApp(App[None]):
                 len(diagnostics),
                 sum(len(text) for _kind, text in diagnostics),
             )
-        segments = self.agent_view_store.transcript_segments(uuid)
-        return (
-            uuid,
-            "segments",
-            len(segments),
-            sum(len(text) for _kind, text in segments),
-        )
+        # O(1)：只检查 deque 尾部，流式期间只有最后一个 segment 在增长
+        count, tail = self.agent_view_store.transcript_tail(uuid)
+        if tail is not None:
+            return (uuid, "segments", count, tail[0], len(tail[1]))
+        return (uuid, "segments", 0)
 
     async def _request_transcript_render(
         self,
@@ -986,6 +1007,12 @@ class AgentTuiApp(App[None]):
                         self._transcript_active_renders -= 1
                         if request.completed is not None and not request.completed.done():
                             request.completed.set_result(rendered)
+                    # 节流：让事件循环有空间处理 keyboard event（ESC）
+                    if self._transcript_pending is not None:
+                        elapsed = time.monotonic() - self._transcript_last_render_time
+                        remaining = _TRANSCRIPT_MIN_RENDER_INTERVAL - elapsed
+                        if remaining > 0:
+                            await asyncio.sleep(remaining)
         except asyncio.CancelledError:
             raise
         finally:
@@ -1007,21 +1034,46 @@ class AgentTuiApp(App[None]):
             return False
         uuid = request.uuid
         position = self._transcript_positions.setdefault(uuid, TranscriptPosition())
-        source = self._transcript_source(uuid)
+        new_source = self._transcript_source(uuid)
         if request.version != self._transcript_generation:
             return False
-        await self._transcript_content.update(source)
-        self._rendered_transcript_id = uuid
-        previous_geometry: tuple[int, float] | None = None
-        for _ in range(4):
+
+        # 增量渲染：若同一 agent 且新 source 以上次渲染为前缀，只 append 增量部分
+        incremental = False
+        prev_len = self._transcript_rendered_source_len
+        if (
+            not request.force
+            and self._transcript_incremental_uuid == uuid
+            and prev_len > 0
+            and len(new_source) >= prev_len
+            and new_source[:prev_len] == self._transcript_content.source[:prev_len]
+        ):
+            delta = new_source[prev_len:]
+            if delta:
+                await self._transcript_content.append(delta)
             await self._transcript_panel.wait_for_refresh()
-            geometry = (
-                self._transcript_panel.virtual_size.height,
-                self._transcript_panel.max_scroll_y,
-            )
-            if geometry == previous_geometry:
-                break
-            previous_geometry = geometry
+            incremental = True
+        else:
+            await self._transcript_content.update(new_source)
+            self._rendered_transcript_id = uuid
+            # 流式 agent 减少 wait_for_refresh 轮数（很快会有下一次渲染）
+            agent_snapshot = self.agent_view_store.agent_snapshot(uuid)
+            max_refreshes = 2 if (agent_snapshot and agent_snapshot.running) else 4
+            previous_geometry: tuple[int, float] | None = None
+            for _ in range(max_refreshes):
+                await self._transcript_panel.wait_for_refresh()
+                geometry = (
+                    self._transcript_panel.virtual_size.height,
+                    self._transcript_panel.max_scroll_y,
+                )
+                if geometry == previous_geometry:
+                    break
+                previous_geometry = geometry
+
+        self._transcript_incremental_uuid = uuid
+        self._transcript_rendered_source_len = len(new_source)
+        self._rendered_transcript_id = uuid
+
         current = (
             self.viewing_agent_id == uuid
             and request.version == self._transcript_generation
@@ -1041,12 +1093,15 @@ class AgentTuiApp(App[None]):
             self._update_transcript_header(invoked=request.invoked)
             if request.restore_focus:
                 self._transcript_panel.focus()
-            self.refresh_chrome()
+            self._mark_chrome_dirty()
+
+        self._transcript_last_render_time = time.monotonic()
         self.diagnostics.record(
             "transcript_render_finished",
             version=request.version,
             target_uuid=uuid,
             current=current,
+            incremental=incremental,
             duration_ms=round((time.monotonic() - started) * 1000, 3),
             merged_requests=self._transcript_merged_requests,
         )
@@ -1194,6 +1249,8 @@ class AgentTuiApp(App[None]):
         self._transcript_ids = []
         self._transcript_signature = None
         self._transcript_requested_signature = None
+        self._transcript_incremental_uuid = None
+        self._transcript_rendered_source_len = 0
         self._transcript_zone.display = False
         self.set_screen_class(False, "viewing")
         self.sync_input_state()
@@ -1451,7 +1508,7 @@ class AgentTuiApp(App[None]):
         if changed or left_retry:
             self._activity_started = now
             self._activity_pause_baseline = self.turn_clock.paused_seconds(now)
-        self.refresh_chrome()
+            self._mark_chrome_dirty()
 
     def _clear_retry(self) -> None:
         self._retry_deadline = None
@@ -1518,7 +1575,7 @@ class AgentTuiApp(App[None]):
         self.refresh_chrome()
 
     def on_plan_state_changed(self) -> None:
-        self.refresh_chrome()
+        self._mark_chrome_dirty()
 
     def on_text_selected(self, _event: events.TextSelected) -> None:
         self._history.resume_anchor_at_end()
@@ -1605,7 +1662,7 @@ class AgentTuiApp(App[None]):
         ):
             return
         self.toggle_plan()
-        self.refresh_chrome()
+        self._mark_chrome_dirty()
 
     def action_clear_selection(self) -> None:
         self.clear_selection()
