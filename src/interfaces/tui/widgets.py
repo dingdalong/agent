@@ -164,7 +164,9 @@ class KeyboardListItem(ListItem):
 
 
 class Composer(KeyboardTextArea):
-    """主输入框：Enter 提交，Shift+Enter/Ctrl+J 换行。"""
+    """主输入框：Enter 提交，Shift+Enter/Ctrl+J 换行。支持鼠标拖选复制。"""
+
+    ALLOW_SELECT = True
 
     BINDINGS = [
         Binding("enter", "submit", show=False, priority=True),
@@ -173,6 +175,10 @@ class Composer(KeyboardTextArea):
         Binding("tab", "tab_or_complete", show=False, priority=True),
         Binding("escape", "escape_or_clear", show=False, priority=True),
     ]
+
+    async def _on_mouse_down(self, event: events.MouseDown) -> None:
+        # 恢复 TextArea 原生点击定位/拖选（不再像 KeyboardTextArea 那样拦截）。
+        await super(KeyboardTextArea, self)._on_mouse_down(event)
 
     class Submitted(Message):
         """用户请求提交当前输入。"""

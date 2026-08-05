@@ -403,11 +403,11 @@ def test_responsive_input_history_and_ctrl_c() -> None:
             await pilot.click(app._status)
             await pilot.pause()
             assert app._composer.has_focus
-            cursor = app._composer.cursor_location
             await pilot.click(app._composer, offset=(0, 0))
             await pilot.pause()
             assert app._composer.has_focus
-            assert app._composer.cursor_location == cursor
+            # 放开鼠标后，点击左上角会把光标定位到行首（不再保持原位）
+            assert app._composer.cursor_location == (0, 0)
             app._composer.load_text("\n".join(str(index) for index in range(9)))
             await pilot.pause()
             assert app._composer_shell.styles.height.value == 8
@@ -1311,5 +1311,40 @@ def test_up_key_on_first_line_moves_to_line_start_before_history() -> None:
             # 行首再按上 → 进历史
             await pilot.press("up")
             assert composer.text == "历史二"
+
+    asyncio.run(scenario())
+
+
+def test_composer_mouse_drag_selects_for_copy() -> None:
+    """回归：Composer 放开鼠标拖选后，可拖选文本并经 _selected_text 取到（复制数据源）。
+
+    根因：KeyboardTextArea._on_mouse_down 拦截 + ALLOW_SELECT=False 使输入框无法选中。
+    修复后 Composer 恢复原生拖选；对话框的 KeyboardTextArea 仍保持仅键盘。
+    """
+
+    app = _app()
+
+    async def scenario() -> None:
+        async with app.run_test(size=(100, 30)) as pilot:
+            composer = app.query_one("#input", Composer)
+            composer.read_only = False
+            composer.focus()
+            composer.load_text("hello world")
+            await pilot.pause()
+
+            # 类属性已放开拖选；对话框基类仍保持仅键盘
+            assert Composer.ALLOW_SELECT is True
+            from src.interfaces.tui.widgets import KeyboardTextArea
+            assert KeyboardTextArea.ALLOW_SELECT is False
+
+            # 经 pilot 真实路由做拖选（mouse_down → hover 移动 → mouse_up）
+            await pilot.mouse_down(composer, offset=(0, 0))
+            await pilot.hover(composer, offset=(5, 0))
+            await pilot.mouse_up(composer, offset=(5, 0))
+            await pilot.pause()
+
+            assert composer.selected_text != ""
+            # 复制数据源 _selected_text 应能取到聚焦 Composer 的选区
+            assert app._selected_text() == composer.selected_text
 
     asyncio.run(scenario())
