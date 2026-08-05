@@ -46,7 +46,7 @@ from src.interfaces.status_presenter import (
 from src.interfaces.turn_clock import TurnClock
 from src.tools.display import tool_title
 from src.interfaces.tui.diagnostics import TuiDiagnostics
-from src.interfaces.tui.dialogs import InteractionCoordinator
+from src.interfaces.tui.dialogs import DialogResult, InlineWidget, InteractionCoordinator
 from src.interfaces.tui.history_journal import PlainHistoryJournal
 from src.interfaces.tui.widgets import (
 
@@ -401,6 +401,15 @@ class AgentTuiApp(App[None]):
         if prompt.strip():
             await self.append_output(prompt, markdown=getattr(request, "markdown", False))
 
+    async def mount_inline_widget(self, widget: InlineWidget) -> None:
+        """将内嵌表单挂载到聊天历史末尾。"""
+        await self.flush_round()
+        self._session_elapsed += self._turn_elapsed(time.monotonic())
+        await self._history.mount(widget)
+        self.call_after_refresh(lambda: self._history.scroll_end(animate=True))
+        self.sync_input_state()
+        self.call_after_refresh(self.restore_focus)
+
     async def begin_input(self, request: InputMenu) -> None:
         await self.flush_round()
         self._session_elapsed += self._turn_elapsed(time.monotonic())
@@ -437,7 +446,7 @@ class AgentTuiApp(App[None]):
             return
         input_visible = (
             not self.viewing_agent_id
-            and not self.coordinator.modal_active
+            and not (self.coordinator.modal_active or self.coordinator.inline_widget_active)
         )
         editable = (
             self.coordinator.input_active
@@ -460,6 +469,10 @@ class AgentTuiApp(App[None]):
         if self.coordinator.modal is not None:
             if self.coordinator.modal.is_mounted:
                 self.coordinator.modal.restore_focus()
+            return
+        if self.coordinator.inline_widget is not None:
+            if self.coordinator.inline_widget.is_mounted:
+                self.coordinator.inline_widget.restore_focus()
             return
         if self.viewing_agent_id:
             self._transcript_panel.focus()
@@ -489,7 +502,7 @@ class AgentTuiApp(App[None]):
         visible = (
             not self.coordinator.input_active
             and not self.viewing_agent_id
-            and not self.coordinator.modal_active
+            and not (self.coordinator.modal_active or self.coordinator.inline_widget_active)
             and bool(self._activity or self._round_entries or self._retry_deadline is not None or task_snapshot)
         )
         self._activity_widget.display = visible
@@ -601,7 +614,7 @@ class AgentTuiApp(App[None]):
             )
             processing = (
                 not self.coordinator.input_active
-                and not self.coordinator.modal_active
+                and not (self.coordinator.modal_active or self.coordinator.inline_widget_active)
                 and bool(self._activity or self._retry_deadline is not None)
             )
             if processing:
@@ -633,7 +646,7 @@ class AgentTuiApp(App[None]):
             or " " in stripped
             or not self.coordinator.input_active
             or self.viewing_agent_id
-            or self.coordinator.modal_active
+            or (self.coordinator.modal_active or self.coordinator.inline_widget_active)
         ):
             self.hide_completion()
             return
@@ -691,6 +704,12 @@ class AgentTuiApp(App[None]):
         if self._composer.read_only or not event.text.strip():
             return
         await self.coordinator.complete_input(event.text)
+
+    def on_inline_widget_completed(self, event: InlineWidget.Completed) -> None:
+        """内嵌表单提交/取消后，触发 coordinator 完成流程。"""
+        self.coordinator._schedule(
+            self.coordinator._finish_inline_widget(event.result)
+        )
 
     def _schedule_agent_refresh(self) -> None:
         snapshots = self._browser_snapshots()
@@ -778,7 +797,7 @@ class AgentTuiApp(App[None]):
         self._agent_list.display = (
             has_sub_agents
             and not self.viewing_agent_id
-            and not self.coordinator.modal_active
+            and not (self.coordinator.modal_active or self.coordinator.inline_widget_active)
         )
         if (
             not has_sub_agents
@@ -799,7 +818,7 @@ class AgentTuiApp(App[None]):
     def focus_agent_list(self) -> bool:
         if (
             self.viewing_agent_id
-            or self.coordinator.modal_active
+            or (self.coordinator.modal_active or self.coordinator.inline_widget_active)
             or not self._has_sub_agents()
         ):
             return False
@@ -875,7 +894,7 @@ class AgentTuiApp(App[None]):
         position.follow = self._transcript_panel.scroll_y >= self._transcript_panel.max_scroll_y - 1
 
     def _schedule_transcript_refresh(self) -> None:
-        if not self.viewing_agent_id or self.coordinator.modal_active:
+        if not self.viewing_agent_id or (self.coordinator.modal_active or self.coordinator.inline_widget_active):
             return
         self._save_transcript_position()
         signature = self._current_transcript_signature(self.viewing_agent_id)
@@ -1199,7 +1218,7 @@ class AgentTuiApp(App[None]):
         )
 
     def switch_transcript(self, delta: int) -> None:
-        if self.coordinator.modal_active or not self.viewing_agent_id:
+        if (self.coordinator.modal_active or self.coordinator.inline_widget_active) or not self.viewing_agent_id:
             return
         ids = [
             uuid
@@ -1235,7 +1254,7 @@ class AgentTuiApp(App[None]):
         )
 
     def close_transcript(self) -> None:
-        if not self.coordinator.modal_active:
+        if not (self.coordinator.modal_active or self.coordinator.inline_widget_active):
             self.coordinator.close_transcript()
 
     def hide_transcript(self) -> None:
@@ -1628,7 +1647,7 @@ class AgentTuiApp(App[None]):
         normal_input = (
             self.coordinator.input_active
             and not self.viewing_agent_id
-            and not self.coordinator.modal_active
+            and not (self.coordinator.modal_active or self.coordinator.inline_widget_active)
             and not self._agent_list.has_focus
         )
         if normal_input:
@@ -1644,7 +1663,7 @@ class AgentTuiApp(App[None]):
         if (
             self.coordinator.input_active
             and not self.viewing_agent_id
-            and not self.coordinator.modal_active
+            and not (self.coordinator.modal_active or self.coordinator.inline_widget_active)
             and not self._composer.text
         ):
             self.coordinator.cancel_input_for_exit()
@@ -1656,7 +1675,7 @@ class AgentTuiApp(App[None]):
         if (
             not self.coordinator.input_active
             or self.viewing_agent_id
-            or self.coordinator.modal_active
+            or (self.coordinator.modal_active or self.coordinator.inline_widget_active)
             or self.completion_visible
             or self._agent_list.has_focus
         ):

@@ -24,7 +24,7 @@ from src.events.types import ResponseDelta, SubagentLifecycle
 from src.interfaces.agent_view_store import AgentViewStore
 from src.interfaces.turn_clock import TurnClock
 from src.interfaces.tui.app import AgentTuiApp
-from src.interfaces.tui.dialogs import SelectionDialog
+from src.interfaces.tui.dialogs import InlineSelectionWidget, SelectionDialog
 from src.interfaces.tui.widgets import (
     KeyboardNavigation,
     KeyboardOptionList,
@@ -581,7 +581,7 @@ def test_modal_controls_are_keyboard_only() -> None:
             )
             await app.coordinator.submit(choice)
             await pilot.pause()
-            options = app.screen.query_one(KeyboardOptionList)
+            options = app._history.query_one(KeyboardOptionList)
             assert options.has_focus
             assert options.highlighted == 0
 
@@ -611,8 +611,8 @@ def test_modal_controls_are_keyboard_only() -> None:
             )
             await app.coordinator.submit(choice_input)
             await pilot.pause()
-            navigation = app.screen.query_one("#choice-input-options", KeyboardNavigation)
-            dialog_input = app.screen.query_one("#dialog-input", TextArea)
+            navigation = app._history.query_one("#choice-input-options", KeyboardNavigation)
+            dialog_input = app._history.query_one("#dialog-input", TextArea)
             assert navigation.has_focus
 
             await pilot.click(dialog_input)
@@ -647,8 +647,8 @@ def test_modal_controls_are_keyboard_only() -> None:
             )
             await app.coordinator.submit(form)
             await pilot.pause()
-            form_body = app.screen.query_one("#form-body", KeyboardNavigation)
-            form_input = app.screen.query_one("#dialog-input", TextArea)
+            form_body = app._history.query_one("#form-body", KeyboardNavigation)
+            form_input = app._history.query_one("#dialog-input", TextArea)
             assert form_body.has_focus
 
             await pilot.click(form_input)
@@ -741,8 +741,8 @@ def test_modal_fifo_and_permission_over_transcript() -> None:
             await app.coordinator.submit(permission)
             await app.coordinator.submit(choice)
             await pilot.pause()
-            assert isinstance(app.screen, SelectionDialog)
-            assert app.screen.request is permission
+            assert isinstance(app.coordinator.inline_widget, InlineSelectionWidget)
+            assert app.coordinator.inline_widget.request is permission
             assert app.viewing_agent_id == "worker-0"
             assert app.coordinator.pending_summary == (1, "worker")
             modal_focus = app.focused
@@ -756,8 +756,8 @@ def test_modal_fifo_and_permission_over_transcript() -> None:
             await pilot.pause()
             assert await permission_future == "yes"
             assert app.viewing_agent_id == "worker-0"
-            assert isinstance(app.screen, SelectionDialog)
-            assert app.screen.request is choice
+            assert isinstance(app.coordinator.inline_widget, InlineSelectionWidget)
+            assert app.coordinator.inline_widget.request is choice
             await pilot.press("1")
             await pilot.pause()
             assert await choice_future == "ok"
@@ -1089,7 +1089,7 @@ def test_external_cancellation_cleans_modal_before_future_completion() -> None:
             complete = first.complete
 
             def observe(value: str) -> None:
-                observed.append((app.coordinator.active, app.coordinator.modal))
+                observed.append((app.coordinator.active, app.coordinator.inline_widget))
                 complete(value)
 
             first.complete = observe  # type: ignore[method-assign]
@@ -1117,7 +1117,7 @@ def test_external_cancellation_cleans_modal_before_future_completion() -> None:
             await pilot.pause()
             await asyncio.wait_for(app.coordinator.wait_idle(), timeout=1)
             assert app.coordinator.active is None
-            assert app.coordinator.modal is None
+            assert app.coordinator.inline_widget is None
             assert clock._human_wait_depth == 0
 
     asyncio.run(scenario())
@@ -1168,7 +1168,7 @@ def test_stream_follow_and_dialog_text_inputs() -> None:
             )
             await app.coordinator.submit(choice_input)
             await pilot.pause()
-            dialog_input = app.screen.query_one("#dialog-input")
+            dialog_input = app._history.query_one("#dialog-input")
             assert dialog_input.has_focus
             app.post_message(events.AppFocus())
             await pilot.pause()

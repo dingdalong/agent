@@ -320,3 +320,67 @@ ModalScreen {
     min-width: 20;
     padding: 0 1;
 }
+
+/* --- 内嵌交互 Widget（替代弹窗） --- */
+
+.inline-widget {
+    height: auto;
+    width: 100%;
+    margin: 1 0;
+    padding: 0;
+}
+
+/* 内嵌模式：无边框、无独立背景，融入聊天流；左侧竖线标记交互区块 */
+.inline-widget #dialog-shell {
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+    max-height: 100%;
+    border: none;
+    background: transparent;
+    padding: 0;
+    border-left: solid #6a7a84;
+    padding-left: 1;
+}
+
+.inline-widget .dialog-title {
+    color: #efc36a;
+    text-style: bold;
+}
+
+.inline-widget .dialog-source,
+.inline-widget .dialog-hint {
+    color: #8d989f;
+}
+
+.inline-widget .dialog-prompt,
+.inline-widget .dialog-detail {
+    margin: 0;
+    color: #d8dee4;
+}
+
+.inline-widget #dialog-options {
+    border: none;
+    background: transparent;
+}
+
+.inline-widget #dialog-input {
+    height: 4;
+    border: solid #3b464f;
+    background: #101315;
+    color: #f0f3f5;
+}
+
+.inline-widget #form-tabs {
+    color: #76d7c4;
+    text-style: bold;
+}
+
+.inline-widget #form-preview-pane {
+    border-left: solid #3b464f;
+    background: transparent;
+}
+
+.inline-widget-active #agent-list {
+    display: none;
+}

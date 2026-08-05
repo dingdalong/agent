@@ -12,6 +12,7 @@ from rich.markdown import Markdown as RichMarkdown
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import Markdown, Static, TextArea
 from textual.widgets.option_list import Option
@@ -161,6 +162,253 @@ class SelectionDialog(KeyboardDialog):
             self.dismiss(DialogResult(value="deny"))
         else:
             self.dismiss(DialogResult(cancelled=True))
+
+
+class InlineWidget(Vertical, can_focus=True):
+    """内嵌到聊天历史流中的交互基类。"""
+
+    FOCUS_ON_CLICK = False
+    ALLOW_SELECT = False
+
+    class Completed(Message):
+        """交互完成时发送。"""
+
+        def __init__(self, result: DialogResult) -> None:
+            super().__init__()
+            self.result = result
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(classes="inline-widget", **kwargs)
+        self._completed = False
+
+    def build_summary(self) -> str:
+        """构建完成后的摘要文本。"""
+        raise NotImplementedError
+
+    def restore_focus(self) -> None:
+        """恢复焦点到合适的子组件。"""
+        raise NotImplementedError
+
+
+class InlineSelectionWidget(InlineWidget):
+    """内嵌权限确认与单选菜单。"""
+
+    BINDINGS = [
+        Binding("escape", "cancel", show=False, priority=True),
+        *[
+            Binding(str(index), f"choose_number({index})", show=False, priority=True)
+            for index in range(1, 10)
+        ],
+    ]
+
+    def __init__(self, request: PermissionMenu | ChoiceMenu) -> None:
+        super().__init__()
+        self.request = request
+        self._chosen_label = ""
+
+    @property
+    def options(self) -> list[tuple[str, str]]:
+        if isinstance(self.request, PermissionMenu):
+            return [("yes", "允许一次"), ("deny", "拒绝 (esc)")]
+        return self.request.options
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="dialog-shell", classes=f"dialog-{self.request.type}"):
+            title = "工具请求权限" if isinstance(self.request, PermissionMenu) else "请选择"
+            yield Static(title, classes="dialog-title", markup=False)
+            source = _source_label(self.request)
+            if source:
+                yield Static(f"发起 Agent  {source}", classes="dialog-source", markup=False)
+            if isinstance(self.request, PermissionMenu):
+                yield Static(
+                    f"工具  {self.request.tool_name}\n内容  {self.request.detail}",
+                    classes="dialog-detail",
+                    markup=False,
+                )
+            elif self.request.prompt:
+                yield _prompt_widget(self.request)
+            yield KeyboardOptionList(
+                *[
+                    Option(_option_prompt(
+                        index,
+                        label,
+                        getattr(self.request, "markdown", False),
+                    ))
+                    for index, (_value, label) in enumerate(self.options, 1)
+                ],
+                id="dialog-options",
+                markup=False,
+            )
+
+    def on_mount(self) -> None:
+        options = self.query_one(KeyboardOptionList)
+        options.highlighted = min(
+            max(0, getattr(self.request, "default_index", 0)),
+            max(0, len(self.options) - 1),
+        )
+        self.restore_focus()
+
+    def restore_focus(self) -> None:
+        if self._completed:
+            return
+        self.query_one(KeyboardOptionList).focus()
+
+    def on_option_list_option_selected(
+        self,
+        event: KeyboardOptionList.OptionSelected,
+    ) -> None:
+        self._choose(event.option_index)
+
+    def action_choose_number(self, index: int) -> None:
+        self._choose(index - 1)
+
+    def _choose(self, index: int) -> None:
+        if self._completed:
+            return
+        if 0 <= index < len(self.options):
+            self._completed = True
+            self._chosen_label = self.options[index][1]
+            self.post_message(self.Completed(DialogResult(value=self.options[index][0])))
+
+    def action_cancel(self) -> None:
+        if self._completed:
+            return
+        self._completed = True
+        if isinstance(self.request, PermissionMenu):
+            self._chosen_label = "拒绝"
+            self.post_message(self.Completed(DialogResult(value="deny")))
+        else:
+            self.post_message(self.Completed(DialogResult(cancelled=True)))
+
+    def build_summary(self) -> str:
+        if isinstance(self.request, PermissionMenu):
+            return f"权限确认：{self.request.tool_name} → {self._chosen_label or '拒绝'}"
+        return f"选择：{self._chosen_label or self.request.prompt or ''}"
+
+
+class InlineChoiceInputWidget(InlineWidget):
+    """内嵌选项与自由输入互斥的交互。"""
+
+    BINDINGS = [
+        Binding("up", "move(-1)", show=False, priority=True),
+        Binding("down", "move(1)", show=False, priority=True),
+        Binding("enter", "submit", show=False, priority=True),
+        Binding("shift+enter", "newline", show=False, priority=True),
+        Binding("ctrl+j", "newline", show=False, priority=True),
+        Binding("escape", "cancel", show=False, priority=True),
+        *[
+            Binding(str(index), f"choose_number({index})", show=False, priority=True)
+            for index in range(1, 10)
+        ],
+    ]
+
+    def __init__(self, request: ChoiceInputMenu) -> None:
+        super().__init__()
+        self.request = request
+        self.row = min(max(0, request.default_index), len(request.options))
+        self._result_summary = ""
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="dialog-shell", classes="dialog-choice-input"):
+            yield Static("请选择或输入", classes="dialog-title", markup=False)
+            source = _source_label(self.request)
+            if source:
+                yield Static(f"发起 Agent  {source}", classes="dialog-source", markup=False)
+            if self.request.prompt:
+                yield _prompt_widget(self.request)
+            yield KeyboardNavigation("", id="choice-input-options", markup=False)
+            yield KeyboardTextArea(
+                "",
+                id="dialog-input",
+                soft_wrap=True,
+                show_line_numbers=False,
+                placeholder=self.request.input_placeholder,
+            )
+            yield Static(
+                "↑↓ 选择 · Enter/数字 确认 · Shift+Enter 换行 · Esc 取消",
+                classes="dialog-hint",
+                markup=False,
+            )
+
+    def on_mount(self) -> None:
+        self._render_rows()
+
+    def _render_rows(self) -> None:
+        lines: list[str] = []
+        descriptions = self.request.descriptions or []
+        for index, (_value, label) in enumerate(self.request.options):
+            marker = "❯" if self.row == index else " "
+            lines.append(f"{marker} {index + 1}. {label}")
+            if index < len(descriptions) and descriptions[index]:
+                lines.append(f"     {descriptions[index]}")
+        marker = "❯" if self.row == len(self.request.options) else " "
+        lines.append(f"{marker} ⌨ 自由输入")
+        self.query_one("#choice-input-options", KeyboardNavigation).update(
+            "\n".join(lines)
+        )
+        input_widget = self.query_one("#dialog-input", TextArea)
+        input_widget.read_only = self.row != len(self.request.options)
+        input_widget.show_cursor = not input_widget.read_only
+        self.restore_focus()
+
+    def restore_focus(self) -> None:
+        if self._completed:
+            return
+        input_widget = self.query_one("#dialog-input", TextArea)
+        if input_widget.read_only:
+            self.query_one("#choice-input-options", KeyboardNavigation).focus()
+        else:
+            input_widget.focus()
+
+    def action_move(self, delta: int) -> None:
+        self.row = min(max(0, self.row + delta), len(self.request.options))
+        self._render_rows()
+
+    def action_choose_number(self, index: int) -> None:
+        input_widget = self.query_one("#dialog-input", TextArea)
+        if self.row == len(self.request.options) and not input_widget.read_only:
+            input_widget.insert(str(index))
+            return
+        if 1 <= index <= len(self.request.options):
+            self._submit_choice(self.request.options[index - 1][0])
+
+    def action_submit(self) -> None:
+        if self._completed:
+            return
+        if self.row < len(self.request.options):
+            label = self.request.options[self.row][1]
+            self._result_summary = f"选择：{label}"
+            self._submit_choice(self.request.options[self.row][0])
+            return
+        text = self.query_one("#dialog-input", TextArea).text.strip()
+        if text:
+            self._completed = True
+            self._result_summary = f"输入：{text[:60]}"
+            self.post_message(self.Completed(DialogResult(value=json.dumps(
+                {"choice": "", "text": text}, ensure_ascii=False
+            ))))
+
+    def action_newline(self) -> None:
+        input_widget = self.query_one("#dialog-input", TextArea)
+        if not input_widget.read_only:
+            input_widget.insert("\n")
+
+    def _submit_choice(self, value: str) -> None:
+        if self._completed:
+            return
+        self._completed = True
+        self.post_message(self.Completed(DialogResult(value=json.dumps(
+            {"choice": value, "text": ""}, ensure_ascii=False
+        ))))
+
+    def action_cancel(self) -> None:
+        if self._completed:
+            return
+        self._completed = True
+        self.post_message(self.Completed(DialogResult(cancelled=True)))
+
+    def build_summary(self) -> str:
+        return self._result_summary or f"选择：{self.request.prompt or '选项输入'}"
 
 
 class ChoiceInputDialog(KeyboardDialog):
@@ -536,8 +784,6 @@ class FormDialog(KeyboardDialog):
         else:
             self.checked[self.tab] = {row}
             self.custom[self.tab] = ""
-            # 单选选中后自动前进到下一个问题
-            self.tab = min(self.tab + 1, len(self.request.questions))
         self._render_form(update_input=False)
 
     def action_choose_number(self, index: int) -> None:
@@ -593,6 +839,352 @@ class FormDialog(KeyboardDialog):
         self.dismiss(DialogResult(cancelled=True))
 
 
+class InlineFormWidget(InlineWidget):
+    """内嵌到聊天历史流中的 ask_user 多问题表单。
+
+    交互逻辑与 FormDialog 完全一致（tab 切换、选项选择、讨论等），
+    但以普通 Widget 挂载到 HistoryPanel 中，而非 ModalScreen 弹窗。
+    完成时发送 Completed Message 而非 dismiss。
+    """
+
+    BINDINGS = [
+        Binding("left", "move_tab(-1)", show=False, priority=True),
+        Binding("right", "move_tab(1)", show=False, priority=True),
+        Binding("up", "move_row(-1)", show=False, priority=True),
+        Binding("down", "move_row(1)", show=False, priority=True),
+        Binding("space", "toggle", show=False, priority=True),
+        Binding("enter", "confirm", show=False, priority=True),
+        Binding("tab", "toggle_discussion", show=False, priority=True),
+        Binding("shift+enter", "newline", show=False, priority=True),
+        Binding("ctrl+j", "newline", show=False, priority=True),
+        Binding("escape", "cancel", show=False, priority=True),
+        *[
+            Binding(str(index), f"choose_number({index})", show=False, priority=True)
+            for index in range(1, 10)
+        ],
+    ]
+
+    def __init__(self, request: FormMenu) -> None:
+        super().__init__()
+        self.request = request
+        self.tab = 0
+        self.zone = "answer"
+        self.rows = [0 for _ in request.questions]
+        self.checked: list[set[int]] = [set() for _ in request.questions]
+        self.custom = ["" for _ in request.questions]
+        self.discussion = ""
+        self._loading_input = False
+        self._has_any_preview = any(q.has_previews for q in request.questions)
+
+    def _current_has_previews(self) -> bool:
+        if self.tab >= len(self.request.questions):
+            return False
+        return self.request.questions[self.tab].has_previews
+
+    def compose(self) -> ComposeResult:
+        classes = "dialog-form dialog-form-preview" if self._has_any_preview else "dialog-form"
+        with Vertical(id="dialog-shell", classes=classes):
+            source = _source_label(self.request)
+            if source:
+                yield Static(
+                    f"[#efc36a bold]问题[/]  ·  {source}",
+                    classes="dialog-title",
+                )
+            else:
+                yield Static("问题", classes="dialog-title", markup=False)
+            yield Static("", id="form-tabs", markup=False)
+            if self._has_any_preview:
+                yield Static("", id="form-question-text", markup=False)
+                with Horizontal(id="form-split"):
+                    with Vertical(id="form-left"):
+                        yield KeyboardNavigation("", id="form-body", markup=False)
+                        yield KeyboardTextArea(
+                            "",
+                            id="dialog-input",
+                            soft_wrap=True,
+                            show_line_numbers=False,
+                            placeholder="输入自定义回答…",
+                        )
+                    with VerticalScroll(id="form-preview-pane"):
+                        yield Markdown("", id="form-preview")
+            else:
+                yield KeyboardNavigation("", id="form-body", markup=False)
+                yield KeyboardTextArea(
+                    "",
+                    id="dialog-input",
+                    soft_wrap=True,
+                    show_line_numbers=False,
+                    placeholder="输入自定义回答…",
+                )
+            yield Static("", id="form-hint", classes="dialog-hint", markup=False)
+
+    def on_mount(self) -> None:
+        self._render_form()
+
+    def on_text_area_changed(self, event: TextArea.Changed) -> None:
+        if self._loading_input:
+            return
+        if self.zone == "discussion":
+            self.discussion = event.text_area.text
+        elif self.tab < len(self.request.questions):
+            question = self.request.questions[self.tab]
+            if self.rows[self.tab] == self._option_count(question):
+                self.custom[self.tab] = event.text_area.text
+        self._render_form(update_input=False)
+
+    @staticmethod
+    def _option_count(question: FormQuestion) -> int:
+        return len(question.options or [])
+
+    def _answer(self, index: int) -> str:
+        question = self.request.questions[index]
+        options = question.options
+        if options is None:
+            return self.custom[index]
+        if question.multi_select:
+            values = [options[item][0] for item in sorted(self.checked[index])]
+            if self.custom[index].strip():
+                values.append(self.custom[index].strip())
+            return "、".join(values)
+        if self.checked[index]:
+            return options[min(self.checked[index])][0]
+        return self.custom[index]
+
+    def _render_form(self, *, update_input: bool = True) -> None:
+        labels: list[str] = []
+        for index, question in enumerate(self.request.questions):
+            marker = "☑" if self._answer(index) else "☐"
+            label = f"{marker} {question.header or f'问题{index + 1}'}"
+            labels.append(f"[{label}]" if self.tab == index else label)
+        labels.append("[提交]" if self.tab == len(self.request.questions) else "提交")
+        self.query_one("#form-tabs", Static).update("  ".join(labels))
+
+        if self.tab == len(self.request.questions):
+            lines = ["回答小结"]
+            for index in range(len(self.request.questions)):
+                lines.append(f"问题{index + 1}：{self._answer(index) or '未作答'}")
+        else:
+            question = self.request.questions[self.tab]
+            options = question.options or []
+            descriptions = question.descriptions or []
+            lines = [question.question]
+            for index, (_value, label) in enumerate(options):
+                selected = index in self.checked[self.tab]
+                mark = (
+                    "[x]" if question.multi_select and selected
+                    else "[ ]" if question.multi_select
+                    else "●" if selected
+                    else "○"
+                )
+                cursor = "❯" if self.zone == "answer" and self.rows[self.tab] == index else " "
+                lines.append(f"{cursor} {mark} {index + 1}. {label}")
+                if not self._current_has_previews() and index < len(descriptions) and descriptions[index]:
+                    lines.append(f"      {descriptions[index]}")
+            custom_cursor = (
+                "❯" if self.zone == "answer" and self.rows[self.tab] == len(options) else " "
+            )
+            lines.append(f"{custom_cursor} ⌨ 其他: {self.custom[self.tab] or '输入回答…'}")
+
+        if self._has_any_preview:
+            question_text_widget = self.query_one("#form-question-text", Static)
+            if self.tab < len(self.request.questions):
+                question_text_widget.update(lines[0])
+                self.query_one("#form-body", KeyboardNavigation).update(
+                    "\n".join(lines[1:])
+                )
+            else:
+                question_text_widget.update("")
+                self.query_one("#form-body", KeyboardNavigation).update(
+                    "\n".join(lines)
+                )
+        else:
+            self.query_one("#form-body", KeyboardNavigation).update("\n".join(lines))
+
+        input_widget = self.query_one("#dialog-input", TextArea)
+        editable = self._input_editable()
+        input_widget.display = editable
+        input_widget.read_only = not editable
+        input_widget.show_cursor = editable
+        if update_input and editable:
+            value = self.discussion if self.zone == "discussion" else self.custom[self.tab]
+            self._loading_input = True
+            input_widget.load_text(value)
+            input_widget.move_cursor((len(value.split("\n")) - 1, len(value.split("\n")[-1])))
+            self._loading_input = False
+        if editable:
+            input_widget.placeholder = (
+                "讨论这几个问题…" if self.zone == "discussion" else "输入自定义回答…"
+            )
+
+        if self._has_any_preview:
+            pane = self.query_one("#form-preview-pane", VerticalScroll)
+            preview_widget = self.query_one("#form-preview", Markdown)
+            if self._current_has_previews():
+                question = self.request.questions[self.tab]
+                previews = question.previews or []
+                row = self.rows[self.tab]
+                if row < len(previews) and previews[row].strip():
+                    preview_widget.update(previews[row])
+                    pane.display = True
+                else:
+                    pane.display = False
+                pane.scroll_home(animate=False)
+            else:
+                pane.display = False
+
+        self.restore_focus()
+        hint = (
+            "Tab 返回答题 · Enter 提交 · Shift+Enter 换行 · Esc 取消"
+            if self.zone == "discussion"
+            else "↑↓ 选择 · ←→ 切换问题 · Space/数字 选择 · Tab 讨论 · Esc 取消"
+        )
+        self.query_one("#form-hint", Static).update(hint)
+
+    def _input_editable(self) -> bool:
+        return self.zone == "discussion" or (
+            self.tab < len(self.request.questions)
+            and self.rows[self.tab]
+            == self._option_count(self.request.questions[self.tab])
+        )
+
+    def restore_focus(self) -> None:
+        if self._completed:
+            return
+        if self._input_editable():
+            self.query_one("#dialog-input", TextArea).focus()
+        else:
+            self.query_one("#form-body", KeyboardNavigation).focus()
+
+    def _commit_input(self) -> None:
+        input_widget = self.query_one("#dialog-input", TextArea)
+        if self.zone == "discussion":
+            self.discussion = input_widget.text
+        elif (
+            self.tab < len(self.request.questions)
+            and self.rows[self.tab]
+            == self._option_count(self.request.questions[self.tab])
+            and input_widget.display
+            and not input_widget.read_only
+        ):
+            self.custom[self.tab] = input_widget.text
+            question = self.request.questions[self.tab]
+            if question.options is not None and not question.multi_select and input_widget.text.strip():
+                self.checked[self.tab].clear()
+
+    def action_move_tab(self, delta: int) -> None:
+        if self.zone != "answer":
+            return
+        self._commit_input()
+        self.tab = min(max(0, self.tab + delta), len(self.request.questions))
+        self._render_form()
+
+    def action_move_row(self, delta: int) -> None:
+        if self.zone != "answer" or self.tab >= len(self.request.questions):
+            return
+        self._commit_input()
+        maximum = self._option_count(self.request.questions[self.tab])
+        self.rows[self.tab] = min(max(0, self.rows[self.tab] + delta), maximum)
+        self._render_form()
+
+    def action_toggle(self) -> None:
+        input_widget = self.query_one("#dialog-input", TextArea)
+        if self.zone == "discussion":
+            input_widget.insert(" ")
+            return
+        if self.tab >= len(self.request.questions):
+            return
+        question = self.request.questions[self.tab]
+        options = question.options or []
+        row = self.rows[self.tab]
+        if row >= len(options):
+            if input_widget.display and not input_widget.read_only:
+                input_widget.insert(" ")
+            return
+        if question.multi_select:
+            if row in self.checked[self.tab]:
+                self.checked[self.tab].remove(row)
+            else:
+                self.checked[self.tab].add(row)
+        elif row in self.checked[self.tab]:
+            self.checked[self.tab].clear()
+        else:
+            self.checked[self.tab] = {row}
+            self.custom[self.tab] = ""
+            # 单选选中后自动前进到下一个问题
+            self.tab = min(self.tab + 1, len(self.request.questions))
+        self._render_form(update_input=False)
+
+    def action_choose_number(self, index: int) -> None:
+        input_widget = self.query_one("#dialog-input", TextArea)
+        if self.zone == "discussion":
+            input_widget.insert(str(index))
+            return
+        if self.tab >= len(self.request.questions):
+            return
+        question = self.request.questions[self.tab]
+        options = question.options or []
+        if self.rows[self.tab] == len(options) and not input_widget.read_only:
+            input_widget.insert(str(index))
+            return
+        if 1 <= index <= len(options):
+            self.rows[self.tab] = index - 1
+            self.action_toggle()
+
+    def action_confirm(self) -> None:
+        self._commit_input()
+        if self.zone == "discussion" or self.tab == len(self.request.questions):
+            self._submit()
+            return
+        question = self.request.questions[self.tab]
+        options = question.options or []
+        if options and not question.multi_select and self.rows[self.tab] < len(options):
+            self.action_toggle()
+            return
+        self.tab = min(self.tab + 1, len(self.request.questions))
+        self._render_form()
+
+    def action_toggle_discussion(self) -> None:
+        self._commit_input()
+        self.zone = "answer" if self.zone == "discussion" else "discussion"
+        self._render_form()
+
+    def action_newline(self) -> None:
+        input_widget = self.query_one("#dialog-input", TextArea)
+        if input_widget.display and not input_widget.read_only:
+            input_widget.insert("\n")
+
+    def _submit(self) -> None:
+        if self._completed:
+            return
+        self._completed = True
+        payload = json.dumps(
+            {
+                "answers": [self._answer(index) for index in range(len(self.request.questions))],
+                "discussion": self.discussion.strip(),
+            },
+            ensure_ascii=False,
+        )
+        self.post_message(self.Completed(DialogResult(value=payload)))
+
+    def action_cancel(self) -> None:
+        if self._completed:
+            return
+        self._completed = True
+        self.post_message(self.Completed(DialogResult(cancelled=True)))
+
+    def build_summary(self) -> str:
+        """构建提交后的回答摘要文本。"""
+        parts: list[str] = []
+        for index, question in enumerate(self.request.questions):
+            header = question.header or f"问题{index + 1}"
+            answer = self._answer(index) or "未作答"
+            parts.append(f"  {header} → {answer}")
+        lines = ["用户选择："] + parts
+        if self.discussion.strip():
+            lines.append(f"讨论：{self.discussion.strip()}")
+        return "\n".join(lines)
+
+
 def make_dialog(request: MenuRequest) -> KeyboardDialog:
     if isinstance(request, FormMenu):
         return FormDialog(request)
@@ -601,6 +1193,16 @@ def make_dialog(request: MenuRequest) -> KeyboardDialog:
     if isinstance(request, (PermissionMenu, ChoiceMenu)):
         return SelectionDialog(request)
     raise TypeError(f"unsupported modal request: {type(request)!r}")
+
+
+def _make_inline_widget(request: MenuRequest) -> InlineWidget:
+    if isinstance(request, FormMenu):
+        return InlineFormWidget(request)
+    if isinstance(request, ChoiceInputMenu):
+        return InlineChoiceInputWidget(request)
+    if isinstance(request, (PermissionMenu, ChoiceMenu)):
+        return InlineSelectionWidget(request)
+    raise TypeError(f"unsupported inline request: {type(request)!r}")
 
 
 class InteractionCoordinator:
@@ -613,6 +1215,7 @@ class InteractionCoordinator:
         self.queue: deque[MenuRequest] = deque()
         self.view_request: ViewRequest | None = None
         self.modal: KeyboardDialog | None = None
+        self.inline_widget: InlineWidget | None = None
         self._cleanup_tasks: set[asyncio.Task] = set()
         self._closed = False
         self._detached = False
@@ -622,6 +1225,10 @@ class InteractionCoordinator:
     @property
     def modal_active(self) -> bool:
         return self.modal is not None
+
+    @property
+    def inline_widget_active(self) -> bool:
+        return self.inline_widget is not None
 
     @property
     def input_active(self) -> bool:
@@ -676,13 +1283,12 @@ class InteractionCoordinator:
             return
         self.turn_clock.enter_human_wait()
         try:
-            self.modal = make_dialog(request)
-            self.app.set_screen_class(True, "dialog-open")
-            self.app.push_screen(self.modal, callback=self._modal_finished)
+            self.inline_widget = _make_inline_widget(request)
+            await self.app.mount_inline_widget(self.inline_widget)
         except BaseException as exc:
             self.turn_clock.exit_human_wait()
             self.active = None
-            self.modal = None
+            self.inline_widget = None
             request.fail(exc)
             await self._pump()
             raise
@@ -719,6 +1325,33 @@ class InteractionCoordinator:
         self.app.set_screen_class(False, "dialog-open")
         self.turn_clock.exit_human_wait()
         self.active = None
+        await asyncio.sleep(0)
+        if request.future is not None and not request.future.done():
+            if result.cancelled:
+                request.complete("")
+            else:
+                request.complete(result.value)
+        await self._pump()
+        self.app.restore_focus()
+        self.app.refresh_chrome()
+
+    async def _finish_inline_widget(self, result: DialogResult) -> None:
+        """内嵌交互完成后：移除 widget、追加摘要、结算 Future。"""
+        request = self.active
+        if request is None or isinstance(request, InputMenu):
+            return
+        widget = self.inline_widget
+        self.inline_widget = None
+        self.turn_clock.exit_human_wait()
+        self.active = None
+        # 移除 widget 并追加摘要
+        if widget is not None and widget.is_mounted:
+            summary = widget.build_summary() if not result.cancelled else ""
+            await widget.remove()
+            if result.cancelled:
+                await self.app.append_output("[用户取消了作答]")
+            else:
+                await self.app.append_output(summary)
         await asyncio.sleep(0)
         if request.future is not None and not request.future.done():
             if result.cancelled:
@@ -779,7 +1412,11 @@ class InteractionCoordinator:
             request.cancel()
         elif self.active is not None:
             self.active.cancel()
-            if render and self.modal is not None and self.modal.is_current:
+            if self.inline_widget is not None:
+                if render and self.inline_widget.is_mounted:
+                    self._schedule(self.inline_widget.remove())
+                self.inline_widget = None
+            elif render and self.modal is not None and self.modal.is_current:
                 self.modal.dismiss(DialogResult(cancelled=True))
             elif not render:
                 self.modal = None
@@ -791,6 +1428,7 @@ class InteractionCoordinator:
         if not render:
             self.active = None
             self.modal = None
+            self.inline_widget = None
             self.turn_clock.reset()
         self._sync_idle()
         if render:
@@ -822,6 +1460,7 @@ class InteractionCoordinator:
         self.queue.clear()
         self.view_request = None
         self.modal = None
+        self.inline_widget = None
         self.turn_clock.reset()
         self._sync_idle()
         return snapshot
@@ -843,6 +1482,9 @@ class InteractionCoordinator:
                     self.app.finish_input_cancelled()
                 self.active = None
                 await self._pump()
+            elif self.inline_widget is not None:
+                if self._render_available() and self.inline_widget.is_mounted:
+                    self.inline_widget.action_cancel()
             elif self._render_available() and self.modal is not None and self.modal.is_current:
                 self.modal.dismiss(DialogResult(cancelled=True))
             return
