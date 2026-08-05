@@ -562,11 +562,8 @@ def test_keyboard_focus_moves_between_composer_agent_list_and_transcript() -> No
             app._schedule_agent_refresh()
             await app.workers.wait_for_complete()
             await pilot.pause()
-            assert app._agent_list.display
-            assert app._agent_list.has_focus
-            assert app._composer.read_only
-            assert not app._composer._draw_cursor
-            assert app._main_focus_target == "agent_list"
+            assert not app._agent_list.display
+            assert app._composer.has_focus
 
     asyncio.run(scenario())
 

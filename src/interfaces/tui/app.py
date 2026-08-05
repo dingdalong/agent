@@ -765,15 +765,13 @@ class AgentTuiApp(App[None]):
             self.focus_composer()
 
     def _has_sub_agents(self) -> bool:
-        return bool(self.agent_view_store.subagent_snapshots())
+        return any(s.running for s in self.agent_view_store.subagent_snapshots())
 
     def _browser_snapshots(self):
-        main = [
-            snapshot
-            for snapshot in self.agent_view_store.active_agent_snapshots()
-            if snapshot.is_main
-        ]
-        return main + self.agent_view_store.subagent_snapshots()
+        snapshots = self.agent_view_store.active_agent_snapshots()
+        main = [s for s in snapshots if s.is_main]
+        subagents = [s for s in snapshots if not s.is_main]
+        return main + subagents
 
     def focus_agent_list(self) -> bool:
         if (
