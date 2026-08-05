@@ -13,9 +13,7 @@ Screen > .screen--selection {
     height: 1fr;
     padding: 0 2;
     background: ansi_default;
-    scrollbar-color: #53616c;
-    scrollbar-color-hover: #7a8b97;
-    scrollbar-color-active: #2f9f91;
+    scrollbar-size: 0 0;
 }
 
 #history Markdown {
@@ -112,7 +110,7 @@ MarkdownFence {
     border: none;
     background: ansi_default;
     color: #f0f3f5;
-    scrollbar-size: 1 1;
+    scrollbar-size: 0 0;
 }
 
 #input .text-area--selection, #dialog-input .text-area--selection {
