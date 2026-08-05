@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 from rich.text import Text
 
 from src.interfaces.agent_view_store import (
@@ -10,6 +12,8 @@ from src.interfaces.agent_view_store import (
     SessionSnapshot,
     TokenUsage,
 )
+
+_SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 
 def format_token_count(count: int) -> str:
@@ -107,9 +111,22 @@ def present_agent_identity(
     Returns:
         Rich text containing identity, optionally followed by the status slot.
     """
-    short_uuid = snapshot.uuid.split("-")[0] if snapshot.uuid else ""
-    text = Text(f"◯ {snapshot.agent_type}  {short_uuid}", style=base_style)
-    if show_status:
+    # 状态图标：运行中用 spinner 动画帧，已完成用 ✔
+    if snapshot.running:
+        frame = _SPINNER[int(time.monotonic() * 10) % len(_SPINNER)]
+        icon = f"{frame} "
+    else:
+        icon = "✔ "
+
+    # 身份 + 任务描述（替代短 UUID + 状态文字）
+    task_label = snapshot.task or ""
+    if task_label:
+        text = Text(f"{icon}{snapshot.agent_type}  {task_label}", style=base_style)
+    else:
+        # 无任务描述时回退到短 UUID
+        short_uuid = snapshot.uuid.split("-")[0] if snapshot.uuid else ""
+        text = Text(f"{icon}{snapshot.agent_type}  {short_uuid}", style=base_style)
+    if show_status and not snapshot.task:
         text.append(f"  {_agent_status_label(snapshot)}", style=base_style)
     return text
 
@@ -146,7 +163,7 @@ def present_ended_agent(agent_uuid: str, base_style: str = "") -> Text:
         Rich text containing the short UUID and ended state.
     """
     short_uuid = agent_uuid.split("-")[0] if agent_uuid else ""
-    return Text(f"◯ {short_uuid}  已结束", style=base_style)
+    return Text(f"✔ {short_uuid}  已结束", style=base_style)
 
 
 def _present_metrics(

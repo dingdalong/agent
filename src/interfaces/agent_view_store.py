@@ -60,6 +60,7 @@ class AgentSnapshot:
     context: ContextUsage
     elapsed_seconds: float
     activity: str = ""
+    task: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +86,7 @@ class _AgentState:
     messages: list[dict] | None = None
     activity: str = ""  # 该 agent 的最新活动文案（等待响应/思考中/回应中/工具名），驱动底部列表实时显示
     active_tools: dict[str, str] = field(default_factory=dict)  # 在飞工具 {tool_call_id: tool_name}，用于并发下判断本轮工具是否全部完成、正确复位状态词
+    task: str = ""  # 委派时的任务摘要，供子 agent 状态行展示
 
 
 class AgentViewStore:
@@ -518,6 +520,8 @@ class AgentViewStore:
                 state.agent_type = event.agent_type or state.agent_type
                 if state.started_monotonic is None:
                     state.started_monotonic = self._clock()
+            if event.task:
+                state.task = event.task
             return
         if state is None:
             state = self._new_state(
@@ -642,6 +646,7 @@ class AgentViewStore:
             context=state.context,
             elapsed_seconds=elapsed,
             activity=state.activity,
+            task=state.task,
         )
 
     @staticmethod

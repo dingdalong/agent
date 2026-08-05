@@ -1,6 +1,8 @@
-"""子 agent 状态槽展示测试：运行中显示实时活动、完成后显示「已完成」、顶部可隐藏状态词。"""
+"""子 agent 状态行展示测试：运行中用 spinner + 任务描述，完成后用 ✔ + 任务描述。"""
 
 from __future__ import annotations
+
+import re
 
 from src.interfaces.agent_view_store import (
     AgentSnapshot,
@@ -10,12 +12,13 @@ from src.interfaces.agent_view_store import (
 from src.interfaces import status_presenter
 
 
-def _snapshot(running: bool, activity: str) -> AgentSnapshot:
+def _snapshot(running: bool, activity: str, task: str = "") -> AgentSnapshot:
     """构造用于展示断言的 agent 快照。
 
     Args:
         running: 是否仍在运行。
         activity: 当前实时活动文案。
+        task: 委派时的任务摘要。
 
     Returns:
         填好统一 token/context/耗时的不可变快照。
@@ -29,57 +32,95 @@ def _snapshot(running: bool, activity: str) -> AgentSnapshot:
         context=ContextUsage(used_tokens=9_200, limit_tokens=200_000),
         elapsed_seconds=67.0,
         activity=activity,
+        task=task,
     )
 
 
-def test_present_agent_running_shows_live_activity_in_status_slot() -> None:
-    """验证运行中的 agent 状态槽显示实时活动，且不再追加重复的活动后缀。
+_METRICS_SUFFIX = "↑32.5k(71%) ↓1.3k · 上下文 9.2k(5%) · 1m7s"
+_SPINNER_CHARS = set("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
+
+
+def test_present_agent_running_with_task_shows_spinner_and_task() -> None:
+    """验证运行中的 agent 显示 spinner 图标 + 任务描述（无状态文字）。
 
     Returns:
         无返回值。
     """
-    rendered = status_presenter.present_agent(_snapshot(running=True, activity="思考中")).plain
+    rendered = status_presenter.present_agent(
+        _snapshot(running=True, activity="思考中", task="分析代码结构"),
+    ).plain
 
-    assert rendered == (
-        "◯ repository-map  2011235e  思考中  ↑32.5k(71%) ↓1.3k · 上下文 9.2k(5%) · 1m7s"
-    )
-    assert not rendered.endswith("· 思考中")
-
-
-def test_present_agent_running_without_activity_falls_back_to_running_label() -> None:
-    """验证运行中但尚无实时活动时状态槽回退「运行中」。
-
-    Returns:
-        无返回值。
-    """
-    rendered = status_presenter.present_agent(_snapshot(running=True, activity="")).plain
-
-    assert rendered == (
-        "◯ repository-map  2011235e  运行中  ↑32.5k(71%) ↓1.3k · 上下文 9.2k(5%) · 1m7s"
-    )
+    # spinner 帧字符 + 空格 + agent_type + 两空格 + 任务描述 + 两空格 + metrics
+    assert rendered[0] in _SPINNER_CHARS
+    assert f"repository-map  分析代码结构  {_METRICS_SUFFIX}" in rendered
+    # 不含短 UUID
+    assert "2011235e" not in rendered
+    # 不含状态文字
+    assert "思考中" not in rendered
 
 
-def test_present_agent_completed_shows_done_label_ignoring_stale_activity() -> None:
-    """验证已结束的 agent 状态槽显示「已完成」，忽略结束后残留的陈旧活动。
+def test_present_agent_completed_with_task_shows_checkmark_and_task() -> None:
+    """验证已完成的 agent 显示 ✔ 图标 + 任务描述（无状态文字）。
 
     Returns:
         无返回值。
     """
-    rendered = status_presenter.present_agent(_snapshot(running=False, activity="思考中")).plain
+    rendered = status_presenter.present_agent(
+        _snapshot(running=False, activity="思考中", task="分析代码结构"),
+    ).plain
 
-    assert rendered == (
-        "◯ repository-map  2011235e  已完成  ↑32.5k(71%) ↓1.3k · 上下文 9.2k(5%) · 1m7s"
-    )
+    assert rendered == f"✔ repository-map  分析代码结构  {_METRICS_SUFFIX}"
+
+
+def test_present_agent_running_without_task_falls_back_to_uuid() -> None:
+    """验证运行中但无任务描述时回退到短 UUID + 状态文字。
+
+    Returns:
+        无返回值。
+    """
+    rendered = status_presenter.present_agent(
+        _snapshot(running=True, activity="思考中"),
+    ).plain
+
+    assert rendered[0] in _SPINNER_CHARS
+    assert "repository-map  2011235e  思考中" in rendered
+
+
+def test_present_agent_completed_without_task_falls_back_to_uuid() -> None:
+    """验证已完成但无任务描述时回退到短 UUID + 状态文字。
+
+    Returns:
+        无返回值。
+    """
+    rendered = status_presenter.present_agent(
+        _snapshot(running=False, activity="思考中"),
+    ).plain
+
+    assert rendered == f"✔ repository-map  2011235e  已完成  {_METRICS_SUFFIX}"
 
 
 def test_present_agent_identity_omits_status_slot_for_transcript_header() -> None:
-    """验证 show_status=False 时身份行仅含标记/类型/短 uuid，不含任何状态词（顶部标题栏用）。
+    """验证 show_status=False 时身份行仅含图标/类型/任务描述或短 uuid，不含状态词。
 
     Returns:
         无返回值。
     """
-    for running in (True, False):
-        snapshot = _snapshot(running=running, activity="思考中")
-        assert status_presenter.present_agent_identity(
-            snapshot, show_status=False
-        ).plain == "◯ repository-map  2011235e"
+    # 有任务描述
+    snapshot = _snapshot(running=False, activity="思考中", task="分析代码结构")
+    assert status_presenter.present_agent_identity(
+        snapshot, show_status=False,
+    ).plain == "✔ repository-map  分析代码结构"
+
+    # 无任务描述，回退到短 UUID
+    snapshot = _snapshot(running=False, activity="思考中")
+    assert status_presenter.present_agent_identity(
+        snapshot, show_status=False,
+    ).plain == "✔ repository-map  2011235e"
+
+    # 运行中
+    snapshot = _snapshot(running=True, activity="思考中", task="分析代码结构")
+    rendered = status_presenter.present_agent_identity(
+        snapshot, show_status=False,
+    ).plain
+    assert rendered[0] in _SPINNER_CHARS
+    assert "repository-map  分析代码结构" in rendered

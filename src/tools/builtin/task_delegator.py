@@ -41,4 +41,5 @@ async def task_delegator(
     """
     return await agent._subagent_mgr.task_delegator(
         agent_type, prompt, parent_agent=agent, task_id=task_id,
+        description=description,
     )

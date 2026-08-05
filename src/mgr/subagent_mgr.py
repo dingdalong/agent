@@ -88,6 +88,7 @@ class SubAgentMgr:
         *,
         parent_agent: Any = None,
         task_id: str | None = None,
+        description: str = "",
     ) -> str:
         """委派任务给子智能体并返回执行结果。
 
@@ -100,6 +101,7 @@ class SubAgentMgr:
             prompt: 传给子智能体的完整任务正文。
             parent_agent: 调用方 Agent 实例，用于管理父任务状态和触发 hooks。
             task_id: 关联的任务 ID（可选），指定后框架自动管理任务状态。
+            description: 委派的任务摘要，传入生命周期事件供 UI 展示。
 
         Returns:
             子智能体的执行结果文本，或错误信息。
@@ -202,6 +204,7 @@ class SubAgentMgr:
                     agent_uuid=str(agent.uuid),
                     agent_type=agent_type,
                     phase="start",
+                    task=description,
                 ))
 
             run_result = await agent.run(prompt)
@@ -224,6 +227,7 @@ class SubAgentMgr:
                         agent_uuid=str(agent.uuid),
                         agent_type=agent_type,
                         phase="end",
+                        task=description,
                         messages=list(agent.history),
                     ))
                 except BaseException:
