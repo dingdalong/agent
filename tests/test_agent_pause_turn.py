@@ -1160,7 +1160,7 @@ def test_new_recovery_chain_attempts_ignore_prior_length_recoveries() -> None:
 
 
 def test_cancel_after_compact_restores_turn_start_history_and_recovery_state() -> None:
-    """compact 改写历史后的取消应按快照恢复本轮前历史。
+    """compact 改写历史后的取消应保留本轮消息并补中断标记。
 
     Returns:
         None。
@@ -1208,7 +1208,13 @@ def test_cancel_after_compact_restores_turn_start_history_and_recovery_state() -
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(agent._run_single_turn(ctx, AgentState.LLM_CALL))
 
-    assert agent.history == turn_start_messages
+    # 中断保留历史（不回滚）：回滚恢复链后到干净尾部 [压缩摘要, 当前问题]，
+    # 再补一条中断标记 assistant 消息。
+    assert agent.history == [
+        {"role": "user", "content": "压缩摘要"},
+        {"role": "user", "content": "当前问题"},
+        {"role": "assistant", "content": "⏸ 本轮已被用户中断。"},
+    ]
     assert agent._pending_input == "当前问题"
     assert ctx.response_recovery_start_idx is None
     assert ctx.response_recovery_response_count == 0
@@ -1217,7 +1223,7 @@ def test_cancel_after_compact_restores_turn_start_history_and_recovery_state() -
 
 
 def test_subagent_run_restores_automatic_snapshot_after_compact_pause_cancel() -> None:
-    """直接输入路径应在 compact 与 pause 之前自动保存本轮历史快照。
+    """直接输入路径在 compact 与 pause 取消后保留本轮消息并补中断标记。
 
     Returns:
         None。
@@ -1324,5 +1330,11 @@ def test_subagent_run_restores_automatic_snapshot_after_compact_pause_cancel() -
 
     assert len(provider.requests) == 2
     assert provider.requests[1]["messages"][-1] == pause_carrier
-    assert agent.history == turn_start_messages
+    # 中断保留历史（不回滚）：compact 改写后历史为 [压缩摘要, 当前问题]，
+    # 取消时回滚恢复链移除 pause 载体、补中断标记 assistant 消息。
+    assert agent.history == [
+        {"role": "user", "content": "压缩摘要"},
+        {"role": "user", "content": "当前问题"},
+        {"role": "assistant", "content": "⏸ 本轮已被用户中断。"},
+    ]
     assert agent._pending_input == "当前问题"

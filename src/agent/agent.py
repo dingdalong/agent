@@ -410,11 +410,35 @@ class Agent:
         except (asyncio.CancelledError, KeyboardInterrupt):
             self._rollback_response_recovery(ctx)
             if ctx.turn_start_messages is not None:
-                self.history[:] = ctx.turn_start_messages
+                # 不回滚本轮，保留已生成内容，仅裁掉悬空的
+                # tool_use 尾部，再补一条中断标记 assistant 消息，保证历史连续合法。
+                self._truncate_to_clean_interrupt_tail()
+                self._append_message(self.history, {
+                    "role": "assistant",
+                    "content": "⏸ 本轮已被用户中断。",
+                })
             else:
                 del self.history[ctx.round_start_idx:]
-            self._pending_input = ctx.user_input
+            self._pending_input = ctx.user_input  # 保留预填，方便改完重发
             raise
+
+    def _truncate_to_clean_interrupt_tail(self) -> None:
+        """中断后把历史裁到最近的合法尾部。
+
+        规则：从末尾向前，丢弃尾部的 tool 消息和带 tool_calls 的 assistant 消息
+        （它们的 tool_use 没有配对 tool_result，是悬空调用），直到历史以
+        user 消息或不含 tool_calls 的 assistant 消息结尾。
+        """
+        msgs = self.history
+        while msgs:
+            last = msgs[-1]
+            if last.get("role") == "tool":
+                msgs.pop()
+                continue
+            if last.get("role") == "assistant" and last.get("tool_calls"):
+                msgs.pop()
+                continue
+            break
 
     @staticmethod
     def _rollback_response_recovery(ctx: RunContext) -> None:
