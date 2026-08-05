@@ -217,3 +217,59 @@ def _combine_styles(base_style: str, added_style: str) -> str:
         Space-separated Rich style string.
     """
     return f"{base_style} {added_style}".strip()
+
+
+def present_task_panel(
+    tasks: list[dict],
+    max_pending_visible: int = 3,
+    max_completed_visible: int = 1,
+) -> list[str]:
+    """渲染任务进度面板行（汇总行 + 逐项列表）。
+
+    Args:
+        tasks: AgentViewStore.task_snapshot() 返回的任务摘要字典列表。
+        max_pending_visible: 最多显示的待处理任务数，超出折叠。
+        max_completed_visible: 最多显示的已完成任务数，超出折叠。
+
+    Returns:
+        带缩进的展示行列表。空任务列表时返回空列表。
+    """
+    if not tasks:
+        return []
+
+    in_progress = [t for t in tasks if t["status"] == "in_progress"]
+    pending = [t for t in tasks if t["status"] == "pending"]
+    completed = [t for t in tasks if t["status"] == "completed"]
+
+    # 汇总行
+    total = len(tasks)
+    parts: list[str] = []
+    if completed:
+        parts.append(f"{len(completed)} 已完成")
+    if in_progress:
+        parts.append(f"{len(in_progress)} 进行中")
+    if pending:
+        parts.append(f"{len(pending)} 待处理")
+    lines = [f"    {total} 任务 ({', '.join(parts)})"]
+
+    # 明细行：in_progress → pending → completed
+    for t in in_progress:
+        lines.append(f"    ◼ {t['subject']}")
+
+    if len(pending) <= max_pending_visible:
+        for t in pending:
+            lines.append(f"    ◻ {t['subject']}")
+    else:
+        for t in pending[:max_pending_visible]:
+            lines.append(f"    ◻ {t['subject']}")
+        lines.append(f"    … {len(pending) - max_pending_visible} 待处理")
+
+    if len(completed) <= max_completed_visible:
+        for t in completed:
+            lines.append(f"    ✔ {t['subject']}")
+    else:
+        for t in completed[:max_completed_visible]:
+            lines.append(f"    ✔ {t['subject']}")
+        lines.append(f"    … {len(completed) - max_completed_visible} 已完成")
+
+    return lines

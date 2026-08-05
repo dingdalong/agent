@@ -36,10 +36,12 @@ from src.events.types import (
 from src.interfaces.agent_view_store import AgentViewStore
 from src.interfaces.status_presenter import (
     format_elapsed_time,
+    format_token_count,
     present_agent,
     present_agent_identity,
     present_ended_agent,
     present_session_metrics,
+    present_task_panel,
 )
 from src.interfaces.turn_clock import TurnClock
 from src.tools.display import tool_title
@@ -469,26 +471,28 @@ class AgentTuiApp(App[None]):
         self._sync_agent_list_visibility()
 
     def _render_activity(self) -> None:
+        task_snapshot = self.agent_view_store.task_snapshot()
         visible = (
             not self.coordinator.input_active
             and not self.viewing_agent_id
             and not self.coordinator.modal_active
-            and bool(self._activity or self._round_entries or self._retry_deadline is not None)
+            and bool(self._activity or self._round_entries or self._retry_deadline is not None or task_snapshot)
         )
         self._activity_widget.display = visible
         if not visible:
             return
         now = time.monotonic()
         frame = _SPINNER[int(now * 10) % len(_SPINNER)]
+
+        # ── 现有三种模式产出 base_content ──
         if self._retry_deadline is not None:
             remaining = max(0, math.ceil(self._retry_deadline - now))
-            self._activity_widget.update(
+            base_content = (
                 f"{frame} {self._active_agent_name()} · "
                 f"LLM错误[{self._retry_error_kind}] {self._retry_safe_message}，"
                 f"{remaining}秒后重试 ({self._retry_attempt}/{self._retry_max})"
             )
-            return
-        if self._round_entries:
+        elif self._round_entries:
             done = sum(entry.status != "running" for entry in self._round_entries)
             lines = [
                 f"{frame} 本轮 · {len(self._round_entries)} 工具"
@@ -519,12 +523,44 @@ class AgentTuiApp(App[None]):
             hidden = len(self._round_entries) - _ROUND_PANEL_MAX_ROWS
             if hidden > 0:
                 lines.append(f"  … 还有 {hidden} 个")
-            self._activity_widget.update("\n".join(lines))
-            return
-        self._activity_widget.update(
-            f"{frame} {self._active_agent_name()} · {self._activity} "
-            f"({format_elapsed_time(self._activity_elapsed(now))})"
-        )
+            base_content = "\n".join(lines)
+        elif self._activity:
+            # 有 in_progress 任务时，spinner 行使用任务描述 + 任务耗时 + token 信息
+            ip_task = next((t for t in task_snapshot if t["status"] == "in_progress"), None)
+            if ip_task:
+                spinner_text = ip_task.get("active_form") or ip_task["subject"]
+                task_started = ip_task.get("started_monotonic")
+                task_elapsed = format_elapsed_time(now - task_started) if task_started else ""
+                session_snap = self.agent_view_store.session_snapshot()
+                usage = session_snap.usage
+                cache_pct = (
+                    usage.cache_read_tokens / usage.input_tokens * 100
+                    if usage.input_tokens
+                    else 0.0
+                )
+                token_info = f"{format_token_count(usage.output_tokens)}({cache_pct:.0f}%)"
+                elapsed_part = f"{task_elapsed} · " if task_elapsed else ""
+                base_content = f"{frame} {spinner_text}… ({elapsed_part}{token_info})"
+            else:
+                base_content = (
+                    f"{frame} {self._active_agent_name()} · {self._activity} "
+                    f"({format_elapsed_time(self._activity_elapsed(now))})"
+                )
+        else:
+            base_content = ""
+
+        # ── 追加任务进度面板 ──
+        task_lines = present_task_panel(task_snapshot)
+        if task_lines:
+            if base_content:
+                full_content = base_content + "\n" + "\n".join(task_lines)
+            else:
+                full_content = "\n".join(task_lines)
+        else:
+            full_content = base_content
+
+        if full_content:
+            self._activity_widget.update(full_content)
 
     def _render_status(self) -> None:
         now = time.monotonic()

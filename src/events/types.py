@@ -284,3 +284,15 @@ class PlanStateChanged(Event):
     active: bool = False
     level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
     type: Literal["plan_state_changed"] = field(default="plan_state_changed", init=False)
+
+
+@dataclass
+class TaskStateChanged(Event):
+    """任务列表变更 — 创建、更新、删除后发射，供 AgentViewStore 刷新快照。
+
+    携带全量任务摘要（非差量），AgentViewStore 直接替换整个快照。
+    级别为 PROGRESS：确保不被级别门控丢弃。
+    """
+    tasks: list[dict] = field(default_factory=list)
+    level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
+    type: Literal["task_state_changed"] = field(default="task_state_changed", init=False)

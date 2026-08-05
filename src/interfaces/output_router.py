@@ -20,6 +20,7 @@ from src.events.types import (
     OutputRequested,
     PermissionNotice,
     SubagentLifecycle,
+    TaskStateChanged,
 )
 from src.interfaces.agent_view_store import AgentViewStore
 from src.interfaces.base import UserInterface
@@ -59,7 +60,7 @@ class OutputRouter:
         """
         self.store.record(event)
 
-        if isinstance(event, SubagentLifecycle):
+        if isinstance(event, (SubagentLifecycle, TaskStateChanged)):
             return
 
         if isinstance(event, _LLM_BOUNDARY_EVENTS):

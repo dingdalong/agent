@@ -151,6 +151,7 @@ class AgentDeps:
     session_id: str = ""
     workdir: Path | None = None
     global_dir: Path | None = None
+    task_change_notifier: Callable[[list[dict]], None] | None = None
 
 @dataclass
 class Agent:
@@ -233,7 +234,8 @@ class Agent:
             tasks_dir = None
             if not self.is_subagent and self.deps.global_dir and self.deps.session_id:
                 tasks_dir = self.deps.global_dir / "tasks" / self.deps.session_id
-            self._task_mgr = TaskManager(tasks_dir=tasks_dir, data_guard=self.deps.data_guard)
+            on_change = self.deps.task_change_notifier if not self.is_subagent else None
+            self._task_mgr = TaskManager(tasks_dir=tasks_dir, data_guard=self.deps.data_guard, on_change=on_change)
         else:
             self._task_mgr = None
         self._reminder_mgr = ReminderMgr()
@@ -577,7 +579,8 @@ class Agent:
         # 重建 TaskManager 指向恢复会话的 tasks 目录（仅在启用 task feature 时）
         if self.deps.global_dir and "task" in self.features:
             tasks_dir = self.deps.global_dir / "tasks" / result.session_id
-            self._task_mgr = TaskManager(tasks_dir=tasks_dir, data_guard=self.deps.data_guard)
+            on_change = self.deps.task_change_notifier if not self.is_subagent else None
+            self._task_mgr = TaskManager(tasks_dir=tasks_dir, data_guard=self.deps.data_guard, on_change=on_change)
             self._reminder_mgr = ReminderMgr()
             self._reminder_mgr.register(self._task_mgr)
 

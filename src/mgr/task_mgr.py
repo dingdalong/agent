@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import shutil
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -25,6 +27,7 @@ class Task:
         blocks: 本任务完成后才能开始的任务 ID 列表。
         blocked_by: 必须先完成才能开始本任务的任务 ID 列表。
         metadata: 任意键值对，None 表示未设置。
+        started_monotonic: 进入 in_progress 的单调时钟时间戳，运行时字段，不持久化。
     """
     id: str
     subject: str
@@ -35,6 +38,7 @@ class Task:
     blocks: list[str] = field(default_factory=list)
     blocked_by: list[str] = field(default_factory=list)
     metadata: dict[str, Any] | None = None
+    started_monotonic: float | None = None
 
     def to_summary(self) -> dict[str, Any]:
         """转为摘要字典，用于 task_list 返回。
@@ -51,6 +55,10 @@ class Task:
         }
         if self.owner is not None:
             d["owner"] = self.owner
+        if self.active_form is not None:
+            d["active_form"] = self.active_form
+        if self.started_monotonic is not None:
+            d["started_monotonic"] = self.started_monotonic
         return d
 
     def to_detail(self) -> dict[str, Any]:
@@ -94,21 +102,32 @@ class TaskManager:
     _TOOL_NAMES = frozenset({"task_create", "task_update", "task_list", "task_get"})
     _HIGHWATERMARK_FILE = ".highwatermark"
 
-    def __init__(self, tasks_dir: Path | None = None, data_guard: Any = None) -> None:
+    def __init__(
+        self,
+        tasks_dir: Path | None = None,
+        data_guard: Any = None,
+        on_change: Callable[[list[dict]], None] | None = None,
+    ) -> None:
         """初始化任务管理器。
 
         tasks_dir 不为 None 时自动加载已有的任务文件。
 
         Args:
             tasks_dir: 任务文件存储目录。None 表示纯内存模式。
+            data_guard: 数据脱敏守卫。
+            on_change: 任务变更回调，接收全量任务摘要列表。
         """
         self._tasks: dict[str, Task] = {}
         self._next_id: int = 1
         self._rounds_without_update: int = 0
         self._tasks_dir: Path | None = tasks_dir
         self._data_guard = data_guard
+        self._on_change = on_change
         if self._tasks_dir is not None:
             self._load()
+        # 恢复已有任务时立即通知 UI
+        if self._tasks:
+            self._emit_change()
 
     # ── 文件持久化 ──────────────────────────────────────────────
 
@@ -205,6 +224,22 @@ class TaskManager:
             self._flush_highwatermark()
             shutil.rmtree(self._tasks_dir, ignore_errors=True)
 
+    def _emit_change(self) -> None:
+        """通知监听器当前全量任务快照（过滤 _internal，与 list_tasks 一致）。"""
+        if self._on_change is None:
+            return
+        tasks = []
+        for task in self._tasks.values():
+            if task.metadata and task.metadata.get("_internal"):
+                continue
+            summary = task.to_summary()
+            summary["blocked_by"] = [
+                bid for bid in task.blocked_by
+                if bid in self._tasks and self._tasks[bid].status != "completed"
+            ]
+            tasks.append(summary)
+        self._on_change(tasks)
+
     @staticmethod
     def clear_dir(tasks_dir: Path) -> None:
         """删除指定的 tasks 目录（/clear 时调用）。
@@ -261,6 +296,7 @@ class TaskManager:
         self._tasks[task_id] = task
         self._flush_task(task_id)
         self._flush_highwatermark()
+        self._emit_change()
         return {"task": {"id": task_id, "subject": subject}}
 
     def update(
@@ -305,6 +341,7 @@ class TaskManager:
 
         if status == "deleted":
             self._delete_task(task_id)
+            self._emit_change()
             return {"success": True, "task_id": task_id, "updated_fields": ["deleted"]}
 
         task = self._tasks[task_id]
@@ -332,6 +369,10 @@ class TaskManager:
             if status not in ("pending", "in_progress", "completed"):
                 raise ValueError(f"无效状态: '{status}'")
             task.status = status
+            if status == "in_progress" and task.started_monotonic is None:
+                task.started_monotonic = time.monotonic()
+            elif status != "in_progress":
+                task.started_monotonic = None
             updated.append("status")
 
         if owner is not None:
@@ -364,6 +405,7 @@ class TaskManager:
                 self._flush_task(tid)
 
         self._auto_cleanup()
+        self._emit_change()
 
         return {"success": True, "task_id": task_id, "updated_fields": updated}
 

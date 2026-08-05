@@ -19,6 +19,7 @@ from src.events.types import (
     ResponseDelta,
     SubagentLifecycle,
     PlanStateChanged,
+    TaskStateChanged,
     ThinkingDelta,
     ToolCallCompleted,
     ToolCallStarted,
@@ -45,7 +46,7 @@ AgentEvent = Union[
     CompactDelta, ToolCallCompleted, ToolCallStarted,
     LLMCallCompleted, LLMCallStarted, LLMRetrying, LLMLengthRetrying, LLMCallFailed,
     ResponseDelta, ThinkingDelta,
-    AgentStateChanged, SubagentLifecycle, PlanStateChanged,
+    AgentStateChanged, SubagentLifecycle, PlanStateChanged, TaskStateChanged,
 ]
 
 __all__ = [
@@ -78,4 +79,5 @@ __all__ = [
     "FormQuestion",
     "TranscriptView",
     "PlanStateChanged",
+    "TaskStateChanged",
 ]

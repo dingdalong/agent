@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import logging.handlers
 import os
+import time
+from collections.abc import Callable
 from pathlib import Path
 
 from src.interfaces import AgentViewStore, OutputRouter, TextualInterface, TurnClock
 from src.interfaces.tui.plain import LineReader, read_console_line
 from src.events import EventBus, EventLevel
+from src.events.types import TaskStateChanged
 from src.mgr import ConfigManager, HooksMgr, LLMMgr, McpMgr, MemoryMgr, PermissionManager, PlanMgr, PluginMgr, RoleMgr, SessionMgr, ToolsMgr, WebAccessMgr, resolve_features
 from src.mgr.data_guard import DataGuard, register_runtime_secrets
 from src.mgr.permission_mgr import LLMJudgeClient
@@ -21,6 +25,22 @@ from src.commands import CommandMgr
 from src.app.app import AgentApp
 
 logger = logging.getLogger(__name__)
+
+
+def _make_task_notifier(bus: EventBus) -> Callable[[list[dict]], None]:
+    """创建线程安全的任务变更回调，将 TaskStateChanged 事件投递到 EventBus。"""
+    def notify(tasks_summary: list[dict]) -> None:
+        event = TaskStateChanged(
+            timestamp=time.time(),
+            source="task_mgr",
+            tasks=tasks_summary,
+        )
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        asyncio.run_coroutine_threadsafe(bus.emit(event), loop)
+    return notify
 
 
 async def _confirm_project_trust(
@@ -165,6 +185,7 @@ async def create_app(
         command_mgr=command_mgr,
         data_guard=data_guard,
         trust_gate=trust_gate,
+        task_change_notifier=_make_task_notifier(event_bus),
         session_context=[],
         workdir=work_dir,
         global_dir=global_dir,

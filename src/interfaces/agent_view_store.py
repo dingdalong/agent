@@ -16,6 +16,7 @@ from src.events.types import (
     LLMRetrying,
     ResponseDelta,
     SubagentLifecycle,
+    TaskStateChanged,
     ThinkingDelta,
     ToolCallCompleted,
     ToolCallStarted,
@@ -112,6 +113,7 @@ class AgentViewStore:
         self._session_usage = TokenUsage()
         self._active: dict[str, _AgentState] = {}
         self._history: dict[str, _AgentState] = {}
+        self._task_snapshot: list[dict] = []
 
     @property
     def foreground_uuid(self) -> str | None:
@@ -175,6 +177,8 @@ class AgentViewStore:
             self._append_tool_start(event)
         elif isinstance(event, ToolCallCompleted):
             self._append_tool_completion(event)
+        elif isinstance(event, TaskStateChanged):
+            self._task_snapshot = list(event.tasks)
 
     def flush_completed(self) -> None:
         """Move completed subagents into bounded history storage.
@@ -207,6 +211,14 @@ class AgentViewStore:
         foreground = self._find(self._foreground_uuid)
         context = foreground.context if foreground is not None else ContextUsage()
         return SessionSnapshot(self._session_usage, context)
+
+    def task_snapshot(self) -> list[dict]:
+        """返回最新的任务列表快照，供 TUI 渲染任务进度面板。
+
+        Returns:
+            最新任务摘要列表的副本。
+        """
+        return list(self._task_snapshot)
 
     def agent_snapshot(self, uuid: str) -> AgentSnapshot | None:
         """Return one agent snapshot by UUID.
@@ -287,6 +299,7 @@ class AgentViewStore:
         self._session_usage = TokenUsage()
         self._active.clear()
         self._history.clear()
+        self._task_snapshot = []
 
     def _new_state(
         self,
