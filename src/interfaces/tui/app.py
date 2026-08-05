@@ -144,7 +144,9 @@ class AgentTuiApp(App[None]):
         history_journal: PlainHistoryJournal | None = None,
         diagnostics: TuiDiagnostics | None = None,
     ) -> None:
-        super().__init__()
+        # ansi_color=True：禁用 ANSIToTruecolor 行过滤器，让 ansi_default 背景输出
+        # SGR 49（终端真实默认背景），而非被改写为 ansi_theme 的固定 RGB。
+        super().__init__(ansi_color=True)
         self.agent_view_store = agent_view_store
         self.slash_commands = slash_commands
         self.turn_clock = turn_clock

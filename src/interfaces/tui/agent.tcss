@@ -1,6 +1,6 @@
 Screen {
     layout: vertical;
-    background: #101315;
+    background: ansi_default;
     color: #d8dee4;
 }
 
@@ -12,7 +12,7 @@ Screen > .screen--selection {
 #history {
     height: 1fr;
     padding: 0 2;
-    background: #101315;
+    background: ansi_default;
     scrollbar-color: #53616c;
     scrollbar-color-hover: #7a8b97;
     scrollbar-color-active: #2f9f91;
@@ -44,14 +44,14 @@ Screen > .screen--selection {
 }
 
 MarkdownFence {
-    background: #1a2025;
+    background: ansi_default;
     color: #e5e9ec;
 }
 
 #transient-zone {
     height: auto;
     max-height: 16;
-    background: #14191c;
+    background: ansi_default;
 }
 
 #activity {
@@ -66,7 +66,7 @@ MarkdownFence {
     display: none;
     height: 14;
     border-top: solid #3b464f;
-    background: #14191c;
+    background: ansi_default;
 }
 
 #transcript-header {
@@ -91,7 +91,7 @@ MarkdownFence {
     max-height: 8;
     padding: 0 2;
     color: #c9d1d7;
-    background: #1a2025;
+    background: ansi_default;
 }
 
 .separator {
@@ -104,13 +104,13 @@ MarkdownFence {
     min-height: 1;
     max-height: 8;
     padding: 0 1;
-    background: #171c20;
+    background: ansi_default;
 }
 
 #input {
     height: 1fr;
     border: none;
-    background: #171c20;
+    background: ansi_default;
     color: #f0f3f5;
     scrollbar-size: 1 1;
 }
@@ -120,19 +120,31 @@ MarkdownFence {
     color: #ffffff;
 }
 
+/* 光标所在行不高亮，避免输入后输入栏局部变色 */
+#input .text-area--cursor-line, #dialog-input .text-area--cursor-line {
+    background: transparent;
+}
+
+/* 光标：不透明白底 + 深色字，去掉 :ansi 分支注入的 reverse 反显，确保清晰可见 */
+#input .text-area--cursor, #dialog-input .text-area--cursor {
+    color: #000000;
+    background: #ffffff;
+    text-style: none;
+}
+
 #core-status {
     height: auto;
     min-height: 1;
     max-height: 3;
     padding: 0 2;
-    background: #23292e;
+    background: ansi_default;
     color: #aeb8bf;
 }
 
 #agent-list {
     height: auto;
     max-height: 10;
-    background: #151a1e;
+    background: ansi_default;
     scrollbar-size: 1 1;
 }
 
@@ -193,7 +205,7 @@ ModalScreen {
     max-height: 88%;
     padding: 0 2;
     border: solid #6a7a84;
-    background: #171c20;
+    background: ansi_default;
     color: #d8dee4;
 }
 
@@ -217,7 +229,7 @@ ModalScreen {
     height: auto;
     max-height: 12;
     border: none;
-    background: #171c20;
+    background: ansi_default;
 }
 
 #choice-input-options {
@@ -273,7 +285,7 @@ ModalScreen {
     max-height: 24;
     border-left: solid #3b464f;
     padding: 0 1;
-    background: #101315;
+    background: ansi_default;
     scrollbar-size: 1 1;
     scrollbar-color: #53616c;
     scrollbar-color-hover: #7a8b97;
@@ -311,7 +323,7 @@ ModalScreen {
 #dialog-input {
     height: 4;
     border: solid #3b464f;
-    background: #101315;
+    background: ansi_default;
     color: #f0f3f5;
 }
 
@@ -337,7 +349,7 @@ ModalScreen {
     max-width: 100%;
     max-height: 100%;
     border: none;
-    background: transparent;
+    background: ansi_default;
     padding: 0;
     border-left: solid #6a7a84;
     padding-left: 1;
@@ -361,13 +373,13 @@ ModalScreen {
 
 .inline-widget #dialog-options {
     border: none;
-    background: transparent;
+    background: ansi_default;
 }
 
 .inline-widget #dialog-input {
     height: 4;
     border: solid #3b464f;
-    background: #101315;
+    background: ansi_default;
     color: #f0f3f5;
 }
 
@@ -378,7 +390,7 @@ ModalScreen {
 
 .inline-widget #form-preview-pane {
     border-left: solid #3b464f;
-    background: transparent;
+    background: ansi_default;
 }
 
 .inline-widget-active #agent-list {
