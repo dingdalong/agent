@@ -536,6 +536,8 @@ class FormDialog(KeyboardDialog):
         else:
             self.checked[self.tab] = {row}
             self.custom[self.tab] = ""
+            # 单选选中后自动前进到下一个问题
+            self.tab = min(self.tab + 1, len(self.request.questions))
         self._render_form(update_input=False)
 
     def action_choose_number(self, index: int) -> None:
