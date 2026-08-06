@@ -236,10 +236,16 @@ class InterruptRequested(Event):
 
 @dataclass
 class PermissionNotice(Event):
-    """工具权限状态通知，供 UI 自行组织展示。"""
+    """工具权限状态通知，供 UI 自行组织展示。
+
+    decision_source 是 AuthorizationResult.source 的原样透传，UI 据此显示真实裁决来源，
+    取值 hard_rule / plan / policy / judge / web_safety / user / failure；
+    与基类 Event.source（事件总线来源标识）含义不同，不可混用。
+    """
     status: Literal["allow", "deny"] = "allow"
     tool_name: str = ""
     detail: str = ""
+    decision_source: str = ""
     level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
     type: Literal["permission_notice"] = field(default="permission_notice", init=False)
 

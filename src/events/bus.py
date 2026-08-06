@@ -357,6 +357,7 @@ class EventBus:
         status: Literal["allow", "deny"],
         tool_name: str,
         detail: str = "",
+        decision_source: str = "",
         source: str = "permission",
         caller_agent_type: str | None = None,
         caller_uuid: str | None = None,
@@ -367,6 +368,8 @@ class EventBus:
             status: 权限决策结果（allow 静默 / deny）。
             tool_name: 工具名。
             detail: 通知详情文本。
+            decision_source: AuthorizationResult.source，UI 据此显示真实裁决来源；
+                与下方 source（事件总线来源标识）不是一回事。
             source: 事件来源标识。
             caller_agent_type: 发起该工具调用的 agent 类型（主 agent 为「main」），供 UI 标注是哪个 agent。
             caller_uuid: 发起该工具调用的 agent 实例 uuid。
@@ -377,6 +380,7 @@ class EventBus:
             status=status,
             tool_name=tool_name,
             detail=detail,
+            decision_source=decision_source,
             caller_agent_type=caller_agent_type,
             caller_uuid=caller_uuid,
         ))

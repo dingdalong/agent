@@ -44,7 +44,7 @@ from src.interfaces.status_presenter import (
     present_task_panel,
 )
 from src.interfaces.turn_clock import TurnClock
-from src.tools.display import tool_title
+from src.tools.display import permission_line
 from src.interfaces.tui.diagnostics import TuiDiagnostics
 from src.interfaces.tui.dialogs import DialogResult, InlineWidget, InteractionCoordinator
 from src.interfaces.tui.history_journal import PlainHistoryJournal
@@ -403,7 +403,7 @@ class AgentTuiApp(App[None]):
             text.append(f"内容: {request.detail}")
             if request.reason:
                 text.append(
-                    f"\n智能权限 · {tool_title(request.tool_name)} · 需确认({request.reason[:60]})",
+                    "\n" + permission_line("ask", request.tool_name, request.reason),
                     style="#efc36a",
                 )
             await self.append_output(text)
@@ -1433,16 +1433,15 @@ class AgentTuiApp(App[None]):
         )
 
     async def on_permission_notice(self, event: PermissionNotice) -> None:
-        title = tool_title(event.tool_name)
-        reason = (event.detail or "")[:60]
-        if event.status == "deny":
-            await self.append_output(
-                Text(f"智能权限 · {title} · 已拒绝({reason})", style="#ff6b6b")
+        style = "#ff6b6b" if event.status == "deny" else "#efc36a"
+        await self.append_output(
+            Text(
+                permission_line(
+                    event.status, event.tool_name, event.detail or "", event.decision_source
+                ),
+                style=style,
             )
-        elif event.status == "allow":
-            await self.append_output(
-                Text(f"智能权限 · {title} · 已放行({reason})", style="#efc36a")
-            )
+        )
 
     async def on_tool_call_started(self, event: ToolCallStarted) -> None:
         self._set_current_agent(event.caller_agent_type, event.caller_uuid)

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from src.tools.display import (
+    PERMISSION_SOURCES,
     TOOL_TITLES,
     ToolDisplay,
     ToolResult,
     build_file_diff,
     format_params,
     format_result,
+    permission_line,
     tool_title,
 )
 
@@ -65,6 +67,57 @@ def test_tool_title_utility_tools():
 
 def test_tool_title_unknown_fallback():
     assert tool_title("unknown_mcp_tool") == "调用 unknown_mcp_tool"
+
+
+# ---------------------------------------------------------------------------
+# permission_line — 权限提示行
+# ---------------------------------------------------------------------------
+
+def test_permission_line_keeps_full_reason():
+    reason = "无法读取路径信息：" + "/seg" * 60  # 远超 60 字符
+    line = permission_line("deny", "get_file_info", reason, "hard_rule")
+    assert reason in line
+    assert "…" not in line
+
+
+def test_permission_line_maps_all_sources():
+    assert permission_line("deny", "x", "r", "hard_rule").startswith("✘ 硬规则 ·")
+    assert permission_line("deny", "x", "r", "plan").startswith("✘ 计划模式 ·")
+    assert permission_line("deny", "x", "r", "policy").startswith("✘ 策略放行 ·")
+    assert permission_line("allow", "x", "r", "judge").startswith("✔ 智能权限 ·")
+    assert permission_line("allow", "x", "r", "web_safety").startswith("✔ 网页安全 ·")
+    assert permission_line("deny", "x", "r", "user").startswith("✘ 用户 ·")
+    assert permission_line("deny", "x", "r", "failure").startswith("✘ 授权失败 ·")
+
+
+def test_permission_line_full_format():
+    assert (
+        permission_line("deny", "get_file_info", "不允许读取", "hard_rule")
+        == "✘ 硬规则 · 文件信息 · 已拒绝(不允许读取)"
+    )
+
+
+def test_permission_line_ask_status():
+    assert permission_line("ask", "web_search", "拿不准") == "? 智能权限 · 搜索网页 · 需确认(拿不准)"
+
+
+def test_permission_line_unknown_source_echoed_raw():
+    # 未登记来源原样回显（暴露漏配），不回退成「智能权限」
+    line = permission_line("deny", "x", "r", "brand_new")
+    assert "brand_new" in line
+    assert "智能权限" not in line
+
+
+def test_permission_line_empty_source_defaults_to_judge():
+    assert permission_line("deny", "x", "r", "").startswith("✘ 智能权限 ·")
+
+
+def test_permission_line_empty_reason_omits_parens():
+    assert permission_line("deny", "shell", "", "hard_rule") == "✘ 硬规则 · 执行命令 · 已拒绝"
+
+
+def test_permission_line_unknown_tool_falls_back():
+    assert permission_line("allow", "mcp_xyz", "ok", "judge").startswith("✔ 智能权限 · 调用 mcp_xyz ·")
 
 
 # ---------------------------------------------------------------------------

@@ -6,7 +6,7 @@ import difflib
 import json
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
-from typing import Any
+from typing import Any, Literal
 
 
 # ---------------------------------------------------------------------------
@@ -81,6 +81,46 @@ TOOL_TITLES: dict[str, str] = {
 def tool_title(tool_name: str) -> str:
     """返回工具中文标题；未命中映射时返回 '调用 {tool_name}'。"""
     return TOOL_TITLES.get(tool_name, f"调用 {tool_name}")
+
+
+# ---------------------------------------------------------------------------
+# 权限提示
+# ---------------------------------------------------------------------------
+
+# AuthorizationResult.source → 中文标签；未登记的来源原样显示（暴露漏配），不回退成「智能权限」。
+PERMISSION_SOURCES: dict[str, str] = {
+    "hard_rule": "硬规则",
+    "plan": "计划模式",
+    "policy": "策略放行",
+    "judge": "智能权限",
+    "web_safety": "网页安全",
+    "user": "用户",
+    "failure": "授权失败",
+}
+
+_PERMISSION_STATUS: dict[str, tuple[str, str]] = {
+    "allow": ("✔", "已放行"),
+    "deny": ("✘", "已拒绝"),
+    "ask": ("?", "需确认"),
+}
+
+
+def permission_line(
+    status: Literal["allow", "deny", "ask"],
+    tool_name: str,
+    reason: str = "",
+    decision_source: str = "judge",
+) -> str:
+    """组装权限提示一行：`{标记} {来源} · {中文工具名} · {结论}({理由})`。
+
+    理由完整保留、不截断，由 UI 容器自动折行；来源取 AuthorizationResult.source，
+    空值按 judge 处理；reason 为空时省略括号。
+    """
+    mark, verdict = _PERMISSION_STATUS[status]
+    label = PERMISSION_SOURCES.get(decision_source or "judge", decision_source)
+    line = f"{mark} {label} · {tool_title(tool_name)} · {verdict}"
+    reason = reason.strip()
+    return f"{line}({reason})" if reason else line
 
 
 # ---------------------------------------------------------------------------

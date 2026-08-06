@@ -388,6 +388,7 @@ class ToolsMgr:
                     status="deny",
                     tool_name=tool_name,
                     detail=authorization.reason or authorization.safe_detail,
+                    decision_source=authorization.source,
                     caller_agent_type=caller_agent_type,
                     caller_uuid=caller_uuid,
                 )
@@ -401,6 +402,7 @@ class ToolsMgr:
                     status="allow",
                     tool_name=tool_name,
                     detail=authorization.reason,
+                    decision_source=authorization.source,
                     caller_agent_type=caller_agent_type,
                     caller_uuid=caller_uuid,
                 )

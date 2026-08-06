@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,7 +12,7 @@ from pydantic import BaseModel
 
 from src.app.plan_mode_controller import PlanModeController
 from src.agent import Agent
-from src.events.types import ToolCallCompleted, ToolCallStarted
+from src.events.types import PermissionNotice, ToolCallCompleted, ToolCallStarted
 from src.mgr.data_guard import DataGuard, REDACTED
 from src.mgr.hooks_mgr import HookRunResult
 from src.mgr.mcp_mgr import McpMgr
@@ -725,3 +726,162 @@ def test_safe_environment_uses_explicit_base_and_trusted_extra():
         {"MCP_TOKEN": "trusted-extra"},
     )
     assert env == {"PATH": "/bin", "SAFE": "ok", "MCP_TOKEN": "trusted-extra"}
+
+
+# ---------------------------------------------------------------------------
+# 授权日志与 PermissionNotice 来源透传
+# ---------------------------------------------------------------------------
+
+def test_authorization_log_carries_source_and_redacted_reason(tmp_path, caplog):
+    secret = "sentinel-secret-value"
+    # RecordingJudge 绕过 StructuredVerdictRunner 的脱敏，故能验证 _result 漏斗自身在脱敏。
+    judge = RecordingJudge(JudgeVerdict("deny", f"含密 {secret}"))
+    manager = make_manager(tmp_path, judge, guard=DataGuard({"provider": secret}))
+    policy = ToolPolicy(AccessKind.REVIEW, DataFlow.DYNAMIC)
+    with caplog.at_level(logging.INFO, logger="src.mgr.permission_mgr"):
+        result = run(manager.authorize(
+            "shell", policy, {"command": "echo hi"}, origin=ToolOrigin("builtin"),
+            plan_active=False, user_intent="do it",
+        ))
+    assert result.allowed is False
+    assert result.source == "judge"
+    assert "授权 shell → deny source=judge" in caplog.text
+    assert secret not in caplog.text
+    assert REDACTED in caplog.text
+
+
+def test_hard_rule_denial_is_logged_with_tool_and_source(tmp_path, caplog):
+    missing = tmp_path / "no-such-file.txt"
+    manager = make_manager(tmp_path)
+    policy = ToolPolicy(
+        AccessKind.LOCAL_READ,
+        DataFlow.LOCAL,
+        (PathArgument("path", PathRole.READ),),
+    )
+    with caplog.at_level(logging.INFO, logger="src.mgr.permission_mgr"):
+        result = run(manager.authorize(
+            "get_file_info", policy, {"path": str(missing)}, origin=ToolOrigin("builtin"),
+            plan_active=False, user_intent="read it",
+        ))
+    assert result.allowed is False
+    assert result.source == "hard_rule"
+    assert "授权 get_file_info → deny source=hard_rule" in caplog.text
+    assert "无法读取路径信息" in caplog.text
+
+
+def test_confirmation_dialog_logs_open_and_outcome(tmp_path, caplog):
+    judge = RecordingJudge(JudgeVerdict("ask", "拿不准"))
+    manager = make_manager(tmp_path, judge, answer=False)
+    policy = ToolPolicy(AccessKind.REVIEW, DataFlow.DYNAMIC)
+    with caplog.at_level(logging.INFO, logger="src.mgr.permission_mgr"):
+        result = run(manager.authorize(
+            "shell", policy, {"command": "echo hi"}, origin=ToolOrigin("builtin"),
+            plan_active=False, user_intent="do it",
+        ))
+    assert result.allowed is False
+    assert result.source == "user"
+    assert "转人工确认 shell" in caplog.text
+    assert "授权 shell → deny source=user" in caplog.text
+    assert caplog.text.index("转人工确认 shell") < caplog.text.index("授权 shell → deny source=user")
+
+
+def test_deterministic_policy_allow_is_debug_only(tmp_path, caplog):
+    target = tmp_path / "a.txt"
+    target.write_text("ok")
+    manager = make_manager(tmp_path)
+    policy = ToolPolicy(
+        AccessKind.LOCAL_READ,
+        DataFlow.LOCAL,
+        (PathArgument("path", PathRole.READ),),
+    )
+    with caplog.at_level(logging.INFO, logger="src.mgr.permission_mgr"):
+        result = run(manager.authorize(
+            "read_file", policy, {"path": str(target)}, origin=ToolOrigin("builtin"),
+            plan_active=False, user_intent="read it",
+        ))
+    assert result.allowed is True
+    assert result.source == "policy"
+    assert "授权 read_file" not in caplog.text
+
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger="src.mgr.permission_mgr"):
+        run(manager.authorize(
+            "read_file", policy, {"path": str(target)}, origin=ToolOrigin("builtin"),
+            plan_active=False, user_intent="read it",
+        ))
+    assert "授权 read_file → allow source=policy" in caplog.text
+
+
+def test_deny_notice_carries_real_authorization_source(tmp_path):
+    secret = "sentinel-secret-value"
+
+    class Args(BaseModel):
+        path: str
+
+    class Hooks:
+        async def run_event(self, _event, _tool, _payload, **_kwargs):
+            return HookRunResult()
+
+    class Bus:
+        def __init__(self):
+            self.events = []
+
+        async def emit(self, event):
+            self.events.append(event)
+
+        async def notify_permission(self, status, tool_name, detail="", decision_source="", **_kwargs):
+            # 模拟 EventBus.notify_permission 组装 PermissionNotice。
+            self.events.append(PermissionNotice(
+                timestamp=0.0, source="permission", status=status,
+                tool_name=tool_name, detail=detail, decision_source=decision_source,
+            ))
+
+    async def unused(path: str) -> str:
+        return path
+
+    guard = DataGuard({"provider": secret})
+    manager = PermissionManager(str(tmp_path), None, None, guard)
+    tools_mgr = ToolsMgr(load_registered=False)
+    tools_mgr.register(ToolEntry(
+        name="info",
+        func=unused,
+        model=Args,
+        description="info",
+        parameters_schema=Args.model_json_schema(),
+        policy=ToolPolicy(
+            AccessKind.LOCAL_READ,
+            DataFlow.LOCAL,
+            (PathArgument("path", PathRole.READ),),
+        ),
+        origin=ToolOrigin("builtin"),
+    ))
+    bus = Bus()
+    deps = SimpleNamespace(
+        data_guard=guard,
+        permission_mgr=manager,
+        hooks_mgr=Hooks(),
+        event_bus=bus,
+        session_id="session",
+        turn_clock=None,
+    )
+    agent = SimpleNamespace(
+        uuid="agent-id",
+        agent_type="main",
+        plan_active=False,
+        history=[],
+        llm=SimpleNamespace(model="default"),
+    )
+    missing = tmp_path / "no-such-dir" / "battle"
+    result = run(tools_mgr.execute(
+        "info",
+        {"path": str(missing)},
+        current_tool_call_id="call-1",
+        deps=deps,
+        agent=agent,
+    ))
+    assert result.startswith("权限拒绝")
+    notice = next(e for e in bus.events if isinstance(e, PermissionNotice))
+    assert notice.status == "deny"
+    assert notice.decision_source == "hard_rule"
+    # detail 完整携带路径，不被截断。
+    assert str(missing) in notice.detail

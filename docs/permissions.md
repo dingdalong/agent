@@ -73,7 +73,7 @@ LOCAL_READ 可以读取工作区外的普通文件或目录，但拒绝设备、
 
 智能权限 allow/deny 直接成为本次裁决；ask、异常、超时、缺失或无效输出进入一次性确认。确认只接受 yes/no，不产生任何后续调用权限。
 
-智能权限的裁决理由会以一行提示展示给用户（格式 `智能权限 · 中文工具名 · 结论(理由)`）：放行亮黄、拒绝亮红，均走 `PermissionNotice`；ask 的理由则在确认弹窗之前的输出区提示。仅智能权限裁决（`source="judge"`）的放行会提示，本地读取、普通工作区写入等策略放行不打断输出。
+权限裁决会以一行提示展示给用户，格式 `{标记} {来源} · {中文工具名} · {结论}(理由)`（组装见 `src/tools/display.py` 的 `permission_line`）。标记 `✘`/`✔`/`?` 分别对应拒绝/放行/需确认；来源标签由 `AuthorizationResult.source` 决定，映射见 `PERMISSION_SOURCES`（`hard_rule`→硬规则、`plan`→计划模式、`policy`→策略放行、`judge`→智能权限、`web_safety`→网页安全、`user`→用户、`failure`→授权失败）。理由完整展示、由历史区自动折行，不截断。所有拒绝都发 `PermissionNotice`（携带 `decision_source`），放行仅 `source="judge"` 的智能权限裁决提示，本地读取、普通工作区写入等策略放行不打断输出；拒绝亮红、放行亮黄。ask 走 `PermissionMenu`，其理由在确认弹窗之前的输出区提示，标签固定「智能权限」。
 
 Web 外部读取另使用 `WebPrivacyGuard` 与 `LLMWebSafetyClient`。本地预检先拒绝秘密、URL userinfo 和认证/签名 query；疑似个人信息、源代码、专有文本或高熵私有标识符不进入 LLM，直接一次性确认。其余请求由当前 Agent 模型审查，不切换到 `llm.fast`；搜索只发送最多 2 KiB 的脱敏查询，抓取只发送 scheme、host、path 和 query key，不发送 query value。两种审查共用 15 秒超时、结构化 `allow/deny/ask` 和失败后一次性确认逻辑。
 
@@ -83,7 +83,7 @@ Web 外部读取另使用 `WebPrivacyGuard` 与 `LLMWebSafetyClient`。本地预
 
 EXTERNAL 工具在执行前发现秘密即 Hard Deny；DYNAMIC Shell 还会运行结构性外传检测。读取层允许读取凭证文件，但正文在离开读取层前脱敏。Shell、Hook 和 stdio MCP 子进程使用 `safe_environment()`，模型 key、token、cookie 和密码不会从父进程环境继承；MCP 只额外获得可信配置显式声明的 env。
 
-工具开始/完成事件、权限通知、日志、UI 预览、PostToolUse、分页缓存、Agent history、子 Agent transcript、session、compact 和工作区 transcript 只能接收已经脱敏的数据。Session、transcript 和信任库使用原子写入和 owner-only 权限。
+工具开始/完成事件、权限通知、授权日志、UI 预览、PostToolUse、分页缓存、Agent history、子 Agent transcript、session、compact 和工作区 transcript 只能接收已经脱敏的数据。Session、transcript 和信任库使用原子写入和 owner-only 权限。
 
 ## 项目启动信任
 
@@ -105,6 +105,16 @@ Plan 激活时只允许：
 - 规范化后位于 `.agent/plans/**` 的 WORKSPACE_WRITE。
 
 其他调用直接以 `source="plan"` 拒绝，不调用智能权限。子 Agent 在构造时继承父 Agent 当前 Plan 状态。
+
+## 授权日志
+
+每次授权的最终结论都写入 `{workdir}/.agent/logs/agent.log`（`bootstrap.create_app` 配 `RotatingFileHandler`，2 MiB × 3 个备份，目录 `0700`、文件 `0600`）。三类行：
+
+- `授权 <工具> → allow/deny source=<来源> reason=<理由>` —— 唯一漏斗，在 `PermissionManager._result` 中于脱敏同一语句内产出，覆盖所有来源与来源的全部调用路径。
+- `<来源> 裁决 <工具> → allow/deny/ask（理由）` 与 `<来源> 失败，转一次性人工确认：…` —— 智能权限/web 审查的阶段裁决，先于漏斗行。
+- `转人工确认 <工具>（理由）` —— 一次性确认弹窗开启；与紧随的漏斗行的时间差即用户思考时长，进程被杀导致弹窗未结束时只有此行而无结果行。
+
+级别约定：所有拒绝与非确定性放行（judge/plan/web_safety/user/failure）为 info；`source=policy` 的确定性放行（每次本地读取都会命中）为 debug，避免刷屏，调 `config.yaml` 的 `logging.level` 到 `debug` 才记录全量。写入的 reason 已过 `DataGuard.redact`，与展示给用户的同源。
 
 ## 安全边界
 

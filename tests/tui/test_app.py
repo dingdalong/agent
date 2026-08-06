@@ -20,7 +20,7 @@ from src.events.menu import (
     InputMenu,
     PermissionMenu,
 )
-from src.events.types import ResponseDelta, SubagentLifecycle
+from src.events.types import PermissionNotice, ResponseDelta, SubagentLifecycle
 from src.interfaces.agent_view_store import AgentViewStore
 from src.interfaces.turn_clock import TurnClock
 from src.interfaces.tui.app import AgentTuiApp
@@ -463,6 +463,31 @@ def test_failed_history_mount_is_not_committed(monkeypatch) -> None:
                 await app.append_output("not displayed")
 
             assert app.history_journal.snapshot() == ""
+
+    asyncio.run(scenario())
+
+
+def test_permission_notice_renders_full_reason_and_wraps() -> None:
+    async def scenario() -> None:
+        app = _app()
+        async with app.run_test(size=(60, 20)) as pilot:
+            detail = "无法读取路径信息：/Users/x/" + "seg/" * 30
+            await app.on_permission_notice(PermissionNotice(
+                timestamp=0.0,
+                source="permission",
+                status="deny",
+                tool_name="get_file_info",
+                detail=detail,
+                decision_source="hard_rule",
+            ))
+            await pilot.pause()
+            widget = list(app._history.children)[-1]
+            rendered = widget.render().plain
+            assert "硬规则" in rendered
+            assert detail in rendered
+            # 60 列终端下长路径应折行（高度 > 1）而不是被截断。
+            await pilot.pause()
+            assert widget.size.height > 1
 
     asyncio.run(scenario())
 

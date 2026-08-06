@@ -170,7 +170,13 @@
 
 > `src/config.yaml` 内置值为 `detail`；`bootstrap` 读取时 `config_mgr.get_config("events").get("level", "progress")` 的 `"progress"` 只在整个 `events.level` 键缺失时才生效。事件级别语义见 [events-and-ui.md](events-and-ui.md)。
 
-### 3.7 完整注释版 `config.yaml` 示例
+### 3.7 `logging` — 运行日志级别
+
+| 键 | 类型 | 默认值 | 可选值 | 效果 |
+|----|------|--------|--------|------|
+| `logging.level` | str | `info`（本仓库；`bootstrap` 内 `.get` 回退同） | `debug` \| `info` \| `warning` \| `error` | 根 logger 级别，作用于写入 `{workdir}/.agent/logs/agent.log` 的文件 handler（`bootstrap.create_app()`）。`info` 下记录所有授权拒绝与非确定性放行；`debug` 额外记录 `source=policy` 的确定性放行（见 [permissions.md](permissions.md)「授权日志」） |
+
+### 3.8 完整注释版 `config.yaml` 示例
 
 ```yaml
 # ── LLM provider 连接与推理配置 ──────────────────────────
@@ -238,6 +244,10 @@ role: onboard                            # 缺省回退 coding
 # ── 事件级别 ────────────────────────────────────────────
 events:
   level: detail                          # progress | detail | trace
+
+# ── 运行日志级别（agent.log）─────────────────────────────
+logging:
+  level: info                            # debug | info | warning | error
 ```
 
 ---
@@ -377,6 +387,7 @@ OPENAI_API_KEY=sk-yyyyyyyyyyyyyyyy
 | `{workdir}/.agent/roles/`、`agents/`、`skills/`、`plugins/` | 项目级角色/子 agent/技能/插件 | 手工 |
 | `{workdir}/.agent/memory/` | 记忆文件（`*.md`） | `MemoryMgr`（`memory_mgr.py:35`，`workdir / ".agent" / "memory"`） |
 | `{workdir}/.agent/plans/` | plan 文件 | `PlanMgr`（`plan_mgr.py:70`，`workdir / ".agent" / "plans"`） |
+| `{workdir}/.agent/logs/agent.log` | 运行日志，含逐次授权裁决（`授权 …` / `judge 裁决 …` / `转人工确认 …`）；2 MiB 轮转保留两个备份，目录 `0700`、文件 `0600` | `bootstrap.create_app` 配 `RotatingFileHandler`，级别见 `logging.level` |
 
 ### 运行产物
 
@@ -386,7 +397,7 @@ OPENAI_API_KEY=sk-yyyyyyyyyyyyyyyy
 
 TUI 诊断路径随 `$AGENT_HOME` 改写，不提供独立配置项。`tui.jsonl` 及 `.1`、`.2` 总上限约 6 MiB；日志不包含对话正文、Markdown、用户输入或工具参数，异常文本和 traceback 在写入前经运行时 `DataGuard` 脱敏。
 
-> 落盘目录要点：会话（`sessions/`）、主 agent 任务（`tasks/`）和 TUI 诊断（`logs/`）在**全局** `~/.agent/` 下；记忆（`memory/`）、plan（`plans/`）、transcript（`transcripts/`）在**项目** `{workdir}/.agent/` 下。子 agent 的 `TaskManager` 为纯内存模式（`tasks_dir=None`），不落盘（`agent.py:150`、`task_mgr.py:82`）。目录路径体系见 [architecture.md](architecture.md)。
+> 落盘目录要点：会话（`sessions/`）、主 agent 任务（`tasks/`）和 TUI 诊断（`logs/`）在**全局** `~/.agent/` 下；记忆（`memory/`）、plan（`plans/`）、transcript（`transcripts/`）和运行日志（`logs/`）在**项目** `{workdir}/.agent/` 下。子 agent 的 `TaskManager` 为纯内存模式（`tasks_dir=None`），不落盘（`agent.py:150`、`task_mgr.py:82`）。目录路径体系见 [architecture.md](architecture.md)。
 
 ---
 
@@ -425,6 +436,7 @@ TUI 诊断路径随 `$AGENT_HOME` 改写，不提供独立配置项。`tui.jsonl
 | 调整 Anthropic 协议续接上限 | `config.yaml` `llm_provider.anthropic.max_pause_turn_continuations` | 设为非 bool 正整数；网络重试次数仍由 `llm.retry.max_attempts` 独立控制 |
 | 换激活角色 | `config.yaml` `role` | 设为目标角色名 |
 | 看模型思考过程 | `config.yaml` `events.level` | 设为 `detail`（或 `trace`） |
+| 看每次授权的完整裁决日志 | `config.yaml` `logging.level` | 设为 `debug`（`info` 已含拒绝与非确定性放行） |
 | 禁用某个 MCP server | `settings.json` `mcp.disabledServers` | 加入该 server 名（连接前剔除） |
 | 只启用部分 MCP server | `settings.json` `mcp.enabledServers` | 列出白名单（非空即生效） |
 | 在工具调用 / 会话事件时跑脚本 | `settings.json` `hooks.<Event>` | 加 hook 命令（见 [mcp-and-hooks.md](mcp-and-hooks.md)） |

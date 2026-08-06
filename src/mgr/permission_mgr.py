@@ -116,16 +116,16 @@ class PermissionManager:
             if tool_name == "move_file":
                 paths.append(self._move_final_path(arguments))
         except PathResolutionError as exc:
-            return self._result(False, "hard_rule", str(exc), safe_detail)
+            return self._result(tool_name, False, "hard_rule", str(exc), safe_detail)
 
         grants = tuple(self.path_resolver.grant(item) for item in paths)
 
         hard_reason = self.hard_deny.check(tool_name, policy, arguments, paths)
         if hard_reason:
-            return self._result(False, "hard_rule", hard_reason, safe_detail, grants)
+            return self._result(tool_name, False, "hard_rule", hard_reason, safe_detail, grants)
 
         if plan_active:
-            plan_result = self._authorize_plan(policy, paths, safe_detail, grants)
+            plan_result = self._authorize_plan(tool_name, policy, paths, safe_detail, grants)
             if plan_result is not None:
                 return plan_result
 
@@ -134,14 +134,14 @@ class PermissionManager:
                 for item in paths:
                     self.path_resolver.validate_local_read(item.path)
             except PathResolutionError as exc:
-                return self._result(False, "hard_rule", str(exc), safe_detail, grants)
-            return self._result(True, "policy", "可信本地读取", safe_detail, grants)
+                return self._result(tool_name, False, "hard_rule", str(exc), safe_detail, grants)
+            return self._result(tool_name, True, "policy", "可信本地读取", safe_detail, grants)
 
         if policy.access is AccessKind.INTERNAL:
-            return self._result(True, "policy", "内部状态操作", safe_detail, grants)
+            return self._result(tool_name, True, "policy", "内部状态操作", safe_detail, grants)
 
         if policy.access is AccessKind.WORKSPACE_WRITE and self._ordinary_workspace_targets(paths):
-            return self._result(True, "policy", "普通工作区写入", safe_detail, grants)
+            return self._result(tool_name, True, "policy", "普通工作区写入", safe_detail, grants)
 
         if policy.access is AccessKind.EXTERNAL_READ:
             return await self._review_web(
@@ -167,6 +167,7 @@ class PermissionManager:
 
     def _authorize_plan(
         self,
+        tool_name: str,
         policy: ToolPolicy,
         paths: Sequence[ResolvedPath],
         safe_detail: str,
@@ -184,8 +185,8 @@ class PermissionManager:
             and write_paths
             and all(item.classification is PathClass.PLAN for item in write_paths)
         ):
-            return self._result(True, "plan", "Plan 允许写入活动计划目录", safe_detail, grants)
-        return self._result(False, "plan", "Plan 期间仅允许读取、明确安全的内部操作和计划文件写入", safe_detail, grants)
+            return self._result(tool_name, True, "plan", "Plan 允许写入活动计划目录", safe_detail, grants)
+        return self._result(tool_name, False, "plan", "Plan 期间仅允许读取、明确安全的内部操作和计划文件写入", safe_detail, grants)
 
     async def _review(
         self,
@@ -224,11 +225,11 @@ class PermissionManager:
         privacy = self.web_privacy.assess(tool_name, arguments)
         logger.debug("web 隐私预检 %s → %s（%s）", tool_name, privacy.decision, privacy.reason)
         if privacy.decision == "deny":
-            return self._result(False, "hard_rule", privacy.reason, safe_detail)
+            return self._result(tool_name, False, "hard_rule", privacy.reason, safe_detail)
         if privacy.decision == "ask":
             return await self._confirm_once(tool_name, safe_detail, privacy.reason, grants)
         # 本地预检通过即放行
-        return self._result(True, "web_safety", "本地隐私预检通过", safe_detail, grants)
+        return self._result(tool_name, True, "web_safety", "本地隐私预检通过", safe_detail, grants)
 
     async def _resolve_review(
         self,
@@ -255,14 +256,17 @@ class PermissionManager:
                 logger.warning("%s 失败，转一次性人工确认：%s", source, failure_reason)
 
         if verdict is not None:
-            logger.info("%s 裁决 %s → %s（%s）", source, tool_name, verdict.decision, verdict.reason)
+            logger.info(
+                "%s 裁决 %s → %s（%s）",
+                source, tool_name, verdict.decision, self.data_guard.redact(verdict.reason),
+            )
         else:
             logger.info("%s 裁决 %s → 无结果（%s）", source, tool_name, failure_reason)
 
         if verdict is not None and verdict.decision == "allow":
-            return self._result(True, source, verdict.reason or "安全审查允许", safe_detail, grants)
+            return self._result(tool_name, True, source, verdict.reason or "安全审查允许", safe_detail, grants)
         if verdict is not None and verdict.decision == "deny":
-            return self._result(False, source, verdict.reason or "安全审查拒绝", safe_detail)
+            return self._result(tool_name, False, source, verdict.reason or "安全审查拒绝", safe_detail)
         return await self._confirm_once(
             tool_name,
             safe_detail,
@@ -277,16 +281,18 @@ class PermissionManager:
         reason: str,
         grants: tuple[PathGrant, ...],
     ) -> AuthorizationResult:
+        logger.info("转人工确认 %s（%s）", tool_name, self.data_guard.redact(reason))
         if self.confirm is None:
-            return self._result(False, "failure", reason or "无法进行人工确认", safe_detail)
+            return self._result(tool_name, False, "failure", reason or "无法进行人工确认", safe_detail)
         try:
             allowed = await self.confirm(tool_name, safe_detail, reason)
         except (asyncio.CancelledError, KeyboardInterrupt):
-            return self._result(False, "user", "用户取消授权", safe_detail)
+            return self._result(tool_name, False, "user", "用户取消授权", safe_detail)
         except Exception as exc:
             reason = str(self.data_guard.redact(exc))[:300]
-            return self._result(False, "failure", reason or "人工确认失败", safe_detail)
+            return self._result(tool_name, False, "failure", reason or "人工确认失败", safe_detail)
         return self._result(
+            tool_name,
             allowed,
             "user",
             "用户一次性允许" if allowed else "用户拒绝",
@@ -456,16 +462,24 @@ class PermissionManager:
 
     def _result(
         self,
+        tool_name: str,
         allowed: bool,
         source: Literal["hard_rule", "plan", "policy", "judge", "web_safety", "user", "failure"],
         reason: str,
         safe_detail: str,
         path_grants: tuple[PathGrant, ...] = (),
     ) -> AuthorizationResult:
+        safe_reason = str(self.data_guard.redact(reason))[:500]
+        # 确定性策略放行量大（每次本地读取都会命中），降到 debug；其余全部 info。
+        logger.log(
+            logging.INFO if not allowed or source != "policy" else logging.DEBUG,
+            "授权 %s → %s source=%s reason=%s",
+            tool_name, "allow" if allowed else "deny", source, safe_reason,
+        )
         return AuthorizationResult(
             allowed=allowed,
             source=source,
-            reason=str(self.data_guard.redact(reason))[:500],
+            reason=safe_reason,
             safe_detail=str(self.data_guard.redact(safe_detail))[:2048],
             path_grants=path_grants,
         )

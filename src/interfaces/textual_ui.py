@@ -31,7 +31,7 @@ from src.interfaces.base import UserInterface
 from src.interfaces.turn_clock import TurnClock
 from src.interfaces.tui.app import AgentTuiApp
 from src.interfaces.tui.diagnostics import TuiDiagnostics
-from src.tools.display import tool_title
+from src.tools.display import permission_line
 from src.interfaces.tui.dialogs import PendingInteractions
 from src.interfaces.tui.history_journal import PlainHistoryJournal
 from src.interfaces.tui.plain import PlainFrontend, normalize_line_input
@@ -666,10 +666,12 @@ class TextualInterface(UserInterface):
         if self.is_tty:
             if await self._invoke(lambda: self._app.on_permission_notice(event)):
                 return
-        if event.status == "deny":
-            self._plain.write(f"智能权限 · {tool_title(event.tool_name)} · 已拒绝({event.detail[:60]})\n")
-        elif event.status == "allow":
-            self._plain.write(f"智能权限 · {tool_title(event.tool_name)} · 已放行({event.detail[:60]})\n")
+        self._plain.write(
+            permission_line(
+                event.status, event.tool_name, event.detail, event.decision_source
+            )
+            + "\n"
+        )
 
     async def on_tool_call_started(self, event: ToolCallStarted) -> None:
         if self.is_tty:

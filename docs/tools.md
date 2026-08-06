@@ -57,7 +57,7 @@ ToolPolicy(
 2. Pydantic 校验原始参数。
 3. 运行可信 `PreToolUse` Hook；blocked 或 deny 立即拒绝。
 4. Hook 改写参数后重新校验。
-5. 调用 `PermissionManager.authorize()`；按裁决结果发布脱敏的 PermissionNotice（放行/拒绝/需确认一行提示，含理由）。
+5. 调用 `PermissionManager.authorize()`；按裁决结果发布脱敏的 PermissionNotice（放行/拒绝/需确认一行提示，含理由），通知携带 `decision_source`，UI 按真实裁决来源标注。
 6. 发布脱敏的 `ToolCallStarted`，携带 `ToolDisplay`（中文标题 + 参数摘要）。
 7. 执行工具，并把结果立即经 DataGuard 递归脱敏、限制到 1 MiB/20,000 行。
 8. 提取 `ToolResult`：若工具函数返回 `ToolResult`，分离 `.display`（展示侧）和 `.text`（LLM 侧）。
