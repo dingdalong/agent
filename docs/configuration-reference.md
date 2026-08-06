@@ -34,7 +34,7 @@
 
 | 文件 | 内置层 | 全局层 | 项目层 | 合并规则 | 写入目标 | `/clear` 重载？ |
 |------|--------|--------|--------|----------|----------|-----------------|
-| `config.yaml` | `src/config.yaml` | `~/.agent/config.yaml` | `{workdir}/.agent/config.yaml` | 深合并，后层覆盖叶子值 | 只读（框架不写） | 是（`ConfigManager.reload()`） |
+| `config.yaml` | `src/config.yaml` | `~/.agent/config.yaml` | `{workdir}/.agent/config.yaml` | 深合并，后层覆盖叶子值 | `ConfigManager.set_config()` 可回写全局或项目层；内置层只读 | 是（`ConfigManager.reload()`） |
 | `settings.json` | 无 | `~/.agent/settings.json` | `{workdir}/.agent/settings.json` | 深合并，项目覆盖全局 | 只读（框架不自动写） | 是 |
 | `mcp_servers.json` | 角色层 `src/roles/<role>/mcp_servers.json` | `~/.agent/mcp_servers.json` | `{workdir}/.agent/mcp_servers.json` | 按 server 名深合并，项目覆盖全局；角色层最低优先级 | 只读（框架不写回） | 是，`/clear` 重新检查信任后重连 |
 | `.env` | 无 | `~/.agent/.env` | `{workdir}/.env` 与 `{workdir}/.agent/.env` | `dotenv_values()` 读入私有有效环境，后覆盖前，不修改 `os.environ` | 只读 | 是（`load_config()` 重跑） |
@@ -55,7 +55,7 @@
 内置 src/config.yaml → 全局 ~/.agent/config.yaml → 项目 {workdir}/.agent/config.yaml
 ```
 
-因此项目层只需写想覆盖的叶子键，其余继承低层。
+因此项目层只需写想覆盖的叶子键，其余继承低层。`ConfigManager.set_config(key, value, scope)` 只更新指定的 `global` 或 `project` 源文件中的点路径，不会把合并结果写回；写后需调用 `reload()` 或重启才会生效。回写使用规范化 YAML 输出，不保留原有注释和空白格式；源文件 YAML 无效或顶层不是对象时会拒绝写入。
 
 ### 2.2 `settings.json` — 深合并
 
@@ -374,7 +374,7 @@ OPENAI_API_KEY=sk-yyyyyyyyyyyyyyyy
 
 | 路径 | 内容 | 来源 |
 |------|------|------|
-| `~/.agent/config.yaml` | 全局运行配置 | 手工 |
+| `~/.agent/config.yaml` | 全局运行配置 | 手工或 `ConfigManager.set_config(..., "global")` |
 | `~/.agent/settings.json` | 全局 MCP 开关与 Hooks | 手工 |
 | `~/.agent/mcp_servers.json` | 全局 MCP 连接 | 手工 |
 | `~/.agent/.env` | 全局环境变量 | 手工 |
@@ -390,7 +390,7 @@ OPENAI_API_KEY=sk-yyyyyyyyyyyyyyyy
 
 | 路径 | 内容 | 来源 |
 |------|------|------|
-| `{workdir}/.agent/config.yaml` | 项目运行配置 | 手工 |
+| `{workdir}/.agent/config.yaml` | 项目运行配置 | 手工或 `ConfigManager.set_config(..., "project")` |
 | `{workdir}/.agent/settings.json` | 项目 MCP 开关与 Hooks（需项目信任） | 手工 |
 | `{workdir}/.agent/mcp_servers.json` | 项目 MCP 连接 | 手工 |
 | `{workdir}/.agent/.env` | 项目环境变量（最高优先级） | 手工 |

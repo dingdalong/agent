@@ -7,7 +7,7 @@ import logging
 import os
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from dotenv import dotenv_values
@@ -16,6 +16,8 @@ from src.mgr.paths import builtin_root
 from src.mgr.secure_io import atomic_write_text
 
 logger = logging.getLogger(__name__)
+
+ConfigScope = Literal["global", "project"]
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -50,10 +52,30 @@ def _load_yaml(path: Path) -> dict[str, Any]:
         return {}
     try:
         with path.open() as f:
-            return yaml.safe_load(f) or {}
+            data = yaml.safe_load(f) or {}
     except yaml.YAMLError as exc:
         logger.warning("忽略配置文件 %s：YAML 格式无效：%s", path, exc)
         return {}
+    if not isinstance(data, dict):
+        logger.warning("忽略配置文件 %s：顶层必须是对象", path)
+        return {}
+    return data
+
+
+def _load_writable_yaml(path: Path) -> dict[str, Any]:
+    """加载待回写的 YAML 配置，异常内容不能被覆盖。"""
+    if not path.exists():
+        return {}
+    try:
+        with path.open() as f:
+            data = yaml.safe_load(f)
+    except yaml.YAMLError as exc:
+        raise ValueError(f"配置文件 {path} 的 YAML 格式无效") from exc
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise ValueError(f"配置文件 {path} 的顶层必须是对象")
+    return data
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -98,6 +120,8 @@ class ConfigManager:
         self.workdir = Path(workdir)
         self.project_dir = self.workdir / ".agent"
         self.project_trusted = project_trusted
+        self.global_config_path = self.global_dir / "config.yaml"
+        self.project_config_path = self.project_dir / "config.yaml"
         # settings.json 写入位置固定为项目级
         self.settings_path = self.project_dir / "settings.json"
         self._lock = threading.RLock()
@@ -141,8 +165,8 @@ class ConfigManager:
 
         # 三层 config.yaml 深度合并
         builtin_config = _load_yaml(builtin_root() / "config.yaml")
-        global_config = _load_yaml(self.global_dir / "config.yaml")
-        project_config = _load_yaml(self.project_dir / "config.yaml")
+        global_config = _load_yaml(self.global_config_path)
+        project_config = _load_yaml(self.project_config_path)
         if not self.project_trusted:
             project_config.pop("llm_provider", None)
             project_config.pop("llm", None)
@@ -236,6 +260,44 @@ class ConfigManager:
             配置值。
         """
         return self._get_value(self._config, key)
+
+    def _config_path(self, scope: ConfigScope) -> Path:
+        """返回可回写配置层的目标路径。"""
+        if scope == "global":
+            return self.global_config_path
+        if scope == "project":
+            return self.project_config_path
+        raise ValueError(f"不支持的配置层: {scope!r}")
+
+    def set_config(self, key: str, value: Any, scope: ConfigScope) -> None:
+        """将 YAML 可序列化值写入指定配置层的点路径。
+
+        写入只修改目标层自身，不会写入内置配置或合并后的有效配置。
+        新值在下次 ``reload()`` 或重启后生效。
+
+        Args:
+            key: 非空点分隔配置路径，如 ``"llm.default"``。
+            value: YAML 可序列化的配置值。
+            scope: 目标配置层，仅支持 ``"global"`` 或 ``"project"``。
+        """
+        if not isinstance(key, str) or not key or any(not part for part in key.split(".")):
+            raise ValueError(f"无效配置路径: {key!r}")
+
+        with self._lock:
+            path = self._config_path(scope)
+            config = _load_writable_yaml(path)
+            parts = key.split(".")
+            target = config
+            for part in parts[:-1]:
+                if part not in target:
+                    target[part] = {}
+                elif not isinstance(target[part], dict):
+                    raise ValueError(f"配置路径 {key!r} 的中间节点 {part!r} 必须是对象")
+                target = target[part]
+            target[parts[-1]] = value
+
+            content = yaml.safe_dump(config, allow_unicode=True, sort_keys=False).rstrip() + "\n"
+            atomic_write_text(path, content)
 
     def get_user_setting(self, key: str) -> Any:
         """获取用户设置值。
