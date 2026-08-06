@@ -131,6 +131,7 @@ class TextualInterface(UserInterface):
             self.get_plan_state,
             self._toggle_plan,
             self._get_input_history,
+            get_model_info=self.get_model_info,
             copy_on_select=self.copy_on_select,
             history_journal=self.history_journal,
             diagnostics=self.diagnostics,

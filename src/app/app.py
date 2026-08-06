@@ -272,6 +272,14 @@ class AgentApp:
                     set_history_provider = getattr(self.deps.ui, "set_input_history_provider", None)
                     if set_history_provider is not None:
                         set_history_provider(agent.get_input_history)
+                    set_model_info = getattr(self.deps.ui, "set_model_info_provider", None)
+                    if set_model_info is not None:
+                        set_model_info(
+                            lambda a=agent: (
+                                a.llm.model,
+                                a.reasoning_effort or a.llm.reasoning_effort,
+                            )
+                        )
                     if self._plan_mode_controller is not None:
                         self._plan_mode_controller.install_shortcut(agent)
                         self._plan_mode_controller.notify_state_changed()

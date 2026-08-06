@@ -49,6 +49,7 @@ class UserInterface(ABC):
         """
         self._request_interrupt: Callable[[], None] | None = None
         self._plan_state_provider: Callable[[], bool] | None = None
+        self._model_info_provider: Callable[[], tuple[str, str] | None] | None = None
         self._active_user_request: UiRequest | None = None
         self._session_reset_in_progress = False
 
@@ -172,6 +173,31 @@ class UserInterface(ABC):
         """
 
         pass
+
+    def set_model_info_provider(
+        self, provider: Callable[[], tuple[str, str] | None] | None
+    ) -> None:
+        """设置 UI 查询当前模型与推理强度时使用的数据源。
+
+        Args:
+            provider: 返回 (模型 ID, 推理力度) 的函数，None 表示移除。
+
+        Returns:
+            None.
+        """
+
+        self._model_info_provider = provider
+
+    def get_model_info(self) -> tuple[str, str] | None:
+        """获取当前入口主 agent 的模型与推理强度。
+
+        Returns:
+            未装配 provider 时返回 None。
+        """
+
+        if self._model_info_provider is None:
+            return None
+        return self._model_info_provider()
 
     def set_input_history_provider(
         self, provider: Callable[[], list[str]] | None

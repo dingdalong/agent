@@ -33,7 +33,12 @@ from src.interfaces.tui.widgets import (
 )
 
 
-def _app(store: AgentViewStore | None = None, *, platform: str = "darwin") -> AgentTuiApp:
+def _app(
+    store: AgentViewStore | None = None,
+    *,
+    platform: str = "darwin",
+    get_model_info=None,
+) -> AgentTuiApp:
     return AgentTuiApp(
         store or AgentViewStore(),
         [("clear", "清理会话"), ("agents", "查看 Agent")],
@@ -41,6 +46,7 @@ def _app(store: AgentViewStore | None = None, *, platform: str = "darwin") -> Ag
         lambda: None,
         lambda: False,
         lambda: None,
+        get_model_info=get_model_info,
         platform_name=platform,
         native_clipboard=False,
     )
@@ -784,10 +790,65 @@ def test_modal_fifo_and_permission_over_transcript() -> None:
     asyncio.run(scenario())
 
 
+def test_input_status_shows_model_and_effort() -> None:
+    async def scenario() -> None:
+        app = _app(get_model_info=lambda: ("deepseek-v4-pro", "max"))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            assert app._input_status.display
+            assert app._input_status.render().plain == "deepseek-v4-pro max"
+            assert app._input_status.region.height == 1
+            _assert_regions_do_not_overlap(app)
+
+    asyncio.run(scenario())
+
+
+def test_input_status_keeps_blank_row_without_provider() -> None:
+    """无 provider 时保留空行占位，避免输入区随状态有无而上下跳动。"""
+
+    async def scenario() -> None:
+        app = _app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            assert app._input_status.display
+            assert app._input_status.render().plain == ""
+            assert app._input_status.region.height == 1
+            _assert_regions_do_not_overlap(app)
+
+    asyncio.run(scenario())
+
+
+def test_input_status_hidden_while_viewing_transcript() -> None:
+    async def scenario() -> None:
+        store = AgentViewStore()
+        store.register_foreground("main", "main")
+        store.record(SubagentLifecycle(
+            timestamp=0.0,
+            source="subagent",
+            agent_uuid="worker-0",
+            agent_type="worker",
+            phase="start",
+        ))
+        app = _app(store, get_model_info=lambda: ("deepseek-v4-pro", "max"))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            assert app._input_status.display
+            await app.coordinator.open_live_transcript("worker-0")
+            await pilot.pause()
+            assert not app._input_status.display
+            app.close_transcript()
+            await pilot.pause()
+            assert app._input_status.display
+
+    asyncio.run(scenario())
+
+
 def test_selection_stays_stable_across_scroll_and_platform_copy_rules() -> None:
     async def scenario() -> None:
         app = _app(platform="win32")
-        async with app.run_test(size=(100, 30)) as pilot:
+        # 高度需保证 #history 视口能容纳整数个段落块：块高与视口高不整除时，
+        # 自动滚动会在一次 tick 内跨过块边界，选区长度出现回退而非单调增长。
+        async with app.run_test(size=(100, 31)) as pilot:
             for index in range(36):
                 await app.append_markdown(
                     f"### 选择段落 {index:02d}\n\n用于验证跨视口连续文本选择。"

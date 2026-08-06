@@ -97,6 +97,15 @@ MarkdownFence {
     color: #53616c;
 }
 
+/* 输入框上方的状态行：常驻占位一行，右对齐，暗灰次要文字 */
+#input-status {
+    height: 1;
+    padding: 0 2;
+    text-align: right;
+    background: ansi_default;
+    color: #8d989f;
+}
+
 #composer-shell {
     height: 1;
     min-height: 1;
@@ -158,14 +167,14 @@ MarkdownFence {
 }
 
 .viewing #composer-shell, .viewing #separator-top,
-.viewing #separator-bottom, .viewing #agent-list,
-.dialog-open #agent-list {
+.viewing #separator-bottom, .viewing #input-status,
+.viewing #agent-list, .dialog-open #agent-list {
     display: none;
 }
 
 .compact #history, .compact #activity, .compact #transcript-panel,
 .compact #transcript-header, .compact #completion, .compact #core-status,
-.compact #agent-list ListItem {
+.compact #input-status, .compact #agent-list ListItem {
     padding-left: 1;
     padding-right: 1;
 }

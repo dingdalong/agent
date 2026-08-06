@@ -138,6 +138,7 @@ class AgentTuiApp(App[None]):
         toggle_plan: Callable[[], None],
         get_input_history: Callable[[], list[str]] | None = None,
         *,
+        get_model_info: Callable[[], tuple[str, str] | None] | None = None,
         copy_on_select: bool | None = None,
         platform_name: str | None = None,
         native_clipboard: bool = True,
@@ -154,6 +155,7 @@ class AgentTuiApp(App[None]):
         self.get_plan_state = get_plan_state
         self.toggle_plan = toggle_plan
         self.get_input_history = get_input_history or (lambda: [])
+        self.get_model_info = get_model_info or (lambda: None)
         self.target_platform = platform_name or sys.platform
         self.copy_on_select = (
             self.target_platform == "darwin"
@@ -184,6 +186,7 @@ class AgentTuiApp(App[None]):
         self._round_agent_type: str | None = None
         self._round_agent_uuid: str | None = None
         self._chrome_dirty = False
+        self._input_status_cache: str | None = None
         self._response_stream: Any = None
         self._thinking_stream: Any = None
 
@@ -236,6 +239,7 @@ class AgentTuiApp(App[None]):
                 with TranscriptPanel(id="transcript-panel"):
                     yield Markdown("", id="transcript-content")
             yield Static("", id="completion", markup=False)
+        yield Static("", id="input-status", markup=False)
         yield Static("", classes="separator", id="separator-top", markup=False)
         with Vertical(id="composer-shell"):
             yield Composer(
@@ -262,6 +266,7 @@ class AgentTuiApp(App[None]):
         self._completion_widget = self.query_one("#completion", Static)
         self._composer_shell = self.query_one("#composer-shell", Vertical)
         self._composer = self.query_one("#input", Composer)
+        self._input_status = self.query_one("#input-status", Static)
         self._status = self.query_one("#core-status", Static)
         self._agent_list = self.query_one("#agent-list", AgentList)
         self._separator_top = self.query_one("#separator-top", Static)
@@ -499,6 +504,7 @@ class AgentTuiApp(App[None]):
             return
         self._render_activity()
         self._render_status()
+        self._render_input_status()
         self._render_completion()
         self.sync_input_state()
         self._sync_agent_list_visibility()
@@ -632,6 +638,27 @@ class AgentTuiApp(App[None]):
             status.append("  ·  ", style="bright_black")
             status.append(f"等待 {pending_count}：{pending_source}", style="yellow")
         self._status.update(status)
+
+    def _render_input_status(self) -> None:
+        """渲染输入框上方的右对齐状态行。
+
+        段内容在会话内基本静态，按组装结果缓存，仅在变化时重绘。
+        后续新增状态段时往 segments 追加即可；无内容时保留空行占位，
+        避免输入区随状态有无而上下跳动。
+        """
+        segments: list[str] = []
+        try:
+            info = self.get_model_info()
+        except Exception:
+            info = None
+        if info is not None:
+            model, effort = info
+            segments.append(f"{model} {effort}")
+        line = "  ·  ".join(segments)
+        if line == self._input_status_cache:
+            return
+        self._input_status_cache = line
+        self._input_status.update(Text(line))
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
         if not hasattr(self, "_composer") or event.text_area is not self._composer:
