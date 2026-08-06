@@ -70,7 +70,7 @@
 | 步骤 | 构造对象 | 说明 |
 |---|---|---|
 | 1 | `global_dir` / `work_dir` | 解析并规范化全局目录与工作目录 |
-| 2 | `ProjectTrustGate` | 在任何项目可执行配置加载前确认工作区指纹 |
+| 2 | `ProjectTrustGate` | 在任何项目可执行配置加载前确认工作目录信任 |
 | 3 | `ConfigManager` / `DataGuard` | 按信任结果加载配置，并登记 Provider、环境和 MCP 精确秘密 |
 | 4 | `RoleMgr` / `EventBus` / UI | 激活角色并构造事件与展示层 |
 | 5 | `ToolsMgr` / feature Managers / Hooks | 注册内置工具；项目 Hook 仅在受信任时加载 |

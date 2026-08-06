@@ -27,7 +27,7 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 
 ### reload 协议
 
-有会话级可变状态、需在 `/clear` 时重置的 Manager 实现 `reload()`。`/clear` 先通过 EventBus 菜单确认变化后的项目指纹，进入 reset gate 后按安全依赖顺序显式停止 MCP、更新信任与配置、重建秘密集、重载角色/插件/Hook、重配 LLM 并重启 MCP。每 Agent 层 Manager 随新 Agent 实例整体重建。
+有会话级可变状态、需在 `/clear` 时重置的 Manager 实现 `reload()`。`/clear` 先检查工作目录信任，未记录时通过 EventBus 菜单确认；进入 reset gate 后按安全依赖顺序显式停止 MCP、更新信任与配置、重建秘密集、重载角色/插件/Hook、重配 LLM 并重启 MCP。每 Agent 层 Manager 随新 Agent 实例整体重建。
 
 ## Manager 一览表
 

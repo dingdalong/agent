@@ -87,11 +87,11 @@ EXTERNAL 工具在执行前发现秘密即 Hard Deny；DYNAMIC Shell 还会运�
 
 ## 项目启动信任
 
-`ProjectTrustGate` 在项目环境、Provider/URL 配置、Hook、Plugin Hook 和 MCP 激活前运行。信任键是规范化 workdir，指纹覆盖受控文件的相对路径、类型、符号链接目标和内容。
+`ProjectTrustGate` 在项目环境、Provider/URL 配置、Hook、Plugin Hook 和 MCP 激活前运行。信任键是规范化 workdir；目录一旦确认信任，目录内文件变化不影响信任状态。
 
-首次进入或指纹变化时要求确认；首次启动在 TUI 创建前通过异步纯文本行读取，运行中的 `/clear` 由 EventBus 选择菜单读取，避免与常驻 UI 争抢 stdin。两条通道都默认拒绝，仅明确选择信任才允许加载；确认后、加载前重新计算，防止确认期间文件变化。拒绝、取消、确认失败或非 TTY 进入受限模式：忽略项目 `.env`、模型/Provider 配置、项目角色、项目 Hook、项目/角色 Plugin Hook 和项目 MCP。普通 AGENTS、agents、skills 和 memory 仍作为数据加载。
+首次进入未记录的工作目录时要求确认；首次启动在 TUI 创建前通过异步纯文本行读取，运行中的 `/clear` 由 EventBus 选择菜单读取，避免与常驻 UI 争抢 stdin。两条通道都默认拒绝，仅明确选择信任才允许加载。拒绝、取消、确认失败或非 TTY 进入受限模式：忽略项目 `.env`、模型/Provider 配置、项目角色、项目 Hook、项目/角色 Plugin Hook 和项目 MCP。普通 AGENTS、agents、skills 和 memory 仍作为数据加载。
 
-记录保存在全局 `trusted_projects.json`，原子写入并设置为 `0600`。`/clear` 重新检查指纹并按结果重载配置、Hook 和 MCP；运行中修改受控文件不会自动激活。
+规范化工作目录列表保存在全局 `trusted_projects.json`，原子写入并设置为 `0600`。`/clear` 重新检查目录是否已记录，并按结果重载配置、Hook 和 MCP；此前拒绝的目录可在此时再次确认。
 
 ## Plan
 

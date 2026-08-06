@@ -8,7 +8,7 @@
 
 `_consume_events()`（`app.py:121-133`）内联处理 `InterruptRequested`，其余事件统一交 `OutputRouter.dispatch()`，确保 Store 先记录再决定可见性。`_run_agent_turn()`（`app.py:135-156`）把 `agent.run()` 包成任务，取消或键盘中断时调用 `_handle_interrupted_turn()` 收束任务与输入。
 
-`_reset_session()` 处理 `/clear` 时先在常驻 UI 中通过 EventBus 菜单重新检查项目指纹；Esc、取消、菜单失败或默认选项都进入受限模式。确认结束后进入 UI reset gate，取消活跃、排队和只读请求并等待窗口 runner 清理；随后拒绝新的 `UiRequest`，用 `EventBus.join()` 收束已投递事件，再更新信任状态并重载配置、Hook 和 MCP，生成 `session_id`，重置 `AgentViewStore` 与会话上下文，安装 `PlanModeController`，从激活角色 manifest 构造新主 Agent并运行 `SessionStart` Hook。
+`_reset_session()` 处理 `/clear` 时先检查工作目录信任；已记录的目录直接通过，未记录的目录在常驻 UI 中通过 EventBus 菜单确认，Esc、取消、菜单失败或默认选项都进入受限模式。确认结束后进入 UI reset gate，取消活跃、排队和只读请求并等待窗口 runner 清理；随后拒绝新的 `UiRequest`，用 `EventBus.join()` 收束已投递事件，再更新信任状态并重载配置、Hook 和 MCP，生成 `session_id`，重置 `AgentViewStore` 与会话上下文，安装 `PlanModeController`，从激活角色 manifest 构造新主 Agent并运行 `SessionStart` Hook。
 
 ## 2. 状态枚举与流转
 

@@ -274,7 +274,7 @@ logging:
 
 **`hooks` 事件**（`hooks_mgr.py:17` `HOOK_EVENTS`，共 8 种）：`PreToolUse`、`PostToolUse`、`UserPromptSubmit`、`Stop`、`SessionStart`、`SessionEnd`、`SubagentStart`、`SubagentStop`。每个事件下是 group 列表，group 含可选 `matcher` 与 `hooks` 命令数组，命令支持 JSON stdin/stdout 协议、`timeout`（默认 60s）、`async`（默认 false）。格式详解见 [mcp-and-hooks.md](mcp-and-hooks.md)。
 
-项目层设置只有通过项目启动信任后才合并。`/clear` 重新检查指纹，并按新的信任结果重载 Hook 与 MCP。
+项目层设置只有通过项目启动信任后才合并。`/clear` 重新检查工作目录是否已信任，并按信任结果重载 Hook 与 MCP。
 
 ### 示例 `settings.json`
 
