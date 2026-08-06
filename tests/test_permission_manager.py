@@ -750,7 +750,9 @@ def test_authorization_log_carries_source_and_redacted_reason(tmp_path, caplog):
     assert REDACTED in caplog.text
 
 
-def test_hard_rule_denial_is_logged_with_tool_and_source(tmp_path, caplog):
+def test_local_read_of_missing_path_is_allowed_not_hard_denied(tmp_path):
+    """不存在的本地读路径应策略放行（allowed/policy），由工具层返回「路径不存在」，
+    而不是被 validate_local_read 笼统归为 hard_rule 授权拒绝。"""
     missing = tmp_path / "no-such-file.txt"
     manager = make_manager(tmp_path)
     policy = ToolPolicy(
@@ -758,14 +760,40 @@ def test_hard_rule_denial_is_logged_with_tool_and_source(tmp_path, caplog):
         DataFlow.LOCAL,
         (PathArgument("path", PathRole.READ),),
     )
+    result = run(manager.authorize(
+        "get_file_info", policy, {"path": str(missing)}, origin=ToolOrigin("builtin"),
+        plan_active=False, user_intent="read it",
+    ))
+    assert result.allowed is True
+    assert result.source == "policy"
+
+
+def test_local_read_stat_permission_error_is_hard_denied(tmp_path, monkeypatch, caplog):
+    """存在但 stat 抛 PermissionError（读取元信息失败）仍应归为 hard_rule 授权拒绝。"""
+    target = tmp_path / "a.txt"
+    target.write_text("x")
+    manager = make_manager(tmp_path)
+    policy = ToolPolicy(
+        AccessKind.LOCAL_READ,
+        DataFlow.LOCAL,
+        (PathArgument("path", PathRole.READ),),
+    )
+
+    real_stat = Path.stat
+
+    def raising_stat(self, *args, **kwargs):
+        if self == target:
+            raise PermissionError("拒绝访问")
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", raising_stat)
     with caplog.at_level(logging.INFO, logger="src.mgr.permission_mgr"):
         result = run(manager.authorize(
-            "get_file_info", policy, {"path": str(missing)}, origin=ToolOrigin("builtin"),
+            "get_file_info", policy, {"path": str(target)}, origin=ToolOrigin("builtin"),
             plan_active=False, user_intent="read it",
         ))
     assert result.allowed is False
     assert result.source == "hard_rule"
-    assert "授权 get_file_info → deny source=hard_rule" in caplog.text
     assert "无法读取路径信息" in caplog.text
 
 
@@ -871,7 +899,8 @@ def test_deny_notice_carries_real_authorization_source(tmp_path):
         history=[],
         llm=SimpleNamespace(model="default"),
     )
-    missing = tmp_path / "no-such-dir" / "battle"
+    # 用 UNSAFE 伪路径触发稳定的 hard_rule 拒绝（不再依赖「不存在路径」的旧行为）。
+    missing = Path("/dev") / "no-such-dir" / "battle"
     result = run(tools_mgr.execute(
         "info",
         {"path": str(missing)},

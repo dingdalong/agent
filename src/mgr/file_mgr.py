@@ -135,7 +135,10 @@ class FileMgr:
             ToolResult（LLM 文本 + UI 展示分离），或错误描述字符串。
         """
         try:
-            all_lines = self._read_path(path, authorization).read_text().splitlines()
+            file_path = self._read_path(path, authorization)
+            if not file_path.exists():
+                return f"Error: 路径不存在: {path}"
+            all_lines = file_path.read_text().splitlines()
             if len(all_lines) > 20_000 and start_line is None and end_line is None:
                 all_lines = all_lines[:20_000]
             total = len(all_lines)

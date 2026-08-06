@@ -122,7 +122,12 @@ class PathResolver:
             raise PathResolutionError(f"不允许读取特殊或伪文件：{path}")
         try:
             info = path.stat()
+        except FileNotFoundError:
+            # 路径不存在（FileNotFoundError，含 NotADirectoryError）：不属于授权问题，
+            # 放行后由各工具按既有逻辑返回「路径不存在」，避免误报为授权拒绝。
+            return
         except OSError as exc:
+            # 权限不足等真正的元信息读取失败，仍归为授权拒绝。
             raise PathResolutionError(f"无法读取路径信息：{path}") from exc
         if stat.S_ISREG(info.st_mode):
             if info.st_size > MAX_READ_FILE_BYTES:
