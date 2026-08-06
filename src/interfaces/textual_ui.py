@@ -34,7 +34,7 @@ from src.interfaces.tui.diagnostics import TuiDiagnostics
 from src.tools.display import tool_title
 from src.interfaces.tui.dialogs import PendingInteractions
 from src.interfaces.tui.history_journal import PlainHistoryJournal
-from src.interfaces.tui.plain import PlainFrontend
+from src.interfaces.tui.plain import PlainFrontend, normalize_line_input
 
 if TYPE_CHECKING:
     from src.mgr.data_guard import DataGuard
@@ -123,6 +123,11 @@ class TextualInterface(UserInterface):
     async def _launch_app(self) -> None:
         self._ui_ready.clear()
         self.diagnostics.record("app_launching")
+        # Textual 启动时会把当前终端属性快照为恢复基线，退出时原样写回。若继承到
+        # 上一次异常退出残留的 raw 模式，脏状态就会被当作基线在多次运行间自我延续。
+        # 这里先规范化再交给 Textual，确保它快照到的是干净基线（有意不还原）。
+        if self._terminal_is_tty:
+            normalize_line_input()
         self._app = AgentTuiApp(
             self.agent_view_store,
             self.slash_commands,
@@ -383,6 +388,9 @@ class TextualInterface(UserInterface):
             self._fallback_task = None
             self._ui_ready.clear()
             _restore_vscode_keyboard_protocol(self._terminal_is_tty or self.is_tty)
+            # Textual 的属性恢复失败时的兜底：不把 raw 模式留给用户 shell 和下次启动。
+            if self._terminal_is_tty or self.is_tty:
+                normalize_line_input()
             try:
                 await super().stop()
             finally:

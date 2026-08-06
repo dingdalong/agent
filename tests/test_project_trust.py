@@ -3,7 +3,15 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import pty
+import select
+import subprocess
+import sys
+import termios
+import textwrap
+import time
 from contextlib import asynccontextmanager, contextmanager
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -15,6 +23,8 @@ from src.interfaces.agent_view_store import AgentViewStore
 from src.mgr.config_mgr import ConfigManager
 from src.mgr.data_guard import DataGuard, REDACTED, register_runtime_secrets
 from src.mgr.project_trust import ProjectTrustGate
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def test_trust_fingerprint_changes_with_controlled_file(tmp_path):
@@ -369,3 +379,76 @@ def test_revoking_trust_removes_project_values_from_private_environment(tmp_path
     config.set_project_trusted(False)
     assert "PROJECT_ONLY_SENTINEL" not in config.environment
     assert os.getenv("PROJECT_ONLY_SENTINEL") is None
+
+
+def test_read_console_line_survives_leftover_raw_mode(tmp_path):
+    """终端残留 raw 模式（ICRNL 被清除）时，启动期确认仍能按回车提交。
+
+    Textual 进入 raw 模式会清除 ICRNL；异常退出未走完恢复流程时该位残留在终端上。
+    此时回车发出的 CR 不再翻译成 NL，而 canonical 模式只认 NL 作行分隔符，
+    readline() 便永远等不到行结束符而卡死，ECHO 还把 CR 回显成字面量 ^M。
+    """
+    ready_path = tmp_path / "ready"
+    go_path = tmp_path / "go"
+    script = textwrap.dedent(
+        f"""
+        import asyncio, os, sys, time
+        sys.path.insert(0, {str(REPO_ROOT)!r})
+        from src.interfaces.tui.plain import read_console_line
+
+        while not os.path.exists({str(go_path)!r}):   # 等父进程先破坏终端
+            time.sleep(0.02)
+        open({str(ready_path)!r}, "w").close()        # 规范化前告知父进程可以按键
+        answer = asyncio.run(read_console_line("[y/N] "))
+        sys.stdout.write("GOT=%r\\r\\n" % answer)
+        sys.stdout.flush()
+        """
+    )
+
+    master, slave = pty.openpty()
+    process = subprocess.Popen(
+        [sys.executable, "-c", script],
+        stdin=slave,
+        stdout=slave,
+        stderr=slave,
+        cwd=os.getcwd(),
+        close_fds=True,
+    )
+    os.close(slave)
+    output = bytearray()
+
+    def drain(timeout: float = 0.1) -> None:
+        while select.select([master], [], [], timeout)[0]:
+            try:
+                chunk = os.read(master, 65536)
+            except OSError:
+                return
+            if not chunk:
+                return
+            output.extend(chunk)
+
+    try:
+        # 复现残留状态：只清除 ICRNL，保留 ICANON/ECHO——正是卡死时的终端状态。
+        attrs = termios.tcgetattr(master)
+        attrs[0] &= ~termios.ICRNL
+        termios.tcsetattr(master, termios.TCSANOW, attrs)
+        go_path.touch()
+
+        deadline = time.monotonic() + 10
+        while not ready_path.exists() and process.poll() is None:
+            assert time.monotonic() < deadline, "子进程未就绪"
+            drain(0.02)
+
+        drain(0.5)  # 等提示写出，确保规范化已生效
+        os.write(master, b"y\r")  # 用户按 y 再按回车
+
+        while time.monotonic() < deadline and b"GOT=" not in output:
+            drain()
+
+        decoded = output.decode(errors="replace")
+        assert "GOT=" in decoded, f"回车未能提交，终端输出：{decoded!r}"
+        assert "'y'" in decoded, decoded
+    finally:
+        process.kill()
+        process.wait(timeout=5)
+        os.close(master)
