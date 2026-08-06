@@ -18,8 +18,15 @@ uv run python main.py --workdir examples/mijia
 ```
 mijia/
 ├── .agent/
-│   └── config.yaml    # role: mijia
+│   └── config.yaml
 └── README.md
+```
+
+`config.yaml` 内容：
+
+```yaml
+role:
+  default: mijia
 ```
 
 角色资产（子 agent、技能、人设、AGENTS.md）位于 `src/roles/mijia/`，

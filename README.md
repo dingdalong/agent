@@ -113,7 +113,7 @@ REQUEST_INPUT → CHECK_COMPACT → [COMPACT →] LLM_CALL → PROCESS_RESPONSE
 2. 全局配置 — `~/.agent/config.yaml`
 3. 项目配置 — `.agent/config.yaml`
 
-`config.yaml` 的 `role:` 键选定激活角色（缺省回退 `coding`），`llm.default` 指定默认模型。MCP 连接开关和 Hooks 通过 `settings.json`（全局 + 项目两层）配置；MCP server 连接配置在独立的 `mcp_servers.json`（角色 → 全局 → 项目三层）。工具授权使用内置声明式策略、代码级安全规则和逐次智能权限裁决，不从用户配置提升权限。
+`config.yaml` 的 `role.default` 选定激活角色（缺省回退 `coding`）；`role.<角色名>.model` 和 `role.<角色名>.reasoning_effort` 可覆盖该主角色 `role.md` 的同名字段。未覆盖时分别保留 `role.md` 的值，并最终由 `llm.default` 和 provider 推理强度兜底。MCP 连接开关和 Hooks 通过 `settings.json`（全局 + 项目两层）配置；MCP server 连接配置在独立的 `mcp_servers.json`（角色 → 全局 → 项目三层）。工具授权使用内置声明式策略、代码级安全规则和逐次智能权限裁决，不从用户配置提升权限。
 
 环境变量 `{PROVIDER}_API_KEY` 和 `{PROVIDER}_API_URL` 可覆盖对应提供商的配置。
 

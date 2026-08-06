@@ -1,7 +1,7 @@
 """角色管理器 — 发现、解析、暴露当前激活角色的路径。
 
 三层发现（低→高）：内置 src/roles/ → 全局 ~/.agent/roles/ → 项目 .agent/roles/。
-激活角色由 config.yaml 的 role: 键指定，缺省回退 coding。
+激活角色由 config.yaml 的 role.default 键指定，缺省回退 coding。
 角色定义文件为 role.md（YAML frontmatter + body），与子 agent 的 *.md 同格式。
 提供 frontmatter 解析与字段提取工具函数（共用）。
 """
@@ -179,7 +179,7 @@ class RoleMgr:
     """角色管理器。
 
     Args:
-        config_mgr: 配置管理器，用于读取 role: 键。
+        config_mgr: 配置管理器，用于读取 role.default 及角色覆盖配置。
         workdir: 用户工作目录。
         global_dir: 全局配置目录（~/.agent/），为 None 时跳过全局层。
     """
@@ -237,7 +237,7 @@ class RoleMgr:
         """
         role_name: str | None = None
         try:
-            val = self.config_mgr.get_config("role")
+            val = self.config_mgr.get_config("role.default")
             if isinstance(val, str) and val.strip():
                 role_name = val.strip()
         except KeyError:
@@ -278,10 +278,44 @@ class RoleMgr:
                 default_id="main",
                 default_description="",
             )
+            self._apply_config_overrides(path.name)
         else:
             self._manifest = None
 
         logger.info("激活角色：%s（%s）", self.role_name, path)
+
+    def _apply_config_overrides(self, role_name: str) -> None:
+        """将活动角色的模型与推理力度配置覆盖到已解析 manifest。"""
+        if self._manifest is None:
+            return
+
+        try:
+            raw_model = self.config_mgr.get_config(f"role.{role_name}.model")
+        except KeyError:
+            raw_model = None
+        if isinstance(raw_model, str) and raw_model.strip():
+            self._manifest.model = raw_model.strip()
+
+        try:
+            raw_effort = self.config_mgr.get_config(
+                f"role.{role_name}.reasoning_effort"
+            )
+        except KeyError:
+            raw_effort = None
+        if raw_effort is None:
+            return
+
+        from src.llm.base import normalize_reasoning_effort
+
+        reasoning_effort = normalize_reasoning_effort(str(raw_effort))
+        if reasoning_effort is None:
+            logger.warning(
+                "角色配置 role.%s.reasoning_effort 非法：%r，已忽略",
+                role_name,
+                raw_effort,
+            )
+            return
+        self._manifest.reasoning_effort = reasoning_effort
 
     # —— 查询 ————————————————————————————————————————————————————————
 

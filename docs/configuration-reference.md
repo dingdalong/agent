@@ -154,11 +154,17 @@
 
 > **换算说明**：`config.yaml` 里存的是**比例**，`Agent` 在构造 `CompactMgr` 时用当前 agent 所用模型的 `context_limit`（`self.llm.context_limit`，`agent.py:203`）乘以比例得到绝对 token 数。不同 agent 若用不同 `context_limit` 的模型，绝对阈值也不同；窗口未知（非正数）时不会自动压缩。`CompactMgr` 细节见 [managers.md](managers.md)。
 
-### 3.5 `role` — 激活角色
+### 3.5 `role` — 激活角色与主角色覆盖
+
+`role` 是 mapping。`RoleMgr._resolve()` 只读取 `role.default`，不会兼容旧标量格式。配置合并后先确定实际激活角色，再解析其 `role.md`，最后应用该角色的配置覆盖；因此无效角色回退到 `coding` 时会应用 `role.coding`。
 
 | 键 | 类型 | 默认值 | 可选值 | 效果 |
 |----|------|--------|--------|------|
-| `role` | str | 缺省回退 `coding`（本仓库设为 `onboard`） | 已发现的角色名 | 指定激活角色；`RoleMgr._resolve()` 读取（`role_mgr.py:228`）。未指定或角色不存在时回退 `coding`（`role_mgr.py:28`、`:234`）。角色决定主 agent 身份提示词、可用子 agent、技能、MCP server 与 feature 集 |
+| `role.default` | str | 缺省或空值回退 `coding` | 已发现的角色名 | 指定激活角色。角色不存在时告警并回退 `coding`；连 `coding` 都不存在则无角色激活 |
+| `role.<角色名>.model` | str | 无 | 非空模型别名或真实模型 ID | 覆盖实际激活主角色 `role.md` 的 `model`。缺失或空值保留 manifest 值；两者都缺失时由 `llm.default` 兜底 |
+| `role.<角色名>.reasoning_effort` | str | 无 | `low` \| `medium` \| `high` \| `xhigh` \| `max` | 覆盖实际激活主角色 `role.md` 的 `reasoning_effort`。值按 `normalize_reasoning_effort` 规整，非法值告警并保留 manifest 值；两者都缺失时由 provider 配置兜底 |
+
+覆盖只影响主角色 manifest，不影响子 agent 既有的模型或推理力度继承规则。角色决定主 agent 身份提示词、可用子 agent、技能、MCP server 与 feature 集。
 
 角色发现与结构见 [roles-subagents-skills.md](roles-subagents-skills.md) 与 [architecture.md](architecture.md)。
 
@@ -238,8 +244,12 @@ compact:
   keep_recent_user_turns: 3              # 优先保留原文的最近 N 个用户轮次范围
   keep_recent_messages_token_rate: 0.25  # 近期原文硬预算占上下文窗口的比例
 
-# ── 激活角色 ────────────────────────────────────────────
-role: onboard                            # 缺省回退 coding
+# ── 激活角色与主角色覆盖 ──────────────────────────────────
+role:
+  default: coding                         # 缺省或空值回退 coding
+  coding:
+    model: best                           # 覆盖 coding/role.md 的 model
+    reasoning_effort: max                 # 覆盖 coding/role.md 的 reasoning_effort
 
 # ── 事件级别 ────────────────────────────────────────────
 events:
@@ -434,7 +444,8 @@ TUI 诊断路径随 `$AGENT_HOME` 改写，不提供独立配置项。`tui.jsonl
 | 调整自动尝试次数 | `config.yaml` `llm.retry.max_attempts` | 设为包含首次的正整数 |
 | 调整重试等待 | `config.yaml` `llm.retry.base_delay_seconds` / `max_delay_seconds` | 设为有限正秒数，且最大值不小于基础值 |
 | 调整 Anthropic 协议续接上限 | `config.yaml` `llm_provider.anthropic.max_pause_turn_continuations` | 设为非 bool 正整数；网络重试次数仍由 `llm.retry.max_attempts` 独立控制 |
-| 换激活角色 | `config.yaml` `role` | 设为目标角色名 |
+| 换激活角色 | `config.yaml` `role.default` | 设为目标角色名 |
+| 覆盖主角色模型 / 推理力度 | `config.yaml` `role.<角色名>.model` / `reasoning_effort` | 配置非空模型与合法力度档位；仅影响该主角色 |
 | 看模型思考过程 | `config.yaml` `events.level` | 设为 `detail`（或 `trace`） |
 | 看每次授权的完整裁决日志 | `config.yaml` `logging.level` | 设为 `debug`（`info` 已含拒绝与非确定性放行） |
 | 禁用某个 MCP server | `settings.json` `mcp.disabledServers` | 加入该 server 名（连接前剔除） |

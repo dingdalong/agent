@@ -20,7 +20,19 @@
 
 发现规则：每个子目录须含 `role.md` 才算一个角色；目录名 `common` **显式跳过**（`role_mgr.py:211`，它是共享目录不是角色）。
 
-激活角色由 `config.yaml` 的 `role:` 键指定（`_resolve()`，`role_mgr.py:220-272`）：缺省或空值回退 `_DEFAULT_ROLE = "coding"`（`role_mgr.py:28`）；指定角色不存在时告警并回退 `coding`；连 `coding` 都不存在则无角色激活（`active == False`）。当前仓库 `config.yaml` 设为 `role: coding`。
+激活角色由 `config.yaml` 的 `role.default` 指定（`_resolve()`）：缺省或空值回退 `_DEFAULT_ROLE = "coding"`；指定角色不存在时告警并回退 `coding`；连 `coding` 都不存在则无角色激活（`active == False`）。`role` 必须是 mapping，旧标量格式不会被解析为激活角色。
+
+主角色还可在同一段配置中覆盖 `role.md` 的模型和推理力度，例如为自定义 `reviewer` 角色配置：
+
+```yaml
+role:
+  default: reviewer
+  reviewer:
+    model: best
+    reasoning_effort: xhigh
+```
+
+`RoleMgr` 先解析实际激活角色的 `role.md`，再应用 `role.<实际角色名>.model` 与 `role.<实际角色名>.reasoning_effort`。模型只接受非空字符串；推理力度只接受 `low`、`medium`、`high`、`xhigh` 或 `max`，并按 `normalize_reasoning_effort` 规整。缺失或无效覆盖保留 `role.md` 的值；模型仍缺失时由 `llm.default` 兜底，推理力度仍缺失时由当前 provider 兜底。角色不存在而回退到 `coding` 时，应用的是 `role.coding` 的覆盖。该配置只影响主角色，不改变子 agent 的模型继承规则。
 
 ### `role.md` 的结构与作用
 
