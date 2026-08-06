@@ -642,7 +642,9 @@ class AgentTuiApp(App[None]):
     def _resize_composer(self) -> None:
         if not hasattr(self, "_composer"):
             return
-        line_count = min(8, max(1, self._composer.text.count("\n") + 1))
+        # 用折行后的视觉行数（含显式换行与软折行），而非只数 "\n"。
+        visual_lines = self._composer.wrapped_document.height
+        line_count = min(8, max(1, visual_lines))
         self._composer_shell.styles.height = line_count
 
     def _update_completions(self, text: str) -> None:

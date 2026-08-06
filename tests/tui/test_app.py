@@ -414,6 +414,15 @@ def test_responsive_input_history_and_ctrl_c() -> None:
             app._composer.clear()
             await pilot.pause()
             assert app._composer_shell.styles.height.value == 1
+            # 软折行（无显式 \n）也应撑高输入栏：视觉行数 = wrapped_document.height
+            app._composer.load_text("a" * 500)
+            await pilot.pause()
+            expected_height = min(8, max(1, app._composer.wrapped_document.height))
+            assert expected_height > 1
+            assert app._composer_shell.styles.height.value == expected_height
+            app._composer.clear()
+            await pilot.pause()
+            assert app._composer_shell.styles.height.value == 1
             await pilot.press("h", "i", "shift+enter", "x")
             assert app._composer.text == "hi\nx"
             assert app._composer_shell.styles.height.value == 2
