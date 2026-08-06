@@ -26,6 +26,7 @@ from src.events.menu import (
     FormMenu,
     FormQuestion,
     InputMenu,
+    ModelMenu,
     PermissionMenu,
     TranscriptView,
     UiRequest,
@@ -237,6 +238,35 @@ class EventBus:
             ),
             "choice",
         )
+
+    async def request_model_selection(
+        self,
+        prompt: str,
+        models: list[tuple[str, str]],
+        efforts: list[str],
+        model_index: int = 0,
+        effort_index: int = 0,
+        source: str = "ui",
+        markdown: bool = False,
+    ) -> tuple[str, str]:
+        """通过双轴菜单选择模型和推理强度。"""
+        raw = await self._request(
+            ModelMenu(
+                timestamp=time.time(),
+                source=source,
+                prompt=prompt,
+                models=models,
+                efforts=efforts,
+                model_index=model_index,
+                effort_index=effort_index,
+                markdown=markdown,
+            ),
+            "model",
+        )
+        if not raw:
+            return "", ""
+        payload = json.loads(raw)
+        return str(payload.get("model", "")), str(payload.get("reasoning_effort", ""))
 
     async def request_form(
         self,

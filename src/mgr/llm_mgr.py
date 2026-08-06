@@ -33,6 +33,11 @@ _CLAUDECODE_ALIASES: dict[str, str] = {
 }
 
 
+def _alphabetical_key(value: str) -> tuple[str, str]:
+    """生成大小写不敏感且结果稳定的 A-Z 排序键。"""
+    return value.casefold(), value
+
+
 class ModelUnavailableError(Exception):
     """默认模型在 load_models() 之后仍不可用。
 
@@ -413,18 +418,28 @@ class LLMMgr:
         )
 
     def list_models(self) -> list[str]:
-        return sorted(self._model_to_provider.keys())
+        """按 `provider/model` 完整展示名 A-Z 返回模型 ID。"""
+        return sorted(
+            self._model_to_provider,
+            key=lambda model: _alphabetical_key(
+                f"{self._model_to_provider[model]}/{model}"
+            ),
+        )
 
     def models_by_provider(self) -> dict[str, list[str]]:
         """按 provider 配置名分组返回已注册模型。
 
         Returns:
-            以 provider 配置名为键（升序）、对应模型 ID 升序列表为值的字典。
+            以 provider 配置名为键、对应模型 ID 列表为值的字典；两层均按
+            大小写不敏感的 A-Z 顺序排列。
         """
         grouped: dict[str, list[str]] = {}
         for model, provider in self._model_to_provider.items():
             grouped.setdefault(provider, []).append(model)
-        return {provider: sorted(models) for provider, models in sorted(grouped.items())}
+        return {
+            provider: sorted(grouped[provider], key=_alphabetical_key)
+            for provider in sorted(grouped, key=_alphabetical_key)
+        }
 
 
 def _positive_finite_number(value: Any, *, key: str) -> float:

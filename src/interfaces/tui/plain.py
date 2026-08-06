@@ -147,6 +147,28 @@ class PlainFrontend:
             return ""
         return options[index][0] if 0 <= index < len(options) else ""
 
+    async def read_model_selection(
+        self,
+        prompt: str,
+        models: list[tuple[str, str]],
+        efforts: list[str],
+        model_index: int,
+        effort_index: int,
+    ) -> str:
+        if prompt:
+            self.write(prompt + "\n")
+        model = await self.read_choice("模型", models, model_index)
+        if not model:
+            return ""
+        effort = await self.read_choice(
+            "推理强度",
+            [(value, value) for value in efforts],
+            effort_index,
+        )
+        if not effort:
+            return ""
+        return json.dumps({"model": model, "reasoning_effort": effort}, ensure_ascii=False)
+
     async def read_choice_input(
         self,
         prompt: str,

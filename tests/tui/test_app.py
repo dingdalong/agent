@@ -8,6 +8,8 @@ import warnings
 
 import pytest
 from textual import events
+from textual.color import Color
+from textual.containers import VerticalScroll
 from textual.geometry import Offset
 from textual.selection import Selection
 from textual.widgets import Markdown, Static, TextArea
@@ -18,6 +20,7 @@ from src.events.menu import (
     FormMenu,
     FormQuestion,
     InputMenu,
+    ModelMenu,
     PermissionMenu,
 )
 from src.events.types import PermissionNotice, ResponseDelta, SubagentLifecycle
@@ -463,6 +466,220 @@ def test_failed_history_mount_is_not_committed(monkeypatch) -> None:
                 await app.append_output("not displayed")
 
             assert app.history_journal.snapshot() == ""
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "/models",
+        "  /MODELS  ",
+        "/models ignored-argument",
+    ],
+)
+def test_models_command_input_is_recorded(text: str) -> None:
+    async def scenario() -> None:
+        app = _app()
+        async with app.run_test(size=(80, 24)) as pilot:
+            future = asyncio.get_running_loop().create_future()
+            request = InputMenu(timestamp=1.0, source="test", future=future)
+            await app.coordinator.submit(request)
+            await app.coordinator.complete_input(text)
+            await pilot.pause()
+
+            assert await future == text
+            history = app.history_journal.snapshot()
+            assert text in history
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+def test_models_flow_only_keeps_success_output(cancelled: bool) -> None:
+    async def scenario() -> None:
+        app = _app()
+        async with app.run_test(size=(80, 24)) as pilot:
+            loop = asyncio.get_running_loop()
+            command = InputMenu(
+                timestamp=1.0,
+                source="test",
+                future=loop.create_future(),
+            )
+            await app.coordinator.submit(command)
+            await app.coordinator.complete_input("/models")
+            assert await command.future == "/models"
+
+            selection = ModelMenu(
+                timestamp=2.0,
+                source="models",
+                models=[("model-a", "provider/model-a")],
+                efforts=["low", "medium", "high", "xhigh", "max"],
+                future=loop.create_future(),
+            )
+            await app.coordinator.submit(selection)
+            await pilot.pause()
+            await pilot.press("escape" if cancelled else "enter")
+            await selection.future
+            await pilot.pause()
+
+            if cancelled:
+                assert app.history_journal.snapshot() == "› /models\n"
+                return
+            await app.append_output("已切换模型：model-a，推理强度：low。")
+            assert app.history_journal.snapshot() == (
+                "› /models\n已切换模型：model-a，推理强度：low。\n"
+            )
+
+    asyncio.run(scenario())
+
+
+def test_inline_widgets_define_their_own_completion_history() -> None:
+    async def scenario() -> None:
+        app = _app()
+        async with app.run_test(size=(90, 28)) as pilot:
+            loop = asyncio.get_running_loop()
+
+            choice = ChoiceMenu(
+                timestamp=1.0,
+                source="test",
+                options=[("ok", "继续")],
+                future=loop.create_future(),
+            )
+            await app.coordinator.submit(choice)
+            await pilot.pause()
+            await pilot.press("escape")
+            assert await choice.future == ""
+            await pilot.pause()
+            assert app.history_journal.snapshot() == ""
+
+            choice_input = ChoiceInputMenu(
+                timestamp=2.0,
+                source="test",
+                options=[("auto", "自动")],
+                future=loop.create_future(),
+            )
+            await app.coordinator.submit(choice_input)
+            await pilot.pause()
+            await pilot.press("escape")
+            assert await choice_input.future == ""
+            await pilot.pause()
+            assert app.history_journal.snapshot() == ""
+
+            model = ModelMenu(
+                timestamp=3.0,
+                source="models",
+                models=[("model-a", "provider/model-a")],
+                efforts=["low", "medium", "high", "xhigh", "max"],
+                future=loop.create_future(),
+            )
+            await app.coordinator.submit(model)
+            await pilot.pause()
+            await pilot.press("enter")
+            assert await model.future == (
+                '{"model": "model-a", "reasoning_effort": "low"}'
+            )
+            await pilot.pause()
+            assert app.history_journal.snapshot() == ""
+
+            cancelled_model = ModelMenu(
+                timestamp=4.0,
+                source="models",
+                models=[("model-a", "provider/model-a")],
+                efforts=["low", "medium", "high", "xhigh", "max"],
+                future=loop.create_future(),
+            )
+            await app.coordinator.submit(cancelled_model)
+            await pilot.pause()
+            await pilot.press("escape")
+            assert await cancelled_model.future == ""
+            await pilot.pause()
+            assert app.history_journal.snapshot() == ""
+
+            form = FormMenu(
+                timestamp=5.0,
+                source="ask_user",
+                questions=[FormQuestion(question="继续？")],
+                future=loop.create_future(),
+            )
+            await app.coordinator.submit(form)
+            await pilot.pause()
+            await pilot.press("escape")
+            assert await form.future == ""
+            await pilot.pause()
+            assert app.history_journal.snapshot() == "[用户取消了作答]\n"
+
+            permission = PermissionMenu(
+                timestamp=6.0,
+                source="test",
+                tool_name="shell",
+                detail="echo test",
+                future=loop.create_future(),
+            )
+            await app.coordinator.submit(permission)
+            await pilot.pause()
+            before_permission = app.history_journal.snapshot()
+            await pilot.press("escape")
+            assert await permission.future == "deny"
+            await pilot.pause()
+            assert app.history_journal.snapshot() == (
+                before_permission + "权限确认：shell → 拒绝\n"
+            )
+
+            successful_choice = ChoiceMenu(
+                timestamp=7.0,
+                source="test",
+                options=[("ok", "继续")],
+                future=loop.create_future(),
+            )
+            await app.coordinator.submit(successful_choice)
+            await pilot.pause()
+            before_choice = app.history_journal.snapshot()
+            await pilot.press("enter")
+            assert await successful_choice.future == "ok"
+            await pilot.pause()
+            assert app.history_journal.snapshot() == before_choice + "选择：继续\n"
+
+            successful_choice_input = ChoiceInputMenu(
+                timestamp=8.0,
+                source="test",
+                options=[("auto", "自动")],
+                future=loop.create_future(),
+            )
+            await app.coordinator.submit(successful_choice_input)
+            await pilot.pause()
+            before_choice_input = app.history_journal.snapshot()
+            await pilot.press("enter")
+            assert await successful_choice_input.future == (
+                '{"choice": "auto", "text": ""}'
+            )
+            await pilot.pause()
+            assert app.history_journal.snapshot() == (
+                before_choice_input + "选择：自动\n"
+            )
+
+            successful_form = FormMenu(
+                timestamp=9.0,
+                source="ask_user",
+                questions=[FormQuestion(
+                    question="模式",
+                    options=[("safe", "安全")],
+                )],
+                future=loop.create_future(),
+            )
+            await app.coordinator.submit(successful_form)
+            await pilot.pause()
+            before_form = app.history_journal.snapshot()
+            await pilot.press("enter")
+            await pilot.pause()
+            await pilot.press("enter")
+            assert await successful_form.future == (
+                '{"answers": ["safe"], "discussion": ""}'
+            )
+            await pilot.pause()
+            assert app.history_journal.snapshot() == (
+                before_form + "用户选择：\n  问题1 → safe\n"
+            )
 
     asyncio.run(scenario())
 
@@ -1219,6 +1436,49 @@ def test_external_cancellation_cleans_modal_before_future_completion() -> None:
     asyncio.run(scenario())
 
 
+def test_close_cancels_active_model_menu_and_waits_for_removal() -> None:
+    """关闭 UI 应能等待活动模型菜单卸载，不接受 coroutine 的限制不得泄漏。"""
+    async def scenario() -> None:
+        clock = TurnClock()
+        app = AgentTuiApp(
+            AgentViewStore(),
+            [],
+            clock,
+            lambda: None,
+            lambda: False,
+            lambda: None,
+            native_clipboard=False,
+        )
+        async with app.run_test(size=(80, 18)) as pilot:
+            request = ModelMenu(
+                timestamp=1.0,
+                source="models",
+                models=[("model-a", "provider/model-a")],
+                efforts=["low", "medium", "high", "xhigh", "max"],
+                future=asyncio.get_running_loop().create_future(),
+            )
+            await app.coordinator.submit(request)
+            await pilot.pause()
+            widget = app.coordinator.inline_widget
+
+            assert widget is not None
+            assert widget.is_mounted
+            assert clock._human_wait_depth == 1
+
+            await asyncio.wait_for(app.coordinator.close(), timeout=1)
+            await pilot.pause()
+
+            assert request.future.cancelled()
+            assert not widget.is_attached
+            assert app.coordinator.active is None
+            assert app.coordinator.inline_widget is None
+            assert not app.coordinator._cleanup_tasks
+            assert app.coordinator.is_idle
+            assert clock._human_wait_depth == 0
+
+    asyncio.run(scenario())
+
+
 def test_stream_follow_and_dialog_text_inputs() -> None:
     async def scenario() -> None:
         app = _app()
@@ -1441,5 +1701,131 @@ def test_composer_mouse_drag_selects_for_copy() -> None:
             assert composer.selected_text != ""
             # 复制数据源 _selected_text 应能取到聚焦 Composer 的选区
             assert app._selected_text() == composer.selected_text
+
+    asyncio.run(scenario())
+
+
+def test_model_menu_uses_vertical_models_and_horizontal_effort() -> None:
+    """模型菜单应分别用上下键和左右键调整两个维度。"""
+    app = _app()
+    selection_color = Color.parse("#76d7c4")
+
+    async def scenario() -> None:
+        async with app.run_test(size=(100, 30)) as pilot:
+            loop = asyncio.get_running_loop()
+            request = ModelMenu(
+                timestamp=1.0,
+                source="models",
+                models=[("model-a", "model-a (one)"), ("model-b", "model-b (two)")],
+                efforts=["low", "medium", "high", "xhigh", "max"],
+                model_index=0,
+                effort_index=2,
+                future=loop.create_future(),
+            )
+            await app.coordinator.submit(request)
+            await pilot.pause()
+
+            body = app._history.query_one("#model-menu-body", KeyboardNavigation)
+            effort = app._history.query_one("#model-menu-effort", Static)
+            assert body.has_focus
+            body_text = body.render()
+            effort_text = effort.render()
+            assert "› model-a (one)" in body_text.plain
+            assert "› high" in effort_text.plain
+            assert [
+                body_text.plain[span.start:span.end]
+                for span in body_text.spans
+                if span.style.foreground == selection_color
+            ] == ["› model-a (one)"]
+            assert [
+                effort_text.plain[span.start:span.end]
+                for span in effort_text.spans
+                if span.style.foreground == selection_color
+            ] == ["› high"]
+
+            await pilot.press("down", "right")
+            body_text = body.render()
+            effort_text = effort.render()
+            assert [
+                body_text.plain[span.start:span.end]
+                for span in body_text.spans
+                if span.style.foreground == selection_color
+            ] == ["› model-b (two)"]
+            assert [
+                effort_text.plain[span.start:span.end]
+                for span in effort_text.spans
+                if span.style.foreground == selection_color
+            ] == ["› xhigh"]
+
+            await pilot.press("enter")
+            assert await request.future == (
+                '{"model": "model-b", "reasoning_effort": "xhigh"}'
+            )
+
+            await pilot.pause()
+            cancelled = ModelMenu(
+                timestamp=2.0,
+                source="models",
+                models=[("model-a", "model-a")],
+                efforts=["low", "medium", "high", "xhigh", "max"],
+                future=loop.create_future(),
+            )
+            await app.coordinator.submit(cancelled)
+            await pilot.pause()
+            await pilot.press("escape")
+            assert await cancelled.future == ""
+
+    asyncio.run(scenario())
+
+
+def test_model_menu_scrolls_models_while_effort_and_hint_stay_visible() -> None:
+    """短窗口中模型独立滚动，强度和操作提示保持可见。"""
+    app = _app()
+
+    async def scenario() -> None:
+        async with app.run_test(size=(80, 18)) as pilot:
+            loop = asyncio.get_running_loop()
+            request = ModelMenu(
+                timestamp=1.0,
+                source="models",
+                models=[(f"model-{index}", f"model-{index}") for index in range(16)],
+                efforts=["low", "medium", "high", "xhigh", "max"],
+                model_index=0,
+                effort_index=2,
+                future=loop.create_future(),
+            )
+            await app.coordinator.submit(request)
+            await pilot.pause()
+
+            scroll = app._history.query_one("#model-menu-scroll", VerticalScroll)
+            body = app._history.query_one("#model-menu-body", KeyboardNavigation)
+            effort = app._history.query_one("#model-menu-effort", Static)
+            hint = app._history.query_one(".dialog-hint", Static)
+            history_region = app._history.content_region
+
+            assert scroll.max_scroll_y > 0
+            assert effort.region.y >= history_region.y
+            assert effort.region.bottom <= history_region.bottom
+            assert hint.region.y >= history_region.y
+            assert hint.region.bottom <= history_region.bottom
+            effort_region = effort.region
+            hint_region = hint.region
+
+            await pilot.press(*(["down"] * 14))
+            await pilot.pause()
+
+            assert "› model-14" in str(body.render())
+            assert scroll.scroll_y > 0
+            selected_y = body.region.y + 15
+            assert scroll.content_region.y <= selected_y < scroll.content_region.bottom
+            assert effort.region == effort_region
+            assert hint.region == hint_region
+            assert "› high" in str(effort.render())
+            assert "↑↓ 模型" in str(hint.render())
+
+            await pilot.press("right", "enter")
+            assert await request.future == (
+                '{"model": "model-14", "reasoning_effort": "xhigh"}'
+            )
 
     asyncio.run(scenario())

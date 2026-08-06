@@ -30,6 +30,7 @@ from src.events.menu import (
     FormMenu,
     FormQuestion,
     InputMenu,
+    ModelMenu,
     MenuRequest,
     PermissionMenu,
     TranscriptView,
@@ -41,7 +42,7 @@ from src.events.menu import (
 # 而上移至包出口，避免 types ↔ menu 循环导入。
 AgentEvent = Union[
     InputMenu, OutputRequested, InterruptRequested,
-    PermissionNotice, PermissionMenu, ChoiceMenu, ChoiceInputMenu, FormMenu,
+    PermissionNotice, PermissionMenu, ChoiceMenu, ChoiceInputMenu, FormMenu, ModelMenu,
     TranscriptView,
     CompactDelta, ToolCallCompleted, ToolCallStarted,
     LLMCallCompleted, LLMCallStarted, LLMRetrying, LLMLengthRetrying, LLMCallFailed,
@@ -74,6 +75,7 @@ __all__ = [
     "PermissionMenu",
     "InputMenu",
     "ChoiceMenu",
+    "ModelMenu",
     "ChoiceInputMenu",
     "FormMenu",
     "FormQuestion",

@@ -157,7 +157,9 @@ TTY 只缓冲前台 Agent 当前一轮的工具。实时区优先级为”重试
 | `history_journal.py` | TUI 异常降级时一次性回放的普通文字历史 |
 | `agent.tcss` | 宽窄和高矮窗口的响应式布局 |
 
-TTY 的 `InteractionCoordinator` 是交互请求状态权威写入者。它最多保留一个转录视图和一个活动作答窗口：普通输入、权限、选择、表单和组合输入不会抢占已有作答窗口，而是按 FIFO 排队；状态栏显示“等待 N：来源”，来源优先使用发起 agent 类型、缺失时回退事件 source。只有真正激活的请求才打印调用方标记和菜单上文。
+TTY 的 `InteractionCoordinator` 是交互请求状态权威写入者。它最多保留一个转录视图和一个活动作答窗口：普通输入、权限、选择、模型双轴选择、表单和组合输入不会抢占已有作答窗口，而是按 FIFO 排队；状态栏显示“等待 N：来源”，来源优先使用发起 agent 类型、缺失时回退事件 source。`ModelMenu` 用上下键选择模型、左右键选择 `low/medium/high/xhigh/max` 强度，Enter 提交、Esc 取消。只有真正激活的请求才打印调用方标记和菜单上文。
+
+内嵌交互结束后默认静默：`InteractionCoordinator` 只移除控件并写入 Widget 返回的非空摘要，是否保留成功或取消历史由各 Widget 显式声明。`ask_user` 专用的 `FormMenu` 取消时保留 `[用户取消了作答]`，普通选择和组合输入取消不留摘要；权限 Esc 作为拒绝结果保留权限确认摘要。`ModelMenu` 成功和取消都不留摘要，`/models` 与其他命令一样保留用户输入，但菜单上文不进入历史；取消后只留下命令，成功后再显示命令最终输出。
 
 转录是只读面板，不占用作答队列。`/agents` 创建带 future 的 `TranscriptView`，Esc 关闭后才完成该 future；Agent 列表实时查看不创建请求 future。Modal 覆盖转录时拥有键盘，结束后转录的 UUID 和每 Agent 独立滚动位置原样恢复。权限、表单和选择期间不能进入 Agent 列表。
 

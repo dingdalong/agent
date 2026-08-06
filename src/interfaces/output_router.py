@@ -7,6 +7,7 @@ from src.events.menu import (
     ChoiceMenu,
     FormMenu,
     InputMenu,
+    ModelMenu,
     PermissionMenu,
     TranscriptView,
 )
@@ -105,6 +106,7 @@ _CONTROL_EVENTS = (
     ChoiceMenu,
     ChoiceInputMenu,
     FormMenu,
+    ModelMenu,
     PermissionMenu,
     TranscriptView,
     PermissionNotice,

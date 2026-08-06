@@ -199,6 +199,10 @@ MarkdownFence {
     max-height: 14;
 }
 
+.short #model-menu-scroll {
+    max-height: 5;
+}
+
 ModalScreen {
     align: center middle;
     background: rgba(0, 0, 0, 0.62);
@@ -230,6 +234,24 @@ ModalScreen {
 .dialog-prompt, .dialog-detail {
     height: auto;
     margin: 1 0;
+}
+
+#model-menu-scroll {
+    height: auto;
+    min-height: 3;
+    max-height: 8;
+    scrollbar-size: 1 1;
+    scrollbar-color: #53616c;
+    scrollbar-color-hover: #7a8b97;
+}
+
+#model-menu-body {
+    height: auto;
+}
+
+#model-menu-effort {
+    height: auto;
+    color: #d8dee4;
 }
 
 #dialog-options {

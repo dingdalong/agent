@@ -1357,7 +1357,7 @@ def test_cli_exits_cleanly_for_llm_startup_errors(
 
 
 def test_models_by_provider_groups_and_sorts() -> None:
-    """models_by_provider 应按 provider 升序分组且组内模型升序。"""
+    """模型 API 应统一按大小写不敏感的 provider/model 完整名称排序。"""
     manager = _manager()
     manager._model_to_provider.update(
         {
@@ -1365,16 +1365,35 @@ def test_models_by_provider_groups_and_sorts() -> None:
             "claude-opus-4-8": "anthropic",
             "deepseek-v4-flash": "deepseek",
             "claude-sonnet-5": "anthropic",
-            "gpt-5.6-sol": "openai",
+            "gpt-5.6-terra": "openai",
+            "gpt-5.2-sol": "openai",
+            "gpt-5.10-sol": "openai",
+            "Alpha-model": "openai",
         }
     )
+
+    assert manager.list_models() == [
+        "claude-opus-4-8",
+        "claude-sonnet-5",
+        "deepseek-v4-flash",
+        "deepseek-v4-pro",
+        "Alpha-model",
+        "gpt-5.10-sol",
+        "gpt-5.2-sol",
+        "gpt-5.6-terra",
+    ]
 
     grouped = manager.models_by_provider()
 
     assert list(grouped.keys()) == ["anthropic", "deepseek", "openai"]
     assert grouped["anthropic"] == ["claude-opus-4-8", "claude-sonnet-5"]
     assert grouped["deepseek"] == ["deepseek-v4-flash", "deepseek-v4-pro"]
-    assert grouped["openai"] == ["gpt-5.6-sol"]
+    assert grouped["openai"] == [
+        "Alpha-model",
+        "gpt-5.10-sol",
+        "gpt-5.2-sol",
+        "gpt-5.6-terra",
+    ]
 
 
 def test_models_by_provider_empty() -> None:

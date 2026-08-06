@@ -123,6 +123,126 @@ def test_models_empty() -> None:
     assert _run_models(llm_mgr) == "当前没有可用模型。\n"
 
 
+def test_models_switches_current_agent_and_persists_role_override() -> None:
+    """交互选择后应原地切换 Agent，并成对写回当前角色配置。"""
+    providers = {
+        "model-a": SimpleNamespace(model="model-a", reasoning_effort="high"),
+        "model-b": SimpleNamespace(model="model-b", reasoning_effort="max"),
+    }
+
+    class SwitchLLM:
+        def list_models(self):
+            return list(providers)
+
+        def provider_name_for_model(self, model):
+            return "stub"
+
+        def resolve_model(self, alias):
+            return {"default": "model-a", "best": "model-b", "fast": "model-a"}[alias]
+
+        def get(self, model):
+            return providers[model]
+
+    class SelectionBus(RecordingEventBus):
+        async def request_model_selection(self, prompt, options, efforts, model_index, effort_index, **kwargs):
+            self.choices.append((prompt, options, efforts, model_index, effort_index, kwargs))
+            return "model-b", "xhigh"
+
+    class WritableConfig:
+        def __init__(self):
+            self.values = None
+            self.scope = None
+            self.reloads = 0
+
+        def set_configs(self, values, scope):
+            self.values = values
+            self.scope = scope
+
+        def reload(self):
+            self.reloads += 1
+
+    history = [{"role": "user", "content": "保留我"}]
+    original_uuid = uuid.uuid4()
+    switches = []
+    agent = SimpleNamespace(
+        uuid=original_uuid,
+        history=history,
+        llm=providers["model-a"],
+        reasoning_effort="high",
+    )
+
+    def switch_model(model, effort):
+        switches.append((model, effort))
+        agent.llm = providers[model]
+        agent.reasoning_effort = effort
+
+    agent.switch_model = switch_model
+    bus = SelectionBus()
+    config = WritableConfig()
+    ctx = _ctx(
+        event_bus=bus,
+        llm_mgr=SwitchLLM(),
+        config_mgr=config,
+        role_mgr=SimpleNamespace(role_name="coding"),
+        agent=agent,
+    )
+
+    asyncio.run(models_cmd.models(ctx, []))
+
+    assert switches == [("model-b", "xhigh")]
+    assert agent.uuid == original_uuid
+    assert agent.history is history
+    assert config.values == {
+        "role.coding.model": "model-b",
+        "role.coding.reasoning_effort": "xhigh",
+    }
+    assert config.scope == "project"
+    assert config.reloads == 1
+    assert bus.choices[0][2] == ["low", "medium", "high", "xhigh", "max"]
+    assert bus.choices[0][3:5] == (0, 2)
+    assert bus.choices[0][0] == ""
+    assert bus.choices[0][1][0][1] == "stub/model-a [default, fast]"
+    assert bus.choices[0][1][1][1] == "stub/model-b [best]"
+    assert "已切换模型：model-b" in bus.outputs[-1]
+
+
+def test_models_cancel_keeps_agent_and_config_unchanged() -> None:
+    """Esc 取消时不应切换 Agent 或写配置。"""
+    provider = SimpleNamespace(model="model-a", reasoning_effort="high")
+
+    class SelectionBus(RecordingEventBus):
+        async def request_model_selection(self, *args, **kwargs):
+            return "", ""
+
+    agent = SimpleNamespace(
+        llm=provider,
+        reasoning_effort="high",
+        switch_model=lambda *_: (_ for _ in ()).throw(AssertionError("不应切换")),
+    )
+    config = SimpleNamespace(
+        set_configs=lambda *_: (_ for _ in ()).throw(AssertionError("不应写配置")),
+        reload=lambda: None,
+    )
+    llm = SimpleNamespace(
+        list_models=lambda: ["model-a"],
+        provider_name_for_model=lambda _model: "stub",
+        resolve_model=lambda _alias: "model-a",
+    )
+    bus = SelectionBus()
+    ctx = _ctx(
+        event_bus=bus,
+        llm_mgr=llm,
+        config_mgr=config,
+        role_mgr=SimpleNamespace(role_name="coding"),
+        agent=agent,
+    )
+
+    asyncio.run(models_cmd.models(ctx, []))
+
+    assert agent.llm is provider
+    assert bus.outputs == []
+
+
 # ── /plan ────────────────────────────────────────────────────────────
 
 def _plan_agent(can_enter: bool) -> SimpleNamespace:

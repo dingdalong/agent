@@ -548,6 +548,20 @@ class TextualInterface(UserInterface):
         del markdown
         return await self._plain.read_choice(prompt, options, default_index)
 
+    async def _read_model_selection(
+        self,
+        prompt: str,
+        models: list[tuple[str, str]],
+        efforts: list[str],
+        model_index: int,
+        effort_index: int,
+        markdown: bool = False,
+    ) -> str:
+        del markdown
+        return await self._plain.read_model_selection(
+            prompt, models, efforts, model_index, effort_index
+        )
+
     async def _read_form(
         self,
         prompt: str,

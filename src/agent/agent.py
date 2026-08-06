@@ -206,18 +206,7 @@ class Agent:
         self.features = resolve_features(self.features)
         self._excluded_tools = self.deps.tools_mgr.excluded_tool_names(self.features)
         self.refresh_tools_schemas()
-        compact_cfg = self.deps.config_mgr.get_config("compact")
-        context_limit = self.llm.context_limit
-        self._compact_mgr = CompactMgr(
-            llm=self.llm,
-            workdir=self.deps.workdir,
-            caller_agent_type=self.agent_type,
-            caller_uuid=str(self.uuid),
-            auto_compact_size=int(context_limit * compact_cfg["auto_compact_rate"]),
-            keep_recent_user_turns=compact_cfg.get("keep_recent_user_turns", 3),
-            recent_messages_token_limit=int(context_limit * compact_cfg.get("keep_recent_messages_token_rate", 0.25)),
-            data_guard=self.deps.data_guard,
-        )
+        self._compact_mgr = self._build_compact_mgr(self.llm)
         workdir = self.deps.workdir
         # 可插拔 Manager：仅启用对应 feature 时创建，否则为 None（其工具已从 schema 排除）
         self._file_mgr = FileMgr(workdir, self.deps) if "file" in self.features else None
@@ -260,6 +249,42 @@ class Agent:
             AgentState.CONTEXT_OVERFLOW: self._on_context_overflow,
             AgentState.LLM_FAILURE:      self._on_llm_failure,
         }
+
+    def _build_compact_mgr(self, llm: Any) -> CompactMgr:
+        """按当前模型上下文窗口创建压缩管理器。"""
+        compact_cfg = self.deps.config_mgr.get_config("compact")
+        context_limit = llm.context_limit
+        return CompactMgr(
+            llm=llm,
+            workdir=self.deps.workdir,
+            caller_agent_type=self.agent_type,
+            caller_uuid=str(self.uuid),
+            auto_compact_size=int(context_limit * compact_cfg["auto_compact_rate"]),
+            keep_recent_user_turns=compact_cfg.get("keep_recent_user_turns", 3),
+            recent_messages_token_limit=int(
+                context_limit * compact_cfg.get("keep_recent_messages_token_rate", 0.25)
+            ),
+            data_guard=self.deps.data_guard,
+        )
+
+    def switch_model(self, model: str, reasoning_effort: str) -> None:
+        """原地切换模型与推理强度，保留对话历史和 Agent 身份。"""
+        from src.llm.base import normalize_reasoning_effort
+
+        effort = normalize_reasoning_effort(reasoning_effort)
+        if effort is None:
+            raise ValueError(f"无效推理强度: {reasoning_effort!r}")
+        new_llm = self.deps.llm_mgr.get(model)
+        new_compact_mgr = self._build_compact_mgr(new_llm)
+        new_compact_mgr.recent_files = list(self._compact_mgr.recent_files)
+        new_compact_mgr.has_compacted = self._compact_mgr.has_compacted
+
+        self.model = new_llm.model
+        self.reasoning_effort = effort
+        self.llm = new_llm
+        self._compact_mgr = new_compact_mgr
+        self._prompt_mgr.model = new_llm.model
+        self._prompt_mgr.invalidate_cache()
 
     @classmethod
     def from_manifest(

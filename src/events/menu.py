@@ -124,6 +124,20 @@ class ChoiceMenu(MenuRequest):
 
 
 @dataclass
+class ModelMenu(MenuRequest):
+    """模型与推理强度双轴选择器。"""
+
+    prompt: str = ""
+    models: list[tuple[str, str]] = field(default_factory=list)
+    efforts: list[str] = field(default_factory=list)
+    model_index: int = 0
+    effort_index: int = 0
+    markdown: bool = False
+    level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
+    type: Literal["model_menu"] = field(default="model_menu", init=False)
+
+
+@dataclass
 class FormQuestion:
     """单屏表单中的单个问题（纯数据，非 Event）——作为 FormMenu.questions 的单题载荷。
 

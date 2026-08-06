@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
@@ -30,6 +31,7 @@ from src.events.menu import (
     FormMenu,
     FormQuestion,
     InputMenu,
+    ModelMenu,
     MenuRequest,
     PermissionMenu,
     TranscriptView,
@@ -280,6 +282,29 @@ class UserInterface(ABC):
         """
         ...
 
+    async def _read_model_selection(
+        self,
+        prompt: str,
+        models: list[tuple[str, str]],
+        efforts: list[str],
+        model_index: int,
+        effort_index: int,
+        markdown: bool = False,
+    ) -> str:
+        """以双轴菜单选择模型和推理强度，返回 JSON 结果。"""
+        model = await self._read_choice(prompt, models, model_index, markdown)
+        if not model:
+            return ""
+        effort = await self._read_choice(
+            "推理强度",
+            [(value, value) for value in efforts],
+            effort_index,
+            False,
+        )
+        if not effort:
+            return ""
+        return json.dumps({"model": model, "reasoning_effort": effort}, ensure_ascii=False)
+
     @abstractmethod
     async def _read_form(
         self, prompt: str, questions: list[FormQuestion], markdown: bool = False
@@ -369,6 +394,23 @@ class UserInterface(ABC):
                 return await self._read_nonempty_answer(read_input)
             case ChoiceMenu(prompt=prompt, options=options, default_index=default_index, markdown=markdown):
                 return await self._read_choice(prompt, options, default_index, markdown)
+            case ModelMenu(
+                prompt=prompt,
+                models=models,
+                efforts=efforts,
+                model_index=model_index,
+                effort_index=effort_index,
+                markdown=markdown,
+            ):
+                await self._emit_caller_banner(request.caller_agent_type, request.caller_uuid)
+                return await self._read_model_selection(
+                    prompt,
+                    models,
+                    efforts,
+                    model_index,
+                    effort_index,
+                    markdown,
+                )
             case FormMenu(prompt=prompt, questions=questions, markdown=markdown):
                 await self._emit_caller_banner(request.caller_agent_type, request.caller_uuid)
                 return await self._read_form(prompt, questions, markdown)

@@ -5,13 +5,16 @@ from __future__ import annotations
 import asyncio
 import json
 from collections import deque
+from collections.abc import Awaitable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from rich.markdown import Markdown as RichMarkdown
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.geometry import Region
 from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import Markdown, Static, TextArea
@@ -23,6 +26,7 @@ from src.events.menu import (
     FormMenu,
     FormQuestion,
     InputMenu,
+    ModelMenu,
     MenuRequest,
     PermissionMenu,
     TranscriptView,
@@ -177,6 +181,117 @@ class SelectionDialog(KeyboardDialog):
             self.dismiss(DialogResult(cancelled=True))
 
 
+_MODEL_MENU_SELECTION_STYLE = "#76d7c4"
+
+
+def _model_menu_models_text(request: ModelMenu, model_index: int) -> Text:
+    text = Text("模型")
+    for index, (_value, label) in enumerate(request.models):
+        selected = index == model_index
+        marker = "›" if selected else " "
+        text.append("\n")
+        text.append(
+            f"{marker} {label}",
+            style=_MODEL_MENU_SELECTION_STYLE if selected else None,
+        )
+    return text
+
+
+def _model_menu_effort_text(request: ModelMenu, effort_index: int) -> Text:
+    text = Text("强度")
+    for index, value in enumerate(request.efforts):
+        selected = index == effort_index
+        marker = "›" if selected else " "
+        text.append("  ")
+        text.append(
+            f"{marker} {value}",
+            style=_MODEL_MENU_SELECTION_STYLE if selected else None,
+        )
+    return text
+
+
+def _model_menu_payload(request: ModelMenu, model_index: int, effort_index: int) -> str:
+    return json.dumps(
+        {
+            "model": request.models[model_index][0],
+            "reasoning_effort": request.efforts[effort_index],
+        },
+        ensure_ascii=False,
+    )
+
+
+class ModelSelectionDialog(KeyboardDialog):
+    """模型与推理强度双轴选择窗口。"""
+
+    BINDINGS = [
+        Binding("up", "move_model(-1)", show=False, priority=True),
+        Binding("down", "move_model(1)", show=False, priority=True),
+        Binding("left", "move_effort(-1)", show=False, priority=True),
+        Binding("right", "move_effort(1)", show=False, priority=True),
+        Binding("enter", "submit", show=False, priority=True),
+        Binding("escape", "cancel", show=False, priority=True),
+    ]
+
+    def __init__(self, request: ModelMenu) -> None:
+        super().__init__()
+        self.request = request
+        self.model_index = min(max(0, request.model_index), max(0, len(request.models) - 1))
+        self.effort_index = min(max(0, request.effort_index), max(0, len(request.efforts) - 1))
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="dialog-shell", classes="dialog-model-menu"):
+            yield Static("选择模型", classes="dialog-title", markup=False)
+            source = _source_label(self.request)
+            if source:
+                yield Static(f"发起 Agent  {source}", classes="dialog-source", markup=False)
+            if self.request.prompt:
+                yield _prompt_widget(self.request)
+            with VerticalScroll(id="model-menu-scroll"):
+                yield KeyboardNavigation("", id="model-menu-body", markup=False)
+            yield Static("", id="model-menu-effort", markup=False)
+            yield Static("↑↓ 模型 · ←→ 强度 · Enter 应用 · Esc 取消", classes="dialog-hint", markup=False)
+
+    def on_mount(self) -> None:
+        self._render_menu()
+
+    def _render_menu(self) -> None:
+        self.query_one("#model-menu-body", KeyboardNavigation).update(
+            _model_menu_models_text(self.request, self.model_index)
+        )
+        self.query_one("#model-menu-effort", Static).update(
+            _model_menu_effort_text(self.request, self.effort_index)
+        )
+        self.restore_focus()
+        self.call_after_refresh(self._scroll_selected_model)
+
+    def _scroll_selected_model(self) -> None:
+        self.query_one("#model-menu-scroll", VerticalScroll).scroll_to_region(
+            Region(0, self.model_index + 1, 1, 1),
+            animate=False,
+            immediate=True,
+        )
+
+    def restore_focus(self) -> None:
+        self.query_one("#model-menu-body", KeyboardNavigation).focus()
+
+    def action_move_model(self, delta: int) -> None:
+        if self.request.models:
+            self.model_index = min(max(0, self.model_index + delta), len(self.request.models) - 1)
+            self._render_menu()
+
+    def action_move_effort(self, delta: int) -> None:
+        if self.request.efforts:
+            self.effort_index = min(max(0, self.effort_index + delta), len(self.request.efforts) - 1)
+            self._render_menu()
+
+    def action_submit(self) -> None:
+        if self.request.models and self.request.efforts:
+            self.dismiss(DialogResult(value=_model_menu_payload(self.request, self.model_index, self.effort_index)))
+
+    def action_cancel(self) -> None:
+        self.dismiss(DialogResult(cancelled=True))
+
+
 class InlineWidget(Vertical, can_focus=True):
     """内嵌到聊天历史流中的交互基类。"""
 
@@ -194,9 +309,10 @@ class InlineWidget(Vertical, can_focus=True):
         super().__init__(classes="inline-widget", **kwargs)
         self._completed = False
 
-    def build_summary(self) -> str:
-        """构建完成后的摘要文本。"""
-        raise NotImplementedError
+    def build_summary(self, result: DialogResult) -> str:
+        """构建完成后的摘要文本；空串表示不写入历史。"""
+        del result
+        return ""
 
     def restore_focus(self) -> None:
         """恢复焦点到合适的子组件。"""
@@ -293,11 +409,90 @@ class InlineSelectionWidget(InlineWidget):
         else:
             self.post_message(self.Completed(DialogResult(cancelled=True)))
 
-    def build_summary(self) -> str:
+    def build_summary(self, result: DialogResult) -> str:
+        if result.cancelled:
+            return ""
         if isinstance(self.request, PermissionMenu):
             return f"权限确认：{self.request.tool_name} → {self._chosen_label or '拒绝'}"
         return f"选择：{self._chosen_label or self.request.prompt or ''}"
 
+
+class InlineModelSelectionWidget(InlineWidget):
+    """内嵌模型与推理强度双轴选择器。"""
+
+    BINDINGS = [
+        Binding("up", "move_model(-1)", show=False, priority=True),
+        Binding("down", "move_model(1)", show=False, priority=True),
+        Binding("left", "move_effort(-1)", show=False, priority=True),
+        Binding("right", "move_effort(1)", show=False, priority=True),
+        Binding("enter", "submit", show=False, priority=True),
+        Binding("escape", "cancel", show=False, priority=True),
+    ]
+
+    def __init__(self, request: ModelMenu) -> None:
+        super().__init__()
+        self.request = request
+        self.model_index = min(max(0, request.model_index), max(0, len(request.models) - 1))
+        self.effort_index = min(max(0, request.effort_index), max(0, len(request.efforts) - 1))
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="dialog-shell", classes="dialog-model-menu"):
+            yield Static("选择模型", classes="dialog-title", markup=False)
+            source = _source_label(self.request)
+            if source:
+                yield Static(f"发起 Agent  {source}", classes="dialog-source", markup=False)
+            if self.request.prompt:
+                yield _prompt_widget(self.request)
+            with VerticalScroll(id="model-menu-scroll"):
+                yield KeyboardNavigation("", id="model-menu-body", markup=False)
+            yield Static("", id="model-menu-effort", markup=False)
+            yield Static("↑↓ 模型 · ←→ 强度 · Enter 应用 · Esc 取消", classes="dialog-hint", markup=False)
+
+    def on_mount(self) -> None:
+        self._render_menu()
+
+    def _render_menu(self) -> None:
+        self.query_one("#model-menu-body", KeyboardNavigation).update(
+            _model_menu_models_text(self.request, self.model_index)
+        )
+        self.query_one("#model-menu-effort", Static).update(
+            _model_menu_effort_text(self.request, self.effort_index)
+        )
+        self.restore_focus()
+        self.call_after_refresh(self._scroll_selected_model)
+
+    def _scroll_selected_model(self) -> None:
+        self.query_one("#model-menu-scroll", VerticalScroll).scroll_to_region(
+            Region(0, self.model_index + 1, 1, 1),
+            animate=False,
+            immediate=True,
+        )
+
+    def restore_focus(self) -> None:
+        self.query_one("#model-menu-body", KeyboardNavigation).focus()
+
+    def action_move_model(self, delta: int) -> None:
+        if self.request.models:
+            self.model_index = min(max(0, self.model_index + delta), len(self.request.models) - 1)
+            self._render_menu()
+
+    def action_move_effort(self, delta: int) -> None:
+        if self.request.efforts:
+            self.effort_index = min(max(0, self.effort_index + delta), len(self.request.efforts) - 1)
+            self._render_menu()
+
+    def action_submit(self) -> None:
+        if not self._completed and self.request.models and self.request.efforts:
+            self._completed = True
+            self.post_message(self.Completed(DialogResult(
+                value=_model_menu_payload(self.request, self.model_index, self.effort_index)
+            )))
+
+    def action_cancel(self) -> None:
+        if self._completed:
+            return
+        self._completed = True
+        self.post_message(self.Completed(DialogResult(cancelled=True)))
 
 class InlineChoiceInputWidget(InlineWidget):
     """内嵌选项与自由输入互斥的交互。"""
@@ -420,7 +615,9 @@ class InlineChoiceInputWidget(InlineWidget):
         self._completed = True
         self.post_message(self.Completed(DialogResult(cancelled=True)))
 
-    def build_summary(self) -> str:
+    def build_summary(self, result: DialogResult) -> str:
+        if result.cancelled:
+            return ""
         return self._result_summary or f"选择：{self.request.prompt or '选项输入'}"
 
 
@@ -1187,8 +1384,10 @@ class InlineFormWidget(InlineWidget):
         self._completed = True
         self.post_message(self.Completed(DialogResult(cancelled=True)))
 
-    def build_summary(self) -> str:
+    def build_summary(self, result: DialogResult) -> str:
         """构建提交后的回答摘要文本。"""
+        if result.cancelled:
+            return "[用户取消了作答]"
         parts: list[str] = []
         for index, question in enumerate(self.request.questions):
             header = question.header or f"问题{index + 1}"
@@ -1203,6 +1402,8 @@ class InlineFormWidget(InlineWidget):
 def make_dialog(request: MenuRequest, task: str = "") -> KeyboardDialog:
     if isinstance(request, FormMenu):
         return FormDialog(request, task=task)
+    if isinstance(request, ModelMenu):
+        return ModelSelectionDialog(request)
     if isinstance(request, ChoiceInputMenu):
         return ChoiceInputDialog(request)
     if isinstance(request, (PermissionMenu, ChoiceMenu)):
@@ -1213,6 +1414,8 @@ def make_dialog(request: MenuRequest, task: str = "") -> KeyboardDialog:
 def _make_inline_widget(request: MenuRequest, task: str = "") -> InlineWidget:
     if isinstance(request, FormMenu):
         return InlineFormWidget(request, task=task)
+    if isinstance(request, ModelMenu):
+        return InlineModelSelectionWidget(request)
     if isinstance(request, ChoiceInputMenu):
         return InlineChoiceInputWidget(request)
     if isinstance(request, (PermissionMenu, ChoiceMenu)):
@@ -1231,7 +1434,7 @@ class InteractionCoordinator:
         self.view_request: ViewRequest | None = None
         self.modal: KeyboardDialog | None = None
         self.inline_widget: InlineWidget | None = None
-        self._cleanup_tasks: set[asyncio.Task] = set()
+        self._cleanup_tasks: set[asyncio.Future[None]] = set()
         self._closed = False
         self._detached = False
         self._idle = asyncio.Event()
@@ -1353,7 +1556,7 @@ class InteractionCoordinator:
         self.app.refresh_chrome()
 
     async def _finish_inline_widget(self, result: DialogResult) -> None:
-        """内嵌交互完成后：移除 widget、追加摘要、结算 Future。"""
+        """内嵌交互完成后：按 Widget 策略写摘要并结算 Future。"""
         request = self.active
         if request is None or isinstance(request, InputMenu):
             return
@@ -1361,13 +1564,11 @@ class InteractionCoordinator:
         self.inline_widget = None
         self.turn_clock.exit_human_wait()
         self.active = None
-        # 移除 widget 并追加摘要
-        if widget is not None and widget.is_mounted:
-            summary = widget.build_summary() if not result.cancelled else ""
-            await widget.remove()
-            if result.cancelled:
-                await self.app.append_output("[用户取消了作答]")
-            else:
+        if widget is not None:
+            summary = widget.build_summary(result)
+            if widget.is_mounted:
+                await widget.remove()
+            if summary:
                 await self.app.append_output(summary)
         await asyncio.sleep(0)
         if request.future is not None and not request.future.done():
@@ -1428,15 +1629,21 @@ class InteractionCoordinator:
                 self.app.finish_input_cancelled()
             request.cancel()
         elif self.active is not None:
-            self.active.cancel()
-            if self.inline_widget is not None:
-                if render and self.inline_widget.is_mounted:
-                    self._schedule(self.inline_widget.remove())
-                self.inline_widget = None
-            elif render and self.modal is not None and self.modal.is_current:
-                self.modal.dismiss(DialogResult(cancelled=True))
-            elif not render:
-                self.modal = None
+            request = self.active
+            widget = self.inline_widget
+            modal = self.modal
+            self.active = None
+            self.inline_widget = None
+            self.modal = None
+            if render:
+                self.turn_clock.exit_human_wait()
+            request.cancel()
+            if render and widget is not None and widget.is_mounted:
+                self._schedule(widget.remove())
+            if render and modal is not None:
+                self.app.set_screen_class(False, "dialog-open")
+                if modal.is_current:
+                    modal.dismiss(DialogResult(cancelled=True))
         if self.view_request is not None:
             self.view_request.cancel()
             self.view_request = None
@@ -1522,13 +1729,13 @@ class InteractionCoordinator:
             if request.future is not None and not request.future.done()
         )
 
-    def _schedule(self, coroutine) -> None:
-        task = asyncio.create_task(coroutine)
+    def _schedule(self, awaitable: Awaitable[None]) -> None:
+        task = asyncio.ensure_future(awaitable)
         self._cleanup_tasks.add(task)
         self._idle.clear()
         task.add_done_callback(self._cleanup_finished)
 
-    def _cleanup_finished(self, task: asyncio.Task) -> None:
+    def _cleanup_finished(self, task: asyncio.Future[None]) -> None:
         self._cleanup_tasks.discard(task)
         if not task.cancelled():
             task.exception()

@@ -164,7 +164,7 @@
 | `role.<角色名>.model` | str | 无 | 非空模型别名或真实模型 ID | 覆盖实际激活主角色 `role.md` 的 `model`。缺失或空值保留 manifest 值；两者都缺失时由 `llm.default` 兜底 |
 | `role.<角色名>.reasoning_effort` | str | 无 | `low` \| `medium` \| `high` \| `xhigh` \| `max` | 覆盖实际激活主角色 `role.md` 的 `reasoning_effort`。值按 `normalize_reasoning_effort` 规整，非法值告警并保留 manifest 值；两者都缺失时由 provider 配置兜底 |
 
-覆盖只影响主角色 manifest，不影响子 agent 既有的模型或推理力度继承规则。角色决定主 agent 身份提示词、可用子 agent、技能、MCP server 与 feature 集。
+覆盖只影响主角色 manifest，不影响子 agent 既有的模型或推理力度继承规则。角色决定主 agent 身份提示词、可用子 agent、技能、MCP server 与 feature 集。`/models` 选定模型和推理强度后会原子写入项目层当前角色的这两个覆盖键，并立即原地更新当前主 Agent；后续新会话经正常配置重载继续使用该选择。
 
 角色发现与结构见 [roles-subagents-skills.md](roles-subagents-skills.md) 与 [architecture.md](architecture.md)。
 

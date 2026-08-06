@@ -75,7 +75,7 @@ LLM_CALL → PROCESS_RESPONSE ──length────→ LENGTH_RETRY ──可
 | 交互终态 | `user_input`、`command`、`exit_requested`、`stop_hook_used` |
 | LLM 终态 | `llm_error: LLMErrorInfo | None` |
 
-`RunResult` 返回 `final_text`、`command`、`exit_requested`、`user_input` 和 `llm_error`。调用方无需从错误文本反向推断类别。`/plan`、`/resume` 在 Agent 内处理；`/clear` 与 `/agents` 通过 `command` 交给应用层。
+`RunResult` 返回 `final_text`、`command`、`exit_requested`、`user_input` 和 `llm_error`。调用方无需从错误文本反向推断类别。`/plan`、`/resume`、`/models` 在 Agent 内处理；`/clear` 与 `/agents` 通过 `command` 交给应用层。`/models` 原地替换当前 Agent 的 provider、推理强度、压缩器和提示词模型信息，不更换 Agent UUID、会话或消息历史。
 
 ## 4. 单点 LLM 错误收口
 
@@ -111,7 +111,7 @@ handler 映射在 `Agent.__post_init__` 建立（`src/agent/agent.py:236-250`）
 
 ### 输入与命令
 
-`_on_request_input()` 读取输入；处理 `exit` / `quit`；分派 `/plan`、`/clear`、`/agents`、`/resume`；运行 `UserPromptSubmit` Hook；注入 turn-start reminder；最后保存 `turn_start_messages` 并追加 user 消息。
+`_on_request_input()` 读取输入；处理 `exit` / `quit`；分派 `/plan`、`/clear`、`/agents`、`/resume`、`/models`；运行 `UserPromptSubmit` Hook；注入 turn-start reminder；最后保存 `turn_start_messages` 并追加 user 消息。
 
 ### 压缩检查
 

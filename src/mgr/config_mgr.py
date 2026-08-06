@@ -7,7 +7,7 @@ import logging
 import os
 import threading
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Mapping
 
 import yaml
 from dotenv import dotenv_values
@@ -283,18 +283,29 @@ class ConfigManager:
         if not isinstance(key, str) or not key or any(not part for part in key.split(".")):
             raise ValueError(f"无效配置路径: {key!r}")
 
+        self.set_configs({key: value}, scope)
+
+    def set_configs(self, values: Mapping[str, Any], scope: ConfigScope) -> None:
+        """原子地将多个 YAML 值写入同一配置层。"""
+        if not values:
+            return
+        for key in values:
+            if not isinstance(key, str) or not key or any(not part for part in key.split(".")):
+                raise ValueError(f"无效配置路径: {key!r}")
+
         with self._lock:
             path = self._config_path(scope)
             config = _load_writable_yaml(path)
-            parts = key.split(".")
-            target = config
-            for part in parts[:-1]:
-                if part not in target:
-                    target[part] = {}
-                elif not isinstance(target[part], dict):
-                    raise ValueError(f"配置路径 {key!r} 的中间节点 {part!r} 必须是对象")
-                target = target[part]
-            target[parts[-1]] = value
+            for key, value in values.items():
+                parts = key.split(".")
+                target = config
+                for part in parts[:-1]:
+                    if part not in target:
+                        target[part] = {}
+                    elif not isinstance(target[part], dict):
+                        raise ValueError(f"配置路径 {key!r} 的中间节点 {part!r} 必须是对象")
+                    target = target[part]
+                target[parts[-1]] = value
 
             content = yaml.safe_dump(config, allow_unicode=True, sort_keys=False).rstrip() + "\n"
             atomic_write_text(path, content)
