@@ -38,6 +38,7 @@ from src.interfaces.tui.widgets import (
     KeyboardNavigation,
     KeyboardOptionList,
     KeyboardTextArea,
+    SelectionStatic,
 )
 
 if TYPE_CHECKING:
@@ -72,7 +73,7 @@ def _prompt_widget(request: MenuRequest):
     prompt = getattr(request, "prompt", "")
     if getattr(request, "markdown", False):
         return Markdown(prompt, classes="dialog-prompt")
-    return Static(prompt, classes="dialog-prompt", markup=False)
+    return SelectionStatic(prompt, classes="dialog-prompt", markup=False)
 
 
 def _source_label(request: UiRequest) -> str:
@@ -125,12 +126,12 @@ class SelectionDialog(KeyboardDialog):
     def compose(self) -> ComposeResult:
         with Vertical(id="dialog-shell", classes=f"dialog-{self.request.type}"):
             title = "工具请求权限" if isinstance(self.request, PermissionMenu) else "请选择"
-            yield Static(title, classes="dialog-title", markup=False)
+            yield SelectionStatic(title, classes="dialog-title", markup=False)
             source = _source_label(self.request)
             if source:
-                yield Static(f"发起 Agent  {source}", classes="dialog-source", markup=False)
+                yield SelectionStatic(f"发起 Agent  {source}", classes="dialog-source", markup=False)
             if isinstance(self.request, PermissionMenu):
-                yield Static(
+                yield SelectionStatic(
                     f"工具  {self.request.tool_name}\n内容  {self.request.detail}",
                     classes="dialog-detail",
                     markup=False,
@@ -240,16 +241,16 @@ class ModelSelectionDialog(KeyboardDialog):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="dialog-shell", classes="dialog-model-menu"):
-            yield Static("选择模型", classes="dialog-title", markup=False)
+            yield SelectionStatic("选择模型", classes="dialog-title", markup=False)
             source = _source_label(self.request)
             if source:
-                yield Static(f"发起 Agent  {source}", classes="dialog-source", markup=False)
+                yield SelectionStatic(f"发起 Agent  {source}", classes="dialog-source", markup=False)
             if self.request.prompt:
                 yield _prompt_widget(self.request)
             with VerticalScroll(id="model-menu-scroll"):
                 yield KeyboardNavigation("", id="model-menu-body", markup=False)
-            yield Static("", id="model-menu-effort", markup=False)
-            yield Static("↑↓ 模型 · ←→ 强度 · Enter 应用 · Esc 取消", classes="dialog-hint", markup=False)
+            yield SelectionStatic("", id="model-menu-effort", markup=False)
+            yield SelectionStatic("↑↓ 模型 · ←→ 强度 · Enter 应用 · Esc 取消", classes="dialog-hint", markup=False)
 
     def on_mount(self) -> None:
         self._render_menu()
@@ -344,12 +345,12 @@ class InlineSelectionWidget(InlineWidget):
     def compose(self) -> ComposeResult:
         with Vertical(id="dialog-shell", classes=f"dialog-{self.request.type}"):
             title = "工具请求权限" if isinstance(self.request, PermissionMenu) else "请选择"
-            yield Static(title, classes="dialog-title", markup=False)
+            yield SelectionStatic(title, classes="dialog-title", markup=False)
             source = _source_label(self.request)
             if source:
-                yield Static(f"发起 Agent  {source}", classes="dialog-source", markup=False)
+                yield SelectionStatic(f"发起 Agent  {source}", classes="dialog-source", markup=False)
             if isinstance(self.request, PermissionMenu):
-                yield Static(
+                yield SelectionStatic(
                     f"工具  {self.request.tool_name}\n内容  {self.request.detail}",
                     classes="dialog-detail",
                     markup=False,
@@ -437,16 +438,16 @@ class InlineModelSelectionWidget(InlineWidget):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="dialog-shell", classes="dialog-model-menu"):
-            yield Static("选择模型", classes="dialog-title", markup=False)
+            yield SelectionStatic("选择模型", classes="dialog-title", markup=False)
             source = _source_label(self.request)
             if source:
-                yield Static(f"发起 Agent  {source}", classes="dialog-source", markup=False)
+                yield SelectionStatic(f"发起 Agent  {source}", classes="dialog-source", markup=False)
             if self.request.prompt:
                 yield _prompt_widget(self.request)
             with VerticalScroll(id="model-menu-scroll"):
                 yield KeyboardNavigation("", id="model-menu-body", markup=False)
-            yield Static("", id="model-menu-effort", markup=False)
-            yield Static("↑↓ 模型 · ←→ 强度 · Enter 应用 · Esc 取消", classes="dialog-hint", markup=False)
+            yield SelectionStatic("", id="model-menu-effort", markup=False)
+            yield SelectionStatic("↑↓ 模型 · ←→ 强度 · Enter 应用 · Esc 取消", classes="dialog-hint", markup=False)
 
     def on_mount(self) -> None:
         self._render_menu()
@@ -518,10 +519,10 @@ class InlineChoiceInputWidget(InlineWidget):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="dialog-shell", classes="dialog-choice-input"):
-            yield Static("请选择或输入", classes="dialog-title", markup=False)
+            yield SelectionStatic("请选择或输入", classes="dialog-title", markup=False)
             source = _source_label(self.request)
             if source:
-                yield Static(f"发起 Agent  {source}", classes="dialog-source", markup=False)
+                yield SelectionStatic(f"发起 Agent  {source}", classes="dialog-source", markup=False)
             if self.request.prompt:
                 yield _prompt_widget(self.request)
             yield KeyboardNavigation("", id="choice-input-options", markup=False)
@@ -532,7 +533,7 @@ class InlineChoiceInputWidget(InlineWidget):
                 show_line_numbers=False,
                 placeholder=self.request.input_placeholder,
             )
-            yield Static(
+            yield SelectionStatic(
                 "↑↓ 选择 · Enter/数字 确认 · Shift+Enter 换行 · Esc 取消",
                 classes="dialog-hint",
                 markup=False,
@@ -644,10 +645,10 @@ class ChoiceInputDialog(KeyboardDialog):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="dialog-shell", classes="dialog-choice-input"):
-            yield Static("请选择或输入", classes="dialog-title", markup=False)
+            yield SelectionStatic("请选择或输入", classes="dialog-title", markup=False)
             source = _source_label(self.request)
             if source:
-                yield Static(f"发起 Agent  {source}", classes="dialog-source", markup=False)
+                yield SelectionStatic(f"发起 Agent  {source}", classes="dialog-source", markup=False)
             if self.request.prompt:
                 yield _prompt_widget(self.request)
             yield KeyboardNavigation("", id="choice-input-options", markup=False)
@@ -658,7 +659,7 @@ class ChoiceInputDialog(KeyboardDialog):
                 show_line_numbers=False,
                 placeholder=self.request.input_placeholder,
             )
-            yield Static(
+            yield SelectionStatic(
                 "↑↓ 选择 · Enter/数字 确认 · Shift+Enter 换行 · Esc 取消",
                 classes="dialog-hint",
                 markup=False,
@@ -770,16 +771,16 @@ class FormDialog(KeyboardDialog):
         with Vertical(id="dialog-shell", classes=classes):
             source = _form_source_label(self.request, self._task)
             if source:
-                yield Static(
+                yield SelectionStatic(
                     f"[#efc36a bold]问题[/]  ·  {source}",
                     classes="dialog-title",
                 )
             else:
-                yield Static("问题", classes="dialog-title", markup=False)
-            yield Static("", id="form-hint", classes="dialog-hint", markup=False)
-            yield Static("", id="form-tabs", markup=False)
+                yield SelectionStatic("问题", classes="dialog-title", markup=False)
+            yield SelectionStatic("", id="form-hint", classes="dialog-hint", markup=False)
+            yield SelectionStatic("", id="form-tabs", markup=False)
             if self._has_any_preview:
-                yield Static("", id="form-question-text", markup=False)
+                yield SelectionStatic("", id="form-question-text", markup=False)
                 with Horizontal(id="form-split"):
                     with Vertical(id="form-left"):
                         yield KeyboardNavigation("", id="form-body", markup=False)
@@ -1098,16 +1099,16 @@ class InlineFormWidget(InlineWidget):
         with Vertical(id="dialog-shell", classes=classes):
             source = _form_source_label(self.request, self._task)
             if source:
-                yield Static(
+                yield SelectionStatic(
                     f"[#efc36a bold]问题[/]  ·  {source}",
                     classes="dialog-title",
                 )
             else:
-                yield Static("问题", classes="dialog-title", markup=False)
-            yield Static("", id="form-hint", classes="dialog-hint", markup=False)
-            yield Static("", id="form-tabs", markup=False)
+                yield SelectionStatic("问题", classes="dialog-title", markup=False)
+            yield SelectionStatic("", id="form-hint", classes="dialog-hint", markup=False)
+            yield SelectionStatic("", id="form-tabs", markup=False)
             if self._has_any_preview:
-                yield Static("", id="form-question-text", markup=False)
+                yield SelectionStatic("", id="form-question-text", markup=False)
                 with Horizontal(id="form-split"):
                     with Vertical(id="form-left"):
                         yield KeyboardNavigation("", id="form-body", markup=False)

@@ -7,6 +7,7 @@ import gc
 import warnings
 
 import pytest
+from rich.text import Text
 from textual import events
 from textual.color import Color
 from textual.containers import VerticalScroll
@@ -33,6 +34,7 @@ from src.interfaces.tui.widgets import (
     KeyboardNavigation,
     KeyboardOptionList,
     SelectionScreen,
+    SelectionStatic,
 )
 
 
@@ -1173,6 +1175,77 @@ def test_selection_stays_stable_across_scroll_and_platform_copy_rules() -> None:
             mac_app.screen.post_message(events.TextSelected())
             await pilot.pause()
             assert mac_app.clipboard == "macOS 选中即复制"
+
+    asyncio.run(scenario())
+
+
+def test_history_entry_trailing_newline_row_is_selectable_without_crash() -> None:
+    async def scenario() -> None:
+        # win32：ctrl+c 走 _selected_text() 复制路径，覆盖真实取词入口。
+        app = _app(platform="win32")
+        async with app.run_test(size=(80, 24)) as pilot:
+            # flush_round 逐行追加 "\n"，工具条目文本以换行结尾。
+            await app.append_output(Text("✔ read (0.01s)\n  src/main.py\n"))
+            await pilot.pause()
+            target = list(app._history.children)[-1]
+            assert isinstance(target, SelectionStatic)
+
+            # 末尾 "\n" 让 Static 比 splitlines() 多渲染一行空行。
+            assert target.region.height == 3
+            widget, offset = app.screen.get_widget_and_offset_at(
+                target.region.x,
+                target.region.y + 2,
+            )
+            assert widget is target
+            assert offset == Offset(0, 2)
+
+            # 起点落在空行：原生 Static 在此 IndexError 打崩整个 app。
+            app.screen.selections = {target: Selection(offset, None)}
+            assert app.screen.get_selected_text() == ""
+
+            # 终点落在空行：收敛到末行行尾，而不是丢掉末行。
+            app.screen.selections = {target: Selection(None, offset)}
+            assert app.screen.get_selected_text() == "✔ read (0.01s)\n  src/main.py"
+
+            # 未越界的选区行为与原生一致。
+            app.screen.selections = {target: Selection(Offset(2, 0), None)}
+            assert app.screen.get_selected_text() == "read (0.01s)\n  src/main.py"
+
+            app.screen.selections = {target: Selection(None, None)}
+            assert app.screen.get_selected_text() == "✔ read (0.01s)\n  src/main.py"
+            await pilot.press("ctrl+c")
+            assert app.clipboard == "✔ read (0.01s)\n  src/main.py"
+            assert app.fatal_error is None
+            assert app.is_running
+
+    asyncio.run(scenario())
+
+
+def test_dialog_prompt_trailing_newline_row_is_selectable_without_crash() -> None:
+    async def scenario() -> None:
+        app = _app()
+        async with app.run_test(size=(80, 24)) as pilot:
+            loop = asyncio.get_running_loop()
+            # ask_user 等场景的 prompt 由模型自撰，可能以换行结尾。
+            choice = ChoiceMenu(
+                timestamp=1.0,
+                source="test",
+                prompt="选择一项：\n",
+                options=[("a", "A"), ("b", "B")],
+                future=loop.create_future(),
+            )
+            await app.coordinator.submit(choice)
+            await pilot.pause()
+            prompt = app._history.query_one(".dialog-prompt", SelectionStatic)
+            assert prompt.region.height == 2
+
+            app.screen.selections = {prompt: Selection(Offset(0, 1), None)}
+            assert app.screen.get_selected_text() == ""
+            assert app.fatal_error is None
+            assert app.is_running
+
+            await pilot.press("escape")
+            assert await choice.future == ""
 
     asyncio.run(scenario())
 

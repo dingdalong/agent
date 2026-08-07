@@ -8,12 +8,14 @@ from collections.abc import Callable
 from functools import partial
 from typing import Literal
 
+from rich.text import Text
 from textual import events
 from textual.binding import Binding
+from textual.content import Content
 from textual.geometry import Offset
 from textual.message import Message
 from textual.screen import Screen
-from textual.selection import SelectEnd, SelectStart, SelectState
+from textual.selection import SelectEnd, Selection, SelectStart, SelectState
 from textual.containers import VerticalScroll
 from textual.widget import Widget
 from textual.widgets import ListItem, ListView, OptionList, Static, TextArea
@@ -124,6 +126,38 @@ class SelectionScreen(Screen[None]):
         super().clear_selection()
 
 
+def _clamp_selection(selection: Selection, lines: list[str]) -> Selection:
+    """把越过末行索引的选区偏移收敛到末行行尾。"""
+    last_line = Offset(len(lines[-1]), len(lines) - 1)
+    start, end = selection
+    if start is not None and start.y > last_line.y:
+        start = last_line
+    if end is not None and end.y > last_line.y:
+        end = last_line
+    return Selection(start, end)
+
+
+class SelectionStatic(Static):
+    """内容以换行结尾时多渲染一行空行，取词前把越界偏移收敛回末行。
+
+    Textual 8.2.8 用 `Content.split(allow_blank=True)` 渲染，尾随换行会多出一行
+    空行并带有真实偏移元数据；而 `Selection.extract` 按 `splitlines()` 取行且不做
+    边界检查，落在这行空行上取词会 IndexError 打崩整个 app。
+    """
+
+    def get_selection(self, selection: Selection) -> tuple[str, str] | None:
+        # Static.render() 直接返回 self.visual，与基类 self._render() 是同一对象，
+        # 不产生额外渲染。
+        visual = self.visual
+        if not isinstance(visual, (Content, Text)):
+            return None
+        text = str(visual)
+        lines = text.splitlines()
+        if lines:
+            selection = _clamp_selection(selection, lines)
+        return selection.extract(text), "\n"
+
+
 class KeyboardTextArea(TextArea):
     """只接受键盘定位和编辑的文本输入框。"""
 
@@ -146,7 +180,7 @@ class KeyboardOptionList(OptionList):
         event.stop()
 
 
-class KeyboardNavigation(Static, can_focus=True):
+class KeyboardNavigation(SelectionStatic, can_focus=True):
     """承接复杂窗口键盘导航焦点的只读区域。"""
 
     FOCUS_ON_CLICK = False

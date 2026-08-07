@@ -58,6 +58,7 @@ from src.interfaces.tui.widgets import (
     KeyboardListItem,
     NativeClipboard,
     SelectionScreen,
+    SelectionStatic,
     TranscriptPanel,
 )
 
@@ -235,14 +236,14 @@ class AgentTuiApp(App[None]):
     def compose(self) -> ComposeResult:
         yield HistoryPanel(id="history")
         with Vertical(id="transient-zone"):
-            yield Static("", id="activity", markup=False)
+            yield SelectionStatic("", id="activity", markup=False)
             with Vertical(id="transcript-zone"):
-                yield Static("", id="transcript-header", markup=False)
+                yield SelectionStatic("", id="transcript-header", markup=False)
                 with TranscriptPanel(id="transcript-panel"):
                     yield Markdown("", id="transcript-content")
-            yield Static("", id="completion", markup=False)
-        yield Static("", id="input-status", markup=False)
-        yield Static("", classes="separator", id="separator-top", markup=False)
+            yield SelectionStatic("", id="completion", markup=False)
+        yield SelectionStatic("", id="input-status", markup=False)
+        yield SelectionStatic("", classes="separator", id="separator-top", markup=False)
         with Vertical(id="composer-shell"):
             yield Composer(
                 "",
@@ -251,8 +252,8 @@ class AgentTuiApp(App[None]):
                 show_line_numbers=False,
                 placeholder="输入消息或 / 命令…",
             )
-        yield Static("", classes="separator", id="separator-bottom", markup=False)
-        yield Static("", id="core-status", markup=False)
+        yield SelectionStatic("", classes="separator", id="separator-bottom", markup=False)
+        yield SelectionStatic("", id="core-status", markup=False)
         yield AgentList(id="agent-list", initial_index=0)
 
     def get_default_screen(self) -> SelectionScreen:
@@ -361,7 +362,7 @@ class AgentTuiApp(App[None]):
             await self._history.mount(Markdown(message, classes=classes or None))
         else:
             await self._history.mount(
-                Static(message, classes=classes or None, markup=False)
+                SelectionStatic(message, classes=classes or None, markup=False)
             )
         self.history_journal.append_entry(message)
 
@@ -387,7 +388,7 @@ class AgentTuiApp(App[None]):
             for index, line in enumerate(lines)
         )
         await self._history.mount(
-            Static(rendered, classes="user-message", markup=False)
+            SelectionStatic(rendered, classes="user-message", markup=False)
         )
         self.history_journal.append_entry(rendered)
 
@@ -815,7 +816,7 @@ class AgentTuiApp(App[None]):
             for snapshot in snapshots:
                 label = snapshot.agent_type if snapshot.is_main else present_agent(snapshot)
                 await self._agent_list.mount(
-                    KeyboardListItem(Static(label, markup=False))
+                    KeyboardListItem(SelectionStatic(label, markup=False))
                 )
             self._agent_ids = ids
             if ids:
