@@ -13,6 +13,7 @@ from src.mgr.data_guard import DataGuard, REDACTED
 from src.mgr.hooks_mgr import HookRunResult, HooksMgr
 from src.mgr.memory_mgr import MemoryMgr
 from src.mgr.session_mgr import SessionMgr
+from src.mgr.session_state import SessionState
 from src.mgr.task_mgr import TaskManager
 from src.tools.builtin.shell import shell
 
@@ -31,7 +32,9 @@ def test_session_memory_and_task_persistence_redact_and_use_owner_only_files(tmp
     workdir.mkdir()
 
     sessions = SessionMgr(global_dir, workdir, guard)
-    sessions.save_history("session", [{"role": "assistant", "content": SECRET}])
+    state = SessionState()
+    state.append_context({"role": "assistant", "content": SECRET})
+    sessions.save_state("session", state)
     sessions.save_metadata("session", is_new=True, topic=f"topic {SECRET}")
 
     memory = MemoryMgr(workdir, data_guard=guard)
@@ -45,7 +48,7 @@ def test_session_memory_and_task_persistence_redact_and_use_owner_only_files(tmp
     )
 
     files = [
-        global_dir / "sessions" / "session.hist.json",
+        global_dir / "sessions" / "session.state.json",
         global_dir / "sessions" / "session.json",
         next((workdir / ".agent" / "memory").glob("*.md")),
         global_dir / "tasks" / "session" / "1.json",
@@ -55,7 +58,7 @@ def test_session_memory_and_task_persistence_redact_and_use_owner_only_files(tmp
         assert SECRET not in path.read_text()
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
-    assert SECRET not in repr(sessions.load_history("session"))
+    assert SECRET not in repr(sessions.load_state("session"))
     assert SECRET not in memory.read("security")
     assert SECRET not in repr(tasks.get_task("1"))
 

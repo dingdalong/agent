@@ -125,9 +125,8 @@ class TaskManager:
         self._on_change = on_change
         if self._tasks_dir is not None:
             self._load()
-        # 恢复已有任务时立即通知 UI
-        if self._tasks:
-            self._emit_change()
+        # 初始化始终发布全量快照，空列表也用于清除上一会话的任务面板。
+        self._emit_change()
 
     # ── 文件持久化 ──────────────────────────────────────────────
 

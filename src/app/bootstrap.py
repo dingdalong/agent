@@ -16,6 +16,7 @@ from src.events import EventBus, EventLevel
 from src.events.types import TaskStateChanged
 from src.mgr import ConfigManager, HooksMgr, LLMMgr, McpMgr, MemoryMgr, PermissionManager, PlanMgr, PluginMgr, RoleMgr, SessionMgr, ToolsMgr, WebAccessMgr, resolve_features
 from src.mgr.data_guard import DataGuard, register_runtime_secrets
+from src.mgr.session_state import SessionState
 from src.mgr.permission_mgr import LLMJudgeClient
 from src.mgr.web_safety_mgr import LLMWebSafetyClient
 from src.mgr.project_trust import ProjectTrustGate
@@ -105,6 +106,7 @@ async def create_app(
     command_mgr = CommandMgr(workdir=work_dir, global_dir=global_dir, project_trusted=project_trusted)
     event_bus = EventBus(level=EventLevel.from_str(config_mgr.get_config("events").get("level", "progress")))
     agent_view_store = AgentViewStore()
+    session_state = SessionState()
     turn_clock = TurnClock()  # 工具执行层与 UI 交互层共享，用于耗时剔除纯人工等待时段
     ui = TextualInterface(
         agent_view_store=agent_view_store,
@@ -118,6 +120,7 @@ async def create_app(
         ui=ui,
         store=agent_view_store,
         passthrough=not ui.is_tty,
+        session_state=session_state,
     )
     tools_mgr = ToolsMgr()
     memory_mgr = MemoryMgr(work_dir, data_guard=data_guard) if "memory" in feats else None
@@ -187,6 +190,7 @@ async def create_app(
         trust_gate=trust_gate,
         task_change_notifier=_make_task_notifier(event_bus),
         session_context=[],
+        session_state=session_state,
         workdir=work_dir,
         global_dir=global_dir,
     )

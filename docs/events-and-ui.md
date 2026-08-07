@@ -70,7 +70,7 @@ LLM 调用使用 `emit_telemetry_safely()`（`src/events/bus.py:36-65`）发布�
 
 ## 4. `AgentViewStore`
 
-`AgentViewStore` 是 UI 唯一读模型（`src/interfaces/agent_view_store.py:79-105`）。它维护会话累计 token、前台 UUID、活动与历史 Agent、每 Agent 的窗口/活动/生命周期以及分段转录。
+`AgentViewStore` 是状态栏与子 agent 读模型。它维护会话累计 token、前台 UUID、活动与历史 Agent、每 Agent 的窗口/活动/生命周期以及子 agent 分段转录；主聊天历史来自 `SessionState.records[].view`，Store 不保存第二份主聊天副本。子 agent 快照会以隐藏的 `subagent` view 投影写入当前 `SessionState`，恢复后重新水合为只读历史。
 
 `record()`（`agent_view_store.py:139-165`）对 LLM 事件的处理：
 
@@ -85,9 +85,9 @@ Store 无 UUID 时只累计会话 token，不虚构 Agent。完成子 Agent 先�
 
 ## 5. OutputRouter 的前后台规则
 
-`OutputRouter.dispatch()` 始终先 `store.record(event)`（`src/interfaces/output_router.py:50-87`），然后按以下顺序路由：
+`OutputRouter.dispatch()` 始终先 `store.record(event)`，完成前后台筛选后才把前台可见事件归并到当前 `SessionState` 并交给 UI。LLM 流按 `call_id` 合并，工具按 `tool_call_id` 合并。路由顺序如下：
 
-1. `SubagentLifecycle` 只进 Store，不进 UI。
+1. `SubagentLifecycle` 先更新 Store 并同步当前子 agent 快照到 `SessionState`，不进 UI。
 2. `LLMCallStarted`、`LLMRetrying`、`LLMLengthRetrying`、`LLMCallFailed` 是边界事件（`_LLM_BOUNDARY_EVENTS`）：只有 `caller_uuid` 精确等于已登记的前台 UUID 才转发；后台和缺前台身份的边界静默。前台 started 还先迁移已完成子 Agent。
 3. 非 TTY 的 `passthrough=True` 对其余事件全部透传，因此正文、思考、工具、完成、菜单与 compact 都保持普通输出，同时 Store 仍记录。
 4. TTY 下菜单、权限通知、显式输出和 `CompactDelta` 始终转发。
@@ -154,7 +154,7 @@ TTY 只缓冲前台 Agent 当前一轮的工具。实时区优先级为”重试
 | `dialogs.py` | 权限、选择、组合输入、表单 Modal 与 FIFO 协调器 |
 | `plain.py` | 非 TTY 输入输出，保证无 ANSI |
 | `diagnostics.py` | TUI 生命周期、降级和转录渲染的后台滚动诊断日志 |
-| `history_journal.py` | TUI 异常降级时一次性回放的普通文字历史 |
+| `history_journal.py` | 当前前台的纯文本降级缓存；会话切换时从 `SessionRecord.view` 重建 |
 | `agent.tcss` | 宽窄和高矮窗口的响应式布局 |
 
 TTY 的 `InteractionCoordinator` 是交互请求状态权威写入者。它最多保留一个转录视图和一个活动作答窗口：普通输入、权限、选择、模型双轴选择、表单和组合输入不会抢占已有作答窗口，而是按 FIFO 排队；状态栏显示“等待 N：来源”，来源优先使用发起 agent 类型、缺失时回退事件 source。`ModelMenu` 用上下键选择模型、左右键选择 `low/medium/high/xhigh/max` 强度，Enter 提交、Esc 取消。只有真正激活的请求才打印调用方标记和菜单上文。

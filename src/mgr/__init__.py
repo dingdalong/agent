@@ -15,8 +15,9 @@ from src.mgr.plan_mgr import PlanMgr
 from src.mgr.plugin_mgr import PluginMgr, PluginInfo, PluginLayer
 from src.mgr.reminder_mgr import ReminderMgr
 from src.mgr.session_mgr import SessionMgr, ResumeResult
+from src.mgr.session_state import SessionRecord, SessionState, ViewPayload
 from src.mgr.mcp_mgr import McpMgr
 from src.mgr.role_mgr import RoleMgr
 from src.mgr.features import ALL_FEATURES, resolve_features
 
-__all__ = ["FileMgr", "CompactMgr", "CompactResult", "TaskManager", "ToolsMgr", "PromptMgr", "SkillMgr", "SubAgentMgr", "PermissionManager", "WebAccessMgr", "ConfigManager", "MemoryMgr", "HooksMgr", "LLMMgr", "ModelUnavailableError", "PlanMgr", "PluginMgr", "PluginInfo", "PluginLayer", "ReminderMgr", "SessionMgr", "ResumeResult", "McpMgr", "RoleMgr", "ALL_FEATURES", "resolve_features"]
+__all__ = ["FileMgr", "CompactMgr", "CompactResult", "TaskManager", "ToolsMgr", "PromptMgr", "SkillMgr", "SubAgentMgr", "PermissionManager", "WebAccessMgr", "ConfigManager", "MemoryMgr", "HooksMgr", "LLMMgr", "ModelUnavailableError", "PlanMgr", "PluginMgr", "PluginInfo", "PluginLayer", "ReminderMgr", "SessionMgr", "ResumeResult", "SessionRecord", "SessionState", "ViewPayload", "McpMgr", "RoleMgr", "ALL_FEATURES", "resolve_features"]

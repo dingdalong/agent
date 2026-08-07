@@ -47,7 +47,7 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 | `PlanMgr` (`plan_mgr.py`) | 计划模式切换与 plan 指令注入 | `plan`（依赖 `file`） | 有 |
 | `FileMgr` (`file_mgr.py`) | 工作区文件读写/搜索（同步阻塞） | `file` | 无 |
 | `TaskManager` (`task_mgr.py`) | 任务 CRUD、依赖、持久化、提醒 | `task` | 无（`/clear` 用 `clear_dir`） |
-| `SessionMgr` (`session_mgr.py`) | 会话元数据/历史持久化与恢复 | 否 | 无 |
+| `SessionMgr` (`session_mgr.py`) | 会话元数据/SessionState 持久化与恢复 | 否 | 无 |
 | `HooksMgr` (`hooks_mgr.py`) | 8 类生命周期钩子的加载与执行 | 否 | 有 |
 | `ConfigManager` (`config_mgr.py`) | 三层配置/settings/.env 合并 | 否 | 有 |
 | `PluginMgr` (`plugin_mgr.py`) | 三层扫描插件目录 | 否 | 有 |
@@ -449,25 +449,27 @@ MCP 连接配置和授权边界见 [mcp-and-hooks.md](mcp-and-hooks.md)。
 
 `src/mgr/session_mgr.py`
 
-**单一职责**：持久化会话元数据与对话历史，支持 `/resume` 恢复。
+**单一职责**：持久化会话元数据与单一 `SessionState` 快照，支持 `/resume` 恢复。
 
-**消费的配置或文件**：`{global_dir}/sessions/` 下——`{id}.json`（元数据：`workdir`/时间戳/`topic`/`plan_active`）、`{id}.hist.json`（脱敏历史快照，覆写式原子写）。
+**消费的配置或文件**：`{global_dir}/sessions/` 下——`{id}.json`（元数据：`workdir`/时间戳/`topic`/`plan_active`）、`{id}.state.json`（版本化 `records` + `context_ids`，经 DataGuard 脱敏并原子写）。旧 `.hist.json` 与 `.input.json` 不读取、不迁移、不删除。
+
+`SessionRecord` 可同时包含模型消息、可见 `ViewPayload`、原始输入和关联 ID。`SessionState` 分别投影 LLM 上下文、TUI 历史与输入回溯；compact 只更新上下文投影。
 
 **公共方法**：
 
 | 方法 | 关键参数 | 返回 | 作用 |
 |---|---|---|---|
 | `save_metadata` | `session_id`, `is_new`, `topic`, `plan_active` | `None` | 原子写/更新元数据（首次写 `created_at`，后续更 `updated_at`） |
-| `save_history` | `session_id`, `messages` | `None` | 原子覆写历史快照（正确处理 compact 后缩短） |
+| `save_state` | `session_id`, `state` | `None` | DataGuard 脱敏后原子覆写 `.state.json` |
+| `load_state` | `session_id` | `SessionState \| None` | 加载并完整校验 version、record 与 context 引用 |
 | `list_sessions` | `limit` | `list[dict]` | 按 `updated_at` 降序列出会话元数据 |
-| `list_resumable` | `current_session_id`, `limit` | `list[dict]` | 同上但排除当前会话 |
-| `load_history` | `session_id` | `list[dict]` | 加载历史，不存在则空列表 |
+| `list_resumable` | `current_session_id`, `limit` | `list[dict]` | 只列有有效 `.state.json` 的非当前会话 |
 | `resolve_resume` | `cmd_args`, `current_session_id`, `current_workdir` | `str \| ResumeResult` | 解析 `/resume` 目标（序号或 id 前缀）、加载校验；**拒绝跨 workdir 恢复** |
 | `get_metadata` | `session_id` | `dict \| None` | 取指定会话元数据 |
 
 **feature 门控**：否。 **reload**：无。
 
-**持有的关键状态**：`_sessions_dir`、`_workdir`（无可变会话状态，历史/元数据落盘）。
+**持有的关键状态**：`_sessions_dir`、`_workdir`（无可变会话状态，`SessionState` 的生命周期所有者是 app 层）。
 
 会话与 `/resume` 流程见 [agent-runtime.md](agent-runtime.md)。
 

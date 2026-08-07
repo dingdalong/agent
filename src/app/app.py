@@ -17,6 +17,8 @@ from src.app.plan_mode_controller import PlanModeController
 from src.events.types import InterruptRequested
 from src.mgr.data_guard import register_runtime_secrets
 from src.mgr.features import resolve_features
+from src.mgr.session_mgr import ResumeResult
+from src.mgr.session_state import SessionState
 
 logger = logging.getLogger(__name__)
 
@@ -48,8 +50,8 @@ class AgentApp:
             consumer_task = asyncio.create_task(self._consume_events())
             await asyncio.sleep(0)
 
-            await self.deps.event_bus.request_output(self._startup_banner())
             agent = await self.reset_session(source="startup")
+            await self.deps.event_bus.request_output(self._startup_banner())
             while True:
                 result = await self._run_agent_turn(agent)
                 if result is None:
@@ -202,7 +204,16 @@ class AgentApp:
                 try:
                     if event_bus is not None:
                         await event_bus.join()
+                    old_session_id = getattr(self.deps, "session_id", "")
+                    old_state = getattr(self.deps, "session_state", None)
+                    session_mgr = getattr(self.deps, "session_mgr", None)
+                    if old_session_id and old_state is not None and session_mgr is not None:
+                        session_mgr.save_state(old_session_id, old_state)
                     self.deps.session_id = str(uuid.uuid4())
+                    self.deps.session_state = SessionState()
+                    bind_state = getattr(self.output_router, "bind_session_state", None)
+                    if bind_state is not None:
+                        bind_state(self.deps.session_state)
                     data_guard = getattr(self.deps, "data_guard", None)
                     config_mgr = getattr(self.deps, "config_mgr", None)
                     global_dir = getattr(self.deps, "global_dir", None)
@@ -283,11 +294,85 @@ class AgentApp:
                     if self._plan_mode_controller is not None:
                         self._plan_mode_controller.install_shortcut(agent)
                         self._plan_mode_controller.notify_state_changed()
+                    replace_state = getattr(self.deps.ui, "replace_session_state", None)
+                    if replace_state is not None:
+                        await replace_state(self.deps.session_state)
                     await self._run_session_start_hooks(source=source)
                     return agent
                 finally:
                     if event_bus is not None:
                         await event_bus.join()
+
+    async def resume_session(self, result: ResumeResult) -> tuple[Agent, str]:
+        """在 UI/EventBus 门控内保存源会话并切换到目标 SessionState。"""
+        event_bus = self.deps.event_bus
+        bus_gate = event_bus.reject_ui_requests() if event_bus is not None else nullcontext()
+        async with self.deps.ui.reset_session_interactions():
+            with bus_gate:
+                if event_bus is not None:
+                    await event_bus.join()
+                session_mgr = self.deps.session_mgr
+                source_id = self.deps.session_id
+                source_state = self.deps.session_state
+                if session_mgr is not None and source_id and source_state is not None:
+                    session_mgr.save_state(source_id, source_state)
+
+                self.deps.session_id = result.session_id
+                self.deps.session_state = result.state
+                self.output_router.bind_session_state(result.state)
+                self.agent_view_store.reset()
+                self.deps.session_context.clear()
+                self._install_plan_mode_controller()
+                self.deps.plan_mode_controller = self._plan_mode_controller
+
+                target_plan_active = result.metadata.get("plan_active") is True
+                agent = Agent.from_manifest(
+                    manifest=self.deps.role_mgr.manifest if self.deps.role_mgr else None,
+                    deps=self.deps,
+                    is_subagent=False,
+                    plan_active=target_plan_active,
+                )
+                if agent.plan_active != target_plan_active:
+                    agent.set_plan_active(target_plan_active)
+                self.agent_view_store.register_foreground(str(agent.uuid), agent.agent_type)
+                restore_subagents = getattr(self.agent_view_store, "restore_subagents", None)
+                if restore_subagents is not None:
+                    restore_subagents(result.state.subagent_views())
+                set_history_provider = getattr(self.deps.ui, "set_input_history_provider", None)
+                if set_history_provider is not None:
+                    set_history_provider(agent.get_input_history)
+                set_model_info = getattr(self.deps.ui, "set_model_info_provider", None)
+                if set_model_info is not None:
+                    set_model_info(
+                        lambda a=agent: (
+                            a.llm.model,
+                            a.reasoning_effort or a.llm.reasoning_effort,
+                        )
+                    )
+                if self._plan_mode_controller is not None:
+                    self._plan_mode_controller.install_shortcut(agent)
+                    self._plan_mode_controller.notify_state_changed()
+                await self.deps.ui.replace_session_state(result.state)
+
+                topic = result.metadata.get("topic", "")
+                self.deps.session_context.append(
+                    f"当前会话已从历史会话恢复（session {result.session_id[:8]}...）。"
+                    f"会话主题: \"{topic}\"。请基于恢复的上下文继续对话。"
+                )
+                agent._prompt_mgr.invalidate_cache()
+                task_info = ""
+                if agent._task_mgr is not None and agent._task_mgr.has_open_items():
+                    tasks = agent._task_mgr.list_tasks()["tasks"]
+                    open_count = sum(1 for task in tasks if task["status"] != "completed")
+                    task_info = f"，{open_count} 个未完成任务"
+                plan_info = "，Plan: active" if agent.plan_active else ""
+                summary = (
+                    f"已恢复会话 {result.session_id[:8]}..."
+                    f"（{len(result.state.context_ids)} 条消息{task_info}{plan_info}）\n"
+                )
+                if event_bus is not None:
+                    await event_bus.join()
+                return agent, summary
 
     def _handle_interrupt_requested(self) -> None:
         """处理中断请求：取消工作任务和活跃输入。"""
@@ -318,6 +403,11 @@ class AgentApp:
         self.deps.ui.cancel_active_input()
         await self.deps.event_bus.request_output("\n已中断当前任务。\n")
         await self.deps.event_bus.join()
+        session_mgr = getattr(self.deps, "session_mgr", None)
+        session_state = getattr(self.deps, "session_state", None)
+        session_id = getattr(self.deps, "session_id", "")
+        if session_mgr is not None and session_state is not None and session_id:
+            session_mgr.save_state(session_id, session_state)
         await self.deps.ui.wait_interactions_idle()
 
     async def shutdown(self) -> None:

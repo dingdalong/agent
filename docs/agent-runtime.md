@@ -4,11 +4,24 @@
 
 ## 1. `AgentApp` 外层 REPL
 
-`AgentApp.run()`（`src/app/app.py:31-77`）先启动 UI 与事件消费者，输出启动信息并创建主 Agent，随后持续调用 `_run_agent_turn()`。Agent 内部可完成多轮输入；只有退出或上抛命令才返回给应用层。`/clear` 重建会话，`/agents` 复用当前 Agent 浏览子 agent 记录。
+`AgentApp.run()` 先启动 UI 与事件消费者，输出启动信息并创建主 Agent，随后持续调用 `_run_agent_turn()`。Agent 内部可完成多轮输入；只有退出或上抛命令才返回给应用层。`/clear` 重建会话，`/resume` 切换会话，`/agents` 复用当前 Agent 浏览子 agent 记录。
 
 `_consume_events()`（`app.py:121-133`）内联处理 `InterruptRequested`，其余事件统一交 `OutputRouter.dispatch()`，确保 Store 先记录再决定可见性。`_run_agent_turn()`（`app.py:135-156`）把 `agent.run()` 包成任务，取消或键盘中断时调用 `_handle_interrupted_turn()` 收束任务与输入。
 
-`_reset_session()` 处理 `/clear` 时先检查工作目录信任；已记录的目录直接通过，未记录的目录在常驻 UI 中通过 EventBus 菜单确认，Esc、取消、菜单失败或默认选项都进入受限模式。确认结束后进入 UI reset gate，取消活跃、排队和只读请求并等待窗口 runner 清理；随后拒绝新的 `UiRequest`，用 `EventBus.join()` 收束已投递事件，再更新信任状态并重载配置、Hook 和 MCP，生成 `session_id`，重置 `AgentViewStore` 与会话上下文，安装 `PlanModeController`，从激活角色 manifest 构造新主 Agent并运行 `SessionStart` Hook。
+`reset_session()` 处理 `/clear` 时先检查工作目录信任；确认结束后进入 UI reset gate，取消活跃、排队和只读请求并等待窗口 runner 清理。随后拒绝新的 `UiRequest`，用 `EventBus.join()` 收束已投递事件并保存源 `SessionState`，再更新信任状态、重载配置/Hook/MCP、生成新 `session_id` 和空状态，重置 `AgentViewStore`，从激活角色 manifest 构造新主 Agent并运行 `SessionStart` Hook。
+
+`resume_session()` 使用同一组 UI/EventBus gate：保存源状态后绑定目标 `.state.json`，清空旧 metrics 和瞬态 UI，按目标 session 重建任务与 Plan，并从隐藏的 `subagent` view 投影恢复 `/agents` 只读记录，再从其他 `SessionRecord.view` 水合聊天。旧子 agent 不会继续运行。`/resume` 是 app 层命令，不能在 Agent 状态机内直接替换共享状态。
+
+主会话只有一个状态权威写入点 `SessionState`（`src/mgr/session_state.py`）：
+
+```text
+SessionState.records
+    ├─ context_ids → Agent.history / LLM 输入
+    ├─ view         → TUI 历史
+    └─ recallable raw_input → 输入回溯
+```
+
+用户记录同时保存原始输入和注入 hook/reminder 后的模型消息；assistant 以 LLM `call_id` 合并流与最终消息，工具以 `tool_call_id` 合并展示和 tool message。compact 只替换 `context_ids`，不会删除已有可见记录。子 Agent 仍使用独立的纯内存 history。
 
 ## 2. 状态枚举与流转
 
@@ -72,10 +85,10 @@ LLM_CALL → PROCESS_RESPONSE ──length────→ LENGTH_RETRY ──可
 | 轮次与工具 | `has_tool_calls`、`manual_compact`、`compact_focus` |
 | 自动压缩 | `compact_streak`、`max_compact_streak=3`、压缩前 token、摘要消息数、摘要是否非空 |
 | 响应恢复 | `length_recoveries`、`max_length_recoveries=3`、`response_recovery_start_idx`、`response_recovery_response_count`、`pause_turn_message_idx`、`pause_turn_continuations`、`length_effort_override`（思考截断重生成时的临时降档 effort）、`length_ephemeral_instruction`（触底时一次性压缩指令，永不落历史） |
-| 交互终态 | `user_input`、`command`、`exit_requested`、`stop_hook_used` |
+| 交互终态 | `user_input`、`user_record_id`、`command`、`exit_requested`、`stop_hook_used` |
 | LLM 终态 | `llm_error: LLMErrorInfo | None` |
 
-`RunResult` 返回 `final_text`、`command`、`exit_requested`、`user_input` 和 `llm_error`。调用方无需从错误文本反向推断类别。`/plan`、`/resume`、`/models` 在 Agent 内处理；`/clear` 与 `/agents` 通过 `command` 交给应用层。`/models` 原地替换当前 Agent 的 provider、推理强度、压缩器和提示词模型信息，不更换 Agent UUID、会话或消息历史。
+`RunResult` 返回 `final_text`、`command`、`exit_requested`、`user_input` 和 `llm_error`。调用方无需从错误文本反向推断类别。`/plan`、`/models` 在 Agent 内处理；`/clear`、`/resume` 与 `/agents` 通过 `command` 交给应用层。`/models` 原地替换当前 Agent 的 provider、推理强度、压缩器和提示词模型信息，不更换 Agent UUID、会话或消息历史。
 
 ## 4. 单点 LLM 错误收口
 
@@ -103,7 +116,7 @@ LLM_CALL → PROCESS_RESPONSE ──length────→ LENGTH_RETRY ──可
 
 `_on_context_overflow()` 与 `_on_llm_failure()` 只设置 `ctx.final_text`，不改写 `ctx.messages`（`agent.py:1130-1166`）。`_format_llm_failure_text()` 按错误类别生成安全摘要和可操作建议：上下文/输出要求缩小范围，内容政策要求调整内容，认证/权限/额度要求检查凭据、权限或额度，瞬时错误建议稍后重试（`agent.py:40-97`）。
 
-失败不会终止主 REPL。主 Agent 的当前单轮到 `DONE` 后，`Agent.run(input=None)` 持久化现有历史并继续下一次 `REQUEST_INPUT`；用户可在保留原请求的会话中继续输入（`agent.py:371-379`）。
+失败不会终止主 REPL。主 Agent 的当前单轮到 `DONE` 后，`Agent.run(input=None)` 先等待 EventBus 完成流式归并，再原子保存 `SessionState` 并继续下一次 `REQUEST_INPUT`；用户可在保留原请求的会话中继续输入。
 
 ## 5. 主要 handler
 

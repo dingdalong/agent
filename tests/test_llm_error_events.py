@@ -806,7 +806,7 @@ def _length_retry(uuid_value: str) -> LLMLengthRetrying:
 
 
 def test_router_forwards_foreground_length_retry_and_records_it() -> None:
-    """前台长度自动恢复事件可见并在 Store 留下恢复转录段。"""
+    """前台长度自动恢复事件可见，Store 只更新活动而不复制主聊天。"""
     store = AgentViewStore()
     store.register_foreground("foreground", "main")
     ui = RecordingUI()
@@ -816,7 +816,7 @@ def test_router_forwards_foreground_length_retry_and_records_it() -> None:
     asyncio.run(router.dispatch(event))
 
     assert ui.events == [event]
-    assert [kind for kind, _text in store.transcript_segments("foreground")] == ["retry"]
+    assert store.transcript_segments("foreground") == []
     assert store.agent_snapshot("foreground").activity == "恢复中"  # type: ignore[union-attr]
 
 
@@ -884,8 +884,8 @@ def test_compact_summary_events_keep_agent_identity_and_reach_foreground(
     assert ui.events == [started]
 
 
-def test_store_segments_retry_and_failure_without_merging_next_response() -> None:
-    """失败残片、retry、新尝试正文和终态 error 是四个独立转录分段。"""
+def test_store_does_not_duplicate_foreground_transcript() -> None:
+    """主聊天由 SessionState 负责，Store 只保留活动状态。"""
     store = AgentViewStore(transcript_limit=8)
     store.register_foreground("foreground", "main")
     store.record(ResponseDelta(
@@ -909,16 +909,7 @@ def test_store_segments_retry_and_failure_without_merging_next_response() -> Non
     ))
     store.record(_failed("foreground"))
 
-    segments = store.transcript_segments("foreground")
-    assert [kind for kind, _text in segments] == ["response", "retry", "response", "error"]
-    assert segments[0][1] == "broken fragment"
-    assert "1/3" in segments[1][1]
-    assert "service" in segments[1][1]
-    assert "服务暂时不可用" in segments[1][1]
-    assert "partial=true" in segments[1][1]
-    assert "tool=partial" in segments[1][1]
-    assert segments[2][1] == "clean response"
-    assert "服务仍不可用" in segments[3][1]
+    assert store.transcript_segments("foreground") == []
     assert store.agent_snapshot("foreground").activity == "失败"  # type: ignore[union-attr]
 
 
@@ -1040,8 +1031,8 @@ def test_store_new_llm_call_clears_stale_in_flight_tool_and_restores_reset() -> 
     assert store.agent_snapshot("worker").activity == "等待响应"  # type: ignore[union-attr]
 
 
-def test_store_error_segments_obey_transcript_limit() -> None:
-    """retry/error 与其它转录一样受 transcript_limit 约束。"""
+def test_store_keeps_foreground_error_out_of_transcript() -> None:
+    """前台 retry/error 不进入 Store 的子 agent 转录缓存。"""
     store = AgentViewStore(transcript_limit=2)
     store.register_foreground("foreground", "main")
     store.record(ResponseDelta(
@@ -1053,10 +1044,7 @@ def test_store_error_segments_obey_transcript_limit() -> None:
     store.record(_retry("foreground"))
     store.record(_failed("foreground"))
 
-    assert [kind for kind, _text in store.transcript_segments("foreground")] == [
-        "retry",
-        "error",
-    ]
+    assert store.transcript_segments("foreground") == []
 
 
 @pytest.mark.parametrize(

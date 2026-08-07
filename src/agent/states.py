@@ -110,6 +110,7 @@ class RunContext:
     manual_compact: bool = False
     compact_focus: str | None = None
     user_input: str = ""
+    user_record_id: str | None = None
     command: tuple[str, list[str]] | None = None
     exit_requested: bool = False
     llm_error: LLMErrorInfo | None = None

@@ -4,8 +4,8 @@ CommandContext 是所有命令 handler 的统一入参，聚合三层能力：
 进程级依赖（deps）、当前前台 Agent（agent）、应用层门面（app）。
 
 分层约定：
-- agent 层命令（plan/models/resume/help 等）在 Agent._on_request_input 内分发，app=None。
-- app 层命令（clear/agents 等需要主循环上下文的）不在 agent 内执行，
+- agent 层命令（plan/models/help 等）在 Agent._on_request_input 内分发，app=None。
+- app 层命令（clear/resume/agents 等需要主循环上下文的）不在 agent 内执行，
   由 CommandMgr defer 后经 RunResult.command 上抛，AgentApp.run 二次 dispatch 时
   传入 app=AgentApp 自身（结构式满足 CommandAppServices）。
 """
@@ -31,6 +31,10 @@ class CommandAppServices(Protocol):
 
     async def reset_session(self, *, source: str = "clear") -> "Agent":
         """重置会话并返回新的前台 Agent。"""
+        ...
+
+    async def resume_session(self, result: object) -> tuple["Agent", str]:
+        """切换到已解析的历史会话。"""
         ...
 
 

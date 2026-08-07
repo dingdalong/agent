@@ -1,8 +1,8 @@
-"""会话管理器 — 管理会话元数据和对话历史的持久化与恢复。
+"""会话管理器 — 管理会话元数据和单一状态快照的持久化与恢复。
 
 会话数据存储在 {global_dir}/sessions/ 下：
 - {session_id}.json     — 元数据（workdir、时间戳、主题）
-- {session_id}.hist.json — 对话历史快照（每次完整覆写，正确处理 compact）
+- {session_id}.state.json — SessionState 原子快照
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from src.mgr.secure_io import atomic_write_text
+from src.mgr.session_state import SessionState
 
 logger = logging.getLogger(__name__)
 
@@ -25,16 +26,16 @@ class ResumeResult:
 
     Attributes:
         session_id: 目标会话 UUID。
-        messages: 加载的完整对话历史。
+        state: 加载的单一会话状态。
         metadata: 目标会话的元数据字典（含 plan_active、topic 等）。
     """
     session_id: str
-    messages: list[dict[str, Any]]
+    state: SessionState
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class SessionMgr:
-    """会话管理器 — 持久化会话元数据和对话历史，支持 /resume 恢复。
+    """会话管理器 — 持久化会话元数据和单一状态，支持 /resume 恢复。
 
     Attributes:
         _sessions_dir: 会话文件存储目录（{global_dir}/sessions/）。
@@ -97,59 +98,29 @@ class SessionMgr:
         except OSError as e:
             logger.warning("写入会话元数据失败: %s", e)
 
-    def save_history(self, session_id: str, messages: list[dict[str, Any]]) -> None:
-        """将完整对话历史写入磁盘（覆写式快照）。
-
-        使用原子写入（先写 .tmp 再 os.replace），正确处理 compact 后历史缩短的场景。
-
-        Args:
-            session_id: 会话 UUID。
-            messages: 完整的对话历史消息列表。
-        """
-        if not messages:
-            return
+    def save_state(self, session_id: str, state: SessionState) -> None:
+        """原子保存单一会话状态快照，空状态也会写入。"""
         self._sessions_dir.mkdir(parents=True, exist_ok=True)
-        history_path = self._sessions_dir / f"{session_id}.hist.json"
+        state_path = self._sessions_dir / f"{session_id}.state.json"
         try:
-            safe_messages = self._data_guard.redact(messages) if self._data_guard is not None else messages
-            atomic_write_text(history_path, json.dumps(safe_messages, ensure_ascii=False))
+            payload = state.to_dict()
+            safe_payload = self._data_guard.redact(payload) if self._data_guard is not None else payload
+            atomic_write_text(state_path, json.dumps(safe_payload, ensure_ascii=False))
         except OSError as e:
-            logger.warning("写入会话历史失败: %s", e)
+            logger.warning("写入会话状态失败: %s", e)
 
-    def save_input_history(self, session_id: str, inputs: list[str]) -> None:
-        """将输入栏历史写入磁盘（覆写式快照），供上键回溯。
-
-        Args:
-            session_id: 会话 UUID。
-            inputs: 已提交输入列表（时间正序）。空列表也写入，保持与新会话一致。
-        """
-        self._sessions_dir.mkdir(parents=True, exist_ok=True)
-        input_path = self._sessions_dir / f"{session_id}.input.json"
+    def load_state(self, session_id: str) -> SessionState | None:
+        """加载并校验单一会话状态；文件缺失或损坏时返回 None。"""
+        state_path = self._sessions_dir / f"{session_id}.state.json"
+        if not state_path.exists():
+            return None
         try:
-            safe_inputs = self._data_guard.redact(inputs) if self._data_guard is not None else inputs
-            atomic_write_text(input_path, json.dumps(safe_inputs, ensure_ascii=False))
-        except OSError as e:
-            logger.warning("写入输入历史失败: %s", e)
-
-    def load_input_history(self, session_id: str) -> list[str]:
-        """加载指定会话的输入栏历史。
-
-        Args:
-            session_id: 目标会话 UUID。
-
-        Returns:
-            输入字符串列表（时间正序）。文件缺失/损坏或非 list[str] 时返回空列表。
-        """
-        input_path = self._sessions_dir / f"{session_id}.input.json"
-        if not input_path.exists():
-            return []
-        try:
-            data = json.loads(input_path.read_text(encoding="utf-8"))
-            if isinstance(data, list) and all(isinstance(item, str) for item in data):
-                return self._data_guard.redact(data) if self._data_guard is not None else data
+            payload = json.loads(state_path.read_text(encoding="utf-8"))
+            safe_payload = self._data_guard.redact(payload) if self._data_guard is not None else payload
+            return SessionState.from_dict(safe_payload)
         except (json.JSONDecodeError, OSError) as e:
-            logger.warning("加载输入历史失败: %s", e)
-        return []
+            logger.warning("加载会话状态失败: %s", e)
+            return None
 
     def list_sessions(self, limit: int = 10) -> list[dict[str, Any]]:
         """列出最近的会话，按 updated_at 降序排列。
@@ -164,7 +135,7 @@ class SessionMgr:
             return []
         sessions: list[dict[str, Any]] = []
         for f in self._sessions_dir.glob("*.json"):
-            if f.name.endswith((".hist.json", ".input.json")):
+            if f.name.endswith((".hist.json", ".input.json", ".state.json")):
                 continue
             try:
                 meta = json.loads(f.read_text(encoding="utf-8"))
@@ -186,27 +157,12 @@ class SessionMgr:
         Returns:
             排除当前会话后的会话元数据字典列表。
         """
-        return [s for s in self.list_sessions(limit=limit) if s.get("session_id") != current_session_id]
-
-    def load_history(self, session_id: str) -> list[dict[str, Any]]:
-        """加载指定会话的完整对话历史。
-
-        Args:
-            session_id: 目标会话 UUID。
-
-        Returns:
-            消息列表，每条为标准 role/content 字典。文件不存在时返回空列表。
-        """
-        history_path = self._sessions_dir / f"{session_id}.hist.json"
-        if not history_path.exists():
-            return []
-        try:
-            data = json.loads(history_path.read_text(encoding="utf-8"))
-            if isinstance(data, list):
-                return self._data_guard.redact(data) if self._data_guard is not None else data
-        except (json.JSONDecodeError, OSError) as e:
-            logger.warning("加载会话历史失败: %s", e)
-        return []
+        return [
+            session
+            for session in self.list_sessions(limit=10_000)
+            if session.get("session_id") != current_session_id
+            and self.load_state(str(session.get("session_id", ""))) is not None
+        ][:limit]
 
     def resolve_resume(
         self,
@@ -216,11 +172,10 @@ class SessionMgr:
     ) -> str | ResumeResult:
         """处理 /resume 命令的会话解析与加载逻辑。
 
-        无参数时返回格式化的会话列表文本；有参数时解析目标、加载历史、校验工作目录。
-        Agent 侧只需判断返回类型：str 直接输出，ResumeResult 应用状态变更。
+        解析目标、加载状态并校验工作目录。
 
         Args:
-            cmd_args: 命令参数列表，序号或 session_id 前缀（无参列表交互已上移到 Agent 的选择菜单）。
+            cmd_args: 命令参数列表，序号或 session_id 前缀（无参列表交互由 app 层命令处理）。
             current_session_id: 当前会话 ID，用于从列表中排除。
             current_workdir: 当前工作目录路径字符串，用于校验一致性。
 
@@ -256,9 +211,9 @@ class SessionMgr:
 
         target_id = target_session["session_id"]
 
-        messages = self.load_history(target_id)
-        if not messages:
-            return f"会话 {target_id[:8]}... 没有保存的对话历史。\n"
+        state = self.load_state(target_id)
+        if state is None:
+            return f"会话 {target_id[:8]}... 没有有效的会话状态。\n"
 
         # 工作目录不一致时拒绝恢复
         saved_workdir = target_session.get("workdir", "")
@@ -270,7 +225,7 @@ class SessionMgr:
 
         return ResumeResult(
             session_id=target_id,
-            messages=messages,
+            state=state,
             metadata=target_session,
         )
 

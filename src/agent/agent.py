@@ -11,7 +11,6 @@ from src.events.types import (
     CompactDelta,
     LLMCallFailed,
     LLMLengthRetrying,
-    PlanStateChanged,
     caller_identity,
 )
 from src.agent.states import AgentState, RunContext, RunResult, parse_command
@@ -31,7 +30,8 @@ if TYPE_CHECKING:
     from src.mgr.hooks_mgr import HooksMgr
     from src.mgr.plan_mgr import PlanMgr
     from src.mgr.plugin_mgr import PluginMgr
-    from src.mgr.session_mgr import SessionMgr, ResumeResult
+    from src.mgr.session_mgr import SessionMgr
+    from src.mgr.session_state import SessionState
     from src.mgr.mcp_mgr import McpMgr
     from src.mgr.role_mgr import RoleMgr, AgentManifest
     from src.interfaces.turn_clock import TurnClock
@@ -148,6 +148,7 @@ class AgentDeps:
     data_guard: Any = None
     trust_gate: Any = None
     session_context: list[str] = field(default_factory=list)
+    session_state: SessionState | None = None
     session_id: str = ""
     workdir: Path | None = None
     global_dir: Path | None = None
@@ -198,6 +199,8 @@ class Agent:
             None。
         """
         self.uuid = uuid.uuid4()
+        if not self.is_subagent and self.deps.session_state is not None:
+            self.history[:] = self.deps.session_state.context_messages()
         # 主、子 agent 均以单实例 UUID 关联生命周期、usage 与转录事件，
         # 供 AgentViewStore 汇聚成一致快照。
         self.llm = self.deps.llm_mgr.get(self.model)
@@ -388,17 +391,22 @@ class Agent:
             result = await self._run_single_turn(ctx, AgentState.CHECK_COMPACT)
             if not ctx.has_tool_calls:
                 self.llm.clear_reasoning_content(self.history[ctx.round_start_idx:])
+                self._sync_context_from_history()
             return result
 
         while True:
             ctx = RunContext(messages=self.history, round_start_idx=len(self.history))
             result = await self._run_single_turn(ctx, AgentState.REQUEST_INPUT)
-            # 每轮结束后持久化会话历史和元数据
+            if not ctx.has_tool_calls:
+                self.llm.clear_reasoning_content(self.history[ctx.round_start_idx:])
+                self._sync_context_from_history()
+            # 流式事件完成归并后再保存与下一次 LLM 输入一致的会话状态。
+            event_bus = getattr(self.deps, "event_bus", None)
+            if event_bus is not None and hasattr(event_bus, "join"):
+                await event_bus.join()
             self._persist_session(ctx.user_input)
             if result.exit_requested or result.command is not None:
                 return result
-            if not ctx.has_tool_calls:
-                self.llm.clear_reasoning_content(self.history[ctx.round_start_idx:])
 
     async def _run_single_turn(self, ctx: RunContext, start_state: AgentState) -> RunResult:
         """运行状态机从 start_state 到 DONE 的单轮执行。
@@ -443,7 +451,7 @@ class Agent:
                     "content": "⏸ 本轮已被用户中断。",
                 })
             else:
-                del self.history[ctx.round_start_idx:]
+                self._truncate_messages(self.history, ctx.round_start_idx)
             self._pending_input = ctx.user_input  # 保留预填，方便改完重发
             raise
 
@@ -458,15 +466,14 @@ class Agent:
         while msgs:
             last = msgs[-1]
             if last.get("role") == "tool":
-                msgs.pop()
+                self._truncate_messages(msgs, len(msgs) - 1)
                 continue
             if last.get("role") == "assistant" and last.get("tool_calls"):
-                msgs.pop()
+                self._truncate_messages(msgs, len(msgs) - 1)
                 continue
             break
 
-    @staticmethod
-    def _rollback_response_recovery(ctx: RunContext) -> None:
+    def _rollback_response_recovery(self, ctx: RunContext) -> None:
         """移除当前响应恢复链写入的临时消息并清空恢复状态。
 
         Args:
@@ -476,7 +483,7 @@ class Agent:
             None。
         """
         if ctx.response_recovery_start_idx is not None:
-            del ctx.messages[ctx.response_recovery_start_idx:]
+            self._truncate_messages(ctx.messages, ctx.response_recovery_start_idx)
         ctx.response_recovery_start_idx = None
         ctx.response_recovery_response_count = 0
         ctx.pause_turn_message_idx = None
@@ -518,8 +525,9 @@ class Agent:
             caller_agent_type, caller_uuid = caller_identity(self)
             await emit_telemetry_safely(event_bus, LLMCallFailed(
                 timestamp=time.time(),
-                source=self.agent_type,
+                source=getattr(self, "agent_type", "agent"),
                 error_kind=ctx.llm_error.kind.value,
+                call_id=getattr(ctx.response, "call_id", "") if ctx.response is not None else "",
                 safe_message=ctx.llm_error.message,
                 attempts=attempts,
                 partial=partial,
@@ -559,6 +567,10 @@ class Agent:
 
         self._pending_input = ""
         ctx.user_input = user_input
+
+        state = self._session_state()
+        if state is not None and user_input:
+            ctx.user_record_id = state.append_user(user_input)
 
         if user_input.strip().lower() in ("exit", "quit"):
             ctx.exit_requested = True
@@ -603,116 +615,24 @@ class Agent:
             user_input = str(data_guard.redact(user_input))
         ctx.turn_start_messages = list(self.history)
         ctx.round_start_idx = len(self.history)
-        self._append_message(self.history, {"role": "user", "content": user_input})
-        self._record_input_history(ctx.user_input)
+        self._append_message(
+            self.history,
+            {"role": "user", "content": user_input},
+            record_id=ctx.user_record_id,
+            kind="user",
+        )
 
         return AgentState.CHECK_COMPACT
-
-    def _record_input_history(self, raw_input: str) -> None:
-        """把一条已提交的用户输入记入输入栏历史并持久化（供上键回溯）。
-
-        记录原始输入（不含 hook/turn 注入），连续去重；仅主 agent 持久化。
-        失败仅告警，不阻塞输入流程。
-
-        Args:
-            raw_input: 用户本轮提交的原始文本。
-        """
-        entry = raw_input.strip("\n")
-        if not entry.strip():
-            return
-        history = self.get_input_history()
-        if history and history[-1] == entry:
-            return
-        history.append(entry)
-        self._input_history = history
-        if self.is_subagent or self.deps.session_mgr is None or not self.deps.session_id:
-            return
-        self.deps.session_mgr.save_input_history(self.deps.session_id, self._input_history)
 
     def get_input_history(self) -> list[str]:
         """返回当前会话输入栏历史副本（时间正序）。
 
         测试可能用 object.__new__ 绕过 dataclass 初始化，故防御缺省。
         """
+        state = self._session_state()
+        if state is not None:
+            return state.input_history()
         return list(getattr(self, "_input_history", []))
-
-    def set_input_history(self, inputs: list[str]) -> None:
-        """整体替换输入栏历史（供 resume/clear 后应用）。"""
-        self._input_history = list(inputs)
-
-    async def apply_resume(self, result: "ResumeResult") -> str:
-        """应用会话恢复结果：替换历史与 session_id、重建 TaskManager、恢复 plan 状态、
-        注入恢复上下文并使提示词缓存失效。
-
-        由 /resume 命令 handler 在解析出目标会话后调用。
-
-        Args:
-            result: SessionMgr.resolve_resume 返回的恢复结果。
-
-        Returns:
-            恢复摘要文本（供调用方输出）。
-        """
-        from src.mgr import TaskManager
-
-        # 替换对话历史和 session_id
-        self.history.clear()
-        self._extend_messages(self.history, result.messages)
-        self.deps.session_id = result.session_id
-
-        # 恢复目标会话的输入栏历史并通知 UI 刷新（resume 不换 Agent 实例，
-        # UI 的 reload_session_state 不会被触发，需显式刷新）。
-        if self.deps.session_mgr is not None:
-            self.set_input_history(
-                self.deps.session_mgr.load_input_history(result.session_id)
-            )
-        ui = getattr(self.deps, "ui", None)
-        if ui is not None and hasattr(ui, "refresh_input_history"):
-            ui.refresh_input_history()
-
-        # 重建 TaskManager 指向恢复会话的 tasks 目录（仅在启用 task feature 时）
-        if self.deps.global_dir and "task" in self.features:
-            tasks_dir = self.deps.global_dir / "tasks" / result.session_id
-            on_change = self.deps.task_change_notifier if not self.is_subagent else None
-            self._task_mgr = TaskManager(tasks_dir=tasks_dir, data_guard=self.deps.data_guard, on_change=on_change)
-            self._reminder_mgr = ReminderMgr()
-            self._reminder_mgr.register(self._task_mgr)
-
-        plan_info = await self._restore_plan_state(result.metadata)
-
-        # 构建恢复摘要
-        topic = result.metadata.get("topic", "")
-        msg_count = len(result.messages)
-        task_info = ""
-        if self._task_mgr is not None and self._task_mgr.has_open_items():
-            task_list = self._task_mgr.list_tasks()
-            open_count = sum(1 for t in task_list["tasks"] if t["status"] != "completed")
-            task_info = f"，{open_count} 个未完成任务"
-
-        # 注入 session_context 让 LLM 知道上下文来自恢复
-        self.deps.session_context.append(
-            f"当前会话已从历史会话恢复（session {result.session_id[:8]}...）。"
-            f"会话主题: \"{topic}\"。"
-            "请基于恢复的上下文继续对话。"
-        )
-        self._prompt_mgr.invalidate_cache()
-
-        return f"已恢复会话 {result.session_id[:8]}...（{msg_count} 条消息{task_info}{plan_info}）\n"
-
-    async def _restore_plan_state(self, metadata: dict) -> str:
-        """从会话元数据恢复 Plan 状态。
-
-        Args:
-            metadata: 目标会话的元数据字典。
-
-        Returns:
-            Plan 状态描述文本，无变更时返回空串。
-        """
-        active = metadata.get("plan_active") is True
-        self.set_plan_active(active)
-        await self.deps.event_bus.emit(PlanStateChanged(
-            timestamp=time.time(), source=self.agent_type, active=active,
-        ))
-        return "，Plan: active" if active else ""
 
     async def _on_check_compact(self, ctx: RunContext) -> AgentState:
         """估算完整输入并推进自动 compact 状态。
@@ -848,7 +768,11 @@ class Agent:
         Raises:
             LLMCallError: 调用不可继续时交由单轮状态机边界收口。
         """
-        self._replace_messages(ctx.messages, self.llm.normalize_messages(ctx.messages))
+        self._replace_messages(
+            ctx.messages,
+            self.llm.normalize_messages(ctx.messages),
+            preserve_positions=True,
+        )
         ctx.response = await self.llm.chat(
             prompt=ctx.prompt,
             messages=ctx.messages,
@@ -887,7 +811,12 @@ class Agent:
         ctx.pause_turn_continuations = 0
         ctx.length_effort_override = None
         ctx.length_ephemeral_instruction = None
-        self._append_message(ctx.messages, response.assistant_message)
+        self._append_message(
+            ctx.messages,
+            response.assistant_message,
+            correlation_id=response.call_id or None,
+            kind="assistant",
+        )
 
         if response.tool_calls:
             return AgentState.EXECUTE_TOOLS
@@ -923,13 +852,18 @@ class Agent:
             if is_tool_call:
                 if response.content:
                     self._append_message(
-                        ctx.messages, {"role": "assistant", "content": response.content}
+                        ctx.messages,
+                        {"role": "assistant", "content": response.content},
+                        correlation_id=response.call_id or None,
+                        kind="assistant",
                     )
             else:
                 self._append_message(
                     ctx.messages,
                     response.assistant_message
-                    or {"role": "assistant", "content": response.content or None}
+                    or {"role": "assistant", "content": response.content or None},
+                    correlation_id=response.call_id or None,
+                    kind="assistant",
                 )
 
         if ctx.length_recoveries >= ctx.max_length_recoveries:
@@ -970,7 +904,11 @@ class Agent:
             else:
                 retry_instruction = "输出达到长度上限。请从中断处直接继续，不要回顾、不要重复，必要时可以从半句话接续。"
             self._append_message(ctx.messages, {"role": "user", "content": retry_instruction})
-            self._replace_messages(ctx.messages, self.llm.normalize_messages(ctx.messages))
+            self._replace_messages(
+                ctx.messages,
+                self.llm.normalize_messages(ctx.messages),
+                preserve_positions=True,
+            )
             strategy = "continue"
             effort = ctx.length_effort_override or self._base_reasoning_effort()
 
@@ -1031,6 +969,7 @@ class Agent:
             timestamp=time.time(),
             source=self.agent_type,
             truncation_kind=truncation_kind,
+            call_id=getattr(ctx.response, "call_id", "") if ctx.response is not None else "",
             strategy=strategy,
             effort=effort,
             attempt=ctx.length_recoveries,
@@ -1084,9 +1023,13 @@ class Agent:
         ):
             self._append_message(ctx.messages, carrier)
         else:
-            ctx.messages[pause_message_idx] = self._safe_history_value(carrier)
+            self._set_message(ctx.messages, pause_message_idx, carrier)
         ctx.pause_turn_continuations += 1
-        self._replace_messages(ctx.messages, self.llm.normalize_messages(ctx.messages))
+        self._replace_messages(
+            ctx.messages,
+            self.llm.normalize_messages(ctx.messages),
+            preserve_positions=True,
+        )
         if ctx.messages and ctx.messages[-1].get("role") == "assistant":
             ctx.pause_turn_message_idx = len(ctx.messages) - 1
         else:
@@ -1150,7 +1093,7 @@ class Agent:
                 "role": "tool",
                 "tool_call_id": tool_call_id,
                 "content": result_text,
-            })
+            }, correlation_id=tool_call_id, kind="tool")
 
         self._reminder_mgr.notify_tool_round(called_tools)
         return AgentState.POST_ROUND
@@ -1229,7 +1172,12 @@ class Agent:
         if response.content:
             ctx.final_text = response.content
         self._replace_messages(ctx.messages, summary_messages)
-        self._append_message(ctx.messages, response.assistant_message)
+        self._append_message(
+            ctx.messages,
+            response.assistant_message,
+            correlation_id=response.call_id or None,
+            kind="assistant",
+        )
         return AgentState.DONE
 
     async def _on_context_overflow(self, ctx: RunContext) -> AgentState:
@@ -1276,14 +1224,61 @@ class Agent:
         data_guard = getattr(getattr(self, "deps", None), "data_guard", None)
         return data_guard.redact(value) if data_guard is not None else value
 
-    def _append_message(self, messages: list[dict], message: dict) -> None:
-        messages.append(self._safe_history_value(message))
+    def _session_state(self) -> "SessionState | None":
+        if getattr(self, "is_subagent", False):
+            return None
+        return getattr(getattr(self, "deps", None), "session_state", None)
 
-    def _extend_messages(self, messages: list[dict], new_messages: list[dict]) -> None:
-        messages.extend(self._safe_history_value(new_messages))
+    def _append_message(
+        self,
+        messages: list[dict],
+        message: dict,
+        *,
+        record_id: str | None = None,
+        correlation_id: str | None = None,
+        kind: str = "internal",
+    ) -> None:
+        safe_message = self._safe_history_value(message)
+        state = self._session_state() if messages is getattr(self, "history", None) else None
+        if state is not None:
+            state.bind_model_message(
+                safe_message,
+                record_id=record_id,
+                correlation_id=correlation_id,
+                kind=kind,
+            )
+        messages.append(safe_message)
 
-    def _replace_messages(self, messages: list[dict], new_messages: list[dict]) -> None:
-        messages[:] = self._safe_history_value(new_messages)
+    def _replace_messages(
+        self,
+        messages: list[dict],
+        new_messages: list[dict],
+        *,
+        preserve_positions: bool = False,
+    ) -> None:
+        safe_messages = self._safe_history_value(new_messages)
+        state = self._session_state() if messages is getattr(self, "history", None) else None
+        if state is not None:
+            state.replace_context(safe_messages, preserve_positions=preserve_positions)
+        messages[:] = safe_messages
+
+    def _truncate_messages(self, messages: list[dict], length: int) -> None:
+        state = self._session_state() if messages is getattr(self, "history", None) else None
+        if state is not None:
+            state.truncate_context(length)
+        del messages[length:]
+
+    def _set_message(self, messages: list[dict], index: int, message: dict) -> None:
+        safe_message = self._safe_history_value(message)
+        state = self._session_state() if messages is getattr(self, "history", None) else None
+        if state is not None:
+            state.set_context_message(index, safe_message)
+        messages[index] = safe_message
+
+    def _sync_context_from_history(self) -> None:
+        state = self._session_state()
+        if state is not None:
+            state.replace_context(self.history, preserve_positions=True)
 
     def _persist_session(self, user_input: str = "") -> None:
         """持久化当前会话历史和元数据（仅主 agent，子 agent 跳过）。
@@ -1299,7 +1294,10 @@ class Agent:
         session_id = self.deps.session_id
         if not session_id:
             return
-        self.deps.session_mgr.save_history(session_id, self.history)
+        state = self._session_state()
+        if state is None:
+            return
+        self.deps.session_mgr.save_state(session_id, state)
         if user_input and self.history:
             is_new = self.deps.session_mgr.get_metadata(session_id) is None
             self.deps.session_mgr.save_metadata(

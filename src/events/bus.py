@@ -16,6 +16,7 @@ from rich.text import Text
 from src.events.levels import EventLevel
 from src.events.types import (
     Event,
+    InteractionCompleted,
     InterruptRequested,
     OutputRequested,
     PermissionNotice,
@@ -181,7 +182,47 @@ class EventBus:
             raise NoEventSubscribers(kind)
         event.future = asyncio.get_running_loop().create_future()
         await self.emit(event)
-        return await event.future
+        answer = await event.future
+        if not isinstance(event, InputMenu):
+            summary = self._interaction_summary(event, answer)
+            await self.emit(InteractionCompleted(
+                timestamp=time.time(),
+                source=event.source,
+                request_type=event.type,
+                summary=summary,
+                cancelled=not bool(answer),
+                caller_agent_type=event.caller_agent_type,
+                caller_uuid=event.caller_uuid,
+            ))
+        return answer
+
+    @staticmethod
+    def _interaction_summary(event: UiRequest, answer: str) -> str:
+        if not answer:
+            return "[用户取消了作答]"
+        if isinstance(event, PermissionMenu):
+            return "权限：允许" if answer.strip().lower() in {"y", "yes", "allow"} else "权限：拒绝"
+        if isinstance(event, ChoiceMenu):
+            label = next((label for value, label in event.options if value == answer), answer)
+            return f"选择：{label}"
+        if isinstance(event, ModelMenu):
+            try:
+                value = json.loads(answer)
+                return f"选择：{value.get('model', '')} / {value.get('reasoning_effort', '')}"
+            except (json.JSONDecodeError, AttributeError):
+                return f"选择：{answer}"
+        if isinstance(event, ChoiceInputMenu):
+            try:
+                value = json.loads(answer)
+                choice = value.get("choice", "")
+                text = value.get("text", "")
+                label = next((label for key, label in event.options if key == choice), choice)
+                return f"选择：{label or text}"
+            except (json.JSONDecodeError, AttributeError):
+                return f"选择：{answer}"
+        if isinstance(event, FormMenu):
+            return "作答已提交"
+        return answer
 
     async def request_input(
         self, prompt: str, source: str = "ui", default: str = "", markdown: bool = False

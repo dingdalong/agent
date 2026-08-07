@@ -1,4 +1,4 @@
-"""Single read model for agent/session status and transcripts."""
+"""Session status, task, and subagent transcript read model."""
 
 from __future__ import annotations
 
@@ -29,6 +29,10 @@ _TRUNCATION_KIND_LABELS = {
     "thinking": "思考",
     "unknown": "未知",
 }
+
+
+def _nonnegative_int(value: object) -> int:
+    return max(0, value) if isinstance(value, int) else 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,7 +94,11 @@ class _AgentState:
 
 
 class AgentViewStore:
-    """Own all UI-facing agent lifecycle, usage, context, and transcript state."""
+    """Own transient lifecycle/status data and subagent transcripts.
+
+    Foreground chat history belongs to SessionState; main-agent events update activity,
+    usage and tool status here without creating a second transcript copy.
+    """
 
     def __init__(
         self,
@@ -326,6 +334,89 @@ class AgentViewStore:
             return []
         return list(state.messages)
 
+    def export_subagent(self, uuid: str) -> dict | None:
+        """Return a JSON-safe snapshot suitable for SessionState persistence."""
+        state = self._find(uuid)
+        if state is None or state.is_main:
+            return None
+        snapshot = self._snapshot(uuid, state)
+        return {
+            "uuid": snapshot.uuid,
+            "agent_type": snapshot.agent_type,
+            "running": snapshot.running,
+            "usage": {
+                "input_tokens": snapshot.usage.input_tokens,
+                "output_tokens": snapshot.usage.output_tokens,
+                "cache_read_tokens": snapshot.usage.cache_read_tokens,
+            },
+            "context": {
+                "used_tokens": snapshot.context.used_tokens,
+                "limit_tokens": snapshot.context.limit_tokens,
+            },
+            "elapsed_seconds": snapshot.elapsed_seconds,
+            "activity": snapshot.activity,
+            "task": snapshot.task,
+            "transcript": [
+                {"kind": kind, "text": text}
+                for kind, text in state.transcript
+            ],
+            "messages": list(state.messages) if state.messages is not None else [],
+        }
+
+    def restore_subagents(self, snapshots: list[dict]) -> None:
+        """Hydrate completed, read-only subagent views from a session snapshot."""
+        for uuid in [
+            key for key, state in self._active.items() if not state.is_main
+        ]:
+            del self._active[uuid]
+        self._history.clear()
+
+        now = self._clock()
+        for snapshot in snapshots[-self._history_limit:] if self._history_limit else []:
+            uuid = snapshot.get("uuid")
+            agent_type = snapshot.get("agent_type")
+            if not isinstance(uuid, str) or not uuid or not isinstance(agent_type, str):
+                continue
+            state = self._new_state(agent_type=agent_type, is_main=False)
+            state.running = False
+            elapsed = snapshot.get("elapsed_seconds", 0.0)
+            if not isinstance(elapsed, (int, float)):
+                elapsed = 0.0
+            state.started_monotonic = now - max(0.0, float(elapsed))
+            state.ended_monotonic = now
+            usage = snapshot.get("usage", {})
+            context = snapshot.get("context", {})
+            state.usage = TokenUsage(
+                input_tokens=_nonnegative_int(usage.get("input_tokens", 0))
+                if isinstance(usage, dict) else 0,
+                output_tokens=_nonnegative_int(usage.get("output_tokens", 0))
+                if isinstance(usage, dict) else 0,
+                cache_read_tokens=_nonnegative_int(usage.get("cache_read_tokens", 0))
+                if isinstance(usage, dict) else 0,
+            )
+            state.context = ContextUsage(
+                used_tokens=_nonnegative_int(context.get("used_tokens", 0))
+                if isinstance(context, dict) else 0,
+                limit_tokens=_nonnegative_int(context.get("limit_tokens", 0))
+                if isinstance(context, dict) else 0,
+            )
+            activity = snapshot.get("activity", "")
+            task = snapshot.get("task", "")
+            state.activity = activity if isinstance(activity, str) else ""
+            state.task = task if isinstance(task, str) else ""
+            transcript = snapshot.get("transcript", [])
+            if isinstance(transcript, list):
+                for segment in transcript:
+                    if not isinstance(segment, dict):
+                        continue
+                    kind = segment.get("kind")
+                    text = segment.get("text")
+                    if isinstance(kind, str) and isinstance(text, str):
+                        state.transcript.append((kind, text))
+            messages = snapshot.get("messages", [])
+            state.messages = list(messages) if isinstance(messages, list) else []
+            self._history[uuid] = state
+
     def reset(self) -> None:
         """Clear all session usage, foreground, agent, and transcript state.
 
@@ -460,6 +551,8 @@ class AgentViewStore:
         if state is None:
             return
         state.activity = "重试中"
+        if state.is_main:
+            return
         state.transcript.append((
             "retry",
             f"⚠ 尝试 {event.attempt}/{event.max_attempts} 失败，将重试 "
@@ -483,6 +576,8 @@ class AgentViewStore:
         if state is None:
             return
         state.activity = "恢复中"
+        if state.is_main:
+            return
         kind_label = _TRUNCATION_KIND_LABELS.get(event.truncation_kind, event.truncation_kind)
         if event.strategy == "regenerate-lower-effort":
             action = f"降低推理力度至 {event.effort} 后重生成"
@@ -509,6 +604,8 @@ class AgentViewStore:
         if state is None:
             return
         state.activity = "失败"
+        if state.is_main:
+            return
         metadata = [
             f"attempts={event.attempts}",
             f"partial={str(event.partial).lower()}",
@@ -588,6 +685,8 @@ class AgentViewStore:
         if state is None:
             return
         state.activity = "回应中" if kind == "response" else "思考中"  # 按增量种类切换面板状态词：thinking→思考中、response→回应中
+        if state.is_main:
+            return
         if state.transcript and state.transcript[-1][0] == kind:
             previous_kind, previous_text = state.transcript[-1]
             state.transcript[-1] = (previous_kind, previous_text + content)
@@ -608,6 +707,8 @@ class AgentViewStore:
             return
         state.active_tools[event.tool_call_id] = event.tool_name
         state.activity = event.tool_name
+        if state.is_main:
+            return
         display = event.display
         if display is not None and hasattr(display, "title"):
             content = (display.content or "").strip()
@@ -637,6 +738,8 @@ class AgentViewStore:
         else:
             # 本轮工具全部完成：复位为「等待响应」，衔接紧随其后的下一次 LLM 调用
             state.activity = "等待响应"
+        if state.is_main:
+            return
         display = event.display
         if display is not None and hasattr(display, "title") and hasattr(display, "content"):
             ok = event.status == "success"

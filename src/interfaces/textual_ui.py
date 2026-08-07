@@ -34,6 +34,7 @@ from src.interfaces.tui.diagnostics import TuiDiagnostics
 from src.tools.display import permission_line
 from src.interfaces.tui.dialogs import PendingInteractions
 from src.interfaces.tui.history_journal import PlainHistoryJournal
+from src.mgr.session_state import SessionState
 from src.interfaces.tui.plain import PlainFrontend, normalize_line_input
 
 if TYPE_CHECKING:
@@ -426,6 +427,33 @@ class TextualInterface(UserInterface):
     def refresh_input_history(self) -> None:
         if self._ui_alive() and self._app is not None:
             self._app.call_later(self._app.refresh_input_history)
+
+    async def replace_session_state(self, state: SessionState) -> None:
+        """切换聊天历史的数据源并水合当前前台。"""
+        records = state.visible_records()
+        if self._ui_alive() and self._app is not None:
+            await self._app.invoke(lambda: self._app.replace_session_history(records))
+            return
+        self.history_journal.clear()
+        for record in records:
+            view = record.view
+            if view is None:
+                continue
+            data = view.data
+            if view.kind == "user":
+                self.history_journal.append_entry(f"› {data.get('text', '')}")
+            elif view.kind == "output":
+                self.history_journal.append_entry(str(data.get("content", "")))
+            elif view.kind == "assistant":
+                if data.get("thinking"):
+                    self.history_journal.append_entry(str(data["thinking"]))
+                if data.get("content"):
+                    self.history_journal.append_entry(str(data["content"]))
+            elif view.kind == "tool":
+                started = data.get("started", {})
+                completed = data.get("completed", {})
+                name = started.get("tool_name") or completed.get("tool_name") or "tool"
+                self.history_journal.append_entry(f"{name}: {completed.get('result_preview', '')}")
 
     def cancel_active_input(self) -> bool:
         if self.is_tty and self._app is not None:

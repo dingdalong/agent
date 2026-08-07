@@ -6,6 +6,7 @@ import json
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
+from typing import TYPE_CHECKING
 
 from rich.text import Text
 
@@ -38,6 +39,9 @@ from src.events.menu import (
     UiRequest,
     ViewRequest,
 )
+
+if TYPE_CHECKING:
+    from src.mgr.session_state import SessionState
 
 
 class UserInterface(ABC):
@@ -223,6 +227,9 @@ class UserInterface(ABC):
         """
 
         pass
+
+    async def replace_session_state(self, state: "SessionState") -> None:
+        """用会话状态的可见投影替换当前聊天历史。"""
 
     async def start(self) -> None:
         """启动 UI 生命周期钩子。默认实现供同步 UI 使用。

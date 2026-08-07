@@ -10,6 +10,7 @@ import sys
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
 from rich.text import Text
@@ -48,6 +49,7 @@ from src.tools.display import permission_line
 from src.interfaces.tui.diagnostics import TuiDiagnostics
 from src.interfaces.tui.dialogs import DialogResult, InlineWidget, InteractionCoordinator
 from src.interfaces.tui.history_journal import PlainHistoryJournal
+from src.mgr.session_state import SessionRecord
 from src.interfaces.tui.widgets import (
 
     AgentList,
@@ -1315,6 +1317,7 @@ class AgentTuiApp(App[None]):
         )
 
     async def on_response_delta(self, event: ResponseDelta, content: str) -> None:
+        follow_tail = self._history.scroll_y >= self._history.max_scroll_y - 1
         self._set_current_agent(event.caller_agent_type, event.caller_uuid)
         self._set_activity("回应中")
         if self._response_stream is None:
@@ -1326,8 +1329,13 @@ class AgentTuiApp(App[None]):
             self._response_stream = Markdown.get_stream(widget)
         await self._response_stream.write(content)
         self.history_journal.append_stream("response", content)
+        if follow_tail:
+            self.call_after_refresh(
+                lambda: self._history.scroll_end(animate=False, immediate=True)
+            )
 
     async def on_thinking_delta(self, event: ThinkingDelta, content: str) -> None:
+        follow_tail = self._history.scroll_y >= self._history.max_scroll_y - 1
         self._set_current_agent(event.caller_agent_type, event.caller_uuid)
         self._set_activity("思考中")
         if self._thinking_stream is None:
@@ -1343,6 +1351,10 @@ class AgentTuiApp(App[None]):
             self._thinking_stream = Markdown.get_stream(widget)
         await self._thinking_stream.write(content)
         self.history_journal.append_stream("thinking", content)
+        if follow_tail:
+            self.call_after_refresh(
+                lambda: self._history.scroll_end(animate=False, immediate=True)
+            )
 
     async def end_response(self) -> None:
         if self._response_stream is not None:
@@ -1623,6 +1635,103 @@ class AgentTuiApp(App[None]):
         self.hide_completion()
         self.refresh_input_history()
         self.refresh_chrome()
+
+    async def replace_session_history(self, records: list[SessionRecord]) -> None:
+        """清除当前聊天并用 SessionRecord.view 投影重新渲染。"""
+        await self.end_thinking()
+        await self.end_response()
+        await self.flush_round()
+        await self._history.remove_children()
+        self.history_journal.clear()
+        self._round_entries.clear()
+
+        for record in records:
+            view = record.view
+            if view is None:
+                continue
+            data = view.data
+            if view.kind == "user":
+                await self.append_user(str(data.get("text", "")))
+            elif view.kind == "output":
+                await self.append_output(
+                    str(data.get("content", "")),
+                    markdown=bool(data.get("markdown", False)),
+                )
+            elif view.kind == "assistant":
+                thinking = str(data.get("thinking", ""))
+                content = str(data.get("content", ""))
+                if thinking:
+                    await self.append_output("› 思考", classes="stream-label")
+                    await self.append_markdown(thinking, classes="thinking-output")
+                if content:
+                    await self.append_output("› 助手：", classes="stream-label")
+                    await self.append_markdown(content)
+                if data.get("event_type") == "llm_call_failed":
+                    await self.append_output(
+                        Text(
+                            f"✘ LLM 调用失败 [{data.get('error_kind', '')}] "
+                            f"{data.get('safe_message', '')}",
+                            style="red",
+                        )
+                    )
+                elif data.get("event_type") == "llm_retrying" and data.get("partial"):
+                    await self.append_output(Text(
+                        f"⚠ 尝试 {data.get('attempt', 0)}/{data.get('max_attempts', 0)} "
+                        f"失败，将重试 [{data.get('error_kind', '')}] "
+                        f"{data.get('safe_message', '')}",
+                        style="yellow",
+                    ))
+                elif data.get("event_type") == "llm_length_retrying":
+                    await self.append_output(Text(
+                        f"⚠ 输出截断（{data.get('truncation_kind', '')}）"
+                        f" ({data.get('attempt', 0)}/{data.get('max_attempts', 0)})",
+                        style="yellow",
+                    ))
+            elif view.kind == "tool":
+                started = data.get("started", {})
+                completed = data.get("completed", {})
+                tool_name = started.get("tool_name") or completed.get("tool_name") or "tool"
+                tool_call_id = started.get("tool_call_id") or completed.get("tool_call_id") or ""
+                start_display = started.get("display")
+                result_display = completed.get("display")
+                await self.on_tool_call_started(ToolCallStarted(
+                    timestamp=float(started.get("timestamp", record.timestamp)),
+                    source=str(started.get("source", "tools")),
+                    tool_name=str(tool_name),
+                    tool_call_id=str(tool_call_id),
+                    detail=str(started.get("detail", "")),
+                    display=SimpleNamespace(**start_display) if isinstance(start_display, dict) else None,
+                    caller_agent_type=started.get("caller_agent_type"),
+                    caller_uuid=self.agent_view_store.foreground_uuid,
+                ))
+                await self.on_tool_call_completed(ToolCallCompleted(
+                    timestamp=float(completed.get("timestamp", record.timestamp)),
+                    source=str(completed.get("source", "tools")),
+                    tool_name=str(tool_name),
+                    tool_call_id=str(tool_call_id),
+                    status=completed.get("status", "error"),
+                    duration_seconds=float(completed.get("duration_seconds", 0.0) or 0.0),
+                    result_preview=str(completed.get("result_preview", "")),
+                    display=SimpleNamespace(**result_display) if isinstance(result_display, dict) else None,
+                    caller_uuid=self.agent_view_store.foreground_uuid,
+                ))
+                await self.flush_round()
+            elif view.kind == "event":
+                event_type = data.get("event_type")
+                if event_type == "compact_delta":
+                    await self.append_output(
+                        Text(f"[compact] {data.get('content', 'context')}", style="bright_black")
+                    )
+                elif event_type == "permission_notice":
+                    await self.append_output(
+                        permission_line(
+                            str(data.get("status", "allow")),
+                            str(data.get("tool_name", "")),
+                            str(data.get("detail", "")),
+                            str(data.get("decision_source", "")),
+                        )
+                    )
+        self.reload_session_state()
 
     def refresh_input_history(self) -> None:
         """重置回溯游标（供 /clear、/resume 后调用）。

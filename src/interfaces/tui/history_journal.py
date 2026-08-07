@@ -49,6 +49,12 @@ class PlainHistoryJournal:
             return value + "\n"
         return value
 
+    def clear(self) -> None:
+        """清空当前会话的降级回放缓存。"""
+        self._buffer = StringIO()
+        self._at_line_start = True
+        self._active_stream = None
+
     def _finish_active_stream(self) -> None:
         if self._active_stream is None:
             return

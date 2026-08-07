@@ -52,6 +52,7 @@ def caller_identity(agent: object | None) -> tuple[str | None, str | None]:
 class ResponseDelta(Event):
     """流式回应 — 默认可见。"""
     content: str = ""
+    call_id: str = ""
     level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
     type: Literal["token_delta"] = field(default="token_delta", init=False)
 
@@ -64,6 +65,7 @@ class ThinkingDelta(Event):
     维持为「等待响应」。progress 级别下本事件被丢弃，「等待响应」持续到首个回应增量。
     """
     content: str = ""
+    call_id: str = ""
     level: EventLevel = field(default=EventLevel.DETAIL, init=False)
     type: Literal["thinking_delta"] = field(default="thinking_delta", init=False)
 
@@ -107,6 +109,7 @@ class LLMCallStarted(Event):
     max_attempts 标识本次调用在统一自动重试流程中的位置。
     """
     model: str = ""
+    call_id: str = ""
     context_limit: int = 0
     estimated_input_tokens: int = 0
     message_count: int = 0
@@ -124,6 +127,7 @@ class LLMCallCompleted(Event):
     级别为 PROGRESS：内联状态条要用 token/缓存命中数据实时更新，必须确保该事件不被级别门控丢弃。
     """
     model: str = ""
+    call_id: str = ""
     # 统一约定：提交给模型的全部输入 token（含缓存读取与写入）。各 provider 在 _extract_token_usage 中归一化到此口径。
     input_tokens: int | None = None
     output_tokens: int | None = None
@@ -153,6 +157,7 @@ class LLMRetrying(Event):
         wait_seconds: 本次等待秒数（含随机抖动，为原始浮点值，展示时由 UI 向上取整）。
     """
     error_kind: str = ""
+    call_id: str = ""
     safe_message: str = ""
     partial: bool = False
     tool_fragment_state: str = "none"
@@ -178,6 +183,7 @@ class LLMLengthRetrying(Event):
         max_attempts: 本轮允许的最大长度恢复次数。
     """
     truncation_kind: str = ""
+    call_id: str = ""
     strategy: str = ""
     effort: str = ""
     attempt: int = 0
@@ -206,6 +212,7 @@ class LLMCallFailed(Event):
         diagnostic_id: 本地安全诊断关联 ID。
     """
     error_kind: str = ""
+    call_id: str = ""
     safe_message: str = ""
     attempts: int = 0
     partial: bool = False
@@ -225,6 +232,16 @@ class OutputRequested(Event):
     markdown: bool = False  # 是否按 Markdown 渲染（如计划内容、hook 拦截说明等消息型内容）
     level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
     type: Literal["output_requested"] = field(default="output_requested", init=False)
+
+
+@dataclass
+class InteractionCompleted(Event):
+    """交互提示结束后的可持久化展示摘要，不包含 future 或瞬态控件状态。"""
+    request_type: str = ""
+    summary: str = ""
+    cancelled: bool = False
+    level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
+    type: Literal["interaction_completed"] = field(default="interaction_completed", init=False)
 
 
 @dataclass

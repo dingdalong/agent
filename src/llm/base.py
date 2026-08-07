@@ -77,6 +77,7 @@ class LLMCallContext:
     """单次 chat 尝试独占的流式输出与调用方状态。"""
 
     attempt: int
+    call_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     caller_agent_type: str | None = None
     caller_uuid: str | None = None
     response_displayed: bool = False
@@ -209,6 +210,7 @@ class LLMResponse:
     token_usage: dict[str, int | None] | None = None
     has_partial_data: bool = False
     truncation_kind: str | None = None
+    call_id: str = ""
 
 
 def _has_reasoning_carrier(assistant_message: dict | None) -> bool:
@@ -907,6 +909,7 @@ class LLMProvider(ABC):
                             call=call,
                         )
                         response.has_partial_data = call.has_partial_data
+                        response.call_id = call.call_id
                         if response.finish_reason == "length":
                             response.truncation_kind = classify_truncation(response, call)
                     finally:
@@ -925,7 +928,7 @@ class LLMProvider(ABC):
                     await self._emit_llm_call_completed(
                         started_at=started_at,
                         usage=response.token_usage,
-                        caller_uuid=caller_uuid,
+                        call=call,
                     )
                     return response
                 except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
@@ -1033,6 +1036,7 @@ class LLMProvider(ABC):
             timestamp=time.time(),
             source=self.model,
             content=content,
+            call_id=call.call_id if call is not None else "",
             caller_agent_type=caller_agent_type,
             caller_uuid=caller_uuid,
         ))
@@ -1065,6 +1069,7 @@ class LLMProvider(ABC):
             timestamp=time.time(),
             source=self.model,
             content=content,
+            call_id=call.call_id if call is not None else "",
             caller_agent_type=caller_agent_type,
             caller_uuid=caller_uuid,
         ))
@@ -1094,6 +1099,7 @@ class LLMProvider(ABC):
             timestamp=time.time(),
             source=self.model,
             error_kind=info.kind.value,
+            call_id=call.call_id,
             safe_message=info.message,
             partial=call.has_partial_data,
             tool_fragment_state=call.tool_fragment_state,
@@ -1123,6 +1129,7 @@ class LLMProvider(ABC):
             timestamp=time.time(),
             source=self.model,
             error_kind=info.kind.value,
+            call_id=call.call_id,
             safe_message=info.message,
             attempts=terminal.attempts,
             partial=call.has_partial_data,
@@ -1164,6 +1171,7 @@ class LLMProvider(ABC):
             timestamp=started_at,
             source=self.model,
             model=self.model,
+            call_id=call.call_id,
             context_limit=self.context_limit,
             estimated_input_tokens=estimated_input_tokens,
             message_count=len(all_messages),
@@ -1180,7 +1188,7 @@ class LLMProvider(ABC):
         started_at: float | None,
         ended_at: float | None = None,
         usage: dict[str, int | None] | None = None,
-        caller_uuid: str | None = None,
+        call: LLMCallContext | None = None,
     ) -> None:
         """发出 LLMCallCompleted 事件。
 
@@ -1203,6 +1211,7 @@ class LLMProvider(ABC):
             timestamp=completed_at,
             source=self.model,
             model=self.model,
+            call_id=call.call_id if call is not None else "",
             input_tokens=usage.get("input_tokens"),
             output_tokens=output_tokens,
             total_tokens=total_tokens,
@@ -1211,7 +1220,8 @@ class LLMProvider(ABC):
             duration_seconds=duration,
             output_tokens_per_second=output_tokens / duration if output_tokens is not None and duration > 0 else None,
             total_tokens_per_second=total_tokens / duration if total_tokens is not None and duration > 0 else None,
-            caller_uuid=caller_uuid,
+            caller_agent_type=call.caller_agent_type if call is not None else None,
+            caller_uuid=call.caller_uuid if call is not None else None,
         ))
 
     @abstractmethod

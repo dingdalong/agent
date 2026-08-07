@@ -1,7 +1,7 @@
 """斜杠命令 /resume — 恢复历史会话。
 
 无参时弹出方向键选择菜单，再委托 SessionMgr 解析会话；
-状态变更（替换历史、重建任务、恢复 plan）由 Agent.apply_resume 完成。
+状态变更由 AgentApp.resume_session 在 UI/EventBus 门控内完成。
 """
 
 from __future__ import annotations
@@ -9,20 +9,19 @@ from __future__ import annotations
 import asyncio
 
 from src.commands import command
-from src.commands.context import CommandContext
+from src.commands.context import CommandContext, CommandResult
 from src.events import NoEventSubscribers
 
 
-@command("恢复历史会话", usage="/resume [序号 | session_id]")
-async def resume(ctx: CommandContext, args: list[str]) -> None:
+@command("恢复历史会话", usage="/resume [序号 | session_id]", layer="app")
+async def resume(ctx: CommandContext, args: list[str]) -> CommandResult | None:
     """解析目标会话并应用到前台 Agent。"""
     deps = ctx.deps
-    agent = ctx.agent
     session_mgr = deps.session_mgr
     if session_mgr is None:
         await deps.event_bus.request_output("会话管理器未初始化。\n")
         return
-    if agent is None:
+    if ctx.app is None:
         return
 
     cmd_args = list(args)
@@ -57,5 +56,6 @@ async def resume(ctx: CommandContext, args: list[str]) -> None:
         await deps.event_bus.request_output(result)
         return
 
-    summary = await agent.apply_resume(result)
+    agent, summary = await ctx.app.resume_session(result)
     await deps.event_bus.request_output(summary)
+    return CommandResult(new_agent=agent)
