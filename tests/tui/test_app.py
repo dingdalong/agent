@@ -1179,19 +1179,58 @@ def test_selection_stays_stable_across_scroll_and_platform_copy_rules() -> None:
     asyncio.run(scenario())
 
 
+def test_history_entries_have_uniform_spacing() -> None:
+    """条目间距由 CSS margin 统一给出，不再依赖内容里的尾随换行。"""
+
+    async def scenario() -> None:
+        app = _app(platform="linux")
+        async with app.run_test(size=(80, 40)) as pilot:
+            # 混合 flush_round 的两种产出：带尾随换行的常规条目，
+            # 以及中断态 / 无参数无结果的成功条目（本就不带尾随换行）。
+            await app.append_output(Text("✔ read (0.01s)\n  src/main.py\n"))
+            await app.append_output(Text("⋯ read  已中断"))
+            await app.append_output(Text("✔ shell (0.02s)\n  ls\n"))
+            await app.append_output(Text("✔ ping (0.01s)"))
+            await pilot.pause()
+
+            entries = list(app._history.children)
+            assert len(entries) == 4
+
+            # 内容不再残留尾随换行；间距改由 padding-bottom 提供，
+            # 因此每个条目高度 = 真实行数 + 1 行留白，中断态条目不再例外。
+            heights = [entry.region.height for entry in entries]
+            assert heights == [3, 2, 3, 2]
+            plains = [str(entry.visual) for entry in entries]
+            assert not any(plain.endswith("\n") for plain in plains)
+
+            # 留白在条目内部，条目之间不再另有间隙。
+            gaps = [
+                after.region.y - (before.region.y + before.region.height)
+                for before, after in zip(entries, entries[1:])
+            ]
+            assert gaps == [0, 0, 0]
+
+    asyncio.run(scenario())
+
+
 def test_history_entry_trailing_newline_row_is_selectable_without_crash() -> None:
     async def scenario() -> None:
         # win32：ctrl+c 走 _selected_text() 复制路径，覆盖真实取词入口。
         app = _app(platform="win32")
         async with app.run_test(size=(80, 24)) as pilot:
-            # flush_round 逐行追加 "\n"，工具条目文本以换行结尾。
-            await app.append_output(Text("✔ read (0.01s)\n  src/main.py\n"))
+            # append_output 会剥掉尾随换行，这里直接挂载以复现 Textual 的越界场景：
+            # 任何绕过 append_output 的挂载点（如 dialogs）仍可能拿到这种内容。
+            target = SelectionStatic(
+                Text("✔ read (0.01s)\n  src/main.py\n"),
+                classes="history-static",
+                markup=False,
+            )
+            await app._history.mount(target)
             await pilot.pause()
-            target = list(app._history.children)[-1]
-            assert isinstance(target, SelectionStatic)
 
-            # 末尾 "\n" 让 Static 比 splitlines() 多渲染一行空行。
-            assert target.region.height == 3
+            # 末尾 "\n" 让 Static 比 splitlines() 多渲染一行空行
+            # （再加 padding-bottom 的 1 行留白）。
+            assert target.region.height == 4
             widget, offset = app.screen.get_widget_and_offset_at(
                 target.region.x,
                 target.region.y + 2,

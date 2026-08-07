@@ -20,8 +20,11 @@ Screen > .screen--selection {
     margin-bottom: 1;
 }
 
+/* padding 而非 margin：margin 的空行归属容器（HistoryPanel），拖选跨条目时
+   端点落在这类间隙上会丢失选区；padding 的空行仍归条目本身，偏移被夹在行内。 */
 .history-static {
     height: auto;
+    padding-bottom: 1;
 }
 
 .user-message {

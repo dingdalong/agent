@@ -111,6 +111,21 @@ class UiCall(Message):
         self.future = future
 
 
+def _strip_trailing_newlines(message: str | Text) -> str | Text:
+    """去掉条目末尾的换行：间距改由 `.history-static` 的 padding-bottom 给出。
+
+    只裁换行、保留行尾空格与样式；`Text` 不就地修改（调用方可能复用同一对象）。
+    """
+    if isinstance(message, Text):
+        excess = len(message.plain) - len(message.plain.rstrip("\n"))
+        if not excess:
+            return message
+        trimmed = message.copy()
+        trimmed.right_crop(excess)
+        return trimmed
+    return message.rstrip("\n")
+
+
 class AgentTuiApp(App[None]):
     """生产全屏 TUI。"""
 
@@ -361,6 +376,7 @@ class AgentTuiApp(App[None]):
         if markdown and isinstance(message, str):
             await self._history.mount(Markdown(message, classes=classes or None))
         else:
+            message = _strip_trailing_newlines(message)
             await self._history.mount(
                 SelectionStatic(message, classes=classes or None, markup=False)
             )
