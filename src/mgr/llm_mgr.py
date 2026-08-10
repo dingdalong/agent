@@ -25,6 +25,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_MODEL_DISCOVERY_TIMEOUT_SECONDS = 3.0
+
 # Claude Code 兼容映射：将 Claude Code 的模型别名映射到本项目的通用别名
 _CLAUDECODE_ALIASES: dict[str, str] = {
     "opus": "best",
@@ -58,7 +60,7 @@ class LLMMgr:
     _provider_web_mode: dict[str, str] = field(init=False, default_factory=dict)
     provider_errors: dict[str, LLMErrorInfo] = field(init=False, default_factory=dict)
     _default_concurrency: int = field(init=False)
-    _timeout_seconds: float = field(init=False)
+    _request_timeout_seconds: float = field(init=False)
     _retry_config: RetryConfig = field(init=False)
     _page_token_rate: float = field(init=False)
     _user_agent: str = field(init=False)
@@ -116,7 +118,7 @@ class LLMMgr:
             )
 
         self._default_concurrency = concurrency
-        self._timeout_seconds = timeout_seconds
+        self._request_timeout_seconds = timeout_seconds
         self._retry_config = RetryConfig(
             max_attempts=max_attempts,
             base_delay_seconds=base_delay_seconds,
@@ -175,7 +177,7 @@ class LLMMgr:
                 discovered_models = await ProviderClass.list_models(
                     api_key=provider_cfg.get("api_key", ""),
                     base_url=provider_cfg["base_url"],
-                    timeout=self._timeout_seconds,
+                    timeout=_MODEL_DISCOVERY_TIMEOUT_SECONDS,
                     user_agent=self._user_agent,
                 )
                 models = _normalize_model_list(
@@ -407,7 +409,7 @@ class LLMMgr:
             reasoning_effort=provider_cfg.get("reasoning_effort", "max"),
             preserve_thinking=provider_cfg.get("preserve_thinking", False),
             concurrency=self._default_concurrency,
-            timeout=self._timeout_seconds,
+            timeout=self._request_timeout_seconds,
             max_attempts=self._retry_config.max_attempts,
             base_delay_seconds=self._retry_config.base_delay_seconds,
             max_delay_seconds=self._retry_config.max_delay_seconds,

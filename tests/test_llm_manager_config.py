@@ -249,7 +249,7 @@ def test_manager_uses_interface_defaults_for_missing_optional_keys() -> None:
     manager = _manager(config)
 
     assert manager._default_concurrency == 5
-    assert manager._timeout_seconds == 120.0
+    assert manager._request_timeout_seconds == 120.0
     assert manager._retry_config.max_attempts == 3
     assert manager._retry_config.base_delay_seconds == 2.0
     assert manager._retry_config.max_delay_seconds == 60.0
@@ -261,9 +261,11 @@ def test_builtin_config_declares_complete_retry_and_timeout_values() -> None:
     Returns:
         None。
     """
-    config = yaml.safe_load(Path("src/config.yaml").read_text())
+    config_text = Path("src/config.yaml").read_text()
+    config = yaml.safe_load(config_text)
 
     assert config["llm"]["timeout_seconds"] == 120
+    assert "timeout_seconds: 120 # 单次 LLM 请求超时秒数" in config_text
     assert config["llm"]["retry"] == {
         "max_attempts": 3,
         "base_delay_seconds": 2,
@@ -520,7 +522,7 @@ def test_model_discovery_client_uses_requested_timeout(
     provider_class: type[LLMProvider],
     client_path: str,
 ) -> None:
-    """基类与 Anthropic 模型发现 client 不得硬编码短超时。
+    """基类与 Anthropic 模型发现应将传入超时用于 SDK 和外层等待。
 
     Args:
         monkeypatch: pytest 属性替换工具。
@@ -530,6 +532,13 @@ def test_model_discovery_client_uses_requested_timeout(
     Returns:
         None。
     """
+    captured_wait_timeouts: list[float] = []
+
+    async def capturing_wait_for(awaitable: Any, timeout: float) -> Any:
+        """记录外层等待超时并执行原 awaitable。"""
+        captured_wait_timeouts.append(timeout)
+        return await awaitable
+
     page = SimpleNamespace(data=[SimpleNamespace(id="model-a")], has_more=False)
     client = SimpleNamespace(
         models=SimpleNamespace(list=AsyncMock(return_value=page)),
@@ -537,6 +546,7 @@ def test_model_discovery_client_uses_requested_timeout(
     )
     client_factory = Mock(return_value=client)
     monkeypatch.setattr(client_path, client_factory)
+    monkeypatch.setattr(asyncio, "wait_for", capturing_wait_for)
 
     models = asyncio.run(provider_class.list_models(
         api_key="test",
@@ -547,9 +557,10 @@ def test_model_discovery_client_uses_requested_timeout(
     assert models == ["model-a"]
     assert client_factory.call_args.kwargs["timeout"] == 19
     assert client_factory.call_args.kwargs["max_retries"] == 0
+    assert captured_wait_timeouts == [19]
 
 
-def test_load_models_uses_timeout_and_static_fallback_for_failed_provider(
+def test_load_models_uses_fixed_timeout_and_static_fallback_for_failed_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """发现失败时应保存分类错误并仅注册非空静态模型。
@@ -628,8 +639,8 @@ def test_load_models_uses_timeout_and_static_fallback_for_failed_provider(
 
     assert manager.list_models() == ["static-model"]
     manager.ensure_default_available()
-    assert calls["auth"]["timeout"] == 33.0
-    assert calls["rate"]["timeout"] == 33.0
+    assert calls["auth"]["timeout"] == 3.0
+    assert calls["rate"]["timeout"] == 3.0
     assert manager.provider_errors["auth"].kind is LLMErrorKind.AUTHENTICATION
     assert manager.provider_errors["auth"].request_id == "req-auth"
     assert manager.provider_errors["rate"].kind is LLMErrorKind.RATE_LIMIT

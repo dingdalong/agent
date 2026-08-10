@@ -42,7 +42,7 @@ llm:
   # best: ...                   # 可选，最强模型，不填时使用 default
   # fast: ...                   # 可选，最快/最便宜模型，不填时使用 default
   concurrency: 5 # 最大并发数量
-  timeout_seconds: 120 # 单次 LLM 请求与模型发现超时秒数
+  timeout_seconds: 120 # 单次 LLM 请求超时秒数
   retry:
     max_attempts: 3 # 最大尝试次数，包含首次调用
     base_delay_seconds: 2 # 指数退避基础秒数

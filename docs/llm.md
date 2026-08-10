@@ -200,6 +200,6 @@ assistant 的 provider 专属字段在判断“真正为空”之前由 `_normal
 
 ## 8. 模型发现
 
-基类 `list_models()` 用 OpenAI 兼容 Models API，外层 `asyncio.wait_for` 与 SDK 共用 `llm.timeout_seconds`，并保证关闭临时客户端（`src/llm/base.py:368-394`）。Anthropic 覆写为分页读取全部模型（`src/llm/anthropic.py:107-145`）。
+基类 `list_models()` 用 OpenAI 兼容 Models API，外层 `asyncio.wait_for` 与 SDK 共用调用方传入的超时，并保证关闭临时客户端（`src/llm/base.py:368-394`）。Anthropic 覆写为分页读取全部模型（`src/llm/anthropic.py:107-145`）。`LLMMgr.load_models()` 固定传入 3 秒；该约束写在代码中，不受 `llm.timeout_seconds` 或项目配置覆盖。
 
 `LLMMgr.load_models()` 并发发现所有已配置 provider；响应必须是仅含非空字符串的列表并按首次出现去重。发现失败先进入统一分类与安全日志；该 provider 配有非空静态 `models` 时使用静态列表，否则不注册模型，并把错误保存到 `provider_errors`。模型在不同 provider 间重复归属属于配置错误（`src/mgr/llm_mgr.py:121-223,443-504`）。启动时仍会精确验证 `llm.default`，不会因其他 provider 可用而切换默认模型（`src/mgr/llm_mgr.py:308-335`）。

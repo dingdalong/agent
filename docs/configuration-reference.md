@@ -128,7 +128,7 @@
 | `llm.best` | str | 不填时回退 `default` | 任一可用模型名 | 别名 `best` 的解析目标（Claude Code 别名 `opus` 映射到此，`llm_mgr.py:17`） |
 | `llm.fast` | str | 不填时回退 `default` | 任一可用模型名 | 别名 `fast` 的解析目标（Claude Code 别名 `haiku` 映射到此） |
 | `llm.concurrency` | int | `5` | `>= 1` 的整数 | provider 并发上限 |
-| `llm.timeout_seconds` | int \| float | `120` | 有限正数 | 每次 provider 请求与模型发现的 SDK/外层超时秒数 |
+| `llm.timeout_seconds` | int \| float | `120` | 有限正数 | 单次 provider LLM 请求的 SDK 超时秒数；不影响模型发现 |
 | `llm.retry.max_attempts` | int | `3` | `>= 1` 的整数 | 最大尝试次数，包含首次调用；`1` 表示不自动重试 |
 | `llm.retry.base_delay_seconds` | int \| float | `2` | 有限正数 | 无有效等待响应头时的指数退避基础秒数 |
 | `llm.retry.max_delay_seconds` | int \| float | `60` | 有限正数，且不小于基础延迟 | 单次退避等待封顶秒数 |
@@ -227,7 +227,7 @@ llm:
   # best: ...                            # 可选：最强模型（别名 best / Claude Code opus）
   # fast: ...                            # 可选：最快/最省模型（别名 fast / Claude Code haiku）
   concurrency: 5                         # provider 并发上限
-  timeout_seconds: 120                   # 单次请求与模型发现超时秒数
+  timeout_seconds: 120                   # 单次 LLM 请求超时秒数
   retry:
     max_attempts: 3                      # 最大尝试次数，包含首次调用
     base_delay_seconds: 2                # 指数退避基础秒数
@@ -440,7 +440,7 @@ TUI 诊断路径随 `$AGENT_HOME` 改写，不提供独立配置项。`tui.jsonl
 | 压缩后多保留近期对话 | `config.yaml` `compact.keep_recent_user_turns` / `keep_recent_messages_token_rate` | 调大 |
 | 加大 / 减小模型上下文窗口 | `config.yaml` `llm_provider.<name>.context_limit` | 设为目标 token 数（同时影响压缩绝对阈值） |
 | 提高 provider 并发 | `config.yaml` `llm.concurrency` | 调大 |
-| 调整单次 LLM/模型发现超时 | `config.yaml` `llm.timeout_seconds` | 设为有限正秒数 |
+| 调整单次 LLM 请求超时 | `config.yaml` `llm.timeout_seconds` | 设为有限正秒数；模型发现固定为 3 秒，不可配置 |
 | 调整自动尝试次数 | `config.yaml` `llm.retry.max_attempts` | 设为包含首次的正整数 |
 | 调整重试等待 | `config.yaml` `llm.retry.base_delay_seconds` / `max_delay_seconds` | 设为有限正秒数，且最大值不小于基础值 |
 | 调整 Anthropic 协议续接上限 | `config.yaml` `llm_provider.anthropic.max_pause_turn_continuations` | 设为非 bool 正整数；网络重试次数仍由 `llm.retry.max_attempts` 独立控制 |

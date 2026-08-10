@@ -126,9 +126,9 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 
 **feature 门控**：否。 **reload**：通过异步 `reconfigure()` 显式完成。
 
-**模型发现规则**（`llm_mgr.py:121-223`）：每个 provider 独立调用 `list_models()`；发现响应同样执行严格模型列表校验。失败信息经统一分类后写入 `provider_errors`，静态 `models` 为空时该 provider 不注册模型。模型 ID 只能归属一个 provider，冲突会终止启动。
+**模型发现规则**（`llm_mgr.py:121-223`）：每个 provider 独立调用 `list_models()`，统一使用代码内固定的 3 秒 SDK/外层等待超时，不受 `llm.timeout_seconds` 影响；发现响应同样执行严格模型列表校验。失败信息经统一分类后写入 `provider_errors`，静态 `models` 为空时该 provider 不注册模型。模型 ID 只能归属一个 provider，冲突会终止启动。
 
-**持有的关键状态**：`_model_to_provider`（模型→provider 名）、`_cache`（模型→provider 实例）、`provider_errors`（provider→安全结构化发现错误）、`_default_concurrency`、`_timeout_seconds`、`_retry_config`、`_page_token_rate`、`_user_agent`。
+**持有的关键状态**：`_model_to_provider`（模型→provider 名）、`_cache`（模型→provider 实例）、`provider_errors`（provider→安全结构化发现错误）、`_default_concurrency`、`_request_timeout_seconds`、`_retry_config`、`_page_token_rate`、`_user_agent`。
 
 模型解析、Provider 抽象与流式细节见 [llm.md](llm.md)。配置键见 [configuration-reference.md](configuration-reference.md)。
 
