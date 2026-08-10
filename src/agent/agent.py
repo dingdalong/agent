@@ -404,7 +404,7 @@ class Agent:
             event_bus = getattr(self.deps, "event_bus", None)
             if event_bus is not None and hasattr(event_bus, "join"):
                 await event_bus.join()
-            self._persist_session(ctx.user_input)
+            await self._persist_session(ctx.user_input)
             if result.exit_requested or result.command is not None:
                 return result
 
@@ -1280,7 +1280,7 @@ class Agent:
         if state is not None:
             state.replace_context(self.history, preserve_positions=True)
 
-    def _persist_session(self, user_input: str = "") -> None:
+    async def _persist_session(self, user_input: str = "") -> None:
         """持久化当前会话历史和元数据（仅主 agent，子 agent 跳过）。
 
         首次持久化时写入 is_new=True 并将用户首条消息设为 topic。
@@ -1297,15 +1297,22 @@ class Agent:
         state = self._session_state()
         if state is None:
             return
-        self.deps.session_mgr.save_state(session_id, state)
-        if user_input and self.history:
-            is_new = self.deps.session_mgr.get_metadata(session_id) is None
-            self.deps.session_mgr.save_metadata(
-                session_id,
-                is_new=is_new,
-                topic=user_input if is_new else "",
-                plan_active=self.plan_active,
-            )
+        session_mgr = self.deps.session_mgr
+        has_history = bool(self.history)
+        plan_active = self.plan_active
+
+        def save() -> None:
+            session_mgr.save_state(session_id, state)
+            if user_input and has_history:
+                is_new = session_mgr.get_metadata(session_id) is None
+                session_mgr.save_metadata(
+                    session_id,
+                    is_new=is_new,
+                    topic=user_input if is_new else "",
+                    plan_active=plan_active,
+                )
+
+        await asyncio.to_thread(save)
 
     async def _emit_state_changed(self, from_state: AgentState, to_state: AgentState) -> None:
         if self.deps.event_bus is None:

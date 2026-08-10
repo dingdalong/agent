@@ -76,6 +76,25 @@ class SessionSnapshot:
 
 
 @dataclass(slots=True)
+class _TranscriptSegment:
+    """一个转录段的增量文本，按需物化为单个字符串。"""
+
+    kind: str
+    chunks: list[str] = field(default_factory=list)
+    length: int = 0
+
+    def append(self, content: str) -> None:
+        if content:
+            self.chunks.append(content)
+            self.length += len(content)
+
+    def materialize(self) -> str:
+        if len(self.chunks) > 1:
+            self.chunks[:] = ["".join(self.chunks)]
+        return self.chunks[0] if self.chunks else ""
+
+
+@dataclass(slots=True)
 class _AgentState:
     """Mutable state backing one immutable agent snapshot."""
 
@@ -86,8 +105,12 @@ class _AgentState:
     context: ContextUsage = field(default_factory=ContextUsage)
     started_monotonic: float | None = None
     ended_monotonic: float | None = None
-    transcript: deque[tuple[str, str]] = field(default_factory=deque)
+    transcript: deque[_TranscriptSegment] = field(default_factory=deque)
+    transcript_revision: int = 0
+    transcript_length: int = 0
     messages: list[dict] | None = None
+    messages_revision: int = 0
+    messages_length: int = 0
     activity: str = ""  # 该 agent 的最新活动文案（等待响应/思考中/回应中/工具名），驱动底部列表实时显示
     active_tools: dict[str, str] = field(default_factory=dict)  # 在飞工具 {tool_call_id: tool_name}，用于并发下判断本轮工具是否全部完成、正确复位状态词
     task: str = ""  # 委派时的任务摘要，供子 agent 状态行展示
@@ -304,7 +327,26 @@ class AgentViewStore:
             Ordered ``(kind, text)`` transcript segments.
         """
         state = self._find(uuid)
-        return list(state.transcript) if state is not None else []
+        if state is None:
+            return []
+        return [
+            (segment.kind, segment.materialize())
+            for segment in state.transcript
+        ]
+
+    def transcript_signature(self, uuid: str) -> tuple[int, ...]:
+        """返回无需复制转录正文即可比较的 revision/长度签名。"""
+        state = self._find(uuid)
+        if state is None:
+            return (0, 0, 0, 0, 0, 0)
+        return (
+            state.transcript_revision,
+            state.transcript_length,
+            len(state.transcript),
+            state.messages_revision,
+            len(state.messages) if state.messages is not None else 0,
+            state.messages_length,
+        )
 
     def transcript_tail(self, uuid: str) -> tuple[int, tuple[str, str] | None]:
         """Return segment count and the last segment without copying the deque.
@@ -318,7 +360,8 @@ class AgentViewStore:
         state = self._find(uuid)
         if state is None or not state.transcript:
             return (0, None)
-        return (len(state.transcript), state.transcript[-1])
+        tail = state.transcript[-1]
+        return (len(state.transcript), (tail.kind, tail.materialize()))
 
     def transcript_messages(self, uuid: str) -> list[dict]:
         """Return a copy of one completed agent's raw message snapshot.
@@ -357,8 +400,8 @@ class AgentViewStore:
             "activity": snapshot.activity,
             "task": snapshot.task,
             "transcript": [
-                {"kind": kind, "text": text}
-                for kind, text in state.transcript
+                {"kind": segment.kind, "text": segment.materialize()}
+                for segment in state.transcript
             ],
             "messages": list(state.messages) if state.messages is not None else [],
         }
@@ -412,9 +455,11 @@ class AgentViewStore:
                     kind = segment.get("kind")
                     text = segment.get("text")
                     if isinstance(kind, str) and isinstance(text, str):
-                        state.transcript.append((kind, text))
+                        self._append_transcript_segment(state, kind, text)
             messages = snapshot.get("messages", [])
             state.messages = list(messages) if isinstance(messages, list) else []
+            state.messages_revision += 1
+            state.messages_length = sum(len(str(message)) for message in state.messages)
             self._history[uuid] = state
 
     def reset(self) -> None:
@@ -553,12 +598,13 @@ class AgentViewStore:
         state.activity = "重试中"
         if state.is_main:
             return
-        state.transcript.append((
+        self._append_transcript_segment(
+            state,
             "retry",
             f"⚠ 尝试 {event.attempt}/{event.max_attempts} 失败，将重试 "
             f"[{event.error_kind}] {event.safe_message} "
             f"(partial={str(event.partial).lower()}, tool={event.tool_fragment_state})\n",
-        ))
+        )
 
     def _record_length_retry(self, event: LLMLengthRetrying) -> None:
         """记录一次输出长度截断的自动恢复并阻断前后正文分段合并。
@@ -585,11 +631,12 @@ class AgentViewStore:
             action = "压缩思考后重生成"
         else:
             action = "从中断处继续生成"
-        state.transcript.append((
+        self._append_transcript_segment(
+            state,
             "retry",
             f"⚠ 输出截断（{kind_label}）：{action} "
             f"({event.attempt}/{event.max_attempts})\n",
-        ))
+        )
 
     def _record_failure(self, event: LLMCallFailed) -> None:
         """记录一次安全终态错误并把 agent 活动更新为失败。
@@ -619,11 +666,12 @@ class AgentViewStore:
             metadata.append(f"request_id={event.request_id}")
         if event.diagnostic_id:
             metadata.append(f"diagnostic_id={event.diagnostic_id}")
-        state.transcript.append((
+        self._append_transcript_segment(
+            state,
             "error",
             f"✘ LLM 调用失败 [{event.error_kind}] {event.safe_message} "
             f"({', '.join(metadata)})\n",
-        ))
+        )
 
     def _record_lifecycle(self, event: SubagentLifecycle) -> None:
         """Apply start/end lifecycle information in an order-stable manner.
@@ -667,6 +715,8 @@ class AgentViewStore:
             state.ended_monotonic = self._clock()
         if event.messages is not None:
             state.messages = list(event.messages)
+            state.messages_revision += 1
+            state.messages_length = sum(len(str(message)) for message in state.messages)
 
     def _append_stream(self, event: Event, kind: str, content: str) -> None:
         """Append or merge one streaming transcript delta.
@@ -687,11 +737,12 @@ class AgentViewStore:
         state.activity = "回应中" if kind == "response" else "思考中"  # 按增量种类切换面板状态词：thinking→思考中、response→回应中
         if state.is_main:
             return
-        if state.transcript and state.transcript[-1][0] == kind:
-            previous_kind, previous_text = state.transcript[-1]
-            state.transcript[-1] = (previous_kind, previous_text + content)
+        if state.transcript and state.transcript[-1].kind == kind:
+            state.transcript[-1].append(content)
+            state.transcript_revision += 1
+            state.transcript_length += len(content)
         else:
-            state.transcript.append((kind, content))
+            self._append_transcript_segment(state, kind, content)
 
     def _append_tool_start(self, event: ToolCallStarted) -> None:
         """Append a tool-start transcript line.
@@ -713,11 +764,19 @@ class AgentViewStore:
         if display is not None and hasattr(display, "title"):
             content = (display.content or "").strip()
             suffix = f" {content.splitlines()[0]}" if content else ""
-            state.transcript.append(("tool", f"● {display.title}{suffix}\n"))
+            self._append_transcript_segment(
+                state,
+                "tool",
+                f"● {display.title}{suffix}\n",
+            )
         else:
             detail = event.detail.strip()
             suffix = f" {detail}" if detail else ""
-            state.transcript.append(("tool", f"● {event.tool_name}{suffix}\n"))
+            self._append_transcript_segment(
+                state,
+                "tool",
+                f"● {event.tool_name}{suffix}\n",
+            )
 
     def _append_tool_completion(self, event: ToolCallCompleted) -> None:
         """移除该在飞工具、据剩余在飞工具复位状态词，并追加紧凑的工具完成转录行。
@@ -750,15 +809,31 @@ class AgentViewStore:
                 # 转录只取前 10 行避免膨胀
                 lines = content.splitlines()[:10]
                 line += "\n".join(f"  {l}" for l in lines) + "\n"
-            state.transcript.append(("tool", line))
+            self._append_transcript_segment(state, "tool", line)
         else:
             preview_lines = (event.result_preview or "").strip().splitlines()
             fallback = "完成" if event.status == "success" else "失败"
             first = preview_lines[0] if preview_lines else fallback
-            state.transcript.append((
+            self._append_transcript_segment(
+                state,
                 "tool",
                 f"  ⎿ {first}  ({event.duration_seconds:.2f}s)\n",
-            ))
+            )
+
+    @staticmethod
+    def _append_transcript_segment(
+        state: _AgentState,
+        kind: str,
+        content: str,
+    ) -> None:
+        maxlen = state.transcript.maxlen
+        if maxlen is not None and len(state.transcript) == maxlen:
+            state.transcript_length -= state.transcript[0].length
+        segment = _TranscriptSegment(kind)
+        segment.append(content)
+        state.transcript.append(segment)
+        state.transcript_revision += 1
+        state.transcript_length += len(content)
 
     def _snapshot(self, uuid: str, state: _AgentState) -> AgentSnapshot:
         """Freeze one mutable state for presentation.

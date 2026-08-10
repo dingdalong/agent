@@ -24,7 +24,12 @@ from src.events.menu import (
     ModelMenu,
     PermissionMenu,
 )
-from src.events.types import PermissionNotice, ResponseDelta, SubagentLifecycle
+from src.events.types import (
+    PermissionNotice,
+    ResponseDelta,
+    SubagentLifecycle,
+    ThinkingDelta,
+)
 from src.interfaces.agent_view_store import AgentViewStore
 from src.interfaces.turn_clock import TurnClock
 from src.interfaces.tui.app import AgentTuiApp
@@ -36,6 +41,7 @@ from src.interfaces.tui.widgets import (
     SelectionScreen,
     SelectionStatic,
 )
+from src.mgr.session_state import SessionState
 
 
 def _app(
@@ -456,15 +462,15 @@ def test_responsive_input_history_and_ctrl_c() -> None:
     asyncio.run(scenario())
 
 
-def test_failed_history_mount_is_not_committed(monkeypatch) -> None:
+def test_failed_history_append_is_not_committed(monkeypatch) -> None:
     async def scenario() -> None:
         app = _app()
         async with app.run_test(size=(80, 24)):
-            def fail_mount(_widget) -> None:
-                raise RuntimeError("mount failed")
+            def fail_append(*_args, **_kwargs) -> None:
+                raise RuntimeError("append failed")
 
-            monkeypatch.setattr(app._history, "mount", fail_mount)
-            with pytest.raises(RuntimeError, match="mount failed"):
+            monkeypatch.setattr(app._history, "append_entry", fail_append)
+            with pytest.raises(RuntimeError, match="append failed"):
                 await app.append_output("not displayed")
 
             assert app.history_journal.snapshot() == ""
@@ -550,9 +556,14 @@ def test_inline_widgets_define_their_own_completion_history() -> None:
             )
             await app.coordinator.submit(choice)
             await pilot.pause()
+            assert app._interaction_slot.display
+            assert len(app._interaction_slot.children) == 1
+            assert not app._history.children
             await pilot.press("escape")
             assert await choice.future == ""
             await pilot.pause()
+            assert not app._interaction_slot.display
+            assert not app._interaction_slot.children
             assert app.history_journal.snapshot() == ""
 
             choice_input = ChoiceInputMenu(
@@ -700,13 +711,14 @@ def test_permission_notice_renders_full_reason_and_wraps() -> None:
                 decision_source="hard_rule",
             ))
             await pilot.pause()
-            widget = list(app._history.children)[-1]
-            rendered = widget.render().plain
+            entry = app._history.entries[-1]
+            rendered = entry.content.plain if isinstance(entry.content, Text) else entry.content
             assert "硬规则" in rendered
             assert detail in rendered
             # 60 列终端下长路径应折行（高度 > 1）而不是被截断。
             await pilot.pause()
-            assert widget.size.height > 1
+            start, end = app._history.entry_ranges[entry.id]
+            assert end - start > 2
 
     asyncio.run(scenario())
 
@@ -841,7 +853,7 @@ def test_modal_controls_are_keyboard_only() -> None:
             )
             await app.coordinator.submit(choice)
             await pilot.pause()
-            options = app._history.query_one(KeyboardOptionList)
+            options = app._interaction_slot.query_one(KeyboardOptionList)
             assert options.has_focus
             assert options.highlighted == 0
 
@@ -871,8 +883,8 @@ def test_modal_controls_are_keyboard_only() -> None:
             )
             await app.coordinator.submit(choice_input)
             await pilot.pause()
-            navigation = app._history.query_one("#choice-input-options", KeyboardNavigation)
-            dialog_input = app._history.query_one("#dialog-input", TextArea)
+            navigation = app._interaction_slot.query_one("#choice-input-options", KeyboardNavigation)
+            dialog_input = app._interaction_slot.query_one("#dialog-input", TextArea)
             assert navigation.has_focus
 
             await pilot.click(dialog_input)
@@ -907,8 +919,8 @@ def test_modal_controls_are_keyboard_only() -> None:
             )
             await app.coordinator.submit(form)
             await pilot.pause()
-            form_body = app._history.query_one("#form-body", KeyboardNavigation)
-            form_input = app._history.query_one("#dialog-input", TextArea)
+            form_body = app._interaction_slot.query_one("#form-body", KeyboardNavigation)
+            form_input = app._interaction_slot.query_one("#dialog-input", TextArea)
             assert form_body.has_focus
 
             await pilot.click(form_input)
@@ -1105,26 +1117,14 @@ def test_selection_stays_stable_across_scroll_and_platform_copy_rules() -> None:
             )
             await pilot.pause()
             history_region = app._history.content_region
-            visible = [
-                block
-                for block in app._history.query("MarkdownBlock")
-                if block.region.overlaps(history_region)
-            ]
-            assert visible
-            start_block = min(visible, key=lambda block: block.region.y)
-            start_region = start_block.region.intersection(history_region)
             await pilot.mouse_down(
-                start_block,
-                offset=(
-                    min(1, max(0, start_region.width - 1)),
-                    start_region.y - start_block.region.y,
-                ),
+                app._history,
+                offset=(1, 1),
             )
             assert app.screen._select_state is not None
             assert app.screen._select_state.start.container is app._history
             edge = (history_region.x + 2, history_region.bottom - 1)
             initial_scroll_y = app._history.scroll_y
-            initial_bottom = start_region.bottom
             app.mouse_position = Offset(*edge)
             app.screen._forward_event(events.MouseMove(
                 app._history,
@@ -1145,7 +1145,7 @@ def test_selection_stays_stable_across_scroll_and_platform_copy_rules() -> None:
                 if selected := app.screen.get_selected_text():
                     lengths.append(len(selected))
                 delta = app._history.scroll_y - initial_scroll_y
-                if initial_bottom - delta <= history_region.y:
+                if delta >= 2:
                     start_scrolled_out = True
             assert start_scrolled_out
             assert len(lengths) >= 3
@@ -1157,30 +1157,56 @@ def test_selection_stays_stable_across_scroll_and_platform_copy_rules() -> None:
             assert app._history.scroll_y == released_scroll_y
 
             app.clear_selection()
-            target = Static("可复制的生产 TUI 文本", markup=False)
-            await app._history.mount(target)
+            text = "可复制的生产 TUI 文本"
+            entry_id = app._history.append_entry(text)
             await pilot.pause()
-            app.screen.selections = {target: Selection(None, None)}
+            start, _end = app._history.entry_ranges[entry_id]
+            app.screen.selections = {
+                app._history: Selection(Offset(0, start), Offset(len(text), start))
+            }
             selected = app.screen.get_selected_text()
-            assert selected == "可复制的生产 TUI 文本"
+            assert selected == text
             await pilot.press("ctrl+c")
             assert app.clipboard == selected
 
         mac_app = _app(platform="darwin")
         async with mac_app.run_test(size=(90, 28)) as pilot:
-            target = Static("macOS 选中即复制", markup=False)
-            await mac_app._history.mount(target)
+            target = "selected history"
+            text = f"prefix {target} suffix"
+            mac_app._history.append_entry(text, spacing=0)
             await pilot.pause()
-            mac_app.screen.selections = {target: Selection(None, None)}
-            mac_app.screen.post_message(events.TextSelected())
+            start_x = len("prefix ")
+            end_x = start_x + len(target)
+            content = mac_app._history.content_region
+            widget_offset = (
+                content.x - mac_app._history.region.x + start_x,
+                content.y - mac_app._history.region.y,
+            )
+            await pilot.mouse_down(mac_app._history, offset=widget_offset)
+            end = Offset(content.x + end_x - 1, content.y)
+            mac_app.mouse_position = end
+            mac_app.screen._forward_event(events.MouseMove(
+                mac_app._history,
+                *end,
+                end_x - start_x,
+                0,
+                1,
+                False,
+                False,
+                False,
+                screen_x=end.x,
+                screen_y=end.y,
+            ))
+            await pilot.mouse_up(offset=end)
             await pilot.pause()
-            assert mac_app.clipboard == "macOS 选中即复制"
+            assert mac_app.screen.get_selected_text() == target
+            assert mac_app.clipboard == target
 
     asyncio.run(scenario())
 
 
 def test_history_entries_have_uniform_spacing() -> None:
-    """条目间距由 CSS margin 统一给出，不再依赖内容里的尾随换行。"""
+    """条目间距由逻辑行区间统一给出，不依赖内容里的尾随换行。"""
 
     async def scenario() -> None:
         app = _app(platform="linux")
@@ -1193,19 +1219,26 @@ def test_history_entries_have_uniform_spacing() -> None:
             await app.append_output(Text("✔ ping (0.01s)"))
             await pilot.pause()
 
-            entries = list(app._history.children)
+            entries = list(app._history.entries)
             assert len(entries) == 4
 
-            # 内容不再残留尾随换行；间距改由 padding-bottom 提供，
-            # 因此每个条目高度 = 真实行数 + 1 行留白，中断态条目不再例外。
-            heights = [entry.region.height for entry in entries]
+            # 内容不再残留尾随换行；每个条目的 Rich 行区间包含一行留白。
+            heights = [
+                app._history.entry_ranges[entry.id][1]
+                - app._history.entry_ranges[entry.id][0]
+                for entry in entries
+            ]
             assert heights == [3, 2, 3, 2]
-            plains = [str(entry.visual) for entry in entries]
+            plains = [
+                entry.content.plain if isinstance(entry.content, Text) else entry.content
+                for entry in entries
+            ]
             assert not any(plain.endswith("\n") for plain in plains)
 
-            # 留白在条目内部，条目之间不再另有间隙。
+            # 行区间连续，留白属于前一个条目。
             gaps = [
-                after.region.y - (before.region.y + before.region.height)
+                app._history.entry_ranges[after.id][0]
+                - app._history.entry_ranges[before.id][1]
                 for before, after in zip(entries, entries[1:])
             ]
             assert gaps == [0, 0, 0]
@@ -1218,39 +1251,28 @@ def test_history_entry_trailing_newline_row_is_selectable_without_crash() -> Non
         # win32：ctrl+c 走 _selected_text() 复制路径，覆盖真实取词入口。
         app = _app(platform="win32")
         async with app.run_test(size=(80, 24)) as pilot:
-            # append_output 会剥掉尾随换行，这里直接挂载以复现 Textual 的越界场景：
-            # 任何绕过 append_output 的挂载点（如 dialogs）仍可能拿到这种内容。
-            target = SelectionStatic(
-                Text("✔ read (0.01s)\n  src/main.py\n"),
-                classes="history-static",
-                markup=False,
+            entry_id = app._history.append_entry(
+                Text("✔ read (0.01s)\n  src/main.py\n")
             )
-            await app._history.mount(target)
             await pilot.pause()
 
-            # 末尾 "\n" 让 Static 比 splitlines() 多渲染一行空行
-            # （再加 padding-bottom 的 1 行留白）。
-            assert target.region.height == 4
-            widget, offset = app.screen.get_widget_and_offset_at(
-                target.region.x,
-                target.region.y + 2,
-            )
-            assert widget is target
-            assert offset == Offset(0, 2)
+            start, end = app._history.entry_ranges[entry_id]
+            assert end - start == 4
+            offset = Offset(0, start + 2)
 
-            # 起点落在空行：原生 Static 在此 IndexError 打崩整个 app。
-            app.screen.selections = {target: Selection(offset, None)}
+            # 起点落在空行时不越界，也不返回 padding。
+            app.screen.selections = {app._history: Selection(offset, None)}
             assert app.screen.get_selected_text() == ""
 
-            # 终点落在空行：收敛到末行行尾，而不是丢掉末行。
-            app.screen.selections = {target: Selection(None, offset)}
+            app.screen.selections = {app._history: Selection(None, offset)}
             assert app.screen.get_selected_text() == "✔ read (0.01s)\n  src/main.py"
 
-            # 未越界的选区行为与原生一致。
-            app.screen.selections = {target: Selection(Offset(2, 0), None)}
+            app.screen.selections = {
+                app._history: Selection(Offset(2, start), None)
+            }
             assert app.screen.get_selected_text() == "read (0.01s)\n  src/main.py"
 
-            app.screen.selections = {target: Selection(None, None)}
+            app.screen.selections = {app._history: Selection(None, None)}
             assert app.screen.get_selected_text() == "✔ read (0.01s)\n  src/main.py"
             await pilot.press("ctrl+c")
             assert app.clipboard == "✔ read (0.01s)\n  src/main.py"
@@ -1275,7 +1297,7 @@ def test_dialog_prompt_trailing_newline_row_is_selectable_without_crash() -> Non
             )
             await app.coordinator.submit(choice)
             await pilot.pause()
-            prompt = app._history.query_one(".dialog-prompt", SelectionStatic)
+            prompt = app._interaction_slot.query_one(".dialog-prompt", SelectionStatic)
             assert prompt.region.height == 2
 
             app.screen.selections = {prompt: Selection(Offset(0, 1), None)}
@@ -1294,105 +1316,26 @@ def test_reverse_selection_tracks_tool_result_without_crossing_its_end() -> None
         app = _app(platform="linux")
         async with app.run_test(size=(80, 24)) as pilot:
             assert isinstance(app.screen, SelectionScreen)
-            summaries: list[Static] = []
             for index in range(24):
                 await app.append_output(
                     f"● main {index:02d} · 本轮 2 工具\n"
                     f"  ✔ read-{index:02d}  ⎿ first-{index:02d}\n"
                     f"  ✔ shell-{index:02d}  ⎿ second-{index:02d}"
                 )
-                summaries.append(list(app._history.children)[-1])
             await pilot.pause()
-
-            async def drag_up(target_index: int, title_y: int, *, reach_top: bool) -> None:
-                target = summaries[target_index]
-                app._history.scroll_to(
-                    y=target.virtual_region.y - title_y,
-                    animate=False,
-                    immediate=True,
+            target = app._history.entries[16]
+            start, end = app._history.entry_ranges[target.id]
+            app.screen.selections = {
+                app._history: Selection(
+                    Offset(50, end - 2),
+                    Offset(0, start),
                 )
-                await pilot.pause()
-                assert target.region.y == title_y
-                await pilot.mouse_down(target, offset=(50, 2))
-                history_region = app._history.content_region
-                edge = (history_region.x, history_region.y)
-                app.mouse_position = Offset(*edge)
-                app.screen._forward_event(events.MouseMove(
-                    app._history,
-                    *edge,
-                    0,
-                    -8,
-                    1,
-                    False,
-                    False,
-                    False,
-                    screen_x=edge[0],
-                    screen_y=edge[1],
-                ))
-                timer = app.screen._auto_select_scroll_timer
-                assert timer is not None
-                assert timer._interval == 0.05
-
-                lengths: list[int] = []
-                for _ in range(12 if reach_top else 2):
-                    await pilot.pause(0.1)
-                    selected = app.screen.get_selected_text()
-                    if selected:
-                        lengths.append(len(selected))
-                assert lengths == sorted(lengths), lengths
-                selected = app.screen.get_selected_text()
-                assert selected is not None
-                heading = f"● main {target_index:02d} · 本轮 2 工具"
-                second_result = f"✔ shell-{target_index:02d}  ⎿ second-{target_index:02d}"
-                assert heading in selected
-                assert selected.endswith(second_result)
-                assert f"main {target_index + 1:02d}" not in selected
-
-                if reach_top:
-                    assert app._history.scroll_y == 0
-                    assert app.screen._auto_select_scroll_timer is None
-                await pilot.mouse_up(offset=edge)
-                assert app.screen._auto_select_scroll_timer is None
-                released_scroll_y = app._history.scroll_y
-                await pilot.pause(0.15)
-                assert app._history.scroll_y == released_scroll_y
-                app.clear_selection()
-
-            history_middle = app._history.content_region.y + 8
-            await drag_up(18, history_middle, reach_top=False)
-            await drag_up(12, app._history.content_region.y, reach_top=True)
-
-            for _ in range(5):
-                target = summaries[16]
-                app._history.scroll_to(
-                    y=target.virtual_region.y - app._history.content_region.y - 4,
-                    animate=False,
-                    immediate=True,
-                )
-                await pilot.pause()
-                await pilot.mouse_down(target, offset=(40, 2))
-                edge = (
-                    app._history.content_region.x,
-                    app._history.content_region.y,
-                )
-                app.mouse_position = Offset(*edge)
-                app.screen._forward_event(events.MouseMove(
-                    app._history,
-                    *edge,
-                    0,
-                    -4,
-                    1,
-                    False,
-                    False,
-                    False,
-                    screen_x=edge[0],
-                    screen_y=edge[1],
-                ))
-                await pilot.pause(0.06)
-                await pilot.mouse_up(offset=edge)
-                assert app.screen._auto_select_scroll_timer is None
-            await pilot.press("ctrl+l")
-            assert app.screen._select_state is None
+            }
+            selected = app.screen.get_selected_text()
+            assert selected is not None
+            assert "● main 16 · 本轮 2 工具" in selected
+            assert selected.endswith("✔ shell-16  ⎿ second-16")
+            assert "main 17" not in selected
             assert app.is_running
 
     asyncio.run(scenario())
@@ -1582,6 +1525,8 @@ def test_close_cancels_active_model_menu_and_waits_for_removal() -> None:
 
             assert request.future.cancelled()
             assert not widget.is_attached
+            assert not app._interaction_slot.display
+            assert not app._interaction_slot.children
             assert app.coordinator.active is None
             assert app.coordinator.inline_widget is None
             assert not app.coordinator._cleanup_tasks
@@ -1610,6 +1555,10 @@ def test_stream_follow_and_dialog_text_inputs() -> None:
             await app._history.wait_for_refresh()
             assert app._history.scroll_y == app._history.max_scroll_y
             await app.end_response()
+            assert app._history.entries[-1].markdown
+            assert app._history.entries[-1].content == (
+                "\n\n".join(f"stream paragraph {i}" for i in range(80)) + "\n\n"
+            )
             app._history.scroll_to(
                 y=max(0, app._history.max_scroll_y - 10),
                 animate=False,
@@ -1624,6 +1573,9 @@ def test_stream_follow_and_dialog_text_inputs() -> None:
             await app._history.wait_for_refresh()
             assert app._history.scroll_y == old_scroll_y
             await app.end_response()
+            assert app._history.entries[-1].content == (
+                "\n\n".join(f"next paragraph {i}" for i in range(20)) + "\n\n"
+            )
 
             loop = asyncio.get_running_loop()
             choice_input = ChoiceInputMenu(
@@ -1636,7 +1588,7 @@ def test_stream_follow_and_dialog_text_inputs() -> None:
             )
             await app.coordinator.submit(choice_input)
             await pilot.pause()
-            dialog_input = app._history.query_one("#dialog-input")
+            dialog_input = app._interaction_slot.query_one("#dialog-input")
             assert dialog_input.has_focus
             app.post_message(events.AppFocus())
             await pilot.pause()
@@ -1664,6 +1616,47 @@ def test_stream_follow_and_dialog_text_inputs() -> None:
             await pilot.press("right", "2", "right", "enter")
             payload = await form.future
             assert '"answers": ["1 2\\nx", "fast"]' in payload
+
+    asyncio.run(scenario())
+
+
+def test_session_history_is_bulk_hydrated_into_rich_lines() -> None:
+    async def scenario() -> None:
+        state = SessionState()
+        state.append_user("恢复的问题", {"role": "user", "content": "恢复的问题"})
+        state.record_event(ThinkingDelta(
+            timestamp=2.0,
+            source="model",
+            content="恢复的思考",
+            call_id="call-restore",
+        ))
+        state.record_event(ResponseDelta(
+            timestamp=3.0,
+            source="model",
+            content="**恢复的回答**",
+            call_id="call-restore",
+        ))
+        state.bind_model_message(
+            {
+                "role": "assistant",
+                "content": "**恢复的回答**",
+                "reasoning_content": "恢复的思考",
+            },
+            correlation_id="call-restore",
+            kind="assistant",
+        )
+        app = _app()
+        async with app.run_test(size=(90, 28)):
+            await app.replace_session_history(state.visible_records())
+
+            assert not app._history.children
+            assert len(app._history.entries) == 5
+            assert app._history.entries[0].content == "› 恢复的问题"
+            assert app._history.entries[2].content == "恢复的思考"
+            assert app._history.entries[2].markdown
+            assert app._history.entries[4].content == "**恢复的回答**"
+            assert app._history.entries[4].markdown
+            assert "恢复的回答" in app.history_journal.snapshot()
 
     asyncio.run(scenario())
 
@@ -1837,8 +1830,8 @@ def test_model_menu_uses_vertical_models_and_horizontal_effort() -> None:
             await app.coordinator.submit(request)
             await pilot.pause()
 
-            body = app._history.query_one("#model-menu-body", KeyboardNavigation)
-            effort = app._history.query_one("#model-menu-effort", Static)
+            body = app._interaction_slot.query_one("#model-menu-body", KeyboardNavigation)
+            effort = app._interaction_slot.query_one("#model-menu-effort", Static)
             assert body.has_focus
             body_text = body.render()
             effort_text = effort.render()
@@ -1909,17 +1902,17 @@ def test_model_menu_scrolls_models_while_effort_and_hint_stay_visible() -> None:
             await app.coordinator.submit(request)
             await pilot.pause()
 
-            scroll = app._history.query_one("#model-menu-scroll", VerticalScroll)
-            body = app._history.query_one("#model-menu-body", KeyboardNavigation)
-            effort = app._history.query_one("#model-menu-effort", Static)
-            hint = app._history.query_one(".dialog-hint", Static)
-            history_region = app._history.content_region
+            scroll = app._interaction_slot.query_one("#model-menu-scroll", VerticalScroll)
+            body = app._interaction_slot.query_one("#model-menu-body", KeyboardNavigation)
+            effort = app._interaction_slot.query_one("#model-menu-effort", Static)
+            hint = app._interaction_slot.query_one(".dialog-hint", Static)
+            interaction_region = app._interaction_slot.content_region
 
             assert scroll.max_scroll_y > 0
-            assert effort.region.y >= history_region.y
-            assert effort.region.bottom <= history_region.bottom
-            assert hint.region.y >= history_region.y
-            assert hint.region.bottom <= history_region.bottom
+            assert effort.region.y >= interaction_region.y
+            assert effort.region.bottom <= interaction_region.bottom
+            assert hint.region.y >= interaction_region.y
+            assert hint.region.bottom <= interaction_region.bottom
             effort_region = effort.region
             hint_region = hint.region
 

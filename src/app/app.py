@@ -208,7 +208,11 @@ class AgentApp:
                     old_state = getattr(self.deps, "session_state", None)
                     session_mgr = getattr(self.deps, "session_mgr", None)
                     if old_session_id and old_state is not None and session_mgr is not None:
-                        session_mgr.save_state(old_session_id, old_state)
+                        await asyncio.to_thread(
+                            session_mgr.save_state,
+                            old_session_id,
+                            old_state,
+                        )
                     self.deps.session_id = str(uuid.uuid4())
                     self.deps.session_state = SessionState()
                     bind_state = getattr(self.output_router, "bind_session_state", None)
@@ -315,7 +319,11 @@ class AgentApp:
                 source_id = self.deps.session_id
                 source_state = self.deps.session_state
                 if session_mgr is not None and source_id and source_state is not None:
-                    session_mgr.save_state(source_id, source_state)
+                    await asyncio.to_thread(
+                        session_mgr.save_state,
+                        source_id,
+                        source_state,
+                    )
 
                 self.deps.session_id = result.session_id
                 self.deps.session_state = result.state
@@ -407,15 +415,20 @@ class AgentApp:
         session_state = getattr(self.deps, "session_state", None)
         session_id = getattr(self.deps, "session_id", "")
         if session_mgr is not None and session_state is not None and session_id:
-            session_mgr.save_state(session_id, session_state)
+            await asyncio.to_thread(session_mgr.save_state, session_id, session_state)
         await self.deps.ui.wait_interactions_idle()
 
     async def shutdown(self) -> None:
-        """断开 MCP server 连接。
+        """保存最终会话并断开 MCP server 连接。
 
         Returns:
             None.
         """
+        session_mgr = getattr(self.deps, "session_mgr", None)
+        session_state = getattr(self.deps, "session_state", None)
+        session_id = getattr(self.deps, "session_id", "")
+        if session_mgr is not None and session_state is not None and session_id:
+            await asyncio.to_thread(session_mgr.save_state, session_id, session_state)
         if self.deps.mcp_mgr is not None:
             await self.deps.mcp_mgr.stop()
 

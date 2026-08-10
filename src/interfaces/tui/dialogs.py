@@ -1055,7 +1055,7 @@ class InlineFormWidget(InlineWidget):
     """内嵌到聊天历史流中的 ask_user 多问题表单。
 
     交互逻辑与 FormDialog 完全一致（tab 切换、选项选择、讨论等），
-    但以普通 Widget 挂载到 HistoryPanel 中，而非 ModalScreen 弹窗。
+    但以普通 Widget 挂载到唯一的临时交互槽，而非 ModalScreen 弹窗。
     完成时发送 Completed Message 而非 dismiss。
     """
 
@@ -1523,6 +1523,7 @@ class InteractionCoordinator:
         self.active = None
         request.complete(text)
         await self._pump()
+        self.app.refresh_chrome()
         return True
 
     def cancel_input_for_exit(self) -> bool:
@@ -1533,6 +1534,7 @@ class InteractionCoordinator:
         self.active = None
         request.cancel()
         self._schedule(self._pump())
+        self.app.refresh_chrome()
         return True
 
     def _modal_finished(self, result: DialogResult | None) -> None:
@@ -1567,8 +1569,7 @@ class InteractionCoordinator:
         self.active = None
         if widget is not None:
             summary = widget.build_summary(result)
-            if widget.is_mounted:
-                await widget.remove()
+            await self.app.unmount_inline_widget(widget)
             if summary:
                 await self.app.append_output(summary)
         await asyncio.sleep(0)
@@ -1639,8 +1640,8 @@ class InteractionCoordinator:
             if render:
                 self.turn_clock.exit_human_wait()
             request.cancel()
-            if render and widget is not None and widget.is_mounted:
-                self._schedule(widget.remove())
+            if render and widget is not None:
+                self._schedule(self.app.unmount_inline_widget(widget))
             if render and modal is not None:
                 self.app.set_screen_class(False, "dialog-open")
                 if modal.is_current:

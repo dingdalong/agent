@@ -10,6 +10,22 @@ from typing import Any, Iterable
 
 
 @dataclass(slots=True)
+class _TextChunks:
+    """流式文本的追加缓冲，只在读取边界合并。"""
+
+    chunks: list[str] = field(default_factory=list)
+    length: int = 0
+
+    def append(self, value: str) -> None:
+        if value:
+            self.chunks.append(value)
+            self.length += len(value)
+
+    def materialize(self) -> str:
+        return "".join(self.chunks)
+
+
+@dataclass(slots=True)
 class ViewPayload:
     """可持久化的前台展示载荷。
 
@@ -101,6 +117,11 @@ class SessionState:
 
     records: list[SessionRecord] = field(default_factory=list)
     context_ids: list[str] = field(default_factory=list)
+    _view_streams: dict[tuple[str, str], _TextChunks] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
 
     @classmethod
     def from_dict(cls, value: object) -> SessionState | None:
@@ -133,6 +154,7 @@ class SessionState:
         return cls(records=records, context_ids=list(context_ids))
 
     def to_dict(self) -> dict[str, Any]:
+        self._materialize_all_view_streams()
         return {
             "version": 1,
             "records": [record.to_dict() for record in self.records],
@@ -148,6 +170,7 @@ class SessionState:
         ]
 
     def visible_records(self) -> list[SessionRecord]:
+        self._materialize_all_view_streams()
         return [
             record
             for record in self.records
@@ -156,6 +179,7 @@ class SessionState:
 
     def subagent_views(self) -> list[dict[str, Any]]:
         """Return persisted read-only projections for the session's subagents."""
+        self._materialize_all_view_streams()
         return [
             copy.deepcopy(record.view.data)
             for record in self.records
@@ -238,6 +262,7 @@ class SessionState:
         )
         if record is None:
             return self.append_context(message, kind=kind, correlation_id=correlation_id)
+        self._materialize_record_view(record)
         record.model_message = copy.deepcopy(message)
         if record.id not in self.context_ids:
             self.context_ids.append(record.id)
@@ -255,6 +280,7 @@ class SessionState:
             for index, message in enumerate(messages):
                 self.set_context_message(index, message)
             return
+        old_ids = set(self.context_ids)
         remaining = list(self.context_ids)
         by_id = {record.id: record for record in self.records}
         new_ids: list[str] = []
@@ -274,9 +300,12 @@ class SessionState:
                 continue
             new_ids.append(self.append_record(kind="internal", model_message=safe_message))
         self.context_ids = new_ids
+        self._release_model_messages(old_ids - set(new_ids))
 
     def truncate_context(self, length: int) -> None:
-        self.context_ids = self.context_ids[:max(0, length)]
+        retained = self.context_ids[:max(0, length)]
+        self._release_model_messages(set(self.context_ids) - set(retained))
+        self.context_ids = retained
 
     def set_context_message(self, index: int, message: dict[str, Any]) -> None:
         record = self._record_by_id(self.context_ids[index])
@@ -293,18 +322,30 @@ class SessionState:
     ) -> str:
         record = self._find(correlation_id=correlation_id, kind=kind) if correlation_id else None
         if record is None:
-            return self.append_record(
+            stored_view = copy.deepcopy(view)
+            stream_values: dict[str, str] = {}
+            if merge:
+                for key in ("content", "thinking"):
+                    value = stored_view.data.get(key)
+                    if isinstance(value, str):
+                        stream_values[key] = value
+                        stored_view.data[key] = ""
+            record_id = self.append_record(
                 kind=kind,
-                view=view,
+                view=stored_view,
                 correlation_id=correlation_id,
                 timestamp=timestamp,
             )
+            for key, value in stream_values.items():
+                self._append_view_stream(record_id, key, value)
+            return record_id
         if not merge or record.view is None or record.view.kind != view.kind:
+            self._clear_record_view_streams(record.id)
             record.view = copy.deepcopy(view)
             return record.id
         for key, value in view.data.items():
             if key in {"content", "thinking"} and isinstance(value, str):
-                record.view.data[key] = str(record.view.data.get(key, "")) + value
+                self._append_view_stream(record.id, key, value)
             else:
                 record.view.data[key] = copy.deepcopy(value)
         return record.id
@@ -454,3 +495,49 @@ class SessionState:
         if record is None:
             raise KeyError(record_id)
         return record
+
+    def _append_view_stream(self, record_id: str, key: str, value: str) -> None:
+        stream_key = (record_id, key)
+        buffer = self._view_streams.get(stream_key)
+        if buffer is None:
+            record = self._record_by_id(record_id)
+            existing = ""
+            if record.view is not None:
+                current = record.view.data.get(key, "")
+                existing = current if isinstance(current, str) else str(current)
+                record.view.data[key] = ""
+            buffer = _TextChunks()
+            buffer.append(existing)
+            self._view_streams[stream_key] = buffer
+        buffer.append(value)
+
+    def _materialize_record_view(self, record: SessionRecord) -> None:
+        if record.view is None:
+            self._clear_record_view_streams(record.id)
+            return
+        for key in ("content", "thinking"):
+            buffer = self._view_streams.pop((record.id, key), None)
+            if buffer is not None:
+                record.view.data[key] = buffer.materialize()
+
+    def _materialize_all_view_streams(self) -> None:
+        if not self._view_streams:
+            return
+        by_id = {record.id: record for record in self.records}
+        for record_id, _key in list(self._view_streams):
+            record = by_id.get(record_id)
+            if record is not None:
+                self._materialize_record_view(record)
+            else:
+                self._clear_record_view_streams(record_id)
+
+    def _clear_record_view_streams(self, record_id: str) -> None:
+        self._view_streams.pop((record_id, "content"), None)
+        self._view_streams.pop((record_id, "thinking"), None)
+
+    def _release_model_messages(self, record_ids: set[str]) -> None:
+        if not record_ids:
+            return
+        for record in self.records:
+            if record.id in record_ids:
+                record.model_message = None

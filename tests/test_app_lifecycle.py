@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
 from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
 
+from src.agent.agent import Agent
 from src.app.app import AgentApp
+from src.mgr.session_state import SessionState
 from src.events.types import SubagentLifecycle
 from src.interfaces.agent_view_store import AgentViewStore
 
@@ -117,6 +121,104 @@ def test_work_task_cancellation_remains_a_turn_interrupt() -> None:
         assert event_bus.join_count == 1
         assert ui.cancel_count == 1
         assert ui.wait_count == 1
+
+    asyncio.run(scenario())
+
+
+def test_slow_interrupt_save_does_not_block_event_loop_and_is_awaited() -> None:
+    class SlowSessions:
+        def __init__(self) -> None:
+            self.saved = False
+            self.thread_id: int | None = None
+
+        def save_state(self, _session_id, _state) -> None:
+            self.thread_id = threading.get_ident()
+            time.sleep(0.12)
+            self.saved = True
+
+    async def scenario() -> None:
+        ui = _RecordingUI()
+        event_bus = _RecordingBus()
+        app = _app(ui, event_bus)
+        sessions = SlowSessions()
+        app.deps.session_mgr = sessions
+        app.deps.session_state = SessionState()
+        app.deps.session_id = "session"
+        main_thread = threading.get_ident()
+        beats = 0
+        running = True
+
+        async def heartbeat() -> None:
+            nonlocal beats
+            while running:
+                beats += 1
+                await asyncio.sleep(0.005)
+
+        heartbeat_task = asyncio.create_task(heartbeat())
+        started = time.monotonic()
+        await app._handle_interrupted_turn()
+        elapsed = time.monotonic() - started
+        running = False
+        await heartbeat_task
+
+        assert sessions.saved
+        assert sessions.thread_id != main_thread
+        assert elapsed >= 0.1
+        assert beats >= 5
+
+    asyncio.run(scenario())
+
+
+def test_agent_round_persistence_serializes_in_worker_thread() -> None:
+    class SlowSessions:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+            self.thread_ids: list[int] = []
+
+        def save_state(self, _session_id, _state) -> None:
+            self.thread_ids.append(threading.get_ident())
+            time.sleep(0.05)
+            self.calls.append("state")
+
+        def get_metadata(self, _session_id):
+            self.thread_ids.append(threading.get_ident())
+            return None
+
+        def save_metadata(self, _session_id, **_kwargs) -> None:
+            self.thread_ids.append(threading.get_ident())
+            self.calls.append("metadata")
+
+    async def scenario() -> None:
+        sessions = SlowSessions()
+        state = SessionState()
+        agent = object.__new__(Agent)
+        agent.is_subagent = False
+        agent.deps = SimpleNamespace(
+            session_mgr=sessions,
+            session_id="session",
+            session_state=state,
+        )
+        agent.history = [{"role": "user", "content": "hello"}]
+        agent.plan_active = False
+        main_thread = threading.get_ident()
+        beats = 0
+        running = True
+
+        async def heartbeat() -> None:
+            nonlocal beats
+            while running:
+                beats += 1
+                await asyncio.sleep(0.005)
+
+        heartbeat_task = asyncio.create_task(heartbeat())
+        await agent._persist_session("hello")
+        running = False
+        await heartbeat_task
+
+        assert sessions.calls == ["state", "metadata"]
+        assert sessions.thread_ids
+        assert all(thread_id != main_thread for thread_id in sessions.thread_ids)
+        assert beats >= 3
 
     asyncio.run(scenario())
 

@@ -15,7 +15,7 @@ from textual.content import Content
 from textual.geometry import Offset
 from textual.message import Message
 from textual.screen import Screen
-from textual.selection import SelectEnd, Selection, SelectStart, SelectState
+from textual.selection import SelectEnd, Selection
 from textual.containers import VerticalScroll
 from textual.widget import Widget
 from textual.widgets import ListItem, ListView, OptionList, Static, TextArea
@@ -265,64 +265,6 @@ class Composer(KeyboardTextArea):
                 self.move_cursor((0, 0))
                 return
         super().action_cursor_up(select)
-
-
-class HistoryPanel(VerticalScroll):
-    """支持尾部跟随和跨视口稳定选择的历史区。"""
-
-    FOCUS_ON_CLICK = False
-
-    def on_mount(self) -> None:
-        self.anchor()
-
-    def on_mouse_down(self, _event: events.MouseDown) -> None:
-        state = self.screen._select_state
-        if state is None or state.end is not None:
-            return
-        start = state.start
-        if start.container is not self and self not in start.container.ancestors:
-            return
-        self.release_anchor()
-        if start.container is self:
-            return
-        normalized_start = SelectStart(
-            container=self,
-            container_pointer_delta=state.screen_offset - self.region.offset,
-            container_initial_offset=self.region.offset,
-            container_initial_scroll_offset=self.scroll_offset,
-            content_widget=start.content_widget,
-            content_offset=start.content_offset,
-        )
-        self.screen._select_state = SelectState(state.screen_offset, normalized_start)
-
-    def watch_scroll_y(self, old_value: float, new_value: float) -> None:
-        super().watch_scroll_y(old_value, new_value)
-        scroll_delta = round(new_value) - round(old_value)
-        if not scroll_delta:
-            return
-        state = self.screen._select_state
-        if (
-            not self.screen._selecting
-            or state is None
-            or state.end is None
-            or state.start.container is not self
-        ):
-            return
-        start = state.start
-        adjusted_start = start._replace(
-            container_initial_scroll_offset=start.container_initial_scroll_offset
-            + Offset(0, scroll_delta * 2)
-        )
-        self.screen.set_reactive(
-            Screen._select_state,
-            state._replace(start=adjusted_start),
-        )
-        if not getattr(self.screen, "_selection_auto_scroll_step", False):
-            self.screen._update_select()
-
-    def resume_anchor_at_end(self) -> None:
-        if self.scroll_y >= self.max_scroll_y - 1:
-            self.anchor()
 
 
 class AgentList(ListView):

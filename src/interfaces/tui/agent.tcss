@@ -16,32 +16,11 @@ Screen > .screen--selection {
     scrollbar-size: 0 0;
 }
 
-#history Markdown {
-    margin-bottom: 1;
-}
-
-/* padding 而非 margin：margin 的空行归属容器（HistoryPanel），拖选跨条目时
-   端点落在这类间隙上会丢失选区；padding 的空行仍归条目本身，偏移被夹在行内。 */
-.history-static {
+#interaction-slot {
+    display: none;
     height: auto;
-    padding-bottom: 1;
-}
-
-.user-message {
-    height: auto;
-    margin-top: 1;
-    color: #76d7c4;
-}
-
-.stream-label {
-    height: auto;
-    margin-top: 1;
-    color: #76d7c4;
-    text-style: bold;
-}
-
-.thinking-output {
-    color: #8d989f;
+    max-height: 24;
+    background: ansi_default;
 }
 
 MarkdownFence {
@@ -184,6 +163,10 @@ MarkdownFence {
 
 .short #transient-zone {
     max-height: 10;
+}
+
+.short #interaction-slot {
+    max-height: 14;
 }
 
 .short #transcript-zone {

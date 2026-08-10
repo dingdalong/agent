@@ -149,6 +149,61 @@ def test_router_persists_and_restores_subagent_snapshot() -> None:
     asyncio.run(scenario())
 
 
+def test_router_exports_subagent_snapshot_only_at_end() -> None:
+    async def scenario() -> None:
+        state = SessionState()
+        store = AgentViewStore()
+        store.register_foreground("main-id", "main")
+        router = OutputRouter(_UI(), store, session_state=state)
+        exports = 0
+        original_export = store.export_subagent
+
+        def count_export(uuid: str):
+            nonlocal exports
+            exports += 1
+            return original_export(uuid)
+
+        store.export_subagent = count_export  # type: ignore[method-assign]
+        await router.dispatch(SubagentLifecycle(
+            timestamp=1.0,
+            source="subagent_mgr",
+            agent_uuid="worker-id",
+            agent_type="worker",
+            phase="start",
+        ))
+        for _ in range(1_000):
+            await router.dispatch(ResponseDelta(
+                timestamp=2.0,
+                source="model",
+                content="x",
+                caller_agent_type="worker",
+                caller_uuid="worker-id",
+            ))
+
+        assert exports == 0
+        assert state.subagent_views() == []
+        signature = store.transcript_signature("worker-id")
+        assert signature[0] == 1_000
+        assert signature[1] == 1_000
+
+        await router.dispatch(SubagentLifecycle(
+            timestamp=3.0,
+            source="subagent_mgr",
+            agent_uuid="worker-id",
+            agent_type="worker",
+            phase="end",
+            messages=[{"role": "assistant", "content": "x" * 1_000}],
+        ))
+
+        assert exports == 1
+        assert len(state.subagent_views()) == 1
+        assert state.subagent_views()[0]["transcript"] == [
+            {"kind": "response", "text": "x" * 1_000}
+        ]
+
+    asyncio.run(scenario())
+
+
 def test_compact_replaces_context_without_deleting_visible_chat() -> None:
     state = SessionState()
     user_id = state.append_user("问题", {"role": "user", "content": "问题"})
@@ -187,8 +242,59 @@ def test_same_length_compact_does_not_rebind_visible_records_positionally() -> N
 
     assert state.context_messages()[0]["content"] == "压缩摘要"
     original = next(record for record in state.records if record.id == user_id)
-    assert original.model_message == {"role": "user", "content": "原问题"}
+    assert original.model_message is None
     assert original.view.data == {"text": "原问题"}
+
+
+def test_stream_view_chunks_materialize_only_at_read_boundaries() -> None:
+    state = SessionState()
+    for _ in range(50_000):
+        state.record_event(ResponseDelta(
+            timestamp=2.0,
+            source="model",
+            content="x",
+            call_id="call-stream",
+        ))
+
+    record = state.records[0]
+    buffer = state._view_streams[(record.id, "content")]
+    assert record.view is not None
+    assert record.view.data["content"] == ""
+    assert len(buffer.chunks) == 50_000
+    assert buffer.length == 50_000
+
+    state.bind_model_message(
+        {"role": "assistant", "content": "x" * 50_000},
+        correlation_id="call-stream",
+        kind="assistant",
+    )
+
+    assert record.view.data["content"] == "x" * 50_000
+    assert not state._view_streams
+
+    serialized = SessionState()
+    serialized.record_event(ThinkingDelta(
+        timestamp=3.0,
+        source="model",
+        content="chunked thought",
+        call_id="call-serialize",
+    ))
+    payload = serialized.to_dict()
+    assert payload["records"][0]["view"]["data"]["thinking"] == "chunked thought"
+    assert not serialized._view_streams
+
+
+def test_truncate_context_releases_only_removed_model_payloads() -> None:
+    state = SessionState()
+    first = state.append_context({"role": "user", "content": "first"})
+    second = state.append_context({"role": "assistant", "content": "second"})
+
+    state.truncate_context(1)
+
+    by_id = {record.id: record for record in state.records}
+    assert state.context_ids == [first]
+    assert by_id[first].model_message is not None
+    assert by_id[second].model_message is None
 
 
 def test_session_manager_only_lists_valid_state_sessions_and_writes_no_legacy_files(tmp_path) -> None:

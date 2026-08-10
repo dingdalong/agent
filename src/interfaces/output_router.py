@@ -69,15 +69,14 @@ class OutputRouter:
         """
         self.store.record(event)
 
-        if self.session_state is not None:
-            agent_uuid = getattr(event, "agent_uuid", None)
-            if not isinstance(agent_uuid, str) or not agent_uuid:
-                agent_uuid = getattr(event, "caller_uuid", None)
-            foreground_uuid = self.store.foreground_uuid
-            if agent_uuid and agent_uuid != foreground_uuid:
-                snapshot = self.store.export_subagent(agent_uuid)
-                if snapshot is not None:
-                    self.session_state.record_subagent_snapshot(snapshot)
+        if (
+            self.session_state is not None
+            and isinstance(event, SubagentLifecycle)
+            and event.phase == "end"
+        ):
+            snapshot = self.store.export_subagent(event.agent_uuid)
+            if snapshot is not None:
+                self.session_state.record_subagent_snapshot(snapshot)
 
         if isinstance(event, (SubagentLifecycle, TaskStateChanged)):
             return

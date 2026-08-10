@@ -11,6 +11,7 @@ from typing import Any, get_args
 import uuid
 
 import pytest
+from rich.text import Text
 
 import src.events as events_package
 from src.agent.agent import Agent
@@ -1082,8 +1083,10 @@ def test_tty_partial_retry_prints_separator_and_countdown_uses_safe_category() -
             assert app._retry_attempt == 1
             assert app._retry_max == 3
             rendered = "\n".join(
-                getattr(child.render(), "plain", str(child.render()))
-                for child in app._history.children
+                entry.content.plain
+                if isinstance(entry.content, Text)
+                else entry.content
+                for entry in app._history.entries
             )
             assert "尝试 1/3 失败，将重试" in rendered
             assert "service" in rendered

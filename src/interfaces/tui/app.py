@@ -47,14 +47,14 @@ from src.interfaces.status_presenter import (
 from src.interfaces.turn_clock import TurnClock
 from src.tools.display import permission_line
 from src.interfaces.tui.diagnostics import TuiDiagnostics
-from src.interfaces.tui.dialogs import DialogResult, InlineWidget, InteractionCoordinator
+from src.interfaces.tui.dialogs import InlineWidget, InteractionCoordinator
+from src.interfaces.tui.history_log import HistoryEntry, HistoryLog
 from src.interfaces.tui.history_journal import PlainHistoryJournal
 from src.mgr.session_state import SessionRecord
 from src.interfaces.tui.widgets import (
 
     AgentList,
     Composer,
-    HistoryPanel,
     KeyboardListItem,
     NativeClipboard,
     SelectionScreen,
@@ -204,6 +204,7 @@ class AgentTuiApp(App[None]):
         self._round_agent_type: str | None = None
         self._round_agent_uuid: str | None = None
         self._chrome_dirty = False
+        self._activity_line_count = 0
         self._input_status_cache: str | None = None
         self._response_stream: Any = None
         self._thinking_stream: Any = None
@@ -249,7 +250,8 @@ class AgentTuiApp(App[None]):
         return bool(self._completion_matches)
 
     def compose(self) -> ComposeResult:
-        yield HistoryPanel(id="history")
+        yield HistoryLog(id="history")
+        yield Vertical(id="interaction-slot")
         with Vertical(id="transient-zone"):
             yield SelectionStatic("", id="activity", markup=False)
             with Vertical(id="transcript-zone"):
@@ -275,7 +277,8 @@ class AgentTuiApp(App[None]):
         return SelectionScreen(id="_default")
 
     async def on_mount(self) -> None:
-        self._history = self.query_one("#history", HistoryPanel)
+        self._history = self.query_one("#history", HistoryLog)
+        self._interaction_slot = self.query_one("#interaction-slot", Vertical)
         self._activity_widget = self.query_one("#activity", Static)
         self._transcript_zone = self.query_one("#transcript-zone", Vertical)
         self._transcript_header = self.query_one("#transcript-header", Static)
@@ -352,8 +355,25 @@ class AgentTuiApp(App[None]):
         self._update_separators()
         self._schedule_agent_refresh()
         self._schedule_transcript_refresh()
-        self._chrome_dirty = False
-        self.refresh_chrome()
+        if self._chrome_dirty:
+            self.refresh_chrome()
+        elif self._chrome_is_dynamic():
+            self._render_activity()
+            self._render_status()
+
+    def _chrome_is_dynamic(self) -> bool:
+        if self.viewing_agent_id:
+            snapshot = self.agent_view_store.agent_snapshot(self.viewing_agent_id)
+            return bool(snapshot is not None and snapshot.running)
+        if self.coordinator.input_active:
+            return self.agent_view_store.has_running_subagents()
+        return bool(
+            self._activity
+            or self._round_entries
+            or self._retry_deadline is not None
+            or self._turn_started is not None
+            or self.agent_view_store.has_running_subagents()
+        )
 
     def _update_separators(self) -> None:
         if not hasattr(self, "_separator_top"):
@@ -363,8 +383,8 @@ class AgentTuiApp(App[None]):
             return
         self._separator_width = width
         separator = "─" * width
-        self._separator_top.update(separator)
-        self._separator_bottom.update(separator)
+        self._separator_top.update(separator, layout=False)
+        self._separator_bottom.update(separator, layout=False)
 
     async def append_output(
         self,
@@ -373,13 +393,14 @@ class AgentTuiApp(App[None]):
         *,
         classes: str = "history-static",
     ) -> None:
-        if markdown and isinstance(message, str):
-            await self._history.mount(Markdown(message, classes=classes or None))
-        else:
-            message = _strip_trailing_newlines(message)
-            await self._history.mount(
-                SelectionStatic(message, classes=classes or None, markup=False)
-            )
+        message = _strip_trailing_newlines(message)
+        style, spacing = self._history_style(classes)
+        self._history.append_entry(
+            message,
+            markdown=markdown and isinstance(message, str),
+            style=style,
+            spacing=spacing,
+        )
         self.history_journal.append_entry(message)
 
     async def append_markdown(
@@ -388,14 +409,26 @@ class AgentTuiApp(App[None]):
         classes: str = "",
         *,
         stream_id: str | None = None,
-    ) -> Markdown:
-        widget = Markdown(source, classes=classes or None)
-        await self._history.mount(widget)
+    ) -> str:
+        style, spacing = self._history_style(classes)
         if stream_id is None:
+            entry_id = self._history.append_entry(
+                source,
+                markdown=True,
+                style=style,
+                spacing=spacing,
+            )
             self.history_journal.append_entry(source)
         else:
+            entry_id = self._history.begin_stream(
+                stream_id,
+                source,
+                markdown=True,
+                style=style,
+                spacing=spacing,
+            )
             self.history_journal.start_stream(stream_id, source)
-        return widget
+        return entry_id
 
     async def append_user(self, text: str) -> None:
         lines = text.split("\n")
@@ -403,10 +436,21 @@ class AgentTuiApp(App[None]):
             f"› {line}" if index == 0 else f"  {line}"
             for index, line in enumerate(lines)
         )
-        await self._history.mount(
-            SelectionStatic(rendered, classes="user-message", markup=False)
+        self._history.append_entry(
+            rendered,
+            style="#76d7c4",
+            spacing=1,
         )
         self.history_journal.append_entry(rendered)
+
+    @staticmethod
+    def _history_style(classes: str) -> tuple[str | None, int]:
+        styles = {
+            "stream-label": ("bold #76d7c4", 0),
+            "thinking-output": ("#8d989f", 1),
+            "user-message": ("#76d7c4", 1),
+        }
+        return styles.get(classes, (None, 1))
 
     async def record_request_context(self, request: MenuRequest) -> None:
         if isinstance(request, InputMenu):
@@ -432,13 +476,19 @@ class AgentTuiApp(App[None]):
             await self.append_output(prompt, markdown=getattr(request, "markdown", False))
 
     async def mount_inline_widget(self, widget: InlineWidget) -> None:
-        """将内嵌表单挂载到聊天历史末尾。"""
+        """将唯一活动表单挂载到临时交互槽。"""
         await self.flush_round()
         self._session_elapsed += self._turn_elapsed(time.monotonic())
-        await self._history.mount(widget)
-        self.call_after_refresh(lambda: self._history.scroll_end(animate=True))
+        await self._interaction_slot.remove_children()
+        await self._interaction_slot.mount(widget)
+        self._interaction_slot.display = True
         self.sync_input_state()
         self.call_after_refresh(self.restore_focus)
+
+    async def unmount_inline_widget(self, widget: InlineWidget) -> None:
+        if widget.is_mounted:
+            await widget.remove()
+        self._interaction_slot.display = False
 
     async def begin_input(self, request: InputMenu) -> None:
         await self.flush_round()
@@ -527,6 +577,7 @@ class AgentTuiApp(App[None]):
         self._render_completion()
         self.sync_input_state()
         self._sync_agent_list_visibility()
+        self._chrome_dirty = False
 
     def _render_activity(self) -> None:
         task_snapshot = self.agent_view_store.task_snapshot()
@@ -538,6 +589,7 @@ class AgentTuiApp(App[None]):
         )
         self._activity_widget.display = visible
         if not visible:
+            self._activity_line_count = 0
             return
         now = time.monotonic()
         frame = _SPINNER[int(now * 10) % len(_SPINNER)]
@@ -618,7 +670,12 @@ class AgentTuiApp(App[None]):
             full_content = base_content
 
         if full_content:
-            self._activity_widget.update(full_content)
+            line_count = full_content.count("\n") + 1
+            self._activity_widget.update(
+                full_content,
+                layout=line_count != self._activity_line_count,
+            )
+            self._activity_line_count = line_count
 
     def _render_status(self) -> None:
         now = time.monotonic()
@@ -677,7 +734,7 @@ class AgentTuiApp(App[None]):
         if line == self._input_status_cache:
             return
         self._input_status_cache = line
-        self._input_status.update(Text(line))
+        self._input_status.update(Text(line), layout=False)
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
         if not hasattr(self, "_composer") or event.text_area is not self._composer:
@@ -841,7 +898,10 @@ class AgentTuiApp(App[None]):
             for item, snapshot in zip(self._agent_list.children, snapshots):
                 label = next(iter(item.query(Static)), None)
                 if label is not None:
-                    label.update(snapshot.agent_type if snapshot.is_main else present_agent(snapshot))
+                    label.update(
+                        snapshot.agent_type if snapshot.is_main else present_agent(snapshot),
+                        layout=False,
+                    )
         self._sync_agent_list_visibility()
 
     def _sync_agent_list_visibility(self) -> None:
@@ -964,26 +1024,7 @@ class AgentTuiApp(App[None]):
 
     def _current_transcript_signature(self, uuid: str | None = None) -> tuple[Any, ...]:
         uuid = uuid if uuid is not None else self.viewing_agent_id or ""
-        messages = self.agent_view_store.transcript_messages(uuid)
-        if messages:
-            diagnostics = [
-                segment
-                for segment in self.agent_view_store.transcript_segments(uuid)
-                if segment[0] in {"retry", "error"}
-            ]
-            return (
-                uuid,
-                "messages",
-                len(messages),
-                sum(len(str(message)) for message in messages),
-                len(diagnostics),
-                sum(len(text) for _kind, text in diagnostics),
-            )
-        # O(1)：只检查 deque 尾部，流式期间只有最后一个 segment 在增长
-        count, tail = self.agent_view_store.transcript_tail(uuid)
-        if tail is not None:
-            return (uuid, "segments", count, tail[0], len(tail[1]))
-        return (uuid, "segments", 0)
+        return (uuid, *self.agent_view_store.transcript_signature(uuid))
 
     async def _request_transcript_render(
         self,
@@ -1334,7 +1375,6 @@ class AgentTuiApp(App[None]):
         )
 
     async def on_response_delta(self, event: ResponseDelta, content: str) -> None:
-        follow_tail = self._history.scroll_y >= self._history.max_scroll_y - 1
         self._set_current_agent(event.caller_agent_type, event.caller_uuid)
         self._set_activity("回应中")
         if self._response_stream is None:
@@ -1342,17 +1382,12 @@ class AgentTuiApp(App[None]):
                 f"› {self._response_prefix(event)}",
                 classes="stream-label",
             )
-            widget = await self.append_markdown("", stream_id="response")
-            self._response_stream = Markdown.get_stream(widget)
-        await self._response_stream.write(content)
+            await self.append_markdown("", stream_id="response")
+            self._response_stream = "response"
+        self._history.append_stream("response", content)
         self.history_journal.append_stream("response", content)
-        if follow_tail:
-            self.call_after_refresh(
-                lambda: self._history.scroll_end(animate=False, immediate=True)
-            )
 
     async def on_thinking_delta(self, event: ThinkingDelta, content: str) -> None:
-        follow_tail = self._history.scroll_y >= self._history.max_scroll_y - 1
         self._set_current_agent(event.caller_agent_type, event.caller_uuid)
         self._set_activity("思考中")
         if self._thinking_stream is None:
@@ -1360,28 +1395,24 @@ class AgentTuiApp(App[None]):
                 f"› {self._thinking_prefix(event)}",
                 classes="stream-label",
             )
-            widget = await self.append_markdown(
+            await self.append_markdown(
                 "",
                 classes="thinking-output",
                 stream_id="thinking",
             )
-            self._thinking_stream = Markdown.get_stream(widget)
-        await self._thinking_stream.write(content)
+            self._thinking_stream = "thinking"
+        self._history.append_stream("thinking", content)
         self.history_journal.append_stream("thinking", content)
-        if follow_tail:
-            self.call_after_refresh(
-                lambda: self._history.scroll_end(animate=False, immediate=True)
-            )
 
     async def end_response(self) -> None:
         if self._response_stream is not None:
-            await self._response_stream.stop()
+            self._history.end_stream("response")
             self._response_stream = None
         self.history_journal.end_stream("response")
 
     async def end_thinking(self) -> None:
         if self._thinking_stream is not None:
-            await self._thinking_stream.stop()
+            self._history.end_stream("thinking")
             self._thinking_stream = None
         self.history_journal.end_stream("thinking")
 
@@ -1503,59 +1534,52 @@ class AgentTuiApp(App[None]):
         if not self._round_entries:
             return
         for entry in self._round_entries:
-            text = Text()
-            if entry.status == "running":
-                # 中断态
-                title = self._entry_title(entry)
-                text.append(f"⋯ {title}", style="bright_black")
-                text.append("  已中断", style="bright_black")
-                await self.append_output(text)
-                continue
-            ok = entry.status == "success"
-            mark = "✔" if ok else "✘"
-            title = self._entry_title(entry)
-            title_style = "green" if ok else "red"
-
-            # 标题行：{mark} {title}  右对齐耗时
-            text.append(f"{mark} {title}", style=title_style)
-            text.append(f"  ({entry.duration:.2f}s)", style="bright_black")
-
-            # 参数内容（来自 start_display）
-            start_content = self._display_content(entry.start_display)
-            if start_content:
-                text.append("\n")
-                for line in start_content.splitlines():
-                    text.append(f"  {line}\n", style="bright_black")
-
-            # 结果内容
-            result_display = entry.result_display
-            if result_display is not None and hasattr(result_display, "content_type"):
-                if result_display.content_type == "diff" and result_display.content:
-                    text.append("  ─────\n", style="bright_black")
-                    for line in result_display.content.splitlines():
-                        stripped = line.lstrip()
-                        if stripped.startswith("+ "):
-                            text.append(f"{line}\n", style="green on #1a2e1a")
-                        elif stripped.startswith("- "):
-                            text.append(f"{line}\n", style="red on #2e1a1a")
-                        else:
-                            text.append(f"{line}\n", style="bright_black")
-                elif result_display.content:
-                    text.append("  ─────\n", style="bright_black")
-                    for line in result_display.content.splitlines()[:20]:
-                        text.append(f"  {line}\n", style="bright_black" if ok else "red")
-            elif not ok:
-                # 降级：无 display 时用 preview
-                preview_lines = entry.preview.splitlines()
-                if preview_lines:
-                    text.append("\n")
-                    for line in preview_lines[:5]:
-                        text.append(f"  {line}\n", style="red")
-
-            await self.append_output(text)
+            await self.append_output(self._round_entry_text(entry))
         self._round_entries = []
         self._round_agent_type = None
         self._round_agent_uuid = None
+
+    def _round_entry_text(self, entry: RoundEntry) -> Text:
+        text = Text()
+        if entry.status == "running":
+            title = self._entry_title(entry)
+            text.append(f"⋯ {title}  已中断", style="bright_black")
+            return text
+        ok = entry.status == "success"
+        mark = "✔" if ok else "✘"
+        text.append(
+            f"{mark} {self._entry_title(entry)}",
+            style="green" if ok else "red",
+        )
+        text.append(f"  ({entry.duration:.2f}s)", style="bright_black")
+        start_content = self._display_content(entry.start_display)
+        if start_content:
+            text.append("\n")
+            for line in start_content.splitlines():
+                text.append(f"  {line}\n", style="bright_black")
+        result_display = entry.result_display
+        if result_display is not None and hasattr(result_display, "content_type"):
+            if result_display.content_type == "diff" and result_display.content:
+                text.append("  ─────\n", style="bright_black")
+                for line in result_display.content.splitlines():
+                    stripped = line.lstrip()
+                    if stripped.startswith("+ "):
+                        text.append(f"{line}\n", style="green on #1a2e1a")
+                    elif stripped.startswith("- "):
+                        text.append(f"{line}\n", style="red on #2e1a1a")
+                    else:
+                        text.append(f"{line}\n", style="bright_black")
+            elif result_display.content:
+                text.append("  ─────\n", style="bright_black")
+                for line in result_display.content.splitlines()[:20]:
+                    text.append(f"  {line}\n", style="bright_black" if ok else "red")
+        elif not ok:
+            preview_lines = entry.preview.splitlines()
+            if preview_lines:
+                text.append("\n")
+                for line in preview_lines[:5]:
+                    text.append(f"  {line}\n", style="red")
+        return text
 
     @staticmethod
     def _entry_title(entry: RoundEntry) -> str:
@@ -1654,13 +1678,29 @@ class AgentTuiApp(App[None]):
         self.refresh_chrome()
 
     async def replace_session_history(self, records: list[SessionRecord]) -> None:
-        """清除当前聊天并用 SessionRecord.view 投影重新渲染。"""
+        """把 SessionRecord.view 批量转换成单控件历史源。"""
         await self.end_thinking()
         await self.end_response()
         await self.flush_round()
-        await self._history.remove_children()
-        self.history_journal.clear()
         self._round_entries.clear()
+        entries: list[HistoryEntry] = []
+
+        def add(
+            record: SessionRecord,
+            content: str | Text,
+            *,
+            markdown: bool = False,
+            style: str | None = None,
+            spacing: int = 1,
+        ) -> None:
+            content = _strip_trailing_newlines(content)
+            entries.append(HistoryEntry(
+                content,
+                markdown=markdown and isinstance(content, str),
+                style=style,
+                spacing=spacing,
+                id=f"{record.id}:{len(entries)}",
+            ))
 
         for record in records:
             view = record.view
@@ -1668,9 +1708,15 @@ class AgentTuiApp(App[None]):
                 continue
             data = view.data
             if view.kind == "user":
-                await self.append_user(str(data.get("text", "")))
+                lines = str(data.get("text", "")).split("\n")
+                rendered = "\n".join(
+                    f"› {line}" if index == 0 else f"  {line}"
+                    for index, line in enumerate(lines)
+                )
+                add(record, rendered, style="#76d7c4")
             elif view.kind == "output":
-                await self.append_output(
+                add(
+                    record,
                     str(data.get("content", "")),
                     markdown=bool(data.get("markdown", False)),
                 )
@@ -1678,28 +1724,26 @@ class AgentTuiApp(App[None]):
                 thinking = str(data.get("thinking", ""))
                 content = str(data.get("content", ""))
                 if thinking:
-                    await self.append_output("› 思考", classes="stream-label")
-                    await self.append_markdown(thinking, classes="thinking-output")
+                    add(record, "› 思考", style="bold #76d7c4", spacing=0)
+                    add(record, thinking, markdown=True, style="#8d989f")
                 if content:
-                    await self.append_output("› 助手：", classes="stream-label")
-                    await self.append_markdown(content)
+                    add(record, "› 助手：", style="bold #76d7c4", spacing=0)
+                    add(record, content, markdown=True)
                 if data.get("event_type") == "llm_call_failed":
-                    await self.append_output(
-                        Text(
-                            f"✘ LLM 调用失败 [{data.get('error_kind', '')}] "
-                            f"{data.get('safe_message', '')}",
-                            style="red",
-                        )
-                    )
+                    add(record, Text(
+                        f"✘ LLM 调用失败 [{data.get('error_kind', '')}] "
+                        f"{data.get('safe_message', '')}",
+                        style="red",
+                    ))
                 elif data.get("event_type") == "llm_retrying" and data.get("partial"):
-                    await self.append_output(Text(
+                    add(record, Text(
                         f"⚠ 尝试 {data.get('attempt', 0)}/{data.get('max_attempts', 0)} "
                         f"失败，将重试 [{data.get('error_kind', '')}] "
                         f"{data.get('safe_message', '')}",
                         style="yellow",
                     ))
                 elif data.get("event_type") == "llm_length_retrying":
-                    await self.append_output(Text(
+                    add(record, Text(
                         f"⚠ 输出截断（{data.get('truncation_kind', '')}）"
                         f" ({data.get('attempt', 0)}/{data.get('max_attempts', 0)})",
                         style="yellow",
@@ -1707,47 +1751,61 @@ class AgentTuiApp(App[None]):
             elif view.kind == "tool":
                 started = data.get("started", {})
                 completed = data.get("completed", {})
+                started = started if isinstance(started, dict) else {}
+                completed = completed if isinstance(completed, dict) else {}
                 tool_name = started.get("tool_name") or completed.get("tool_name") or "tool"
                 tool_call_id = started.get("tool_call_id") or completed.get("tool_call_id") or ""
                 start_display = started.get("display")
                 result_display = completed.get("display")
-                await self.on_tool_call_started(ToolCallStarted(
-                    timestamp=float(started.get("timestamp", record.timestamp)),
-                    source=str(started.get("source", "tools")),
+                round_entry = RoundEntry(
                     tool_name=str(tool_name),
                     tool_call_id=str(tool_call_id),
                     detail=str(started.get("detail", "")),
-                    display=SimpleNamespace(**start_display) if isinstance(start_display, dict) else None,
-                    caller_agent_type=started.get("caller_agent_type"),
-                    caller_uuid=self.agent_view_store.foreground_uuid,
-                ))
-                await self.on_tool_call_completed(ToolCallCompleted(
-                    timestamp=float(completed.get("timestamp", record.timestamp)),
-                    source=str(completed.get("source", "tools")),
-                    tool_name=str(tool_name),
-                    tool_call_id=str(tool_call_id),
-                    status=completed.get("status", "error"),
-                    duration_seconds=float(completed.get("duration_seconds", 0.0) or 0.0),
-                    result_preview=str(completed.get("result_preview", "")),
-                    display=SimpleNamespace(**result_display) if isinstance(result_display, dict) else None,
-                    caller_uuid=self.agent_view_store.foreground_uuid,
-                ))
-                await self.flush_round()
+                    started_monotonic=0.0,
+                    status=(
+                        "success"
+                        if completed.get("status") == "success"
+                        else "error" if completed else "running"
+                    ),
+                    preview=str(completed.get("result_preview", "")),
+                    duration=float(completed.get("duration_seconds", 0.0) or 0.0),
+                    start_display=(
+                        SimpleNamespace(**start_display)
+                        if isinstance(start_display, dict)
+                        else None
+                    ),
+                    result_display=(
+                        SimpleNamespace(**result_display)
+                        if isinstance(result_display, dict)
+                        else None
+                    ),
+                )
+                add(record, self._round_entry_text(round_entry))
             elif view.kind == "event":
                 event_type = data.get("event_type")
                 if event_type == "compact_delta":
-                    await self.append_output(
-                        Text(f"[compact] {data.get('content', 'context')}", style="bright_black")
+                    add(
+                        record,
+                        Text(
+                            f"[compact] {data.get('content', 'context')}",
+                            style="bright_black",
+                        ),
                     )
                 elif event_type == "permission_notice":
-                    await self.append_output(
+                    add(
+                        record,
                         permission_line(
                             str(data.get("status", "allow")),
                             str(data.get("tool_name", "")),
                             str(data.get("detail", "")),
                             str(data.get("decision_source", "")),
-                        )
+                        ),
                     )
+        self._history.replace_entries(entries)
+        await self._history.wait_for_reflow()
+        self.history_journal.clear()
+        for entry in entries:
+            self.history_journal.append_entry(entry.content)
         self.reload_session_state()
 
     def refresh_input_history(self) -> None:
