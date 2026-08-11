@@ -118,7 +118,7 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 | 方法 | 关键参数 | 返回 | 作用 |
 |---|---|---|---|
 | `load_models` (async) | — | `None` | 并发发现模型；单个 provider 失败时记录 `provider_errors`，仅在静态 `models` 非空时回退；跨 provider 的同名模型归属冲突会抛配置错误 |
-| `reconfigure` (async) | — | `None` | 清理旧 provider/model 缓存，重新解析配置、发现模型并校验默认模型 |
+| `reconfigure` (async) | — | `None` | 重解析配置 → 丢弃 provider 实例缓存 → 重跑发现 → 校验默认模型；任一步失败保留上一次的模型表与 `provider_errors`，配置校验失败时连实例缓存都不丢弃 |
 | `resolve_model` | `model: str \| None` | `str` | 解析顺序：`None`→`"default"`→CC 别名→config 别名→精确匹配→子串模糊匹配（多个取最短）→回退 `default` |
 | `ensure_default_available` | — | `None` | 启动前精确校验配置的默认模型；不可用时携安全化的 provider 发现错误抛 `ModelUnavailableError`，不切换到其他 provider |
 | `get` | `model: str \| None` | `LLMProvider` | 解析并返回缓存的 provider 实例（未知模型抛 `ValueError`） |

@@ -235,11 +235,24 @@ class LLMMgr:
         self._cache.clear()
 
     async def reconfigure(self) -> None:
-        """重新读取运行配置并重建 provider/model 缓存。"""
-        self._model_to_provider.clear()
-        self.provider_errors.clear()
-        self._cache.clear()
+        """重读运行配置并重建 provider/model 状态，失败时保留上一次的模型表与发现错误。
+
+        Returns:
+            None。
+
+        Raises:
+            LLMConfigurationError: 新的 llm.* 或 llm_provider 配置非法。
+            ModelUnavailableError: 重新发现后默认模型不可用。
+        """
+        # 必须最先执行：__post_init__ 的检查全部先于赋值，非法 llm.* 配置既不会留下半套
+        # 标量字段，也不会清掉 _cache，manager 保持完整可用。
         self.__post_init__()
+        # provider 实例内嵌旧的 api_key/base_url/timeout/concurrency/user_agent，必须无
+        # 条件整体丢弃，否则旧端点跨会话存活。代价是 load_models() 失败时 _cache 已空而
+        # 模型表仍在，此后 get() 会按新配置重建旧模型名的 provider。
+        self._cache.clear()
+        # 不可在此预清空 _model_to_provider / provider_errors：load_models() 以局部变量
+        # 原子换入，发现失败或跨 provider 冲突时旧状态原样保留。
         await self.load_models()
         self.ensure_default_available()
 

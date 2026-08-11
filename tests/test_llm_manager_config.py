@@ -1007,6 +1007,152 @@ def test_successful_reload_replaces_models_and_clears_cache(
     assert manager._cache == {}
 
 
+def test_reconfigure_keeps_previous_state_when_discovery_conflicts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """reconfigure 发现冲突时应保留上一次的模型表与发现错误。
+
+    Args:
+        monkeypatch: pytest 属性替换工具。
+
+    Returns:
+        None。
+    """
+    scripts = {"alpha": ["alpha-model"], "zeta": ["zeta-model"]}
+
+    def provider_class(provider_name: str) -> type:
+        """为 provider 名构造读取可变脚本的类型。
+
+        Args:
+            provider_name: provider 配置名。
+
+        Returns:
+            返回当前脚本模型列表的 provider 类型。
+        """
+        class ScriptedProvider:
+            """返回当前 provider 脚本模型的 provider。"""
+
+            @classmethod
+            async def list_models(cls, **kwargs: Any) -> list[str]:
+                """返回当前脚本模型列表。
+
+                Args:
+                    kwargs: 模型发现参数。
+
+                Returns:
+                    当前 provider 的模型列表副本。
+                """
+                return list(scripts[provider_name])
+
+        return ScriptedProvider
+
+    config = _base_config()
+    config["llm"]["default"] = "alpha-model"
+    config["llm_provider"] = {
+        name: {"base_url": f"https://{name}.example.test/v1"}
+        for name in scripts
+    }
+    monkeypatch.setattr("src.mgr.llm_mgr.get_provider", provider_class)
+    manager = _manager(config)
+    asyncio.run(manager.load_models())
+    previous_errors = dict(manager.provider_errors)
+    scripts["alpha"] = ["shared-model"]
+    scripts["zeta"] = ["shared-model"]
+
+    with pytest.raises(LLMConfigurationError):
+        asyncio.run(manager.reconfigure())
+
+    assert manager.list_models() == ["alpha-model", "zeta-model"]
+    assert manager.provider_errors == previous_errors
+
+
+def test_reconfigure_keeps_everything_when_llm_config_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """llm.* 配置非法时 reconfigure 必须先于任何状态写入失败。
+
+    校验 __post_init__ 排在 _cache.clear() 之前：此时连 provider 实例缓存都不应丢弃。
+
+    Args:
+        monkeypatch: pytest 属性替换工具。
+
+    Returns:
+        None。
+    """
+    class StubProvider:
+        """返回固定模型列表的 provider。"""
+
+        @classmethod
+        async def list_models(cls, **kwargs: Any) -> list[str]:
+            """返回固定模型列表。
+
+            Args:
+                kwargs: 模型发现参数。
+
+            Returns:
+                固定模型列表。
+            """
+            return ["model-a"]
+
+    monkeypatch.setattr("src.mgr.llm_mgr.get_provider", lambda name: StubProvider)
+    config = _base_config()
+    manager = _manager(config)
+    asyncio.run(manager.load_models())
+    cached = object()
+    manager._cache["model-a"] = cached
+    previous_errors = dict(manager.provider_errors)
+    _set_path(config, "llm.concurrency", 0)
+
+    with pytest.raises(LLMConfigurationError):
+        asyncio.run(manager.reconfigure())
+
+    assert manager.list_models() == ["model-a"]
+    assert manager.provider_errors == previous_errors
+    assert manager._cache == {"model-a": cached}
+
+
+def test_reconfigure_replaces_state_and_clears_cache_on_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """reconfigure 成功时应替换模型表并清空旧 provider 实例缓存。
+
+    Args:
+        monkeypatch: pytest 属性替换工具。
+
+    Returns:
+        None。
+    """
+    api_models = ["model-a"]
+
+    class ReloadProvider:
+        """返回可变模型列表的 provider。"""
+
+        @classmethod
+        async def list_models(cls, **kwargs: Any) -> list[str]:
+            """返回当前模型列表。
+
+            Args:
+                kwargs: 模型发现参数。
+
+            Returns:
+                当前模型列表副本。
+            """
+            return list(api_models)
+
+    monkeypatch.setattr("src.mgr.llm_mgr.get_provider", lambda name: ReloadProvider)
+    config = _base_config()
+    manager = _manager(config)
+    asyncio.run(manager.load_models())
+    manager._cache["model-a"] = object()
+    api_models[:] = ["model-b"]
+    _set_path(config, "llm.default", "model-b")
+
+    asyncio.run(manager.reconfigure())
+
+    assert manager.list_models() == ["model-b"]
+    assert manager._cache == {}
+
+
 def test_unknown_discovery_error_logging_never_contains_secret(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
