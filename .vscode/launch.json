@@ -10,6 +10,7 @@
             "request": "launch",
             "program": "main.py",
             "console": "integratedTerminal",
+            "onTerminate": "KeyboardInterrupt",
             "env": {
                 "AGENT_WORKDIR": "/Users/dingdalong/agent-workspace"
             }
