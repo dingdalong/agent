@@ -51,7 +51,6 @@ class AgentApp:
             await asyncio.sleep(0)
 
             agent = await self.reset_session(source="startup")
-            await self.deps.event_bus.request_output(self._startup_banner())
             while True:
                 result = await self._run_agent_turn(agent)
                 if result is None:
@@ -302,6 +301,8 @@ class AgentApp:
                     if replace_state is not None:
                         await replace_state(self.deps.session_state)
                     await self._run_session_start_hooks(source=source)
+                    if event_bus is not None:
+                        await event_bus.request_output(self._startup_banner())
                     return agent
                 finally:
                     if event_bus is not None:

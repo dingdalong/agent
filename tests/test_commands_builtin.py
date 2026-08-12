@@ -287,7 +287,7 @@ def test_clear_resets_session_and_returns_new_agent() -> None:
     assert isinstance(result, CommandResult)
     assert result.new_agent is new_agent
     assert calls == ["clear"]
-    assert bus.outputs == ["上下文已清理，所有组件已重载。\n"]
+    assert bus.outputs == []
 
 
 # ── /agents ──────────────────────────────────────────────────────────

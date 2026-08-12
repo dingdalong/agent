@@ -30,7 +30,7 @@ class CommandAppServices(Protocol):
     agent_view_store: "AgentViewStore"
 
     async def reset_session(self, *, source: str = "clear") -> "Agent":
-        """重置会话并返回新的前台 Agent。"""
+        """重置会话、输出新会话 Banner，并返回新的前台 Agent。"""
         ...
 
     async def resume_session(self, result: object) -> tuple["Agent", str]:

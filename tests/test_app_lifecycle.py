@@ -1,16 +1,18 @@
-"""AgentApp 取消与退出生命周期回归测试。"""
+"""AgentApp 会话、取消与退出生命周期回归测试。"""
 
 from __future__ import annotations
 
 import asyncio
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
 from src.agent.agent import Agent
+from src.agent.states import RunResult
 from src.app.app import AgentApp
 from src.mgr.session_state import SessionState
 from src.events.types import SubagentLifecycle
@@ -71,6 +73,178 @@ class _FinishOnCancellationAgent(_BlockingAgent):
                 return
         finally:
             self.finished.set()
+
+
+class _SessionUI:
+    def __init__(self, order: list[str]) -> None:
+        self.order = order
+
+    async def start(self) -> None:
+        self.order.append("ui_start")
+
+    async def stop(self) -> None:
+        self.order.append("ui_stop")
+
+    @asynccontextmanager
+    async def reset_session_interactions(self):
+        self.order.append("ui_gate")
+        yield
+
+    async def replace_session_state(self, _state: SessionState) -> None:
+        self.order.append("replace")
+
+
+class _SessionBus:
+    def __init__(self, order: list[str]) -> None:
+        self.order = order
+        self.outputs: list[object] = []
+
+    @contextmanager
+    def reject_ui_requests(self):
+        self.order.append("bus_gate")
+        yield
+
+    async def join(self) -> None:
+        self.order.append("join")
+
+    async def request_output(self, content: object) -> None:
+        self.outputs.append(content)
+        self.order.append("banner")
+
+    def close(self) -> None:
+        self.order.append("close")
+
+
+class _SessionHooks:
+    def __init__(self, order: list[str]) -> None:
+        self.order = order
+
+    def reload(self) -> None:
+        self.order.append("hooks_reload")
+
+    async def run_event(self, event: str, source: str, _payload: dict, **_kwargs):
+        self.order.append(f"hook:{event}:{source}")
+        return SimpleNamespace(additional_context=[])
+
+
+class _ReloadingRoleMgr:
+    role_name = "old-role"
+    manifest = SimpleNamespace(
+        model="old-alias",
+        reasoning_effort=None,
+        description="old description",
+        start_in_plan_mode=False,
+        features=None,
+    )
+
+    def __init__(self, order: list[str]) -> None:
+        self.order = order
+
+    def reload(self) -> None:
+        self.order.append("role_reload")
+        self.role_name = "reloaded-role"
+        self.manifest = SimpleNamespace(
+            model="reloaded-alias",
+            reasoning_effort=None,
+            description="reloaded description",
+            start_in_plan_mode=True,
+            features=None,
+        )
+
+
+class _ReloadingLLMMgr:
+    def __init__(self, order: list[str]) -> None:
+        self.order = order
+        self.model = "old-model"
+
+    async def reconfigure(self) -> None:
+        self.order.append("llm_reconfigure")
+        self.model = "reloaded-model"
+
+    def get(self, _model: str | None):
+        return SimpleNamespace(model=self.model, reasoning_effort="high")
+
+
+def _session_app(order: list[str]) -> tuple[AgentApp, _SessionBus]:
+    bus = _SessionBus(order)
+    deps = SimpleNamespace(
+        ui=_SessionUI(order),
+        event_bus=bus,
+        hooks_mgr=_SessionHooks(order),
+        trust_gate=None,
+        session_id="",
+        session_state=SessionState(),
+        session_mgr=None,
+        session_context=[],
+        config_mgr=SimpleNamespace(project_trusted=False, environment={}),
+        data_guard=None,
+        global_dir=None,
+        workdir="/workspace",
+        mcp_mgr=None,
+        memory_mgr=None,
+        tools_mgr=None,
+        plugin_mgr=None,
+        plan_mgr=None,
+        role_mgr=_ReloadingRoleMgr(order),
+        llm_mgr=_ReloadingLLMMgr(order),
+        command_mgr=None,
+        plan_mode_controller=None,
+    )
+    output_router = SimpleNamespace(
+        bind_session_state=lambda _state: order.append("bind_state")
+    )
+    return AgentApp(deps, AgentViewStore(), output_router), bus
+
+
+def test_run_outputs_startup_banner_once() -> None:
+    order: list[str] = []
+    app, bus = _session_app(order)
+    new_agent = SimpleNamespace(uuid="startup-agent", agent_type="main")
+
+    async def consume_events() -> None:
+        await asyncio.Event().wait()
+
+    async def finish_turn(_agent) -> RunResult:
+        return RunResult(exit_requested=True)
+
+    with (
+        patch("src.app.app.Agent.from_manifest", return_value=new_agent),
+        patch.object(AgentApp, "_install_plan_mode_controller"),
+        patch.object(app, "_consume_events", new=consume_events),
+        patch.object(app, "_run_agent_turn", new=finish_turn),
+    ):
+        asyncio.run(app.run())
+
+    assert len(bus.outputs) == 1
+    banner = bus.outputs[0].plain
+    assert "old-model high" in banner
+    assert "old-role  old description" in banner
+    assert "Plan  inactive" in banner
+    assert order.index("replace") < order.index("hook:SessionStart:startup")
+    assert order.index("hook:SessionStart:startup") < order.index("banner")
+    assert order.index("banner") < order.index("join", order.index("banner"))
+
+
+def test_clear_outputs_one_banner_with_reloaded_session_details() -> None:
+    order: list[str] = []
+    app, bus = _session_app(order)
+    new_agent = SimpleNamespace(uuid="clear-agent", agent_type="main")
+
+    with (
+        patch("src.app.app.Agent.from_manifest", return_value=new_agent),
+        patch.object(AgentApp, "_install_plan_mode_controller"),
+    ):
+        assert asyncio.run(app.reset_session(source="clear")) is new_agent
+
+    assert len(bus.outputs) == 1
+    banner = bus.outputs[0].plain
+    assert "reloaded-model high" in banner
+    assert "reloaded-role  reloaded description" in banner
+    assert "Plan  active" in banner
+    assert "/workspace" in banner
+    assert order.index("replace") < order.index("hook:SessionStart:clear")
+    assert order.index("hook:SessionStart:clear") < order.index("banner")
+    assert order.index("banner") < order.index("join", order.index("banner"))
 
 
 def _app(

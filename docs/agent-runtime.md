@@ -4,11 +4,11 @@
 
 ## 1. `AgentApp` 外层 REPL
 
-`AgentApp.run()` 先启动 UI 与事件消费者，输出启动信息并创建主 Agent，随后持续调用 `_run_agent_turn()`。Agent 内部可完成多轮输入；只有退出或上抛命令才返回给应用层。`/clear` 重建会话，`/resume` 切换会话，`/agents` 复用当前 Agent 浏览子 agent 记录。
+`AgentApp.run()` 先启动 UI 与事件消费者，再通过 `reset_session(source="startup")` 创建主 Agent 并输出启动 Banner，随后持续调用 `_run_agent_turn()`。Agent 内部可完成多轮输入；只有退出或上抛命令才返回给应用层。`/clear` 通过同一重建流程再次输出 Banner，`/resume` 切换会话但不输出 Banner，`/agents` 复用当前 Agent 浏览子 agent 记录。
 
 `_consume_events()`（`app.py:121-133`）内联处理 `InterruptRequested`，其余事件统一交 `OutputRouter.dispatch()`，确保 Store 先记录再决定可见性。`_run_agent_turn()`（`app.py:135-156`）把 `agent.run()` 包成任务，取消或键盘中断时调用 `_handle_interrupted_turn()` 收束任务与输入。
 
-`reset_session()` 处理 `/clear` 时先检查工作目录信任；确认结束后进入 UI reset gate，取消活跃、排队和只读请求并等待窗口 runner 清理。随后拒绝新的 `UiRequest`，用 `EventBus.join()` 收束已投递事件并保存源 `SessionState`，再更新信任状态、重载配置/Hook/MCP、生成新 `session_id` 和空状态，重置 `AgentViewStore`，从激活角色 manifest 构造新主 Agent并运行 `SessionStart` Hook。
+`reset_session()` 是首次启动与 `/clear` 共用的新会话生命周期。处理 `/clear` 时先检查工作目录信任；确认结束后进入 UI reset gate，取消活跃、排队和只读请求并等待窗口 runner 清理。随后拒绝新的 `UiRequest`，用 `EventBus.join()` 收束已投递事件并保存源 `SessionState`，生成新 `session_id` 和空状态；`/clear` 再更新信任状态并重载配置、角色、Hook、模型与 MCP。最后重置 `AgentViewStore`，从激活角色 manifest 构造新主 Agent，替换 UI 会话状态，运行 `SessionStart` Hook，输出使用重载后模型、角色、Plan 状态和工作目录的启动 Banner，并在重新开放 gate 前完成最终事件 drain。重建失败时不输出 Banner。
 
 `resume_session()` 使用同一组 UI/EventBus gate：保存源状态后绑定目标 `.state.json`，清空旧 metrics 和瞬态 UI，按目标 session 重建任务与 Plan，并从隐藏的 `subagent` view 投影恢复 `/agents` 只读记录，再从其他 `SessionRecord.view` 水合聊天。旧子 agent 不会继续运行。`/resume` 是 app 层命令，不能在 Agent 状态机内直接替换共享状态。
 

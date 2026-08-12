@@ -269,11 +269,18 @@ def test_clear_uses_choice_before_reset_gate_and_defaults_to_restricted(tmp_path
         async def join(self):
             order.append("join")
 
+        async def request_output(self, content):
+            assert "智能体工作台" in content.plain
+            order.append("banner")
+
     class UiProbe:
         @asynccontextmanager
         async def reset_session_interactions(self):
             order.append("ui_gate")
             yield
+
+        async def replace_session_state(self, _state):
+            order.append("replace")
 
     config = ConfigProbe()
     deps = SimpleNamespace(
@@ -293,6 +300,7 @@ def test_clear_uses_choice_before_reset_gate_and_defaults_to_restricted(tmp_path
         role_mgr=None,
         command_mgr=None,
         plan_mode_controller=None,
+        workdir=workdir,
     )
     app = AgentApp(deps, AgentViewStore(), output_router=object())
     new_agent = SimpleNamespace(uuid="new-agent", agent_type="main")
@@ -305,6 +313,7 @@ def test_clear_uses_choice_before_reset_gate_and_defaults_to_restricted(tmp_path
 
     assert order[:4] == ["choice", "ui_gate", "gate", "join"]
     assert order.index("trusted:False") > order.index("join")
+    assert order[-3:] == ["replace", "banner", "join"]
     assert not trust_gate.store_path.exists()
 
 
