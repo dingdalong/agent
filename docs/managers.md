@@ -527,6 +527,10 @@ hook 协议、JSON 字段与插件 `CLAUDE_PLUGIN_ROOT` 环境变量见 [mcp-and
 | `get_config` | `key`（点路径） | `Any` | 取配置值（缺失抛 `KeyError`） |
 | `get_user_setting` | `key`（点路径） | `Any` | 取设置值（缺失返回空 dict） |
 | `set_project_trusted` | `trusted` | `None` | 更新信任状态并重载配置 |
+| `set_config` | `key`, `value`, `scope`（`"global"`/`"project"`） | `None` | 原子写单个点路径到指定配置层（YAML 规范化输出，不保留原注释格式）；写后需 `reload()` 或重启才生效 |
+| `set_configs` | `values`, `scope` | `None` | 原子批量写多个点路径到同一配置层 |
+| `set_global_env` | `values` | `None` | 批量原子写全局 `.env`（`global_dir/.env`）：只改目标变量、保留注释与无关原文，目录 0700/文件 0600，不修改 `os.environ`；写后需 `reload()` 或重启才生效 |
+| `has_explicit_provider_config` | — | `bool` | 用户层是否已有显式 Provider 配置（有效环境含内置 `{NAME}_API_KEY`/`{NAME}_API_URL` 键、全局或 trusted 项目非空 `llm_provider`）；首次 Provider 向导据此决定是否跳过 |
 
 **feature 门控**：否。 **reload**：有。
 

@@ -24,6 +24,7 @@ from src.mgr.paths import global_data_dir, workdir as resolve_workdir
 from src.agent import AgentDeps
 from src.commands import CommandMgr
 from src.app.app import AgentApp
+from src.app.provider_setup import maybe_run_provider_setup
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +79,11 @@ async def create_app(
         workdir=work_dir,
         project_trusted=project_trusted,
     )
+
+    # 首次启动无显式 Provider 配置时先运行配置向导。必须早于项目日志目录创建、
+    # DataGuard/register_runtime_secrets、RoleMgr/EventBus/UI、McpMgr.start 与 LLMMgr，
+    # 失败（非 TTY/取消/持久化错误）时抛 LLMConfigurationError 由 main.cli 干净退出。
+    await maybe_run_provider_setup(config_mgr)
 
     # 配置项目级日志：写入 {workdir}/.agent/logs/agent.log
     log_dir = work_dir / ".agent" / "logs"

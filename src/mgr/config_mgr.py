@@ -5,12 +5,15 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
+import shutil
+import tempfile
 import threading
 from pathlib import Path
 from typing import Any, Literal, Mapping
 
 import yaml
-from dotenv import dotenv_values
+from dotenv import dotenv_values, set_key
 
 from src.mgr.paths import builtin_root
 from src.mgr.secure_io import atomic_write_text
@@ -18,6 +21,8 @@ from src.mgr.secure_io import atomic_write_text
 logger = logging.getLogger(__name__)
 
 ConfigScope = Literal["global", "project"]
+
+_ENV_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -76,6 +81,40 @@ def _load_writable_yaml(path: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError(f"配置文件 {path} 的顶层必须是对象")
     return data
+
+
+def _user_config_has_provider(path: Path) -> bool:
+    """只读检测单个用户层 config.yaml 是否含显式 llm_provider，异常内容保守视为显式。
+
+    与 ``_load_yaml`` 的容错语义不同：YAML 无效或顶层非对象时不降级为空，
+    而是视为显式配置，避免向导覆盖无法解析的用户内容。
+
+    Args:
+        path: 用户层 config.yaml 路径。
+
+    Returns:
+        ``llm_provider`` 为非空 mapping（含未知/不完整段）时为 True；
+        值为非 mapping（含显式 null）或文件 YAML 无效/顶层非对象时保守返回 True；
+        文件不存在、无 ``llm_provider`` 键或值为空 mapping 时返回 False。
+    """
+    if not path.exists():
+        return False
+    try:
+        with path.open() as f:
+            data = yaml.safe_load(f)
+    except yaml.YAMLError:
+        return True
+    if not isinstance(data, dict):
+        return True
+    if "llm_provider" not in data:
+        return False
+    provider = data["llm_provider"]
+    if provider is None:
+        # 键存在但值为显式 null：属非 mapping，保守视为显式，避免向导覆盖用户内容。
+        return True
+    if not isinstance(provider, dict):
+        return True
+    return bool(provider)
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -174,8 +213,12 @@ class ConfigManager:
         config = _deep_merge(builtin_config, global_config)
         config = _deep_merge(config, project_config)
 
-        # 环境变量覆盖 provider 的 API key 和 base_url
-        for key, provider in config.get("llm_provider", {}).items():
+        # 环境变量覆盖 provider 的 API key 和 base_url；llm_provider 非 mapping 时
+        # 跳过覆盖，交由后续 LLMMgr 校验报错
+        providers = config.get("llm_provider", {})
+        if not isinstance(providers, dict):
+            providers = {}
+        for key, provider in providers.items():
             for env_suffix, field in (("API_KEY", "api_key"), ("API_URL", "base_url")):
                 value = environment.get(f"{key.upper()}_{env_suffix}")
                 if value is not None:
@@ -188,6 +231,36 @@ class ConfigManager:
     def environment(self) -> dict[str, str]:
         """返回本次信任状态对应的私有有效环境副本。"""
         return dict(self._environment)
+
+    def has_explicit_provider_config(self) -> bool:
+        """判断用户层是否已存在显式 LLM Provider 配置。
+
+        显式配置来源（任一命中即 True）：
+        - 有效环境中存在任一内置 Provider 的 ``{NAME}_API_KEY`` 或 ``{NAME}_API_URL`` 键
+          （键存在即算，包括值为空字符串）；有效环境遵循本次信任边界；
+        - 全局 config.yaml 存在非空 ``llm_provider`` mapping；项目 trusted 时项目
+          config.yaml 同规则，未信任项目忽略；
+        - 用户层 ``llm_provider`` 非 mapping 或 YAML 无效时保守视为显式，避免向导覆盖。
+        内置 ``src/config.yaml`` 的 ``llm_provider`` 与用户层仅配置 ``llm.default``
+        均不视为显式配置。
+
+        Returns:
+            是否存在显式 LLM Provider 配置。
+        """
+        if _user_config_has_provider(self.global_config_path):
+            return True
+        if self.project_trusted and _user_config_has_provider(self.project_config_path):
+            return True
+        builtin_providers = _load_yaml(builtin_root() / "config.yaml").get("llm_provider", {})
+        if not isinstance(builtin_providers, dict):
+            builtin_providers = {}
+        for name in builtin_providers:
+            if (
+                f"{name.upper()}_API_KEY" in self._environment
+                or f"{name.upper()}_API_URL" in self._environment
+            ):
+                return True
+        return False
 
     def load_mcp_servers(self) -> dict[str, dict[str, Any]]:
         """读取并合并两层 mcp_servers.json，返回 {server_name: spec}。
@@ -309,6 +382,49 @@ class ConfigManager:
 
             content = yaml.safe_dump(config, allow_unicode=True, sort_keys=False).rstrip() + "\n"
             atomic_write_text(path, content)
+
+    def set_global_env(self, values: Mapping[str, str]) -> None:
+        """批量原子写入全局 .env（``self.global_dir / ".env"``）。
+
+        - values 为空时直接返回；变量名必须匹配 ``[A-Za-z_][A-Za-z0-9_]*``，
+          值必须是 str，非法输入在任何文件操作前抛 ValueError/TypeError。
+        - 锁定完整读取 → staging → 最终替换流程；保留注释、export、无关变量与
+          有效 dotenv 原文。
+        - 通过 python-dotenv 的 ``set_key(..., quote_mode="always")`` 在 owner-only
+          staging 文件上依次应用目标变量，最后一次性 ``atomic_write_text`` 原子替换
+          目标（目录 0700、文件 0600）。异常时原目标不变且 staging 清理。
+        - 不修改 os.environ，不自动 reload，新值在下次 ``reload()`` 或重启后生效
+          （与 set_configs 契约一致）。
+
+        Args:
+            values: 目标环境变量 mapping，键为 env key，值为 str。
+        """
+        if not values:
+            return
+        for key, value in values.items():
+            if not isinstance(key, str) or _ENV_KEY_RE.fullmatch(key) is None:
+                raise ValueError(f"无效环境变量名: {key!r}")
+            if not isinstance(value, str):
+                raise TypeError(f"环境变量 {key!r} 的值必须是 str，得到 {type(value).__name__}")
+
+        with self._lock:
+            target = self.global_dir / ".env"
+            self.global_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            try:
+                os.chmod(self.global_dir, 0o700)
+            except OSError:
+                pass
+            fd, tmp_name = tempfile.mkstemp(dir=self.global_dir, prefix=f".{target.name}.")
+            os.close(fd)
+            staging = Path(tmp_name)
+            try:
+                if target.exists():
+                    shutil.copyfile(target, staging)
+                for key, value in values.items():
+                    set_key(staging, key, value, quote_mode="always")
+                atomic_write_text(target, staging.read_text(encoding="utf-8"))
+            finally:
+                staging.unlink(missing_ok=True)
 
     def get_user_setting(self, key: str) -> Any:
         """获取用户设置值。

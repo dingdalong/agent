@@ -71,15 +71,31 @@
 |---|---|---|
 | 1 | `global_dir` / `work_dir` | 解析并规范化全局目录与工作目录 |
 | 2 | `ProjectTrustGate` | 在任何项目可执行配置加载前确认工作目录信任 |
-| 3 | `ConfigManager` / `DataGuard` | 按信任结果加载配置，并登记 Provider、环境和 MCP 精确秘密 |
-| 4 | `RoleMgr` / `EventBus` / UI | 激活角色并构造事件与展示层 |
-| 5 | `ToolsMgr` / feature Managers / Hooks | 注册内置工具；项目 Hook 仅在受信任时加载 |
-| 6 | `McpMgr.start()` | 按信任和连接开关启动 server；动态工具强制 `REVIEW + EXTERNAL` |
-| 7 | `SessionMgr` / `LLMMgr` | 构造持久化服务、发现模型并验证 default |
-| 8 | `PermissionManager` / `WebAccessMgr` | 注入通用智能权限审查、Web 安全审查、一次性确认回调与 Web 路由依赖 |
-| 9 | `AgentDeps` / `AgentApp` | 组装共享依赖并返回应用实例 |
+| 3 | `ConfigManager` | 按信任结果加载三层配置与有效环境 |
+| 4 | 首次 Provider 配置向导 | 无显式配置时运行 `SetupApp` 并持久化（见「首次 LLM Provider 配置向导」）；失败抛 `LLMConfigurationError` 干净退出 |
+| 5 | `DataGuard` / `RoleMgr` / `EventBus` / UI | 登记 Provider、环境和 MCP 精确秘密；激活角色并构造事件与展示层 |
+| 6 | `ToolsMgr` / feature Managers / Hooks | 注册内置工具；项目 Hook 仅在受信任时加载 |
+| 7 | `McpMgr.start()` | 按信任和连接开关启动 server；动态工具强制 `REVIEW + EXTERNAL` |
+| 8 | `SessionMgr` / `LLMMgr` | 构造持久化服务、发现模型并验证 default |
+| 9 | `PermissionManager` / `WebAccessMgr` | 注入通用智能权限审查、Web 安全审查、一次性确认回调与 Web 路由依赖 |
+| 10 | `AgentDeps` / `AgentApp` | 组装共享依赖并返回应用实例 |
 
-启动信任必须先于 ConfigManager、Hook 和 MCP；这是防止未信任项目通过环境、模型端点或子进程在确认前执行的硬顺序。PermissionManager 不快照工具元数据，ToolsMgr 每次调用都把当前 ToolEntry 的 policy 与 origin 传给 `authorize()`，因此动态 MCP 工具可在运行时注册和重连。
+### 首次 LLM Provider 配置向导
+
+`bootstrap.create_app()` 在 `ProjectTrustGate` 确认信任并构造 `ConfigManager` 之后、项目日志目录创建与 DataGuard/其余 Manager 之前调用 `maybe_run_provider_setup(config_mgr)`（`src/app/provider_setup.py`）。只有 `ConfigManager.has_explicit_provider_config()` 判定用户层尚无显式 Provider 配置时才进入向导；判定为显式的来源（任一命中即算）：
+
+- 有效环境中存在任一内置 Provider 的 `{NAME}_API_KEY` 或 `{NAME}_API_URL` 键（键存在即算，含空字符串值）；有效环境遵循本次信任边界，未信任项目的 `.env` 与 `config.yaml` 来源不加载、不计入；
+- 全局 `config.yaml` 存在非空 `llm_provider` mapping；项目 trusted 时项目 `config.yaml` 同规则；
+- 用户层 `llm_provider` 非 mapping 或 YAML 无效时保守视为显式，避免向导覆盖无法解析的用户内容。
+
+仅内置 `src/config.yaml` 的 provider 段、用户层只有 `llm.default` 都不算显式配置。
+
+TTY 时运行独立短生命周期的 `SetupApp`（`src/interfaces/tui/provider_setup.py`）：单选内置 Provider → 编辑 API 地址 → 掩码输入 API key（Ollama 可空）→ 严格调用该 Provider 自身的 `list_models` 验证连通性（10 秒超时，无静态回退，失败在 UI 内安全化展示且不写配置）→ 选择默认模型。确认后 `persist_setup` 持久化：`llm.default` 写全局 `config.yaml`，`{PROVIDER}_API_URL` 与（云 provider）`{PROVIDER}_API_KEY` 写全局 `.env`（默认 `~/.agent/.env`，可经 `$AGENT_HOME` 改写）。写入先 default 后凭据、中间 reload 校验，避免留下会让下次跳过向导的半套凭据；每个文件单独原子更新（owner-only、`.env` 只改目标变量并保留其他原文），不提供跨文件事务。写完后 `reload()` 并做后置校验，然后继续 `create_app()` 原有装配与主 TUI。
+
+- 非 TTY：不读取 stdin，抛 `LLMConfigurationError`，`main.cli()` 打印手工 `.env` + `llm.default` 配置指引并以状态码 1 退出。
+- 取消：不写任何配置，同样抛 `LLMConfigurationError` 并以状态码 1 退出。
+- 已有显式配置（即使已失效）：跳过向导，仍走 `LLMMgr` 模型发现/静态回退与 `ensure_default_available()` 精确校验的既有错误链（见下节）。
+- 向导只在 `bootstrap.create_app()` 首次进程启动接线，不在 `/clear` 重跑；它不是通用设置编辑器，没有 `/setup` 命令。
 
 ### LLM 启动错误链
 

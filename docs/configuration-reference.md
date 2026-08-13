@@ -37,9 +37,11 @@
 | `config.yaml` | `src/config.yaml` | `~/.agent/config.yaml` | `{workdir}/.agent/config.yaml` | 深合并，后层覆盖叶子值 | `ConfigManager.set_config()` 可回写全局或项目层；内置层只读 | 是（`ConfigManager.reload()`） |
 | `settings.json` | 无 | `~/.agent/settings.json` | `{workdir}/.agent/settings.json` | 深合并，项目覆盖全局 | 只读（框架不自动写） | 是 |
 | `mcp_servers.json` | 角色层 `src/roles/<role>/mcp_servers.json` | `~/.agent/mcp_servers.json` | `{workdir}/.agent/mcp_servers.json` | 按 server 名深合并，项目覆盖全局；角色层最低优先级 | 只读（框架不写回） | 是，`/clear` 重新检查信任后重连 |
-| `.env` | 无 | `~/.agent/.env` | `{workdir}/.env` 与 `{workdir}/.agent/.env` | `dotenv_values()` 读入私有有效环境，后覆盖前，不修改 `os.environ` | 只读 | 是（`load_config()` 重跑） |
+| `.env` | 无 | `~/.agent/.env` | `{workdir}/.env` 与 `{workdir}/.agent/.env` | `dotenv_values()` 读入私有有效环境，后覆盖前，不修改 `os.environ` | 全局：手工或首次 Provider 向导 / `ConfigManager.set_global_env`；项目层：手工 | 是（`load_config()` 重跑） |
 
-项目 `.env`、模型/Provider 配置、项目 Hook 和项目 MCP 只有通过 `ProjectTrustGate` 后才加载；拒绝、取消或非 TTY 时进入受限模式。
+项目 `.env`、模型/Provider 配置、项目 Hook 和项目 MCP 只有通过 `ProjectTrustGate` 后才加载；项目信任确认被拒绝、取消、失败或运行于非 TTY 时进入受限模式。
+
+首次启动无显式 Provider 配置时（判定与流程见 [architecture.md](architecture.md)「首次 LLM Provider 配置向导」），向导自动把 `{PROVIDER}_API_URL` / `{PROVIDER}_API_KEY` 写入全局 `.env`、`llm.default` 写入全局 `config.yaml`；项目层 `.env` 始终手工维护。写入均为单文件原子更新，`.env` 只改目标变量并保留其他原文。
 
 ---
 
@@ -377,7 +379,7 @@ OPENAI_API_KEY=sk-yyyyyyyyyyyyyyyy
 | `~/.agent/config.yaml` | 全局运行配置 | 手工或 `ConfigManager.set_config(..., "global")` |
 | `~/.agent/settings.json` | 全局 MCP 开关与 Hooks | 手工 |
 | `~/.agent/mcp_servers.json` | 全局 MCP 连接 | 手工 |
-| `~/.agent/.env` | 全局环境变量 | 手工 |
+| `~/.agent/.env` | 全局环境变量 | 手工或首次 Provider 向导 / `ConfigManager.set_global_env` |
 | `~/.agent/roles/` | 全局角色 | 手工 |
 | `~/.agent/agents/` | 全局子 agent 定义 | 手工 |
 | `~/.agent/skills/` | 全局技能 | 手工 |

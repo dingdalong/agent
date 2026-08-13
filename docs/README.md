@@ -14,7 +14,7 @@ uv run python main.py --debug            # 启用 asyncio 慢回调告警（>0.1
 uv run pytest                            # 运行全部测试
 ```
 
-入口链路：`main.py`（解析 `--workdir`/`--debug`）→ `app.bootstrap.create_app()`（唯一依赖组装点）→ `AgentApp.run()`。默认模型不可用时打印可操作提示并以非零码退出（`ModelUnavailableError`）。
+入口链路：`main.py`（解析 `--workdir`/`--debug`）→ `app.bootstrap.create_app()`（唯一依赖组装点）→ `AgentApp.run()`。首次启动无显式 Provider 配置时先运行首次配置向导（`SetupApp`），配置完成后再继续装配；已有配置的默认模型不可用时打印可操作提示并以非零码退出（`ModelUnavailableError`）。
 
 ## 四层架构一图
 

@@ -210,3 +210,4 @@ __marimo__/
 .claude
 workspace/
 .worktrees/
+.agent
