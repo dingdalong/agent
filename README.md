@@ -40,30 +40,75 @@ uv run python main.py --workdir /path/to/project
 
 # 启用 asyncio 慢回调告警（排查事件循环阻塞）
 uv run python main.py --debug
+
+# 核对随包资源与内置工具/命令注册是否完好（主要用于验证打包产物）
+uv run python main.py --self-check
 ```
 
 ### 打包分发
 
+分发物是**解压即用的可执行包**，使用者机器无需 Python、无需装依赖，首次启动也不需要联网。
+
 ```bash
-# 构建（同时产出在线 wheel 和离线安装包）
+# 构建当前平台的可执行包
 make build
+
+# 复用已预热的 tiktoken 缓存重建（改依赖或换 tiktoken 版本后请用 make build）
+make rebuild
+
+# 对构建产物跑冻结态冒烟测试
+make check
+
+# 构建并把产物安装到 ~/.local/bin
+make install
 
 # 清理构建产物
 make clean
 ```
 
-用户安装：
+产物为 `dist/agent-{版本}-{os}-{arch}.tar.gz`（Windows 为 `.zip`），压缩包内含安装脚本。
+
+**PyInstaller 无法交叉编译**：`make build` 只产出当前平台的包，名字如实标注平台。三平台
+发布由 `.github/workflows/release.yml` 在各自 runner 上跑同一个脚本完成，push tag 触发。
+
+#### 使用者侧
+
+一行安装，装完在任意目录敲 `agent` 即可，工作目录就是启动时所在目录：
 
 ```bash
-# 在线安装（自动从 PyPI 拉取依赖）
-pip install ./agent-0.1.0-py3-none-any.whl
-
-# 离线安装（无需网络）
-tar xzf agent-0.1.0-offline.tar.gz
-pip install --no-index --find-links deps/ agent-0.1.0-py3-none-any.whl
+# macOS / Linux
+curl -fsSL https://raw.githubusercontent.com/dingdalong/agent/main/scripts/install.sh | sh
 ```
 
-安装后直接运行 `agent` 命令即可。
+```bat
+:: Windows
+curl -fsSL https://raw.githubusercontent.com/dingdalong/agent/main/scripts/install.bat -o "%TEMP%\agent-install.bat" && "%TEMP%\agent-install.bat"
+```
+
+也可以下载 release 里的压缩包，解压后运行包内的 `install.sh`（Windows 为 `install.bat`）。
+
+安装器会改动这些位置：
+
+| 位置 | 说明 |
+| --- | --- |
+| `~/.local/share/agent/<版本>/` | 产物本体。Windows 为 `%LOCALAPPDATA%\Programs\agent\<版本>\` |
+| `~/.local/bin/agent` | 指向上面那个目录的符号链接。Windows 为 `bin\agent.bat` 转发脚本 |
+| shell 配置 | 仅当 `~/.local/bin` 不在 PATH 上时，追加一段带 `agent installer` 标记的 PATH 导出；幂等，重复安装不重复写。Windows 改写用户 PATH 环境变量 |
+
+产物是 onedir 形态，`agent` 必须与同级 `_internal/` 在一起，所以不能只把二进制拷进
+`~/.local/bin`——安装脚本做的就是"落到固定位置再建链接"这件事。
+
+常用选项：`--from <解压目录>` 跳过下载、`--version <tag>` 指定版本、`--keep-old` 保留旧版本、
+`--verify` 装完跑自检、`--uninstall` 卸载（同时移除 shell 配置里那段，并留下 `.agent.bak` 备份）。
+
+macOS 上的隔离标记由安装器自动去除（产物未签名，否则首次运行会被 Gatekeeper 拦下）。
+Windows 上未签名的 exe 可能被 SmartScreen 或 Defender 提示，属预期。
+
+`agent --self-check` 会核对随包资源、内置工具/命令注册与离线编码，输出 JSON 报告——
+打包引入的失效大多是「能启动但不干活」，用它可以直接判定产物是否完好。
+
+**已知限制**：用户自定义 slash 命令（`~/.agent/commands/*.py`）在可执行包里只能 import
+已被打包的模块，import 额外的第三方库会失败。需要这类扩展时请从源码运行。
 
 ### 配置 API Key
 

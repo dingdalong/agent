@@ -9,7 +9,7 @@ src.mgr/__init__ ↔ src.tools/__init__ 的包级循环导入。延迟扫描让 
 """
 
 import importlib
-from pathlib import Path
+import pkgutil
 
 from src.tools.policy import AccessKind, DataFlow, PathArgument, PathRole, ToolOrigin, ToolPolicy
 
@@ -27,11 +27,13 @@ def _scan_builtin() -> None:
     if _scanned:
         return
     _scanned = True
-    package_dir = Path(__file__).parent / "builtin"
-    for item in sorted(package_dir.glob("*.py")):
-        if item.name == "__init__.py":
-            continue
-        importlib.import_module(f".{item.stem}", package=f"{__package__}.builtin")
+    # 用 pkgutil 而非文件系统 glob 枚举：PyInstaller 冻结后 builtin/*.py 不以文件形式
+    # 存在，glob 会静默返回空导致全部工具不注册；pkgutil 走 importer 协议，冻结与
+    # 未冻结行为一致（PyInstaller 由 pyi_rth_pkgutil 运行时钩子提供支持）。
+    from src.tools import builtin
+
+    for info in sorted(pkgutil.iter_modules(builtin.__path__), key=lambda i: i.name):
+        importlib.import_module(f".{info.name}", package=builtin.__name__)
 
 
 def __getattr__(name: str):

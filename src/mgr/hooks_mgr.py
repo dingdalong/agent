@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, TYPE_CHECKING
 
+from src.mgr.frozen import clean_env
+
 if TYPE_CHECKING:
     from src.mgr.plugin_mgr import PluginMgr
 
@@ -80,7 +82,7 @@ class HooksMgr:
         self.global_dir = global_dir
         self.plugin_mgr = plugin_mgr
         self.data_guard = data_guard
-        self.base_environment = dict(
+        self.base_environment = clean_env(
             os.environ if base_environment is None else base_environment
         )
         self.project_trusted = project_trusted

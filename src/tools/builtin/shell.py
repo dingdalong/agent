@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 
 from pydantic import BaseModel, Field
 
+from src.mgr.frozen import clean_env
 from src.tools.policy import AccessKind, DataFlow, ToolPolicy
 from src.tools.decorator import tool
 
@@ -113,7 +114,7 @@ async def shell(command: str, timeout: int, deps=None) -> str:
     cwd = str(deps.workdir) if deps and deps.workdir else None
     data_guard = getattr(deps, "data_guard", None) if deps is not None else None
     config_mgr = getattr(deps, "config_mgr", None) if deps is not None else None
-    base_environment = getattr(config_mgr, "environment", os.environ)
+    base_environment = clean_env(getattr(config_mgr, "environment", None))
     env = (
         data_guard.safe_environment(base_environment)
         if data_guard is not None

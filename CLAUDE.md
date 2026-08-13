@@ -11,9 +11,13 @@ uv sync                              # 安装依赖
 uv run python main.py                # 运行应用
 uv run python main.py --workdir /path  # 指定工作目录运行
 uv run python main.py --debug        # 启用 asyncio 慢回调告警（事件循环被占用 >0.1s 即告警），排查阻塞
+uv run python main.py --self-check   # 核对随包资源与内置工具/命令注册（验证打包产物）
 uv run pytest                        # 运行全部测试
 uv run pytest -k "test_name"         # 运行匹配名称的测试
 uv run pytest tests/test_foo.py      # 运行单个测试文件
+make build                           # 构建当前平台的可执行分发包
+make check                           # 对构建产物跑冻结态冒烟测试
+make install                         # 构建并把产物装到 ~/.local/bin（等价于用户跑包内 install.sh）
 ```
 
 项目要求 Python >= 3.13，使用 `uv` 管理依赖。无 lint/format 工具配置。
@@ -74,7 +78,17 @@ MCP server 连接配置在独立的 `mcp_servers.json`（角色 `src/roles/<role
 
 ## 关键模式
 
-**工具注册** — 使用 `@tool` 装饰器（`src/tools/decorator.py`）+ Pydantic 参数模型，自动注册到全局 `_registry`。工具实现在 `src/tools/builtin/`。新增工具时须确认其 `subagent` 标记：`ToolsMgr.resolve_subagent_tools()` 会自动注入所有 `subagent=True` 的工具、强制排除所有 `subagent=False` 的工具（如四个 plan 工具从子 agent 排除）。
+**工具注册** — 使用 `@tool` 装饰器（`src/tools/decorator.py`）+ Pydantic 参数模型，自动注册到全局 `_registry`。工具实现在 `src/tools/builtin/`。新增工具时须确认其 `subagent` 标记：`ToolsMgr.resolve_subagent_tools()` 会自动注入所有 `subagent=True` 的工具、强制排除所有 `subagent=False` 的工具（如四个 plan 工具从子 agent 排除）。新增工具后同步更新 `src/app/self_check.py` 的 `EXPECTED_TOOL_COUNT`。
+
+**可冻结性（必须遵守）** — 项目以 PyInstaller 打包成可执行分发包（`agent.spec` + `scripts/build_exe.py`）。冻结后**文件系统里不存在 `.py` 源文件**，因此：
+  - **禁止**用目录 glob 扫 `*.py` 来发现模块。内置工具（`src/tools/__init__.py`）与内置 slash 命令（`src/commands/mgr.py`）一律用 `pkgutil.iter_modules(<包>.__path__)`；用户层的外部 `.py` 才用 `spec_from_file_location` 按路径加载。新增这类插件式子模块时，须在 `agent.spec` 的 `collect_submodules` 里覆盖到。
+  - 内置命令的注册发生在**模块执行期**，已在 `sys.modules` 里时必须 `importlib.reload`，否则 `CommandMgr` 重建或 `/clear` 走 `reload()` 后命令全空。
+  - **禁止**用 cwd 相对路径读随包资源，一律走 `builtin_root()`（`src/mgr/paths.py`）。新增随包资源须加进 `agent.spec` 的 `datas`。
+  - 要落在产物**顶层**（与 `agent` 同级、而非 `_internal/` 内）的文件走 `scripts/build_exe.py` 的 `stage_installer()`：`agent.spec` 的 `datas` 一律进 `_internal/`。安装脚本与 `VERSION` 即属此类。
+  - 惰性 import 的模块（如按 transport 分支的 `mcp.client.*`）静态分析看不到，须列入 `agent.spec` 的 `hiddenimports`。
+  - 运行时读自身版本（`importlib.metadata`）的包须列入 `copy_metadata`。
+  - **所有 spawn 子进程的地方**都要用 `clean_env()`（`src/mgr/frozen.py`）构造环境：冻结产物的动态库搜索路径被引导器改写过，直接继承会让子进程加载错动态库（MCP server 常常本身就是另一个 Python 程序，后果最严重）。
+  - 以上失效**都是静默的**——应用照常启动，只是工具、命令或编码悄悄不见。改动相关机制后必须跑 `make build && make check`，仅跑源码测试发现不了。
 
 **异步/阻塞契约（必须遵守）** — 整个框架跑在单线程 asyncio 事件循环上（UI 状态条按 100ms 重绘、事件分发、Agent 轮次共用同一循环）。事件循环只在 `await` 真异步原语时让出控制权；任何在事件循环上运行的 `async def` 一旦做*同步阻塞*工作（同步网络、文件 I/O、`socket.getaddrinfo`、CPU 密集循环）且不 `await`，就会冻结 UI 并停滞事件分发。因此每个工具 / Manager 方法只能是两类之一：
   - **真异步**：函数体只 `await` 真正的异步原语（如 `asyncio.create_subprocess_shell` + `await proc.communicate()`、`AsyncAnthropic`/`AsyncOpenAI`、事件总线等待）。保持 `async def`。正例：`shell`（`src/tools/builtin/shell.py`）、hooks（`src/mgr/hooks_mgr.py`）、LLM provider（`src/llm/`）。

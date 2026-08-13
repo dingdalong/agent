@@ -20,6 +20,7 @@ from typing import Any, TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict
 
+from src.mgr.frozen import clean_env
 from src.tools import AccessKind, DataFlow, ToolOrigin, ToolPolicy
 from src.tools.decorator import ToolEntry
 
@@ -291,14 +292,16 @@ class McpMgr:
                 args=spec.get("args", []),
                 # 默认环境（含 PATH）叠加用户声明的 env，避免子进程丢失 PATH 导致启动失败；
                 # env 值先经占位符替换（${workdir}、~），使其能引用随运行变化的绝对路径。
+                # 基底过 clean_env：冻结产物里动态库搜索路径被改写过，server 子进程常常
+                # 本身就是另一个 Python 程序，继承下去会加载错动态库。
                 env=(
                     self.data_guard.safe_environment(
-                        self.config_mgr.environment,
+                        clean_env(self.config_mgr.environment),
                         _interpolate_env(spec.get("env") or {}, self.workdir),
                     )
                     if self.data_guard is not None
                     else {
-                        **get_default_environment(),
+                        **clean_env(get_default_environment()),
                         **_interpolate_env(spec.get("env") or {}, self.workdir),
                     }
                 ),

@@ -11,6 +11,7 @@ import subprocess
 import sys
 import time
 
+from src.mgr.frozen import bundled_path, clean_env
 from src.mgr.path_resolver import PathGrant, PathResolutionError, PathResolver
 
 if TYPE_CHECKING:
@@ -31,12 +32,16 @@ class _TreeBudget:
 
 @lru_cache(maxsize=1)
 def _resolve_rg() -> str | None:
-    """定位 ripgrep 可执行文件：优先随 ripgrep 包安装到环境 bin 目录的二进制，回退到 PATH。
+    """定位 ripgrep 可执行文件：优先冻结产物内置，其次随包安装到环境 bin 目录，最后 PATH。
 
     Returns:
-        rg 可执行文件的绝对路径；随包二进制与 PATH 均未命中时返回 None。
+        rg 可执行文件的绝对路径；三条来源均未命中时返回 None。
     """
     exe = "rg.exe" if sys.platform == "win32" else "rg"
+    # 冻结产物里 dist-info 与 bin/ 布局都不存在，只能按打包时的落点直接找
+    bundled = bundled_path(exe)
+    if bundled is not None:
+        return str(bundled)
     # 优先使用 ripgrep 包随 wheel 装入环境 bin 目录的二进制（不依赖主机预装 rg）
     try:
         dist = metadata.distribution("ripgrep")
@@ -648,7 +653,8 @@ class FileMgr:
             return 2, "", "未找到 rg（ripgrep），请确认 ripgrep 依赖已安装"
         try:
             proc = subprocess.run(
-                [rg, *rg_args], capture_output=True, text=True, timeout=10
+                [rg, *rg_args], capture_output=True, text=True, timeout=10,
+                env=clean_env(),
             )
             return proc.returncode, proc.stdout, proc.stderr
         except subprocess.TimeoutExpired:

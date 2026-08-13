@@ -5,8 +5,8 @@ from __future__ import annotations
 from functools import cached_property
 from typing import TYPE_CHECKING, Any
 
-import transformers
 from openai import AsyncOpenAI
+from tokenizers import Tokenizer
 
 from src.llm.base import LLMCallContext, LLMProvider, LLMResponse
 from src.llm.responses import (
@@ -112,12 +112,16 @@ class DeepSeekProvider(ResponsesStreamMixin, LLMProvider):
         converted_tools = convert_function_tools(tools)
         if converted_tools:
             payload["tools"] = converted_tools
-        return len(self._tokenizer.encode(str(payload)))
+        return len(self._tokenizer.encode(str(payload)).ids)
 
     @cached_property
     def _tokenizer(self) -> Any:
-        return transformers.AutoTokenizer.from_pretrained(
-            "src/llm/tokenizer/deepseek", trust_remote_code=True
+        # 延迟 import：src.mgr 顶层会拉回 src.llm，模块级引入会形成包级循环导入。
+        from src.mgr.paths import builtin_root
+
+        # 用 builtin_root() 而非 cwd 相对路径：安装/冻结后从任意工作目录启动都要能定位。
+        return Tokenizer.from_file(
+            str(builtin_root() / "llm" / "tokenizer" / "deepseek" / "tokenizer.json")
         )
 
     def _extract_token_usage(

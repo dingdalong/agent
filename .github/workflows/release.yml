@@ -1,0 +1,108 @@
+name: release
+
+# PyInstaller 无法交叉编译，每个平台必须在对应 runner 上构建。
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14          # Apple Silicon
+            tag: macos-arm64
+          - os: ubuntu-22.04      # 用较老的 glibc 构建，产物才能在新旧发行版都跑
+            tag: linux-x86_64
+          - os: windows-2022
+            tag: windows-x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: 安装依赖
+        run: uv sync --extra dev
+
+      - name: 构建可执行包
+        run: uv run python scripts/build_exe.py
+
+      - name: 冒烟测试（冻结产物）
+        # AGENT_REQUIRE_BUILD=1：构建产物缺失时直接失败，避免用例被 skip 掉后流水线假绿
+        env:
+          AGENT_REQUIRE_BUILD: "1"
+        run: uv run pytest tests/packaging -q
+
+      - name: 单元测试
+        run: uv run pytest tests -q --ignore=tests/packaging
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-${{ matrix.tag }}
+          path: |
+            dist/agent-*.tar.gz
+            dist/agent-*.zip
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      # 安装脚本要作为 release 资产上传，所以这个 job 也需要仓库内容
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          # 把安装脚本也挂成资产，releases/latest/download/install.sh 便成为稳定地址；
+          # raw.githubusercontent.com 在部分网络下不可达，多一条路子。
+          files: |
+            artifacts/*
+            scripts/install.sh
+            scripts/install.bat
+          # raw 地址钉到本次 tag，让这份说明可复现；README 里才用 main。
+          body: |
+            ## 安装
+
+            **macOS / Linux**
+
+            ```bash
+            curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/scripts/install.sh | sh
+            ```
+
+            **Windows**
+
+            ```bat
+            curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/scripts/install.bat -o "%TEMP%\agent-install.bat" && "%TEMP%\agent-install.bat"
+            ```
+
+            也可以下载下方压缩包，解压后运行包内的 `install.sh`（Windows 为 `install.bat`）。
+
+            装完在任意目录敲 `agent` 即可，工作目录就是启动时所在目录。
+
+            ## 安装器会做什么
+
+            - 把产物放到 `~/.local/share/agent/<版本>/`（Windows：`%LOCALAPPDATA%\Programs\agent\<版本>\`）
+            - 创建 `~/.local/bin/agent` 符号链接（Windows：`bin\agent.bat` 转发脚本并写入用户 PATH）
+            - 若 `~/.local/bin` 不在 PATH 上，在 shell 配置里追加一段带标记的 PATH 导出（幂等，重复安装不会重复写入）
+            - macOS 上自动去除隔离标记（产物未签名，否则会被 Gatekeeper 拦下）
+            - 清理旧版本目录（`--keep-old` 可保留）
+
+            卸载：`sh install.sh --uninstall`（Windows：`install.bat --uninstall`）。
+
+            验证：`agent --self-check`（核对随包资源、内置工具与离线编码）。
+
+            Windows 上未签名的 exe 可能被 SmartScreen 或 Defender 提示，属预期。

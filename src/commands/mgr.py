@@ -1,8 +1,11 @@
-"""斜杠命令管理器 — 三层扫描（内置 → 全局 → 项目），同名覆盖；统一分发。
+"""斜杠命令管理器 — 三层加载（内置 → 全局 → 项目），同名覆盖；统一分发。
 
-发现机制镜像 tools 系统：扫描各层目录下的 <name>.py，import 触发 @command 装饰器
-把 CommandEntry 登记到模块级 _COMMAND_REGISTRY，再按层收集。
-命令的声明（装饰器元数据）与执行体（被装饰的 async 函数）内聚于单个 .py 文件。
+发现机制镜像 tools 系统：import 各层的 <name>.py 触发 @command 装饰器把 CommandEntry
+登记到模块级 _COMMAND_REGISTRY，再按层收集。命令的声明（装饰器元数据）与执行体（被
+装饰的 async 函数）内聚于单个 .py 文件。
+
+内置层按包内模块枚举（pkgutil），用户层与项目层扫描环境里的外部目录并按文件路径
+加载——两者的加载方式不同，但登记与覆盖逻辑共用。
 
 分层覆盖：内置 builtin → 全局 user → 项目 project，后者同名覆盖前者。
 项目层整层受 project_trusted 门控（对齐 hooks/plugins/MCP）。
@@ -13,12 +16,15 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import logging
+import pkgutil
+import sys
 from dataclasses import dataclass, field
 from enum import Enum
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, Callable
 
-from src.mgr.paths import builtin_root, project_data_dir
+from src.mgr.paths import project_data_dir
 
 if TYPE_CHECKING:
     from src.agent.states import RunContext
@@ -105,25 +111,23 @@ class CommandMgr:
         self._load_all()
 
     def _load_all(self) -> None:
-        """按低→高优先级分层扫描 .py，import 触发装饰器登记，后者同名覆盖前者。"""
+        """按低→高优先级分层加载，import 触发装饰器登记，后者同名覆盖前者。"""
         from src.commands.decorator import _COMMAND_REGISTRY
 
-        scan_dirs: list[tuple[Path, str]] = [
-            (builtin_root() / "commands" / "builtin", "builtin"),
+        layers: list[tuple[str, list[Callable[[], object | None]]]] = [
+            ("builtin", self._builtin_loaders()),
         ]
         if self.global_dir:
-            scan_dirs.append((self.global_dir / "commands", "user"))
+            layers.append(("user", self._path_loaders(self.global_dir / "commands", "user")))
         if self.project_trusted:
-            scan_dirs.append((project_data_dir(self.workdir) / "commands", "project"))
+            layers.append(
+                ("project", self._path_loaders(project_data_dir(self.workdir) / "commands", "project"))
+            )
 
-        for directory, namespace in scan_dirs:
-            if not directory.exists():
-                continue
-            for py_path in sorted(directory.glob("*.py")):
-                if py_path.name == "__init__.py":
-                    continue
+        for namespace, loaders in layers:
+            for load in loaders:
                 before = len(_COMMAND_REGISTRY)
-                if self._import_module(py_path, namespace) is None:
+                if load() is None:
                     # import 失败已告警；清掉可能部分登记的 entry，避免脏数据
                     del _COMMAND_REGISTRY[before:]
                     continue
@@ -133,6 +137,62 @@ class CommandMgr:
                     for alias in entry.aliases:
                         self._commands[alias] = entry
                 del _COMMAND_REGISTRY[before:]
+
+    def _builtin_loaders(self) -> list[Callable[[], object | None]]:
+        """内置层：按包内模块枚举，返回逐个 import 的 thunk。
+
+        用 pkgutil 而非目录 glob：PyInstaller 冻结后 builtin/*.py 不以文件形式存在，
+        glob 会静默落空导致内置命令全部消失；pkgutil 走 importer 协议，冻结与未冻结
+        行为一致。
+
+        Returns:
+            每项调用后返回模块对象，失败返回 None（已告警）。
+        """
+        from src.commands import builtin
+
+        return [
+            partial(self._import_builtin, f"{builtin.__name__}.{info.name}")
+            for info in sorted(pkgutil.iter_modules(builtin.__path__), key=lambda i: i.name)
+        ]
+
+    def _path_loaders(self, directory: Path, namespace: str) -> list[Callable[[], object | None]]:
+        """用户层/项目层：扫描环境里的外部 .py，返回逐个按路径 exec 的 thunk。
+
+        这两层的文件不在包内，只能按文件路径加载。
+
+        Args:
+            directory: 待扫描目录，不存在时返回空列表。
+            namespace: 命名空间标签，用于合成唯一模块名。
+
+        Returns:
+            每项调用后返回模块对象，失败返回 None（已告警）。
+        """
+        if not directory.exists():
+            return []
+        return [
+            partial(self._import_module, py_path, namespace)
+            for py_path in sorted(directory.glob("*.py"))
+            if py_path.name != "__init__.py"
+        ]
+
+    def _import_builtin(self, module_name: str):
+        """import 一个内置命令模块（触发其 @command 装饰器登记）。
+
+        已在 sys.modules 里时必须 reload：登记发生在模块执行期，直接 import 会命中
+        缓存而不重新执行，导致 CommandMgr 重建或 /clear 走 reload() 后内置命令全空。
+
+        Args:
+            module_name: 完整模块名，如 src.commands.builtin.help。
+
+        Returns:
+            成功返回模块，失败返回 None（已告警）。
+        """
+        try:
+            cached = sys.modules.get(module_name)
+            return importlib.reload(cached) if cached else importlib.import_module(module_name)
+        except Exception:
+            logger.warning("内置命令加载失败：%s", module_name, exc_info=True)
+            return None
 
     def _import_module(self, py_path: Path, namespace: str):
         """按文件路径 import 一个命令模块（触发其 @command 装饰器登记）。

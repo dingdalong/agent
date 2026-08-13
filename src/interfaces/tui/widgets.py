@@ -20,6 +20,8 @@ from textual.containers import VerticalScroll
 from textual.widget import Widget
 from textual.widgets import ListItem, ListView, OptionList, Static, TextArea
 
+from src.mgr.frozen import clean_env
+
 
 _SELECT_AUTO_SCROLL_FPS = 20
 
@@ -343,6 +345,7 @@ class NativeClipboard:
                 timeout=2,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
+                env=clean_env(),
             )
         except (OSError, subprocess.SubprocessError):
             return False

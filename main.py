@@ -7,6 +7,7 @@ import sys
 from src.app.bootstrap import create_app
 from src.llm import LLMConfigurationError
 from src.mgr import ModelUnavailableError
+from src.mgr.frozen import setup_tiktoken_cache
 
 
 def parse_args() -> argparse.Namespace:
@@ -32,6 +33,12 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=None,
         help="鼠标选中文本后立即复制；macOS 默认启用，其他平台默认关闭",
+    )
+    parser.add_argument(
+        "--self-check",
+        action="store_true",
+        help="核对随包资源、内置工具/命令注册与离线编码是否完好，输出 JSON 后退出；"
+             "用于验证打包产物（冻结后这些失效是静默的）。",
     )
     return parser.parse_args()
 
@@ -59,6 +66,12 @@ def cli() -> None:
         None。
     """
     args = parse_args()
+    # 必须在任何 tiktoken 调用之前：冻结产物把编码文件预热在包内，指过去才能离线启动。
+    setup_tiktoken_cache()
+    if args.self_check:
+        from src.app.self_check import run_self_check
+
+        sys.exit(run_self_check())
     try:
         # debug=True 启用 asyncio 慢回调告警（阈值默认 0.1s），暴露阻塞事件循环的协程。
         asyncio.run(main(args), debug=args.debug)
