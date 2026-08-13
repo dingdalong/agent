@@ -30,17 +30,26 @@ logger = logging.getLogger(__name__)
 
 
 def _make_task_notifier(bus: EventBus) -> Callable[[list[dict]], None]:
-    """创建线程安全的任务变更回调，将 TaskStateChanged 事件投递到 EventBus。"""
+    """创建线程安全的任务变更回调，将 TaskStateChanged 事件投递到 EventBus。
+
+    首次调用在事件循环线程上时捕获 loop 引用存入闭包；后续任意线程的
+    调用都用缓存的 loop 做 run_coroutine_threadsafe，避免 worker 线程中
+    get_running_loop() 抛 RuntimeError 导致事件被静默丢弃。
+    """
+    loop: asyncio.AbstractEventLoop | None = None
+
     def notify(tasks_summary: list[dict]) -> None:
+        nonlocal loop
+        if loop is None:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                return
         event = TaskStateChanged(
             timestamp=time.time(),
             source="task_mgr",
             tasks=tasks_summary,
         )
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return
         asyncio.run_coroutine_threadsafe(bus.emit(event), loop)
     return notify
 

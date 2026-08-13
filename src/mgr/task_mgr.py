@@ -212,16 +212,22 @@ class TaskManager:
         hwm_path = self._tasks_dir / self._HIGHWATERMARK_FILE
         atomic_write_text(hwm_path, str(self._next_id - 1))
 
-    def _auto_cleanup(self) -> None:
-        """当所有任务都已完成时，删除整个 tasks_dir 目录。"""
-        if self._tasks_dir is None:
-            return
-        if not self._tasks:
-            return
-        if all(t.status == "completed" for t in self._tasks.values()):
-            # 写 highwatermark 后删除目录
+    def cleanup_if_all_completed(self) -> bool:
+        """轮末收尾：全部任务 completed 时清空内存、删除磁盘目录、发布空快照。
+
+        Returns: True 表示执行了清理。
+        """
+        if not self._tasks or not all(t.status == "completed" for t in self._tasks.values()):
+            return False
+        self._tasks.clear()
+        self._rounds_without_update = 0
+        if self._tasks_dir is not None:
+            # 先写 highwatermark 是 rmtree 部分失败时的防御，成功时随目录一并删除
             self._flush_highwatermark()
             shutil.rmtree(self._tasks_dir, ignore_errors=True)
+            shutil.rmtree(self._tasks_dir, ignore_errors=True)
+        self._emit_change()
+        return True
 
     def _emit_change(self) -> None:
         """通知监听器当前全量任务快照（过滤 _internal，与 list_tasks 一致）。"""
@@ -238,16 +244,6 @@ class TaskManager:
             ]
             tasks.append(summary)
         self._on_change(tasks)
-
-    @staticmethod
-    def clear_dir(tasks_dir: Path) -> None:
-        """删除指定的 tasks 目录（/clear 时调用）。
-
-        Args:
-            tasks_dir: 要删除的任务目录路径。
-        """
-        if tasks_dir.exists():
-            shutil.rmtree(tasks_dir, ignore_errors=True)
 
     # ── CRUD ──────────────────────────────────────────────────
 
@@ -403,7 +399,6 @@ class TaskManager:
             for tid in add_blocked_by:
                 self._flush_task(tid)
 
-        self._auto_cleanup()
         self._emit_change()
 
         return {"success": True, "task_id": task_id, "updated_fields": updated}
@@ -471,7 +466,6 @@ class TaskManager:
                 affected.append(task.id)
         for tid in affected:
             self._flush_task(tid)
-        self._auto_cleanup()
 
     def _claim_task(self, task: Task, claimant: str) -> None:
         """认领任务，设置 owner。
@@ -625,7 +619,7 @@ class TaskManager:
                 "- 只有完全完成时才标记 completed\n"
                 "- 遇到错误或阻塞时，保持 in_progress，尝试自行解决\n"
                 "- 任务不再需要（需求取消、被其他任务合并覆盖）或创建有误（重复、描述错误）时，status 设为 deleted 永久删除\n"
-                "- 已完成的任务保留 completed 状态，不要删除；全部 completed 后框架自动清理"
+                "- 已完成的任务保留 completed 状态，不要删除；本轮对话正常结束时，若全部任务均已完成，框架会自动清空任务列表"
             )
         return (
             "# 任务管理\n\n"
@@ -647,7 +641,7 @@ class TaskManager:
             "- 只有完全完成时才标记 completed\n"
             "- 遇到错误或阻塞时，保持 in_progress，尝试自行解决；无法解决时向用户说明阻塞原因等待指示\n"
             "- 任务不再需要（需求取消、被其他任务合并覆盖）或创建有误（重复、描述错误）时，status 设为 deleted 永久删除\n"
-            "- 已完成的任务保留 completed 状态，不要删除；全部 completed 后框架自动清理\n\n"
+            "- 已完成的任务保留 completed 状态，不要删除；本轮对话正常结束时，若全部任务均已完成，框架会自动清空任务列表\n\n"
             "## 创建与依赖管理\n"
             "先批量创建所有任务（获得 ID），再通过 task_update 设置依赖关系：\n"
             "1. 在同一轮中调用多个 task_create 一次性创建所有子任务\n"

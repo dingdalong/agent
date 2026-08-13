@@ -46,7 +46,7 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 | `MemoryMgr` (`memory_mgr.py`) | 项目记忆的加载/构建/读写 | `memory` | 有 |
 | `PlanMgr` (`plan_mgr.py`) | 计划模式切换与 plan 指令注入 | `plan`（依赖 `file`） | 有 |
 | `FileMgr` (`file_mgr.py`) | 工作区文件读写/搜索（同步阻塞） | `file` | 无 |
-| `TaskManager` (`task_mgr.py`) | 任务 CRUD、依赖、持久化、提醒 | `task` | 无（`/clear` 用 `clear_dir`） |
+| `TaskManager` (`task_mgr.py`) | 任务 CRUD、依赖、持久化、提醒 | `task` | 无 |
 | `SessionMgr` (`session_mgr.py`) | 会话元数据/SessionState 持久化与恢复 | 否 | 无 |
 | `HooksMgr` (`hooks_mgr.py`) | 8 类生命周期钩子的加载与执行 | 否 | 有 |
 | `ConfigManager` (`config_mgr.py`) | 三层配置/settings/.env 合并 | 否 | 有 |
@@ -420,7 +420,7 @@ MCP 连接配置和授权边界见 [mcp-and-hooks.md](mcp-and-hooks.md)。
 
 **单一职责**：会话内任务的 CRUD、依赖关系（双向同步 + 环检测）、文件持久化，并作为提醒源向 `ReminderMgr` 注入任务状态。
 
-**消费的配置或文件**：`tasks_dir`（主 agent 为 `{global_dir}/tasks/{session_id}/`，`agent.py:151-155`；子 agent 传 `None` 为**纯内存模式**）。每 task 一个 `{id}.json`（原子写），`.highwatermark` 记录最高分配 ID 防重用；所有任务 `completed` 后 `_auto_cleanup` 删除整个目录。`MAX_TASKS = 50`。
+**消费的配置或文件**：`tasks_dir`（主 agent 为 `{global_dir}/tasks/{session_id}/`，`agent.py:151-155`；子 agent 传 `None` 为**纯内存模式**）。每 task 一个 `{id}.json`（原子写），`.highwatermark` 记录最高分配 ID 防重用；全部任务 `completed` 时由轮末 `cleanup_if_all_completed()` 清空内存并删除整个目录。`MAX_TASKS = 50`。
 
 **`Task` 字段**（`task_mgr.py:14-36`）：`id`、`subject`、`description`、`active_form`、`status`（`pending`/`in_progress`/`completed`）、`owner`、`blocks`、`blocked_by`、`metadata`。
 
@@ -437,11 +437,12 @@ MCP 连接配置和授权边界见 [mcp-and-hooks.md](mcp-and-hooks.md)。
 | `get_turn_start_reminder` | `mode` | `str` | 未完成且连续 ≥3 轮未用任务工具时注入任务列表 |
 | `notify_tool_round` | `tool_names` | `None` | 含任意 `task_*` 工具则重置计数，否则 +1 |
 | `pop_post_round_reminder` | `mode` | `str \| None` | 同条件下提示“更新你的任务列表” |
-| `clear_dir` (static) | `tasks_dir` | `None` | 删除指定 tasks 目录（`/clear` 时调用） |
+| `cleanup_if_all_completed` | — | `bool` | 轮末收尾：全部任务 `completed` 时清空内存列表、删除 tasks 目录并发布空快照（隐藏 UI 面板）；否则返回 `False` 不清理 |
 
-**feature 门控**：`task`（未启用时 `Agent` 中为 `None`）。 **reload**：无（`/clear` 由 `Agent` 侧新建实例 + 静态 `clear_dir` 处理，非实例 `reload()`）。
-
+**feature 门控**：`task`（未启用时 `Agent` 中为 `None`）。 **reload**：无（`/clear` 由 `Agent` 侧新建实例处理，非实例 `reload()`）。
 **持有的关键状态**：`_tasks`、`_next_id`、`_rounds_without_update`、`_tasks_dir`。
+
+轮末清理时机：`Agent` 每轮结束调用 `cleanup_if_all_completed()`（`agent.py:460-470`），仅当本轮正常结束（turn DONE，无 LLM 错误/退出/斜杠命令）且全部任务 `completed` 时执行；存在未完成任务时不清理，磁盘目录保留，`/resume` 恢复行为不变。清理后 `_next_id` 不重置，新任务 ID 会话内继续单调递增。
 
 ---
 

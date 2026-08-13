@@ -392,6 +392,7 @@ class Agent:
             if not ctx.has_tool_calls:
                 self.llm.clear_reasoning_content(self.history[ctx.round_start_idx:])
                 self._sync_context_from_history()
+            await self._cleanup_tasks_at_turn_end(ctx)
             return result
 
         while True:
@@ -404,6 +405,7 @@ class Agent:
             event_bus = getattr(self.deps, "event_bus", None)
             if event_bus is not None and hasattr(event_bus, "join"):
                 await event_bus.join()
+            await self._cleanup_tasks_at_turn_end(ctx)
             await self._persist_session(ctx.user_input)
             if result.exit_requested or result.command is not None:
                 return result
@@ -454,6 +456,18 @@ class Agent:
                 self._truncate_messages(self.history, ctx.round_start_idx)
             self._pending_input = ctx.user_input  # 保留预填，方便改完重发
             raise
+
+    async def _cleanup_tasks_at_turn_end(self, ctx: RunContext) -> None:
+        """轮末收尾：turn 正常结束且全部任务 completed 时清空任务。
+
+        Args:
+            ctx: 当前运行上下文。
+        """
+        if getattr(self, "_task_mgr", None) is None:
+            return
+        if ctx.llm_error is not None or ctx.exit_requested or ctx.command is not None:
+            return
+        await asyncio.to_thread(self._task_mgr.cleanup_if_all_completed)
 
     def _truncate_to_clean_interrupt_tail(self) -> None:
         """中断后把历史裁到最近的合法尾部。
