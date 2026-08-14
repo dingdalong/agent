@@ -97,6 +97,15 @@ async def read_console_line(
     return line.rstrip("\r\n")
 
 
+def _display_options(question: FormQuestion) -> list[tuple[str, str]]:
+    """按推荐标记给展示 label 追加 (推荐) 后缀；value 保持原样。"""
+    recommended = question.recommended or []
+    return [
+        (value, f"{label}(推荐)" if index < len(recommended) and recommended[index] else label)
+        for index, (value, label) in enumerate(question.options or [])
+    ]
+
+
 class PlainFrontend:
     """管道和 CI 环境使用的串行输入输出。"""
 
@@ -201,14 +210,16 @@ class PlainFrontend:
                 if question.multi_select:
                     answers.append(await self._read_multi_choice(question))
                 else:
-                    answers.append(await self.read_choice(question.question, question.options, 0, question.descriptions))
+                    answers.append(await self.read_choice(
+                        question.question, _display_options(question), 0, question.descriptions,
+                    ))
             else:
                 answers.append((await self.reader(f"{question.question}: ")).strip())
         discussion = (await self.reader("补充讨论（回车跳过）: ")).strip()
         return json.dumps({"answers": answers, "discussion": discussion}, ensure_ascii=False)
 
     async def _read_multi_choice(self, question: FormQuestion) -> str:
-        options = question.options or []
+        options = _display_options(question)
         self.write(question.question + "\n")
         for index, (_value, label) in enumerate(options, 1):
             self.write(f"{index}. {label}\n")

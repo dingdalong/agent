@@ -142,14 +142,16 @@ class FormQuestion:
     """单屏表单中的单个问题（纯数据，非 Event）——作为 FormMenu.questions 的单题载荷。
 
     Attributes:
-        question: 问题文本。
+        question: 问题文本（纯文本渲染）。
         options: (value, label) 选项列表；非空时该题为选项菜单，None 时仅自由文本输入。
         multi_select: 有 options 时是否允许勾选多项（True 为多选，False 为单选）。
         header: 顶部标签栏用的简短标签（概括该题主旨），为空时标签栏回退显示「问题N」。
-        descriptions: 与 options 等长对齐的选项参考说明，逐项为该选项下方展示的浅色说明（空串表示无说明）；None 表示无任何说明。
+        descriptions: 与 options 等长对齐的选项参考说明，逐项为该选项下方展示的暗色说明（空串表示无说明）；None 表示无任何说明。
         previews: 与 options 等长对齐的选项预览内容（Markdown 格式），非空时该题在 UI 中切换为
                   左右分栏展示，右侧渲染当前光标所在选项的预览；None 或全空串表示无预览。
                   仅在单选模式下生效。
+        recommended: 与 options 等长对齐的推荐标记；True 的选项由调用方排序在前，UI 在其标签后
+                  紧跟 (推荐) 后缀。None 表示无推荐。
     """
     question: str
     options: list[tuple[str, str]] | None = None
@@ -157,6 +159,7 @@ class FormQuestion:
     header: str = ""
     descriptions: list[str] | None = None
     previews: list[str] | None = None
+    recommended: list[bool] | None = None
 
     @property
     def has_previews(self) -> bool:
@@ -172,27 +175,25 @@ class FormQuestion:
 class FormMenu(MenuRequest):
     """请求 UI 以单屏表单读取多个问题的作答，通过 future 返回 JSON 编码的答案列表（空串表示取消）。
 
-    TUI 由 `tui/dialogs.py` 的 `FormDialog` 呈现：顶部标签栏（已答 ☑ 未答 ☐ + header
-    简介 + 末尾「提交」）、题干、单选 ●/○ 或多选 [x]/[ ] 选项行（可带浅色参考说明副行）、
-    末行自定义输入行、底部操作提示与讨论栏：
+    TUI 由 `tui/dialogs.py` 的 `InlineFormWidget` 以内嵌形式呈现：顶部标签栏（已答 ☑ 未答 ☐
+    + header 简介 + 末尾「提交」）、题干、单选 ●/○ 或多选 [x]/[ ] 选项行（推荐项带 (推荐)
+    后缀、可带暗色参考说明）、选项末尾常驻「其它」输入行与可切换的讨论输入行：
 
          ☑ 语言   ☐ 经验   提交
 
         你主要用哪门语言？
-         ○ 1. Python
+         ● 1. Python(推荐)
              数据与脚本首选
          ○ 2. Rust
              系统级、内存安全
-         ○ ⌨ 其他: 输入回答…
-        ↑↓ 选择行 · Enter/空格 选中 · ←→ 切换标签 · Esc 取消
-        ──────────────────────────────
-        Tab 讨论这几个问题…
+         ○ 其它: 输入自定义回答…
+        ↑↓ 选择行 · ←→ 切换问题 · Space/数字 选择 · Tab 讨论 · Esc 取消
 
-    ←→ 切标签、↑↓ 移行、空格/Enter 选中、Tab 切讨论区、Enter 提交、Esc 取消。用于 ask_user、plan。
+    ←→ 切标签、↑↓ 移行、空格/数字 选中、Enter 确认或前进、Tab 切讨论区、Esc 取消。用于 ask_user。
     """
     prompt: str = ""  # 表单上文提示（打印到 scrollback，如「🤖 提问」）
     questions: list[FormQuestion] = field(default_factory=list)  # 问题列表，顺序即作答顺序
-    markdown: bool = False  # 上文提示与问题/选项标签是否按 Markdown 渲染
+    markdown: bool = False  # 上文提示与选项说明/预览是否按 Markdown 渲染（题干与选项标签恒为纯文本）
     level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
     type: Literal["form_menu"] = field(default="form_menu", init=False)
 

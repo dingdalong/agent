@@ -104,18 +104,21 @@ MarkdownFence {
     scrollbar-size: 0 0;
 }
 
-#input .text-area--selection, #dialog-input .text-area--selection {
+#input .text-area--selection, #dialog-input .text-area--selection,
+.form-input .text-area--selection {
     background: #2f6f68;
     color: #ffffff;
 }
 
 /* 光标所在行不高亮，避免输入后输入栏局部变色 */
-#input .text-area--cursor-line, #dialog-input .text-area--cursor-line {
+#input .text-area--cursor-line, #dialog-input .text-area--cursor-line,
+.form-input .text-area--cursor-line {
     background: transparent;
 }
 
 /* 光标：不透明白底 + 深色字，去掉 :ansi 分支注入的 reverse 反显，确保清晰可见 */
-#input .text-area--cursor, #dialog-input .text-area--cursor {
+#input .text-area--cursor, #dialog-input .text-area--cursor,
+.form-input .text-area--cursor {
     color: #000000;
     background: #ffffff;
     text-style: none;
@@ -179,6 +182,10 @@ MarkdownFence {
 
 .short #form-split {
     max-height: 14;
+}
+
+.short #inline-form-body {
+    max-height: 10;
 }
 
 .short #form-preview-pane {
@@ -287,7 +294,7 @@ ModalScreen {
 }
 
 #form-left {
-    width: auto;
+    width: 1fr;
     min-width: 24;
     height: auto;
 }
@@ -398,6 +405,94 @@ ModalScreen {
     color: #f0f3f5;
 }
 
+/* --- ask_user 内嵌表单（结构化选项 + 同行输入） --- */
+
+#inline-form-body {
+    height: auto;
+    max-height: 18;
+    scrollbar-size: 1 1;
+    scrollbar-color: #53616c;
+    scrollbar-color-hover: #7a8b97;
+}
+
+.form-question {
+    height: auto;
+    margin: 1 0 0 0;
+    padding: 0;
+    color: #d8dee4;
+}
+
+.form-options {
+    height: auto;
+    margin-top: 1;
+}
+
+.form-option-row {
+    height: auto;
+}
+
+.form-option-line {
+    height: auto;
+}
+
+.form-marker {
+    width: auto;
+    height: auto;
+    color: #d8dee4;
+}
+
+.form-label {
+    width: auto;
+    max-width: 1fr;
+    height: auto;
+    margin: 0;
+    padding: 0;
+}
+
+.form-description MarkdownBlock {
+    margin: 0;
+    padding: 0;
+}
+
+.form-recommended {
+    width: auto;
+    height: auto;
+    color: #efc36a;
+}
+
+.form-description {
+    height: auto;
+    margin: 0;
+    padding: 0 0 0 5;
+    color: #8d989f;
+}
+
+.form-custom-row, .form-discussion-row {
+    height: auto;
+    margin-top: 1;
+}
+
+.form-input-prefix {
+    width: auto;
+    height: auto;
+    color: #d8dee4;
+}
+
+.form-input {
+    width: 1fr;
+    height: 1;
+    border: none;
+    background: ansi_default;
+    color: #f0f3f5;
+    scrollbar-size: 0 0;
+}
+
+#form-summary {
+    height: auto;
+    margin-top: 1;
+    color: #d8dee4;
+}
+
 .inline-widget #form-tabs {
     color: #76d7c4;
     text-style: bold;
@@ -406,6 +501,10 @@ ModalScreen {
 .inline-widget #form-preview-pane {
     border-left: solid #3b464f;
     background: ansi_default;
+}
+
+.compact .inline-widget #form-preview-pane {
+    border-left: none;
 }
 
 .inline-widget-active #agent-list {

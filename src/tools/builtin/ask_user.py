@@ -15,10 +15,14 @@ if TYPE_CHECKING:
 
 class Option(BaseModel):
     """问题的一个可选项。"""
-    label: str = Field(description="选项显示文本，用户看到并选择的内容，需简洁")
+    label: str = Field(description="选项显示文本，用户看到并选择的内容，需简洁，建议不超过一行")
+    recommended: bool = Field(
+        default=False,
+        description="是否推荐该项（默认 false）；推荐项会置顶显示并紧接标注 (推荐)；单选与多选均允许多个推荐项",
+    )
     description: str = Field(
         default="",
-        description="该选项的参考说明，解释其含义、取舍或影响，供用户判断时参考；选项自明时可省略",
+        description="该选项的参考说明（支持 Markdown），解释其含义、取舍或影响，供用户判断时参考；选项自明时可省略",
     )
     preview: str = Field(
         default="",
@@ -60,7 +64,9 @@ class AskUser(BaseModel):
           "一次弹出一个标签页表单：questions 中每个问题占一个标签页，用户逐题作答后一并返回。"
           "每个需用户拍板的独立维度应是 questions 中的一条——严禁把多个问题塞进同一段问题文本，"
           "或把不同维度合并成一个组合选项（如「Python + 格子法」）。"
-          "每题末尾恒有「自定义输入」行，用户可不选给定项自行作答（因此无需再加「其他」类选项）；"
+          "每题末尾恒有「其它」输入行，用户可不选给定项自行作答（因此无需再加「其他」类选项）；"
+          "选项说明支持 Markdown；选项可设 recommended=true 表示推荐，"
+          "推荐项自动置顶并标注 (推荐)。"
           "表单底部有讨论栏，用户的疑问或补充会以「讨论：…」附在返回末尾。"
           "返回逐题配对的「问题 + 回答」；用户取消或漏答的项以哨兵串标注。"
       ),
@@ -76,17 +82,21 @@ async def ask_user(questions: list[dict], deps: AgentDeps, agent: Agent) -> str:
         逐题配对的「问题 + 回答」文本，末尾附用户在讨论栏填写的「讨论：…」（若有）；
         用户取消或未作答的项以哨兵串标注，便于 LLM 察觉残缺。
     """
-    form_questions = [
-        FormQuestion(
+    form_questions = []
+    for q in questions:
+        options = q.get("options") or []
+        if options:
+            # 稳定排序：推荐项置顶，推荐组与普通组内部各自保持原顺序
+            options = sorted(options, key=lambda o: not o.get("recommended", False))
+        form_questions.append(FormQuestion(
             question=q["question"],
-            options=[(o["label"], o["label"]) for o in q["options"]] if q.get("options") else None,
-            descriptions=[o.get("description", "") for o in q["options"]] if q.get("options") else None,
-            previews=[o.get("preview", "") for o in q["options"]] if q.get("options") else None,
+            options=[(o["label"], o["label"]) for o in options] if options else None,
+            descriptions=[o.get("description", "") for o in options] if options else None,
+            previews=[o.get("preview", "") for o in options] if options else None,
+            recommended=[bool(o.get("recommended", False)) for o in options] if options else None,
             multi_select=q.get("multi_select", False),
             header=q.get("header", ""),
-        )
-        for q in questions
-    ]
+        ))
     caller_agent_type, caller_uuid = caller_identity(agent)
     answers, discussion = await deps.event_bus.request_form(
         form_questions, prompt="🤖 **提问**", markdown=True,

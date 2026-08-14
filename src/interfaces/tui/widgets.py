@@ -170,6 +170,34 @@ class KeyboardTextArea(TextArea):
         event.prevent_default()
         event.stop()
 
+class AutoGrowTextArea(KeyboardTextArea):
+    """键盘优先、随内容自动增高的多行输入框：1 行起，最多 MAX_LINES 行，超出内部滚动。"""
+
+    MAX_LINES = 4
+
+    def on_mount(self) -> None:
+        self._autosize()
+
+    def on_resize(self, _event: events.Resize) -> None:
+        # 宽度变化会改变软折行数，需要重新计算高度。
+        self._autosize()
+
+    def on_text_area_changed(self, _event: TextArea.Changed) -> None:
+        self._autosize()
+
+    def _autosize(self) -> None:
+        if not self.is_mounted:
+            return
+        # 用折行后的视觉行数（含显式换行与软折行），与 Composer 增高同一口径。
+        height = min(self.MAX_LINES, max(1, self.wrapped_document.height))
+        current = self.styles.height
+        if current is None or int(current.value) != height:
+            self.styles.height = height
+
+class FormBodyScroll(VerticalScroll):
+    """表单正文滚动容器：承接长表单滚动，但不因鼠标点击抢焦点。"""
+
+    FOCUS_ON_CLICK = False
 
 class KeyboardOptionList(OptionList):
     """只接受键盘选择的选项列表。"""

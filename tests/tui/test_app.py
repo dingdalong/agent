@@ -33,7 +33,11 @@ from src.events.types import (
 from src.interfaces.agent_view_store import AgentViewStore
 from src.interfaces.turn_clock import TurnClock
 from src.interfaces.tui.app import AgentTuiApp
-from src.interfaces.tui.dialogs import InlineSelectionWidget, SelectionDialog
+from src.interfaces.tui.dialogs import (
+    InlineFormWidget,
+    InlineSelectionWidget,
+    SelectionDialog,
+)
 from src.interfaces.tui.widgets import (
     Composer,
     KeyboardNavigation,
@@ -61,6 +65,21 @@ def _app(
         platform_name=platform,
         native_clipboard=False,
     )
+
+
+async def _open_form(app, pilot, questions, **kwargs):
+    """提交 FormMenu 并等待挂载，返回请求对象。"""
+    loop = asyncio.get_running_loop()
+    form = FormMenu(
+        timestamp=1.0,
+        source="test",
+        questions=questions,
+        future=loop.create_future(),
+        **kwargs,
+    )
+    await app.coordinator.submit(form)
+    await pilot.pause()
+    return form
 
 
 def _assert_regions_do_not_overlap(app: AgentTuiApp) -> None:
@@ -919,22 +938,583 @@ def test_modal_controls_are_keyboard_only() -> None:
             )
             await app.coordinator.submit(form)
             await pilot.pause()
-            form_body = app._interaction_slot.query_one("#form-body", KeyboardNavigation)
-            form_input = app._interaction_slot.query_one("#dialog-input", TextArea)
-            assert form_body.has_focus
+            form_widget = app._interaction_slot.query_one(InlineFormWidget)
+            form_input = app._interaction_slot.query_one("#custom-input-0", TextArea)
+            assert form_widget.has_focus
 
             await pilot.click(form_input)
             await pilot.pause()
-            assert form_body.has_focus
+            assert form_widget.has_focus
             await pilot.press("down", "x")
             assert form_input.has_focus
             assert form_input.text == "x"
-            await pilot.click(form_body)
+            await pilot.click(app._interaction_slot.query_one("#label-0-0"))
             await pilot.pause()
             assert form_input.has_focus
+            assert form_widget.rows[0] == 1
 
             form.future.cancel()
             await pilot.pause()
+
+    asyncio.run(scenario())
+
+
+def test_form_custom_row_is_inline_and_focus_shows_cursor() -> None:
+    """自定义回答行常驻选项末尾：导航到该行即聚焦输入框，无底部独立输入框。"""
+    async def scenario() -> None:
+        app = _app()
+        async with app.run_test(size=(100, 32)) as pilot:
+            form = await _open_form(app, pilot, [FormQuestion(
+                question="模式",
+                options=[("safe", "安全")],
+            )])
+            slot = app._interaction_slot
+            assert len(slot.query("#dialog-input")) == 0
+            custom_input = slot.query_one("#custom-input-0", TextArea)
+            assert slot.query_one("#custom-row-0").display
+
+            await pilot.press("down")
+            await pilot.pause()
+            assert app.screen.focused is custom_input
+            assert custom_input.has_focus
+            assert custom_input.show_cursor
+            await pilot.press("a", "b")
+            assert custom_input.text == "ab"
+
+            await pilot.press("enter", "enter")
+            assert await form.future == '{"answers": ["ab"], "discussion": ""}'
+
+    asyncio.run(scenario())
+
+
+def test_form_free_text_question_focuses_custom_input_on_mount() -> None:
+    """无选项自由题挂载后直接聚焦其它输入行。"""
+    async def scenario() -> None:
+        app = _app()
+        async with app.run_test(size=(100, 32)) as pilot:
+            form = await _open_form(app, pilot, [FormQuestion(question="说明")])
+            custom_input = app._interaction_slot.query_one("#custom-input-0", TextArea)
+            assert custom_input.has_focus
+            await pilot.press("o", "k")
+            assert custom_input.text == "ok"
+            await pilot.press("enter", "enter")
+            assert await form.future == '{"answers": ["ok"], "discussion": ""}'
+
+    asyncio.run(scenario())
+
+
+def test_form_custom_input_autogrows_to_four_lines_then_scrolls() -> None:
+    """其它输入默认 1 行，随内容增高到 4 行后内部滚动，清空后回到 1 行。"""
+    async def scenario() -> None:
+        app = _app()
+        async with app.run_test(size=(100, 32)) as pilot:
+            await _open_form(app, pilot, [FormQuestion(question="说明")])
+            custom_input = app._interaction_slot.query_one("#custom-input-0", TextArea)
+            assert int(custom_input.styles.height.value) == 1
+
+            await pilot.press(
+                "shift+enter", "shift+enter", "shift+enter",
+                "shift+enter", "shift+enter", "x",
+            )
+            await pilot.pause()
+            assert custom_input.wrapped_document.height >= 6
+            assert int(custom_input.styles.height.value) == 4
+            assert custom_input.scroll_y > 0
+
+            custom_input.clear()
+            await pilot.pause()
+            assert int(custom_input.styles.height.value) == 1
+
+    asyncio.run(scenario())
+
+
+def test_form_discussion_row_swaps_with_custom_row_and_persists() -> None:
+    """讨论行与其它行在同一位置互换；文本在切换间保持。"""
+    async def scenario() -> None:
+        app = _app()
+        async with app.run_test(size=(100, 32)) as pilot:
+            form = await _open_form(app, pilot, [FormQuestion(
+                question="模式",
+                options=[("safe", "安全")],
+            )])
+            slot = app._interaction_slot
+            custom_row = slot.query_one("#custom-row-0")
+            discussion_row = slot.query_one("#discussion-row")
+            discussion_input = slot.query_one("#discussion-input", TextArea)
+            assert custom_row.display
+            assert not discussion_row.display
+
+            await pilot.press("tab")
+            await pilot.pause()
+            assert not custom_row.display
+            assert discussion_row.display
+            assert app.screen.focused is discussion_input
+            await pilot.press("n", "o", "t", "e")
+            assert discussion_input.text == "note"
+
+            await pilot.press("tab")
+            await pilot.pause()
+            assert custom_row.display
+            assert not discussion_row.display
+
+            await pilot.press("tab")
+            await pilot.pause()
+            assert discussion_input.text == "note"
+            await pilot.press("enter")
+            assert await form.future == '{"answers": [""], "discussion": "note"}'
+
+    asyncio.run(scenario())
+
+
+def test_form_custom_texts_are_independent_per_question() -> None:
+    """每题的其它输入独立保存，切换标签不丢失。"""
+    async def scenario() -> None:
+        app = _app()
+        async with app.run_test(size=(100, 32)) as pilot:
+            form = await _open_form(app, pilot, [
+                FormQuestion(question="题一", options=[("a", "甲")], header="一"),
+                FormQuestion(question="题二", options=[("b", "乙")], header="二"),
+            ])
+            slot = app._interaction_slot
+            await pilot.press("down")
+            await pilot.pause()
+            await pilot.press("o", "n", "e")
+            assert slot.query_one("#custom-input-0", TextArea).text == "one"
+
+            await pilot.press("right")
+            await pilot.pause()
+            second_input = slot.query_one("#custom-input-1", TextArea)
+            assert second_input.text == ""
+            await pilot.press("down")
+            await pilot.pause()
+            assert app.screen.focused is second_input
+            await pilot.press("t", "w", "o")
+            assert second_input.text == "two"
+
+            await pilot.press("left")
+            await pilot.pause()
+            assert slot.query_one("#custom-input-0", TextArea).text == "one"
+
+            await pilot.press("right", "right", "enter")
+            payload = await form.future
+            assert '"answers": ["one", "two"]' in payload
+
+    asyncio.run(scenario())
+
+
+def test_form_recommended_option_shows_suffix_component() -> None:
+    """推荐项在 label 后紧跟独立 (推荐) 后缀组件。"""
+    async def scenario() -> None:
+        app = _app()
+        async with app.run_test(size=(100, 32)) as pilot:
+            await _open_form(
+                app, pilot,
+                [FormQuestion(
+                    question="模式",
+                    options=[("a", "方案A"), ("b", "方案B")],
+                    recommended=[True, False],
+                )],
+                markdown=True,
+            )
+            slot = app._interaction_slot
+            suffix = slot.query_one("#recommended-0-0", Static)
+            assert str(suffix.visual) == "(推荐)"
+            children = list(suffix.parent.children)
+            assert [child.id for child in children] == [
+                "marker-0-0", "label-0-0", "recommended-0-0",
+            ]
+            assert len(slot.query("#recommended-0-1")) == 0
+
+    asyncio.run(scenario())
+
+
+def test_form_question_label_plain_and_description_markdown() -> None:
+    """题干与选项标签恒为纯文本；说明按 markdown 开关渲染为 Markdown 或纯文本。"""
+    async def scenario() -> None:
+        app = _app()
+        async with app.run_test(size=(100, 32)) as pilot:
+            form = await _open_form(
+                app, pilot,
+                [FormQuestion(
+                    question="**重要**决定",
+                    options=[("a", "用 `code` 实现")],
+                    descriptions=["细节**加粗**"],
+                )],
+                markdown=True,
+            )
+            slot = app._interaction_slot
+            question_text = slot.query_one("#question-text-0")
+            label = slot.query_one("#label-0-0")
+            description = slot.query_one("#description-0-0")
+            assert isinstance(question_text, SelectionStatic)
+            assert isinstance(label, SelectionStatic)
+            assert "**重要**" in str(question_text.visual)
+            assert "`code`" in str(label.visual)
+            assert isinstance(description, Markdown)
+            assert "form-description" in description.classes
+            await pilot.pause()
+            desc_blocks = [str(block.visual) for block in description.query(Static)]
+            assert any("细节加粗" in text for text in desc_blocks)
+            assert all("**" not in text for text in desc_blocks)
+
+            await pilot.press("escape")
+            assert await form.future == ""
+
+            await _open_form(app, pilot, [FormQuestion(
+                question="**重要**决定",
+                options=[("a", "用 `code` 实现")],
+                descriptions=["细节**加粗**"],
+            )])
+            slot = app._interaction_slot
+            plain_desc = slot.query_one("#description-0-0")
+            assert isinstance(plain_desc, SelectionStatic)
+            assert "**加粗**" in str(plain_desc.visual)
+
+    asyncio.run(scenario())
+
+
+def test_form_multiline_label_keeps_logical_row_navigation() -> None:
+    """多行选项标签不改变逻辑导航：Down 一次移动一个选项。"""
+    async def scenario() -> None:
+        app = _app()
+        async with app.run_test(size=(100, 32)) as pilot:
+            form = await _open_form(
+                app, pilot,
+                [FormQuestion(
+                    question="多行",
+                    options=[("a", "第一行\n第二行"), ("b", "短")],
+                )],
+                markdown=True,
+            )
+            slot = app._interaction_slot
+            widget = slot.query_one(InlineFormWidget)
+            await pilot.press("down")
+            await pilot.pause()
+            assert widget.rows[0] == 1
+            marker = slot.query_one("#marker-0-1", Static)
+            assert str(marker.visual).startswith("❯")
+            await pilot.press("2")
+            await pilot.pause()
+            await pilot.press("enter")
+            assert await form.future == '{"answers": ["b"], "discussion": ""}'
+
+    asyncio.run(scenario())
+
+
+def test_form_preview_updates_and_hides_descriptions() -> None:
+    """有 preview 时不渲染说明组件；预览随当前选项更新。"""
+    async def scenario() -> None:
+        app = _app()
+        async with app.run_test(size=(120, 36)) as pilot:
+            await _open_form(
+                app, pilot,
+                [FormQuestion(
+                    question="预览",
+                    options=[("a", "A"), ("b", "B")],
+                    descriptions=["说明A", "说明B"],
+                    previews=["预览A内容", "预览B内容"],
+                )],
+                markdown=True,
+            )
+            slot = app._interaction_slot
+            slot.query_one("#options-0")
+            assert len(slot.query(".form-description")) == 0
+            pane = slot.query_one("#form-preview-pane")
+            assert pane.display
+            preview = slot.query_one("#form-preview", Markdown)
+            await pilot.pause()
+            blocks = [str(block.visual) for block in preview.query(Static)]
+            assert any("预览A内容" in text for text in blocks)
+
+            await pilot.press("down")
+            await pilot.pause()
+            await pilot.pause()
+            blocks = [str(block.visual) for block in preview.query(Static)]
+            assert any("预览B内容" in text for text in blocks)
+
+    asyncio.run(scenario())
+
+
+def test_form_preview_stacks_and_body_scrolls_in_compact_viewport() -> None:
+    """紧凑视口下 preview 分栏上下堆叠不重叠；内容超高时正文内部滚动。"""
+    async def scenario() -> None:
+        app = _app()
+        async with app.run_test(size=(80, 24)) as pilot:
+            await _open_form(
+                app, pilot,
+                [FormQuestion(
+                    question="紧凑布局",
+                    options=[(f"v{index}", f"选项{index}") for index in range(12)],
+                    descriptions=[f"说明{index}" for index in range(12)],
+                    previews=["预览内容"] + [""] * 11,
+                )],
+                markdown=True,
+            )
+            await pilot.pause()
+            slot = app._interaction_slot
+            slot.query_one("#options-0")
+            left = slot.query_one("#form-left")
+            pane = slot.query_one("#form-preview-pane")
+            assert pane.display
+            assert left.region.bottom <= pane.region.y
+            blocks = [
+                str(block.visual)
+                for block in slot.query_one("#form-preview", Markdown).query(Static)
+            ]
+            assert any("预览内容" in text for text in blocks)
+            body = slot.query_one("#inline-form-body", VerticalScroll)
+            assert body.max_scroll_y > 0
+
+    asyncio.run(scenario())
+
+
+def test_form_drag_select_copies_on_mac() -> None:
+    """题干/选项文本支持鼠标拖选；macOS 选中即复制。"""
+    async def scenario() -> None:
+        app = _app(platform="darwin")
+        async with app.run_test(size=(100, 32)) as pilot:
+            await _open_form(
+                app, pilot,
+                [FormQuestion(
+                    question="选择题干文本",
+                    options=[("a", "选项标签文本")],
+                )],
+                markdown=True,
+            )
+            await pilot.pause()
+            slot = app._interaction_slot
+            start_block = slot.query_one("#question-text-0")
+            end_block = slot.query_one("#label-0-0")
+            await pilot.mouse_down(start_block, offset=(0, 0))
+            end_region = end_block.content_region
+            end = Offset(end_region.right - 1, end_region.y)
+            app.mouse_position = end
+            app.screen._forward_event(events.MouseMove(
+                end_block,
+                *end,
+                end_region.width - 1,
+                0,
+                1,
+                False,
+                False,
+                False,
+                screen_x=end.x,
+                screen_y=end.y,
+            ))
+            await pilot.mouse_up(offset=end)
+            await pilot.pause()
+            selected = app.screen.get_selected_text()
+            assert "选择题干文本" in selected
+            assert "选项标签文本" in selected
+            assert app.clipboard == selected
+
+    asyncio.run(scenario())
+
+
+def test_form_preview_code_block_and_trailing_newline_drag_no_crash() -> None:
+    """preview 代码块与尾随换行内容拖选不崩溃。"""
+    async def scenario() -> None:
+        app = _app()
+        async with app.run_test(size=(120, 36)) as pilot:
+            await _open_form(
+                app, pilot,
+                [FormQuestion(
+                    question="预览\n",
+                    options=[("a", "标签\n")],
+                    previews=["```python\nprint('hi')\n```"],
+                )],
+                markdown=True,
+            )
+            await pilot.pause()
+            slot = app._interaction_slot
+            slot.query_one("#options-0")
+            preview = slot.query_one("#form-preview", Markdown)
+            blocks = list(preview.query(Static))
+            assert blocks
+            target = blocks[-1]
+            region = target.content_region
+            await pilot.mouse_down(target, offset=(0, 0))
+            end = Offset(region.x + 2, region.y)
+            app.mouse_position = end
+            app.screen._forward_event(events.MouseMove(
+                target,
+                *end,
+                2,
+                0,
+                1,
+                False,
+                False,
+                False,
+                screen_x=end.x,
+                screen_y=end.y,
+            ))
+            await pilot.mouse_up(offset=end)
+            await pilot.pause()
+            assert app.fatal_error is None
+            assert app.is_running
+            assert app.screen.get_selected_text()
+
+    asyncio.run(scenario())
+
+
+def test_form_inputs_stay_keyboard_only_under_mouse() -> None:
+    """其它/讨论输入框不响应鼠标聚焦与拖选。"""
+    async def scenario() -> None:
+        app = _app()
+        async with app.run_test(size=(100, 32)) as pilot:
+            await _open_form(app, pilot, [FormQuestion(
+                question="模式",
+                options=[("safe", "安全")],
+            )])
+            slot = app._interaction_slot
+            custom_input = slot.query_one("#custom-input-0", TextArea)
+            widget = slot.query_one(InlineFormWidget)
+            assert widget.has_focus
+
+            await pilot.mouse_down(custom_input, offset=(0, 0))
+            await pilot.hover(custom_input, offset=(2, 0))
+            await pilot.mouse_up(custom_input, offset=(2, 0))
+            await pilot.pause()
+            assert custom_input.selected_text == ""
+            assert widget.has_focus
+
+    asyncio.run(scenario())
+
+
+def test_form_multi_select_toggles_and_combines_custom_text() -> None:
+    """多选题：空格/数字勾选与反选，自定义文本按选项序追加在勾选值之后。"""
+    async def scenario() -> None:
+        app = _app()
+        async with app.run_test(size=(100, 32)) as pilot:
+            form = await _open_form(app, pilot, [FormQuestion(
+                question="组件",
+                options=[("a", "甲"), ("b", "乙"), ("c", "丙")],
+                multi_select=True,
+            )])
+            slot = app._interaction_slot
+            await pilot.press("space")
+            await pilot.press("down")
+            await pilot.press("space")
+            await pilot.press("space")
+            await pilot.press("3")
+            await pilot.pause()
+            assert "[x]" in str(slot.query_one("#marker-0-0", Static).visual)
+            assert "[ ]" in str(slot.query_one("#marker-0-1", Static).visual)
+            assert "[x]" in str(slot.query_one("#marker-0-2", Static).visual)
+
+            await pilot.press("down", "x", "y")
+            await pilot.press("right", "enter")
+            assert await form.future == '{"answers": ["a、c、xy"], "discussion": ""}'
+
+    asyncio.run(scenario())
+
+
+def test_form_single_select_custom_text_and_option_are_exclusive() -> None:
+    """单选互斥：输入清空已选项；选中选项清空已输入文本。"""
+    async def scenario() -> None:
+        app = _app()
+        async with app.run_test(size=(100, 32)) as pilot:
+            form = await _open_form(app, pilot, [FormQuestion(
+                question="模式",
+                options=[("safe", "安全")],
+            )])
+            slot = app._interaction_slot
+            widget = slot.query_one(InlineFormWidget)
+            await pilot.press("1")
+            await pilot.pause()
+            assert widget.checked[0] == {0}
+
+            await pilot.press("left")
+            await pilot.press("down", "z")
+            await pilot.pause()
+            assert widget.checked[0] == set()
+            assert widget.custom[0] == "z"
+
+            await pilot.press("up")
+            await pilot.press("space")
+            await pilot.pause()
+            assert widget.checked[0] == {0}
+            assert widget.custom[0] == ""
+            assert slot.query_one("#custom-input-0", TextArea).text == ""
+
+            form.future.cancel()
+            await pilot.pause()
+
+    asyncio.run(scenario())
+
+
+def test_form_restores_focus_after_app_focus() -> None:
+    """终端重新激活后，焦点恢复到当前状态对应组件且文本保留。"""
+    async def scenario() -> None:
+        app = _app()
+        async with app.run_test(size=(100, 32)) as pilot:
+            form = await _open_form(app, pilot, [FormQuestion(
+                question="模式",
+                options=[("safe", "安全")],
+            )])
+            slot = app._interaction_slot
+            widget = slot.query_one(InlineFormWidget)
+            custom_input = slot.query_one("#custom-input-0", TextArea)
+            discussion_input = slot.query_one("#discussion-input", TextArea)
+
+            assert widget.has_focus
+            app.screen.set_focus(None)
+            app.post_message(events.AppFocus())
+            await pilot.pause()
+            assert widget.has_focus
+
+            await pilot.press("down", "x")
+            assert custom_input.has_focus
+            app.screen.set_focus(None)
+            app.post_message(events.AppFocus())
+            await pilot.pause()
+            assert custom_input.has_focus
+            assert custom_input.text == "x"
+            assert custom_input.show_cursor
+
+            await pilot.press("tab", "n")
+            assert discussion_input.has_focus
+            app.screen.set_focus(None)
+            app.post_message(events.AppFocus())
+            await pilot.pause()
+            assert discussion_input.has_focus
+            assert discussion_input.text == "n"
+
+            form.future.cancel()
+            await pilot.pause()
+
+    asyncio.run(scenario())
+
+
+def test_form_preview_pane_hides_on_empty_and_restores() -> None:
+    """预览随当前选项切换：空 preview 隐藏面板，返回时恢复内容。"""
+    async def scenario() -> None:
+        app = _app()
+        async with app.run_test(size=(120, 36)) as pilot:
+            await _open_form(
+                app, pilot,
+                [FormQuestion(
+                    question="预览",
+                    options=[("a", "A"), ("b", "B")],
+                    previews=["预览A内容", ""],
+                )],
+                markdown=True,
+            )
+            slot = app._interaction_slot
+            pane = slot.query_one("#form-preview-pane")
+            assert pane.display
+            await pilot.press("down")
+            await pilot.pause()
+            assert not pane.display
+            await pilot.press("up")
+            await pilot.pause()
+            await pilot.pause()
+            assert pane.display
+            blocks = [
+                str(block.visual)
+                for block in slot.query_one("#form-preview", Markdown).query(Static)
+            ]
+            assert any("预览A内容" in text for text in blocks)
 
     asyncio.run(scenario())
 
