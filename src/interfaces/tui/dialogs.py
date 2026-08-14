@@ -1096,8 +1096,8 @@ class InlineFormWidget(InlineWidget):
             return False
         return self.request.questions[self.tab].has_previews
 
-    def _text_widget(self, source: str, widget_id: str, classes: str) -> Widget:
-        """按 markdown 开关生成选项说明组件（题干与选项标签恒为纯文本）。"""
+    def _content_widget(self, source: str, widget_id: str, classes: str) -> Widget:
+        """按 markdown 开关生成表单内容组件。"""
         if self.request.markdown:
             return Markdown(source, id=widget_id, classes=classes)
         return SelectionStatic(source, id=widget_id, classes=classes, markup=False)
@@ -1116,11 +1116,10 @@ class InlineFormWidget(InlineWidget):
             yield SelectionStatic("", id="form-hint", classes="dialog-hint", markup=False)
             yield SelectionStatic("", id="form-tabs", markup=False)
             for index, question in enumerate(self.request.questions):
-                yield SelectionStatic(
+                yield self._content_widget(
                     question.question,
-                    id=f"question-text-{index}",
-                    classes="form-question",
-                    markup=False,
+                    f"question-text-{index}",
+                    "form-question",
                 )
             if self._has_any_preview:
                 with Horizontal(id="form-split"):
@@ -1147,11 +1146,10 @@ class InlineFormWidget(InlineWidget):
                                     classes="form-marker",
                                     markup=False,
                                 )
-                                yield SelectionStatic(
+                                yield self._content_widget(
                                     label,
-                                    id=f"label-{index}-{option_index}",
-                                    classes="form-label",
-                                    markup=False,
+                                    f"label-{index}-{option_index}",
+                                    "form-label",
                                 )
                                 if option_index < len(recommended) and recommended[option_index]:
                                     yield Static(
@@ -1165,7 +1163,7 @@ class InlineFormWidget(InlineWidget):
                                 and option_index < len(descriptions)
                                 and descriptions[option_index]
                             ):
-                                yield self._text_widget(
+                                yield self._content_widget(
                                     descriptions[option_index],
                                     f"description-{index}-{option_index}",
                                     "form-description",

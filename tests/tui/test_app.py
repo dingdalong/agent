@@ -1106,30 +1106,34 @@ def test_form_recommended_option_shows_suffix_component() -> None:
     """推荐项在 label 后紧跟独立 (推荐) 后缀组件。"""
     async def scenario() -> None:
         app = _app()
-        async with app.run_test(size=(100, 32)) as pilot:
+        async with app.run_test(size=(48, 24)) as pilot:
             await _open_form(
                 app, pilot,
                 [FormQuestion(
                     question="模式",
-                    options=[("a", "方案A"), ("b", "方案B")],
+                    options=[("a", "方案 **A**"), ("b", "方案 B")],
                     recommended=[True, False],
                 )],
                 markdown=True,
             )
             slot = app._interaction_slot
+            label = slot.query_one("#label-0-0")
             suffix = slot.query_one("#recommended-0-0", Static)
+            assert isinstance(label, Markdown)
             assert str(suffix.visual) == "(推荐)"
             children = list(suffix.parent.children)
             assert [child.id for child in children] == [
                 "marker-0-0", "label-0-0", "recommended-0-0",
             ]
+            assert label.region.right <= suffix.region.x
+            assert suffix.region.right <= suffix.parent.region.right
             assert len(slot.query("#recommended-0-1")) == 0
 
     asyncio.run(scenario())
 
 
-def test_form_question_label_plain_and_description_markdown() -> None:
-    """题干与选项标签恒为纯文本；说明按 markdown 开关渲染为 Markdown 或纯文本。"""
+def test_form_question_label_and_description_follow_markdown_flag() -> None:
+    """题干、选项标签与说明统一按 markdown 开关渲染。"""
     async def scenario() -> None:
         app = _app()
         async with app.run_test(size=(100, 32)) as pilot:
@@ -1146,16 +1150,19 @@ def test_form_question_label_plain_and_description_markdown() -> None:
             question_text = slot.query_one("#question-text-0")
             label = slot.query_one("#label-0-0")
             description = slot.query_one("#description-0-0")
-            assert isinstance(question_text, SelectionStatic)
-            assert isinstance(label, SelectionStatic)
-            assert "**重要**" in str(question_text.visual)
-            assert "`code`" in str(label.visual)
+            assert isinstance(question_text, Markdown)
+            assert isinstance(label, Markdown)
             assert isinstance(description, Markdown)
             assert "form-description" in description.classes
             await pilot.pause()
-            desc_blocks = [str(block.visual) for block in description.query(Static)]
-            assert any("细节加粗" in text for text in desc_blocks)
-            assert all("**" not in text for text in desc_blocks)
+            rendered = [
+                [str(block.visual) for block in widget.query(Static)]
+                for widget in (question_text, label, description)
+            ]
+            assert any("重要决定" in text for text in rendered[0])
+            assert any("用 code 实现" in text for text in rendered[1])
+            assert any("细节加粗" in text for text in rendered[2])
+            assert all("**" not in text and "`" not in text for texts in rendered for text in texts)
 
             await pilot.press("escape")
             assert await form.future == ""
@@ -1166,8 +1173,14 @@ def test_form_question_label_plain_and_description_markdown() -> None:
                 descriptions=["细节**加粗**"],
             )])
             slot = app._interaction_slot
+            plain_question = slot.query_one("#question-text-0")
+            plain_label = slot.query_one("#label-0-0")
             plain_desc = slot.query_one("#description-0-0")
+            assert isinstance(plain_question, SelectionStatic)
+            assert isinstance(plain_label, SelectionStatic)
             assert isinstance(plain_desc, SelectionStatic)
+            assert "**重要**" in str(plain_question.visual)
+            assert "`code`" in str(plain_label.visual)
             assert "**加粗**" in str(plain_desc.visual)
 
     asyncio.run(scenario())
@@ -1182,12 +1195,13 @@ def test_form_multiline_label_keeps_logical_row_navigation() -> None:
                 app, pilot,
                 [FormQuestion(
                     question="多行",
-                    options=[("a", "第一行\n第二行"), ("b", "短")],
+                    options=[("a", "第一行  \n第二行"), ("b", "短")],
                 )],
                 markdown=True,
             )
             slot = app._interaction_slot
             widget = slot.query_one(InlineFormWidget)
+            assert slot.query_one("#label-0-0").region.height >= 2
             await pilot.press("down")
             await pilot.pause()
             assert widget.rows[0] == 1
@@ -1276,8 +1290,8 @@ def test_form_drag_select_copies_on_mac() -> None:
             await _open_form(
                 app, pilot,
                 [FormQuestion(
-                    question="选择题干文本",
-                    options=[("a", "选项标签文本")],
+                    question="选择 **题干** 文本",
+                    options=[("a", "选项 `标签` 文本")],
                 )],
                 markdown=True,
             )
@@ -1304,8 +1318,10 @@ def test_form_drag_select_copies_on_mac() -> None:
             await pilot.mouse_up(offset=end)
             await pilot.pause()
             selected = app.screen.get_selected_text()
-            assert "选择题干文本" in selected
-            assert "选项标签文本" in selected
+            assert "选择 题干 文本" in selected
+            assert "选项 标签 文本" in selected
+            assert "**" not in selected
+            assert "`" not in selected
             assert app.clipboard == selected
 
     asyncio.run(scenario())

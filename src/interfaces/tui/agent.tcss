@@ -449,9 +449,15 @@ ModalScreen {
     padding: 0;
 }
 
+.form-question MarkdownBlock,
+.form-label MarkdownBlock,
 .form-description MarkdownBlock {
     margin: 0;
     padding: 0;
+}
+
+.form-label MarkdownBlock {
+    width: auto;
 }
 
 .form-recommended {

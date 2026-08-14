@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 
 class Option(BaseModel):
     """问题的一个可选项。"""
-    label: str = Field(description="选项显示文本，用户看到并选择的内容，需简洁，建议不超过一行")
+    label: str = Field(description="选项显示文本（支持 Markdown），用户看到并选择的内容，需简洁，建议不超过一行")
     recommended: bool = Field(
         default=False,
         description="是否推荐该项（默认 false）；推荐项会置顶显示并紧接标注 (推荐)；单选与多选均允许多个推荐项",
@@ -35,7 +35,7 @@ class Option(BaseModel):
 
 class Question(BaseModel):
     """单个待向用户提出的问题。"""
-    question: str = Field(description="要向用户提出的问题，需清晰具体")
+    question: str = Field(description="要向用户提出的问题（支持 Markdown），需清晰具体")
     header: str = Field(
         description="问题的简短标签，用于表单顶部标签栏，需概括该问题主旨，6 个汉字宽度（12 列）以内，如「编程语言」「性能目标」",
     )
@@ -52,9 +52,9 @@ class Question(BaseModel):
 class AskUser(BaseModel):
     """ask_user 的参数模型。"""
     questions: list[Question] = Field(
-        description="问题列表，1 到 3 个，每题各自独立作答",
+        description="问题列表，1 到 5 个，每题各自独立作答",
         min_length=1,
-        max_length=3,
+        max_length=5,
     )
 
 
@@ -65,7 +65,7 @@ class AskUser(BaseModel):
           "每个需用户拍板的独立维度应是 questions 中的一条——严禁把多个问题塞进同一段问题文本，"
           "或把不同维度合并成一个组合选项（如「Python + 格子法」）。"
           "每题末尾恒有「其它」输入行，用户可不选给定项自行作答（因此无需再加「其他」类选项）；"
-          "选项说明支持 Markdown；选项可设 recommended=true 表示推荐，"
+          "题干、选项标签和选项说明支持 Markdown；选项可设 recommended=true 表示推荐，"
           "推荐项自动置顶并标注 (推荐)。"
           "表单底部有讨论栏，用户的疑问或补充会以「讨论：…」附在返回末尾。"
           "返回逐题配对的「问题 + 回答」；用户取消或漏答的项以哨兵串标注。"
