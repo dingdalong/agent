@@ -68,6 +68,14 @@ class _ViewportAnchor:
     follow_tail: bool
 
 
+def _first_strip_difference(left: list[Strip], right: list[Strip]) -> int | None:
+    common_length = min(len(left), len(right))
+    for index in range(common_length):
+        if left[index] != right[index]:
+            return index
+    return common_length if len(left) != len(right) else None
+
+
 class HistoryLog(RichLog):
     """保留全量逻辑历史、只以一个 DOM 控件绘制 Rich 行。"""
 
@@ -391,7 +399,10 @@ class HistoryLog(RichLog):
             rendered = self._render_entry_lines(entry, self._render_width)
             self.lines.extend(rendered)
             self._entry_ranges[entry.id] = (start, len(self.lines))
-            self._commit_line_metadata(self._render_width)
+            self._commit_line_metadata(
+                self._render_width,
+                changed_range=(start, len(self.lines)),
+            )
             self._rendered_revision = self._source_revision
             if follow_tail:
                 self._scroll_to_end()
@@ -451,10 +462,23 @@ class HistoryLog(RichLog):
                 self._request_current_width_reflow()
             return
         follow_tail = self._is_following_tail()
-        del self.lines[row_range[0]:]
-        self.lines.extend(self._render_entry_lines(entry, self._render_width))
+        start = row_range[0]
+        old_tail = self.lines[start:]
+        new_tail = self._render_entry_lines(entry, self._render_width)
+        first_difference = _first_strip_difference(old_tail, new_tail)
+        if first_difference is None:
+            self._rendered_revision = self._source_revision
+            if follow_tail:
+                self._scroll_to_end()
+            return
+        changed_start = start + first_difference
+        changed_end = start + max(len(old_tail), len(new_tail))
+        self.lines[changed_start:] = new_tail[first_difference:]
         self._entry_ranges[entry.id] = (row_range[0], len(self.lines))
-        self._commit_line_metadata(self._render_width)
+        self._commit_line_metadata(
+            self._render_width,
+            changed_range=(changed_start, changed_end),
+        )
         self._rendered_revision = self._source_revision
         if follow_tail:
             self._scroll_to_end()
@@ -544,11 +568,25 @@ class HistoryLog(RichLog):
             if self._reflow_task is current_task:
                 self._reflow_task = None
 
-    def _commit_line_metadata(self, width: int) -> None:
+    def _commit_line_metadata(
+        self,
+        width: int,
+        *,
+        changed_range: tuple[int, int] | None = None,
+    ) -> None:
         self._line_cache.clear()
         self._widest_line_width = width if self.lines else 0
         self.virtual_size = Size(self._widest_line_width, len(self.lines))
-        self.refresh()
+        if changed_range is None:
+            self.refresh()
+            return
+        changed_start, changed_end = changed_range
+        visible_start = self.scroll_offset.y
+        visible_end = visible_start + self.scrollable_content_region.height
+        refresh_start = max(changed_start, visible_start)
+        refresh_end = min(changed_end, visible_end)
+        if refresh_start < refresh_end:
+            self.refresh_lines(refresh_start, refresh_end - refresh_start)
 
     def _capture_viewport_anchor(self) -> _ViewportAnchor:
         follow_tail = self._is_following_tail()

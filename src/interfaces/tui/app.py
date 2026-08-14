@@ -126,6 +126,11 @@ def _strip_trailing_newlines(message: str | Text) -> str | Text:
     return message.rstrip("\n")
 
 
+def _rich_text_signature(text: Text) -> tuple[Any, ...]:
+    """返回覆盖 Rich Text 可见内容和样式的稳定签名。"""
+    return text.plain, text.style, tuple(text.spans)
+
+
 class AgentTuiApp(App[None]):
     """生产全屏 TUI。"""
 
@@ -205,6 +210,8 @@ class AgentTuiApp(App[None]):
         self._round_agent_uuid: str | None = None
         self._chrome_dirty = False
         self._activity_line_count = 0
+        self._activity_content_cache: str | None = None
+        self._status_render_signature: tuple[Any, ...] | None = None
         self._input_status_cache: str | None = None
         self._response_stream: Any = None
         self._thinking_stream: Any = None
@@ -588,7 +595,6 @@ class AgentTuiApp(App[None]):
         )
         self._activity_widget.display = visible
         if not visible:
-            self._activity_line_count = 0
             return
         now = time.monotonic()
         frame = _SPINNER[int(now * 10) % len(_SPINNER)]
@@ -668,13 +674,13 @@ class AgentTuiApp(App[None]):
         else:
             full_content = base_content
 
-        if full_content:
-            line_count = full_content.count("\n") + 1
-            self._activity_widget.update(
-                full_content,
-                layout=line_count != self._activity_line_count,
-            )
-            self._activity_line_count = line_count
+        line_count = full_content.count("\n") + 1 if full_content else 0
+        layout = line_count != self._activity_line_count
+        self._activity_line_count = line_count
+        if full_content == self._activity_content_cache:
+            return
+        self._activity_widget.update(full_content, layout=layout)
+        self._activity_content_cache = full_content
 
     def _render_status(self) -> None:
         now = time.monotonic()
@@ -712,7 +718,11 @@ class AgentTuiApp(App[None]):
         if pending_count:
             status.append("  ·  ", style="bright_black")
             status.append(f"等待 {pending_count}：{pending_source}", style="yellow")
+        signature = _rich_text_signature(status)
+        if signature == self._status_render_signature:
+            return
         self._status.update(status)
+        self._status_render_signature = signature
 
     def _render_input_status(self) -> None:
         """渲染输入框上方的右对齐状态行。

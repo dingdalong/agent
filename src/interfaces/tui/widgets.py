@@ -166,6 +166,10 @@ class KeyboardTextArea(TextArea):
     FOCUS_ON_CLICK = False
     ALLOW_SELECT = False
 
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.cursor_blink = False
+
     async def _on_mouse_down(self, event: events.MouseDown) -> None:
         event.prevent_default()
         event.stop()

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import gc
 import warnings
+from types import SimpleNamespace
 
 import pytest
 from rich.text import Text
@@ -32,7 +33,8 @@ from src.events.types import (
 )
 from src.interfaces.agent_view_store import AgentViewStore
 from src.interfaces.turn_clock import TurnClock
-from src.interfaces.tui.app import AgentTuiApp
+import src.interfaces.tui.app as tui_app_module
+from src.interfaces.tui.app import AgentTuiApp, _rich_text_signature
 from src.interfaces.tui.dialogs import (
     InlineFormWidget,
     InlineSelectionWidget,
@@ -479,6 +481,156 @@ def test_responsive_input_history_and_ctrl_c() -> None:
             assert exit_future.cancelled()
 
     asyncio.run(scenario())
+
+
+def test_keyboard_text_areas_keep_cursor_visible_without_blinking(monkeypatch) -> None:
+    async def scenario() -> None:
+        app = _app()
+        async with app.run_test(size=(100, 32)) as pilot:
+            request = InputMenu(
+                timestamp=1.0,
+                source="test",
+                prompt="输入",
+                future=asyncio.get_running_loop().create_future(),
+            )
+            await app.coordinator.submit(request)
+            await pilot.pause()
+
+            composer_refreshes: list[tuple[int, int]] = []
+            monkeypatch.setattr(
+                app._composer,
+                "refresh_lines",
+                lambda start, count=1: composer_refreshes.append((start, count)),
+            )
+            assert app._composer.has_focus
+            assert app._composer.show_cursor
+            assert app._composer._draw_cursor
+            assert not app._composer.cursor_blink
+            await pilot.pause(0.55)
+            assert composer_refreshes == []
+
+            await pilot.press("x", "enter")
+            assert await request.future == "x"
+            form = await _open_form(
+                app,
+                pilot,
+                [FormQuestion(question="说明")],
+            )
+            custom_input = app._interaction_slot.query_one(
+                "#custom-input-0",
+                TextArea,
+            )
+            form_refreshes: list[tuple[int, int]] = []
+            monkeypatch.setattr(
+                custom_input,
+                "refresh_lines",
+                lambda start, count=1: form_refreshes.append((start, count)),
+            )
+            assert custom_input.has_focus
+            assert custom_input.show_cursor
+            assert custom_input._draw_cursor
+            assert not custom_input.cursor_blink
+            await pilot.pause(0.55)
+            assert form_refreshes == []
+
+            form.future.cancel()
+            await pilot.pause()
+
+    asyncio.run(scenario())
+
+
+def test_repeated_chrome_render_skips_unchanged_content(monkeypatch) -> None:
+    async def scenario() -> None:
+        app = _app()
+        async with app.run_test(size=(100, 32)):
+            app._tick_timer.pause()
+            monkeypatch.setattr(
+                tui_app_module,
+                "time",
+                SimpleNamespace(monotonic=lambda: 10.0),
+            )
+            app._set_activity("回应中")
+            app._render_activity()
+            app._render_status()
+
+            activity_updates: list[tuple[str, bool]] = []
+            status_updates: list[Text] = []
+            monkeypatch.setattr(
+                app._activity_widget,
+                "update",
+                lambda content, *, layout=True: activity_updates.append(
+                    (str(content), layout)
+                ),
+            )
+            monkeypatch.setattr(
+                app._status,
+                "update",
+                lambda content, *, layout=True: status_updates.append(content),
+            )
+
+            for _ in range(6):
+                app._render_activity()
+                app._render_status()
+            assert activity_updates == []
+            assert status_updates == []
+
+            app._set_activity("思考中")
+            app._render_activity()
+            assert len(activity_updates) == 1
+            app.get_plan_state = lambda: True
+            app._render_status()
+            assert len(status_updates) == 1
+
+    asyncio.run(scenario())
+
+
+def test_ask_user_ticks_do_not_repeat_static_updates(monkeypatch) -> None:
+    async def scenario() -> None:
+        app = _app()
+        async with app.run_test(size=(100, 32)) as pilot:
+            app._tick_timer.pause()
+            app._set_activity("回应中")
+            form = await _open_form(
+                app,
+                pilot,
+                [FormQuestion(question="模式", options=[("safe", "安全")])],
+            )
+            app.refresh_chrome()
+
+            activity_updates: list[str] = []
+            status_updates: list[Text] = []
+            monkeypatch.setattr(
+                app._activity_widget,
+                "update",
+                lambda content, *, layout=True: activity_updates.append(str(content)),
+            )
+            monkeypatch.setattr(
+                app._status,
+                "update",
+                lambda content, *, layout=True: status_updates.append(content),
+            )
+
+            for _ in range(6):
+                app._tick()
+            assert activity_updates == []
+            assert status_updates == []
+
+            app.get_plan_state = lambda: True
+            app._tick()
+            assert len(status_updates) == 1
+
+            form.future.cancel()
+            await pilot.pause()
+
+    asyncio.run(scenario())
+
+
+def test_rich_text_signature_includes_base_style() -> None:
+    red = Text("same", style="red")
+    blue = Text("same", style="blue")
+
+    assert red == blue
+    assert _rich_text_signature(red) != _rich_text_signature(blue)
 
 
 def test_failed_history_append_is_not_committed(monkeypatch) -> None:

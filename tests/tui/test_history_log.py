@@ -122,6 +122,86 @@ def test_fifty_thousand_deltas_use_one_coalesced_tail() -> None:
     asyncio.run(scenario())
 
 
+def test_stream_tail_refresh_does_not_render_stable_path_line(monkeypatch) -> None:
+    async def scenario() -> None:
+        app = _HistoryApp()
+        async with app.run_test(size=(80, 12)) as pilot:
+            history = app.query_one(HistoryLog)
+            path = "/Users/example/project"
+            history.append_entry(path, spacing=0, entry_id="path")
+            history.begin_stream(
+                "response",
+                "tail",
+                markdown=False,
+                spacing=0,
+                entry_id="response",
+            )
+            await pilot.pause()
+
+            rendered_lines: list[int] = []
+            render_line = history.render_line
+
+            def record_render_line(y: int):
+                rendered_lines.append(y)
+                return render_line(y)
+
+            monkeypatch.setattr(history, "render_line", record_render_line)
+            history.append_stream("response", " update")
+            history.end_stream("response")
+            await pilot.pause()
+
+            path_start, _ = history.entry_ranges["path"]
+            response_start, _ = history.entry_ranges["response"]
+            assert history.entries[0].content == path
+            assert path_start - history.scroll_offset.y not in rendered_lines
+            assert response_start - history.scroll_offset.y in rendered_lines
+
+    asyncio.run(scenario())
+
+
+def test_offscreen_stream_tail_update_does_not_render_visible_history(
+    monkeypatch,
+) -> None:
+    async def scenario() -> None:
+        app = _HistoryApp()
+        async with app.run_test(size=(80, 12)) as pilot:
+            history = app.query_one(HistoryLog)
+            history.replace_entries([
+                HistoryEntry(f"stable line {index}", spacing=0, id=f"line-{index}")
+                for index in range(80)
+            ])
+            await history.wait_for_reflow()
+            history.begin_stream(
+                "response",
+                "tail",
+                markdown=False,
+                spacing=0,
+                entry_id="response",
+            )
+            await pilot.pause()
+            history.scroll_to(y=0, animate=False, immediate=True)
+            await pilot.pause()
+
+            rendered_lines: list[int] = []
+            render_line = history.render_line
+
+            def record_render_line(y: int):
+                rendered_lines.append(y)
+                return render_line(y)
+
+            monkeypatch.setattr(history, "render_line", record_render_line)
+            history.append_stream("response", " update")
+            history.end_stream("response")
+            await pilot.pause()
+
+            response_start, _ = history.entry_ranges["response"]
+            assert response_start >= history.scrollable_content_region.height
+            assert history.lines[response_start].text.rstrip() == "tail update"
+            assert rendered_lines == []
+
+    asyncio.run(scenario())
+
+
 def test_selection_reads_only_selected_rich_lines() -> None:
     class CountingLines(list):
         def __init__(self, values) -> None:
