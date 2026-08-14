@@ -17,6 +17,7 @@ from src.interfaces.turn_clock import TurnClock
 from src.interfaces.tui.app import AgentTuiApp
 from src.interfaces.tui.dialogs import PendingInteractions
 from src.interfaces.tui.history_journal import PlainHistoryJournal
+from src.interfaces.tui.render_policy import TuiRenderPolicy
 
 
 class _RecordingStream:
@@ -340,6 +341,33 @@ def test_history_journal_preserves_plain_rich_markdown_and_stream_text() -> None
     journal.end_stream("response")
 
     assert journal.snapshot() == "Rich 输出\n**Markdown 原文**\n流式输出\n"
+
+
+def test_history_journal_bounds_completed_and_active_text_together() -> None:
+    policy = TuiRenderPolicy(journal_chars=20)
+    journal = PlainHistoryJournal(policy)
+    journal.append_entry("older-a")
+    journal.append_entry("older-b")
+    journal.start_stream("response")
+    journal.append_stream("response", "1234567890")
+    journal.append_stream("response", "abcdefghijklmno")
+
+    active_snapshot = journal.snapshot()
+    assert journal._entry_chars + journal._active_chars <= policy.journal_chars
+    assert journal._active_buffer.tell() <= policy.journal_chars
+    assert active_snapshot.startswith("[较早历史未回放]\n")
+    assert "older-a" not in active_snapshot
+    assert "older-b" not in active_snapshot
+
+    for _ in range(50_000):
+        journal.append_stream("response", "x")
+    assert journal._active_buffer.tell() == policy.journal_chars
+    assert len(journal._active_buffer._blocks) <= 2
+
+    journal.end_stream("response")
+
+    assert journal._entry_chars <= policy.journal_chars
+    assert journal.snapshot().startswith("[较早历史未回放]\n")
 
 
 def test_plain_fallback_replays_history_once(monkeypatch) -> None:

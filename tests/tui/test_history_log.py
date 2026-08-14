@@ -10,13 +10,18 @@ from textual.geometry import Offset
 from textual.selection import Selection
 
 from src.interfaces.tui.history_log import HistoryEntry, HistoryLog
+from src.interfaces.tui.render_policy import TuiRenderPolicy
 
 
 class _HistoryApp(App[None]):
     CSS = "HistoryLog { height: 1fr; padding: 0 1; scrollbar-size: 0 0; }"
 
+    def __init__(self, policy: TuiRenderPolicy | None = None) -> None:
+        self.render_policy = policy or TuiRenderPolicy()
+        super().__init__()
+
     def compose(self) -> ComposeResult:
-        yield HistoryLog(id="history")
+        yield HistoryLog(id="history", policy=self.render_policy)
 
 
 def test_bulk_markdown_and_plain_replay_keeps_constant_dom() -> None:
@@ -39,11 +44,14 @@ def test_bulk_markdown_and_plain_replay_keeps_constant_dom() -> None:
 
             assert history.max_lines is None
             assert len(history.entries) == 300
-            assert len(history.entry_ranges) == 300
+            assert history.window_range[1] == 300
+            assert history.rendered_entry_count <= 250
+            assert len(history.entry_ranges) == history.rendered_entry_count
             assert not history.children
             assert len(list(app.walk_children())) == baseline_dom
             assert history.entries[-1].content == markdown_entries[-1].content
-            assert len(history.lines) > len(markdown_entries)
+            assert len(history.lines) > history.rendered_entry_count
+            assert len(history.lines) <= 4_000
 
             plain_entries = [
                 HistoryEntry(f"plain replay {index}", id=f"plain-{index}")
@@ -54,7 +62,10 @@ def test_bulk_markdown_and_plain_replay_keeps_constant_dom() -> None:
             await pilot.pause()
 
             assert len(history.entries) == 1_000
-            assert len(history.entry_ranges) == 1_000
+            assert history.window_range[1] == 1_000
+            assert history.rendered_entry_count <= 250
+            assert len(history.entry_ranges) == history.rendered_entry_count
+            assert len(history.lines) <= 4_000
             assert not history.children
             assert len(list(app.walk_children())) == baseline_dom
             assert [entry.content for entry in history.entries] == [
@@ -107,8 +118,8 @@ def test_fifty_thousand_deltas_use_one_coalesced_tail() -> None:
             buffer = history._streams["response"]
             assert len(history.entries) == 1
             assert history.active_stream_id == "response"
-            assert len(buffer.chunks) == 50_000
-            assert sum(map(len, buffer.chunks)) == 50_000
+            assert buffer.length == 50_000
+            assert buffer.buffer.tell() == 50_000
             assert history.stream_flush_count == 0
             assert history.stream_merge_count == 49_999
 
@@ -221,15 +232,15 @@ def test_selection_reads_only_selected_rich_lines() -> None:
                 for index in range(1_000)
             ])
             await history.wait_for_reflow()
-            start, _end = history.entry_ranges["line-500"]
+            start, _end = history.entry_ranges["line-900"]
             counting = CountingLines(history.lines)
             history.lines = counting
 
             selected, ending = history.get_selection(
-                Selection(Offset(0, start), Offset(len("line 500"), start))
+                Selection(Offset(0, start), Offset(len("line 900"), start))
             )
 
-            assert selected == "line 500"
+            assert selected == "line 900"
             assert ending == "\n"
             assert counting.reads <= 2
 
@@ -315,5 +326,175 @@ def test_follow_tail_upscroll_and_resize_restore_entry_anchor() -> None:
                 line_offset,
                 new_end - new_start - 1,
             )
+
+    asyncio.run(scenario())
+
+
+def test_scroll_edges_page_history_and_new_messages_do_not_move_old_page() -> None:
+    async def scenario() -> None:
+        policy = TuiRenderPolicy(
+            history_page_entries=10,
+            history_window_entries=20,
+            history_window_chars=10_000,
+            history_window_lines=100,
+        )
+        app = _HistoryApp(policy)
+        async with app.run_test(size=(80, 12)) as pilot:
+            history = app.query_one(HistoryLog)
+            history.replace_entries([
+                HistoryEntry(f"line {index}", spacing=0, id=f"line-{index}")
+                for index in range(60)
+            ])
+            await history.wait_for_reflow()
+            await pilot.pause()
+            await history.wait_for_reflow()
+
+            assert history.window_range == (40, 60)
+            assert history.has_older
+            assert not history.has_newer
+
+            history.scroll_to(y=0, animate=False, immediate=True)
+            await pilot.pause()
+            await history.wait_for_reflow()
+            await pilot.pause()
+
+            assert history.window_range == (30, 50)
+            assert history.has_older
+            assert history.has_newer
+            assert "line-30" in history.entry_ranges
+            assert "line-49" in history.entry_ranges
+            old_scroll_y = history.scroll_y
+
+            history.append_entry("new tail", spacing=0, entry_id="new-tail")
+
+            assert len(history.entries) == 61
+            assert history.window_range == (30, 50)
+            assert history.scroll_y == old_scroll_y
+            assert "new-tail" not in history.entry_ranges
+            assert history.lines[-1].text.rstrip() == "↓ 较新历史 11 条"
+
+            history.jump_to_tail()
+            await history.wait_for_reflow()
+
+            assert history.window_range == (41, 61)
+            assert "new-tail" in history.entry_ranges
+            assert not history.has_newer
+            assert history.scroll_y == history.max_scroll_y
+
+    asyncio.run(scenario())
+
+
+def test_history_budgets_limit_window_and_project_oversized_entry() -> None:
+    async def scenario() -> None:
+        policy = TuiRenderPolicy(
+            history_window_entries=12,
+            history_window_chars=90,
+            history_window_lines=14,
+            history_entry_chars=60,
+            history_entry_source_lines=6,
+        )
+        app = _HistoryApp(policy)
+        async with app.run_test(size=(80, 20)):
+            history = app.query_one(HistoryLog)
+            history.replace_entries([
+                HistoryEntry("x" * 20, spacing=0, id=f"entry-{index}")
+                for index in range(30)
+            ])
+            await history.wait_for_reflow()
+
+            visible = history.entries[slice(*history.window_range)]
+            assert history.rendered_entry_count <= policy.history_window_entries
+            assert sum(len(entry.content) for entry in visible) <= policy.history_window_chars
+            assert len(history.lines) <= policy.history_window_lines
+
+            source = "\n".join(
+                f"source-{index:02d}-" + "y" * 20
+                for index in range(20)
+            )
+            history.replace_entries([
+                HistoryEntry(source, spacing=0, id="oversized")
+            ])
+            await history.wait_for_reflow()
+
+            projected, was_projected = history._project_entry_content(source)
+            assert was_projected
+            assert isinstance(projected, str)
+            assert len(projected) <= policy.history_entry_chars
+            assert "内容过长" in projected
+            assert history.entries[0].content == source
+            assert len(history.lines) <= policy.history_window_lines
+            assert any("内容过长" in line.text for line in history.lines)
+
+    asyncio.run(scenario())
+
+
+def test_resize_burst_runs_one_final_window_reflow(monkeypatch) -> None:
+    async def scenario() -> None:
+        policy = TuiRenderPolicy(
+            history_window_entries=50,
+            history_resize_debounce=0.1,
+            history_reflow_slice=0.001,
+        )
+        app = _HistoryApp(policy)
+        async with app.run_test(size=(100, 24)) as pilot:
+            history = app.query_one(HistoryLog)
+            history.replace_entries([
+                HistoryEntry(
+                    f"entry {index}: " + "content " * 8,
+                    id=f"entry-{index}",
+                )
+                for index in range(100)
+            ])
+            await history.wait_for_reflow()
+            await pilot.pause()
+            await history.wait_for_reflow()
+
+            render_calls = 0
+            render_entry = history._render_entry_lines
+
+            def count_render(entry: HistoryEntry, width: int):
+                nonlocal render_calls
+                render_calls += 1
+                return render_entry(entry, width)
+
+            monkeypatch.setattr(history, "_render_entry_lines", count_render)
+            for width in range(70, 95):
+                await pilot.resize_terminal(width, 24)
+            await history.wait_for_reflow()
+
+            assert render_calls == history.rendered_entry_count
+            assert history._render_width == history.scrollable_content_region.width
+            assert not history.reflow_pending
+
+    asyncio.run(scenario())
+
+
+def test_unmount_cancels_resize_and_stream_work() -> None:
+    async def scenario() -> None:
+        policy = TuiRenderPolicy(
+            history_resize_debounce=1.0,
+            stream_short_interval=1.0,
+        )
+        app = _HistoryApp(policy)
+        debounce_task = None
+        async with app.run_test(size=(100, 24)) as pilot:
+            history = app.query_one(HistoryLog)
+            history.append_entry("stable", entry_id="stable")
+            await history.wait_for_reflow()
+            await pilot.pause()
+            await history.wait_for_reflow()
+
+            await pilot.resize_terminal(70, 24)
+            debounce_task = history._resize_debounce_task
+            assert debounce_task is not None
+
+            history.begin_stream("response", entry_id="response")
+            history.append_stream("response", "pending")
+            assert history._stream_timer is not None
+
+        assert debounce_task is not None and debounce_task.done()
+        assert history._resize_debounce_task is None
+        assert history._reflow_task is None
+        assert history._stream_timer is None
 
     asyncio.run(scenario())

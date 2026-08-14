@@ -34,6 +34,7 @@ from src.interfaces.tui.diagnostics import TuiDiagnostics
 from src.tools.display import permission_line
 from src.interfaces.tui.dialogs import PendingInteractions
 from src.interfaces.tui.history_journal import PlainHistoryJournal
+from src.interfaces.tui.render_policy import TuiRenderPolicy
 from src.mgr.session_state import SessionState
 from src.interfaces.tui.plain import PlainFrontend, normalize_line_input
 
@@ -96,7 +97,8 @@ class TextualInterface(UserInterface):
         self._ui_ready = asyncio.Event()
         self._termination_handled = False
         self._stopping = False
-        self.history_journal = PlainHistoryJournal()
+        self.render_policy = TuiRenderPolicy()
+        self.history_journal = PlainHistoryJournal(self.render_policy)
         self._pending_interactions: PendingInteractions | None = None
         self._plain = PlainFrontend()
         self._plan_toggle_handler: Callable[[], None] | None = None
@@ -141,6 +143,7 @@ class TextualInterface(UserInterface):
             copy_on_select=self.copy_on_select,
             history_journal=self.history_journal,
             diagnostics=self.diagnostics,
+            render_policy=self.render_policy,
         )
         app = self._app
         task = self._app_task = asyncio.create_task(app.run_async())

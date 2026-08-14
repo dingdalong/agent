@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Iterable
+from io import StringIO
+from typing import Iterable, Literal
 
 from rich.markdown import Markdown as RichMarkdown
 from rich.segment import Segment
@@ -20,9 +22,11 @@ from textual.strip import Strip
 from textual.timer import Timer
 from textual.widgets import RichLog
 
+from src.interfaces.tui.diagnostics import TuiDiagnostics
+from src.interfaces.tui.render_policy import TuiRenderPolicy
 
-_STREAM_RENDER_INTERVAL = 0.05
-_REFLOW_BATCH_SIZE = 32
+
+_OMISSION_NOTICE = "\n\n[内容过长，中间部分未渲染]\n\n"
 
 
 @dataclass(slots=True)
@@ -34,6 +38,7 @@ class HistoryEntry:
     style: str | None = None
     spacing: int = 1
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    revision: int = 0
 
     def clone(self) -> HistoryEntry:
         content = self.content.copy() if isinstance(self.content, Text) else self.content
@@ -43,22 +48,23 @@ class HistoryEntry:
             style=self.style,
             spacing=self.spacing,
             id=self.id,
+            revision=self.revision,
         )
 
 
 @dataclass(slots=True)
 class _StreamBuffer:
     entry_id: str
-    chunks: list[str] = field(default_factory=list)
+    buffer: StringIO = field(default_factory=StringIO)
+    length: int = 0
 
     def append(self, content: str) -> None:
         if content:
-            self.chunks.append(content)
+            self.buffer.write(content)
+            self.length += len(content)
 
     def materialize(self) -> str:
-        if len(self.chunks) > 1:
-            self.chunks[:] = ["".join(self.chunks)]
-        return self.chunks[0] if self.chunks else ""
+        return self.buffer.getvalue()
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,11 +83,17 @@ def _first_strip_difference(left: list[Strip], right: list[Strip]) -> int | None
 
 
 class HistoryLog(RichLog):
-    """保留全量逻辑历史、只以一个 DOM 控件绘制 Rich 行。"""
+    """保留轻量逻辑历史，只渲染有预算的分页窗口。"""
 
     FOCUS_ON_CLICK = False
 
-    def __init__(self, **kwargs) -> None:
+    def __init__(
+        self,
+        *,
+        policy: TuiRenderPolicy | None = None,
+        diagnostics: TuiDiagnostics | None = None,
+        **kwargs,
+    ) -> None:
         kwargs.setdefault("max_lines", None)
         kwargs.setdefault("min_width", 1)
         kwargs.setdefault("wrap", True)
@@ -89,9 +101,15 @@ class HistoryLog(RichLog):
         kwargs.setdefault("markup", False)
         kwargs.setdefault("auto_scroll", False)
         super().__init__(**kwargs)
+        self._policy = policy or TuiRenderPolicy()
+        self._diagnostics = diagnostics
         self._entries: list[HistoryEntry] = []
         self._entries_by_id: dict[str, HistoryEntry] = {}
         self._entry_ranges: dict[str, tuple[int, int]] = {}
+        self._window_start = 0
+        self._window_end = 0
+        self._rendered_window = (0, 0)
+        self._window_bias: Literal["start", "end"] = "end"
         self._active_stream_id: str | None = None
         self._streams: dict[str, _StreamBuffer] = {}
         self._stream_timer: Timer | None = None
@@ -103,7 +121,13 @@ class HistoryLog(RichLog):
         self._render_width = 0
         self._reflow_generation = 0
         self._reflow_task: asyncio.Task[None] | None = None
+        self._resize_debounce_task: asyncio.Task[None] | None = None
         self._reflow_anchor: _ViewportAnchor | None = None
+        self._resize_anchor: _ViewportAnchor | None = None
+        self._reflow_reason = "initial"
+        self._cancelled_reflows = 0
+        self._page_shift_pending = False
+        self._renderable_cache: dict[str, tuple[int, object]] = {}
 
     @property
     def entries(self) -> tuple[HistoryEntry, ...]:
@@ -112,6 +136,26 @@ class HistoryLog(RichLog):
     @property
     def entry_ranges(self) -> dict[str, tuple[int, int]]:
         return dict(self._entry_ranges)
+
+    @property
+    def window_range(self) -> tuple[int, int]:
+        return self._window_start, self._window_end
+
+    @property
+    def rendered_entry_count(self) -> int:
+        return self._window_end - self._window_start
+
+    @property
+    def has_older(self) -> bool:
+        return self._window_start > 0
+
+    @property
+    def has_newer(self) -> bool:
+        return self._window_end < len(self._entries)
+
+    @property
+    def reflow_pending(self) -> bool:
+        return self._resize_debounce_task is not None or self._reflow_task is not None
 
     @property
     def active_stream_id(self) -> str | None:
@@ -132,16 +176,23 @@ class HistoryLog(RichLog):
         if self._stream_timer is not None:
             self._stream_timer.stop()
             self._stream_timer = None
+        debounce_task = self._resize_debounce_task
+        self._resize_debounce_task = None
+        if debounce_task is not None and not debounce_task.done():
+            debounce_task.cancel()
         task = self._reflow_task
         self._reflow_task = None
         if task is not None and not task.done():
             task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+        await asyncio.gather(
+            *(item for item in (debounce_task, task) if item is not None),
+            return_exceptions=True,
+        )
 
     def on_resize(self, event: events.Resize) -> None:
         super().on_resize(event)
         if event.size.width:
-            self.call_after_refresh(self._request_current_width_reflow)
+            self.call_after_refresh(self._schedule_resize_reflow)
 
     def append_entry(
         self,
@@ -196,7 +247,7 @@ class HistoryLog(RichLog):
         return entry.id
 
     def append_stream(self, stream_id: str, content: str) -> None:
-        """O(1) 追加 delta，并把下一次尾项渲染合并到 50 ms 窗口。"""
+        """O(1) 追加 delta，并按累计长度自适应合并尾项渲染。"""
         if not content:
             return
         if self._active_stream_id != stream_id:
@@ -210,7 +261,7 @@ class HistoryLog(RichLog):
         if not self.is_mounted:
             return
         self._stream_timer = self.set_timer(
-            _STREAM_RENDER_INTERVAL,
+            self._policy.stream_interval(buffer.length),
             self._flush_stream,
         )
 
@@ -221,7 +272,7 @@ class HistoryLog(RichLog):
         return self._finish_active_stream()
 
     def replace_entries(self, entries: Iterable[HistoryEntry]) -> None:
-        """批量替换逻辑源，只触发一次分批行重建。"""
+        """批量替换逻辑源，初始只渲染尾部窗口。"""
         self._discard_stream()
         new_entries = [entry.clone() for entry in entries]
         ids = [entry.id for entry in new_entries]
@@ -229,12 +280,24 @@ class HistoryLog(RichLog):
             raise ValueError("HistoryEntry.id must be unique")
         self._entries = new_entries
         self._entries_by_id = {entry.id: entry for entry in new_entries}
+        self._window_end = len(new_entries)
+        self._window_start = self._fit_window_backward(self._window_end)
+        self._window_bias = "end"
+        self._renderable_cache.clear()
         self._source_revision += 1
+        tail_anchor = _ViewportAnchor(None, 0, True)
+        self._reflow_anchor = tail_anchor
+        if self._resize_debounce_task is not None:
+            self._resize_anchor = tail_anchor
         if self._size_known and self.is_mounted:
-            self._request_current_width_reflow()
+            self._request_current_width_reflow(
+                reason="hydrate",
+                capture_anchor=False,
+            )
         else:
             super().clear()
             self._entry_ranges.clear()
+            self._rendered_window = (0, 0)
             self._rendered_revision = 0
 
     def clear(self) -> HistoryLog:
@@ -242,18 +305,26 @@ class HistoryLog(RichLog):
         self._entries.clear()
         self._entries_by_id.clear()
         self._entry_ranges.clear()
+        self._window_start = 0
+        self._window_end = 0
+        self._rendered_window = (0, 0)
+        self._renderable_cache.clear()
         self._source_revision += 1
         self._rendered_revision = self._source_revision
         super().clear()
         return self
 
     async def wait_for_reflow(self) -> None:
-        """等待当前和被合并进来的 resize 重排完成。"""
-        while self._reflow_task is not None:
-            task = self._reflow_task
-            await asyncio.gather(task, return_exceptions=True)
-            if self._reflow_task is task:
-                break
+        """等待 resize 去抖和被合并进来的重排全部完成。"""
+        while True:
+            tasks = [
+                task
+                for task in (self._resize_debounce_task, self._reflow_task)
+                if task is not None
+            ]
+            if not tasks:
+                return
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     def get_selection(self, selection: Selection) -> tuple[str, str] | None:
         """只读取选区覆盖的 Rich 行，避免拼接完整历史。"""
@@ -358,17 +429,32 @@ class HistoryLog(RichLog):
 
     def watch_scroll_y(self, old_value: float, new_value: float) -> None:
         super().watch_scroll_y(old_value, new_value)
-        if new_value < self.max_scroll_y - 1:
+        if new_value < self.max_scroll_y - 1 or self.has_newer:
             self.anchor(False)
         scroll_delta = round(new_value) - round(old_value)
         if not scroll_delta:
             return
         state = self.screen._select_state
+        selecting_history = bool(
+            self.screen._selecting
+            and state is not None
+            and state.start.container is self
+        )
+        if not selecting_history and not self.reflow_pending and not self._page_shift_pending:
+            if scroll_delta < 0 and new_value <= 1 and self.has_older:
+                self._page_shift_pending = True
+                self.call_after_refresh(lambda: self._shift_page("older"))
+            elif (
+                scroll_delta > 0
+                and new_value >= self.max_scroll_y - 1
+                and self.has_newer
+            ):
+                self._page_shift_pending = True
+                self.call_after_refresh(lambda: self._shift_page("newer"))
         if (
-            not self.screen._selecting
+            not selecting_history
             or state is None
             or state.end is None
-            or state.start.container is not self
         ):
             return
         start = state.start
@@ -384,21 +470,126 @@ class HistoryLog(RichLog):
             self.screen._update_select()
 
     def resume_anchor_at_end(self) -> None:
-        if self.scroll_y >= self.max_scroll_y - 1:
+        if not self.has_newer and self.scroll_y >= self.max_scroll_y - 1:
             self.anchor()
+
+    def jump_to_tail(self) -> None:
+        """切回最新分页窗口并跟随尾部。"""
+        self._window_end = len(self._entries)
+        self._window_start = self._fit_window_backward(self._window_end)
+        self._window_bias = "end"
+        tail_anchor = _ViewportAnchor(None, 0, True)
+        self._reflow_anchor = tail_anchor
+        if self._resize_debounce_task is not None:
+            self._resize_anchor = tail_anchor
+        self._request_current_width_reflow(reason="jump_tail", capture_anchor=False)
+
+    def _shift_page(self, direction: Literal["older", "newer"]) -> None:
+        self._page_shift_pending = False
+        if self.reflow_pending:
+            return
+        anchor = self._capture_viewport_anchor()
+        page_size = max(1, self._policy.history_page_entries)
+        if direction == "older":
+            if not self.has_older:
+                return
+            self._window_start = max(0, self._window_start - page_size)
+            self._window_end = self._fit_window_forward(self._window_start)
+            self._window_bias = "start"
+        else:
+            if not self.has_newer:
+                return
+            self._window_end = min(len(self._entries), self._window_end + page_size)
+            self._window_start = self._fit_window_backward(self._window_end)
+            self._window_bias = "end"
+        self._reflow_anchor = anchor
+        self._request_current_width_reflow(
+            reason=f"page_{direction}",
+            capture_anchor=False,
+        )
+
+    def _fit_window_backward(self, end: int) -> int:
+        limit_entries = max(1, self._policy.history_window_entries)
+        limit_chars = max(1, self._policy.history_window_chars)
+        start = end
+        chars = 0
+        while start > 0 and end - start < limit_entries:
+            length = self._entry_length(self._entries[start - 1])
+            if start < end and chars + length > limit_chars:
+                break
+            start -= 1
+            chars += length
+        return start
+
+    def _fit_window_forward(self, start: int) -> int:
+        limit_entries = max(1, self._policy.history_window_entries)
+        limit_chars = max(1, self._policy.history_window_chars)
+        end = start
+        chars = 0
+        while end < len(self._entries) and end - start < limit_entries:
+            length = self._entry_length(self._entries[end])
+            if end > start and chars + length > limit_chars:
+                break
+            chars += length
+            end += 1
+        return end
+
+    @staticmethod
+    def _entry_length(entry: HistoryEntry) -> int:
+        content = entry.content
+        return len(content.plain if isinstance(content, Text) else content)
+
+    def _refresh_newer_sentinel(self) -> None:
+        if not self.has_newer or not self._render_width:
+            return
+        sentinel = self._render_sentinel("newer", self._render_width)
+        rendered_end = max((row_range[1] for row_range in self._entry_ranges.values()), default=0)
+        if rendered_end == len(self.lines):
+            line = len(self.lines)
+            self.lines.append(sentinel)
+        else:
+            line = len(self.lines) - 1
+            self.lines[line] = sentinel
+        self._rendered_revision = self._source_revision
+        self._commit_line_metadata(
+            self._render_width,
+            changed_range=(line, line + 1),
+        )
 
     def _append_source_entry(self, entry: HistoryEntry) -> None:
         if entry.id in self._entries_by_id:
             raise ValueError(f"duplicate HistoryEntry.id: {entry.id}")
         follow_tail = self._is_following_tail()
+        source_was_at_tail = self._window_end == len(self._entries)
+        old_window_start = self._window_start
+        old_window_end = self._window_end
         self._entries.append(entry)
         self._entries_by_id[entry.id] = entry
         self._source_revision += 1
-        if self._size_known and self._render_width and self._reflow_task is None:
+        if not source_was_at_tail or not follow_tail:
+            self._refresh_newer_sentinel()
+            return
+        self._window_end = len(self._entries)
+        self._window_start = self._fit_window_backward(self._window_end)
+        self._window_bias = "end"
+        can_append = (
+            self._window_start == old_window_start
+            and self._rendered_window == (old_window_start, old_window_end)
+            and self._size_known
+            and self._render_width
+            and not self.reflow_pending
+            and self._rendered_revision == self._source_revision - 1
+        )
+        if can_append:
             start = len(self.lines)
             rendered = self._render_entry_lines(entry, self._render_width)
+            line_limit = max(1, self._policy.history_window_lines - 1)
+            if len(self.lines) + len(rendered) > line_limit:
+                self._request_current_width_reflow(reason="append_trim")
+                return
             self.lines.extend(rendered)
             self._entry_ranges[entry.id] = (start, len(self.lines))
+            self._rendered_window = (self._window_start, self._window_end)
             self._commit_line_metadata(
                 self._render_width,
                 changed_range=(start, len(self.lines)),
@@ -408,7 +599,7 @@ class HistoryLog(RichLog):
                 self._scroll_to_end()
             return
         if self._size_known and self.is_mounted:
-            self._request_current_width_reflow()
+            self._request_current_width_reflow(reason="append")
 
     def _finish_active_stream(self) -> str:
         stream_id = self._active_stream_id
@@ -421,8 +612,10 @@ class HistoryLog(RichLog):
         self._active_stream_id = None
         content = buffer.materialize()
         entry = self._entries_by_id.get(buffer.entry_id)
-        if entry is not None:
+        if entry is not None and entry.content != content:
             entry.content = content
+            entry.revision += 1
+            self._renderable_cache.pop(entry.id, None)
             self._source_revision += 1
             self._replace_rendered_tail(entry)
         self._stream_dirty = False
@@ -440,12 +633,22 @@ class HistoryLog(RichLog):
         self._stream_timer = None
         if not self._stream_dirty or self._active_stream_id is None:
             return
-        self._stream_dirty = False
         buffer = self._streams[self._active_stream_id]
         entry = self._entries_by_id.get(buffer.entry_id)
         if entry is None:
             return
+        if self.reflow_pending:
+            self._stream_timer = self.set_timer(
+                self._policy.stream_interval(buffer.length),
+                self._flush_stream,
+            )
+            return
+        if entry.id not in self._entry_ranges:
+            return
+        self._stream_dirty = False
         entry.content = buffer.materialize()
+        entry.revision += 1
+        self._renderable_cache.pop(entry.id, None)
         self._source_revision += 1
         self._stream_flush_count += 1
         self._replace_rendered_tail(entry)
@@ -456,15 +659,23 @@ class HistoryLog(RichLog):
             row_range is None
             or row_range[1] != len(self.lines)
             or not self._render_width
-            or self._reflow_task is not None
         ):
-            if self._size_known and self.is_mounted:
-                self._request_current_width_reflow()
+            if row_range is not None and self._size_known and self.is_mounted:
+                self._request_current_width_reflow(reason="stream")
             return
         follow_tail = self._is_following_tail()
         start = row_range[0]
         old_tail = self.lines[start:]
         new_tail = self._render_entry_lines(entry, self._render_width)
+        line_budget = max(1, self._policy.history_window_lines - start - 1)
+        needs_window_trim = len(new_tail) > line_budget
+        needs_window_reflow = needs_window_trim and self.rendered_entry_count > 1
+        if needs_window_trim:
+            new_tail = self._limit_entry_lines(
+                new_tail,
+                self._render_width,
+                line_budget,
+            )
         first_difference = _first_strip_difference(old_tail, new_tail)
         if first_difference is None:
             self._rendered_revision = self._source_revision
@@ -482,20 +693,57 @@ class HistoryLog(RichLog):
         self._rendered_revision = self._source_revision
         if follow_tail:
             self._scroll_to_end()
+        if needs_window_reflow:
+            self._rendered_revision = max(0, self._source_revision - 1)
+            self._request_current_width_reflow(reason="stream_trim")
 
     def _render_entry_lines(self, entry: HistoryEntry, width: int) -> list[Strip]:
-        content = entry.content
-        if entry.markdown:
+        renderable = self._entry_renderable(entry)
+        return self._render_renderable_lines(renderable, width, entry.spacing)
+
+    def _entry_renderable(self, entry: HistoryEntry) -> object:
+        cached = self._renderable_cache.get(entry.id)
+        if cached is not None and cached[0] == entry.revision:
+            return cached[1]
+        content, projected = self._project_entry_content(entry.content)
+        if entry.markdown and not projected:
             source = content.plain if isinstance(content, Text) else content
-            renderable = RichMarkdown(source, style=entry.style or "none")
+            renderable: object = RichMarkdown(source, style=entry.style or "none")
         elif isinstance(content, Text):
-            renderable = content.copy()
+            rendered_text = content.copy()
             if entry.style:
-                renderable.stylize(entry.style)
-            renderable.expand_tabs()
+                rendered_text.stylize(entry.style)
+            rendered_text.expand_tabs()
+            renderable = rendered_text
         else:
-            renderable = Text(content, style=entry.style)
-            renderable.expand_tabs()
+            rendered_text = Text(content, style=entry.style)
+            rendered_text.expand_tabs()
+            renderable = rendered_text
+        self._renderable_cache[entry.id] = (entry.revision, renderable)
+        return renderable
+
+    def _project_entry_content(self, content: str | Text) -> tuple[str | Text, bool]:
+        plain = content.plain if isinstance(content, Text) else content
+        char_limit = max(1, self._policy.history_entry_chars)
+        line_limit = max(2, self._policy.history_entry_source_lines)
+        if len(plain) <= char_limit and plain.count("\n") < line_limit:
+            return content, False
+        if char_limit <= len(_OMISSION_NOTICE):
+            return plain[:char_limit], True
+        content_chars = char_limit - len(_OMISSION_NOTICE)
+        head_chars = content_chars // 2
+        tail_chars = content_chars - head_chars
+        half_lines = max(1, line_limit // 2)
+        head = "".join(plain[:head_chars].splitlines(keepends=True)[:half_lines])
+        tail = "".join(plain[-tail_chars:].splitlines(keepends=True)[-half_lines:])
+        return head + _OMISSION_NOTICE + tail, True
+
+    def _render_renderable_lines(
+        self,
+        renderable: object,
+        width: int,
+        spacing: int = 0,
+    ) -> list[Strip]:
         options = self.app.console.options.update_width(width)
         segments = self.app.console.render(renderable, options)
         rich_lines = list(Segment.split_lines(segments))
@@ -505,22 +753,115 @@ class HistoryLog(RichLog):
                 strip.adjust_cell_length(width)
         else:
             strips = [Strip.blank(width)]
-        strips.extend(Strip.blank(width) for _ in range(max(0, entry.spacing)))
+        strips.extend(Strip.blank(width) for _ in range(max(0, spacing)))
         return strips
 
-    def _request_current_width_reflow(self) -> None:
+    def _render_sentinel(
+        self,
+        direction: Literal["older", "newer"],
+        width: int,
+    ) -> Strip:
+        if direction == "older":
+            count = self._window_start
+            label = f"↑ 较早历史 {count} 条"
+        else:
+            count = len(self._entries) - self._window_end
+            label = f"↓ 较新历史 {count} 条"
+        return self._render_renderable_lines(
+            Text(label, style="bright_black"),
+            width,
+        )[0]
+
+    def _render_omission_line(self, width: int) -> Strip:
+        return self._render_renderable_lines(
+            Text("[单条内容过长，部分渲染行已省略]", style="yellow"),
+            width,
+        )[0]
+
+    def _limit_entry_lines(
+        self,
+        lines: list[Strip],
+        width: int,
+        limit: int,
+    ) -> list[Strip]:
+        limit = max(1, limit)
+        if len(lines) <= limit:
+            return lines
+        if limit == 1:
+            return [self._render_omission_line(width)]
+        head = (limit - 1) // 2
+        tail = limit - 1 - head
+        return lines[:head] + [self._render_omission_line(width)] + lines[-tail:]
+
+    def _schedule_resize_reflow(self) -> None:
         if not self._size_known or not self.is_mounted:
+            return
+        if not self._render_width:
+            self._request_current_width_reflow(reason="initial")
             return
         width = max(1, self.scrollable_content_region.width)
         if (
             width == self._render_width
             and self._rendered_revision == self._source_revision
+            and self._rendered_window == (self._window_start, self._window_end)
+        ):
+            return
+        if self._resize_debounce_task is None:
+            self._resize_anchor = self._capture_viewport_anchor()
+        self._reflow_generation += 1
+        task = self._reflow_task
+        if task is not None and not task.done():
+            task.cancel()
+            self._cancelled_reflows += 1
+        debounce = self._resize_debounce_task
+        if debounce is not None and not debounce.done():
+            debounce.cancel()
+        self._resize_debounce_task = asyncio.create_task(
+            self._debounced_resize_reflow(),
+            name="history-log-resize-debounce",
+        )
+
+    async def _debounced_resize_reflow(self) -> None:
+        current_task = asyncio.current_task()
+        try:
+            await asyncio.sleep(max(0, self._policy.history_resize_debounce))
+        except asyncio.CancelledError:
+            return
+        finally:
+            if self._resize_debounce_task is current_task:
+                self._resize_debounce_task = None
+        if not self.is_mounted:
+            return
+        self._reflow_anchor = self._resize_anchor
+        self._resize_anchor = None
+        self._request_current_width_reflow(reason="resize", capture_anchor=False)
+
+    def _request_current_width_reflow(
+        self,
+        *,
+        reason: str = "content",
+        capture_anchor: bool = True,
+    ) -> None:
+        if not self._size_known or not self.is_mounted:
+            return
+        if self._resize_debounce_task is not None and reason != "resize":
+            self._reflow_generation += 1
+            self._reflow_reason = reason
+            return
+        width = max(1, self.scrollable_content_region.width)
+        if (
+            width == self._render_width
+            and self._rendered_revision == self._source_revision
+            and self._rendered_window == (self._window_start, self._window_end)
             and self._reflow_task is None
         ):
             return
         self._reflow_generation += 1
-        self._reflow_anchor = self._capture_viewport_anchor()
-        if self._reflow_task is None:
+        self._reflow_reason = reason
+        if capture_anchor:
+            self._reflow_anchor = self._capture_viewport_anchor()
+        task = self._reflow_task
+        if task is None or task.done() or task.cancelling():
             self._reflow_task = asyncio.create_task(
                 self._reflow_worker(),
                 name="history-log-reflow",
@@ -529,44 +870,179 @@ class HistoryLog(RichLog):
     async def _reflow_worker(self) -> None:
         current_task = asyncio.current_task()
         try:
-            # Textual 在 Python 3.12+ 使用 eager task factory。空历史没有批次可
-            # await，若不先让出，协程会在 _reflow_task 赋值前结束并留下失效引用。
             await asyncio.sleep(0)
             while self.is_mounted:
+                if self._resize_debounce_task is not None:
+                    return
+                self._materialize_visible_stream()
                 generation = self._reflow_generation
                 revision = self._source_revision
                 width = max(1, self.scrollable_content_region.width)
-                entries = list(self._entries)
-                lines: list[Strip] = []
-                ranges: dict[str, tuple[int, int]] = {}
+                window_start = self._window_start
+                window_end = self._window_end
+                entries = list(self._entries[window_start:window_end])
+                rendered: list[tuple[HistoryEntry, list[Strip]]] = []
                 stale = False
-                for batch_start in range(0, len(entries), _REFLOW_BATCH_SIZE):
-                    for entry in entries[batch_start:batch_start + _REFLOW_BATCH_SIZE]:
-                        start = len(lines)
-                        lines.extend(self._render_entry_lines(entry, width))
-                        ranges[entry.id] = (start, len(lines))
+                started = time.perf_counter()
+                slice_started = started
+                for entry in entries:
+                    rendered.append((entry, self._render_entry_lines(entry, width)))
+                    if time.perf_counter() - slice_started < self._policy.history_reflow_slice:
+                        continue
                     await asyncio.sleep(0)
-                    if (
-                        generation != self._reflow_generation
-                        or revision != self._source_revision
-                        or width != max(1, self.scrollable_content_region.width)
-                    ):
-                        stale = True
+                    slice_started = time.perf_counter()
+                    stale = self._reflow_is_stale(
+                        generation,
+                        revision,
+                        width,
+                        window_start,
+                        window_end,
+                    )
+                    if stale:
                         break
                 if stale:
+                    if self._resize_debounce_task is not None:
+                        return
                     continue
+                window_start, window_end, rendered = self._trim_rendered_window(
+                    window_start,
+                    window_end,
+                    rendered,
+                    width,
+                )
+                self._window_start = window_start
+                self._window_end = window_end
+                lines: list[Strip] = []
+                ranges: dict[str, tuple[int, int]] = {}
+                if self.has_older:
+                    lines.append(self._render_sentinel("older", width))
+                for entry, entry_lines in rendered:
+                    start = len(lines)
+                    lines.extend(entry_lines)
+                    ranges[entry.id] = (start, len(lines))
+                if self.has_newer:
+                    lines.append(self._render_sentinel("newer", width))
                 anchor = self._reflow_anchor or _ViewportAnchor(None, 0, True)
                 self.lines = lines
                 self._entry_ranges = ranges
                 self._render_width = width
                 self._rendered_revision = revision
+                self._rendered_window = (window_start, window_end)
                 self._commit_line_metadata(width)
                 self._restore_viewport_anchor(anchor)
+                self._reflow_anchor = None
+                self._prune_renderable_cache()
+                self._record_reflow(
+                    reason=self._reflow_reason,
+                    width=width,
+                    started=started,
+                    rendered=rendered,
+                )
                 if generation == self._reflow_generation:
                     break
+        except asyncio.CancelledError:
+            raise
         finally:
             if self._reflow_task is current_task:
                 self._reflow_task = None
+
+    def _materialize_visible_stream(self) -> None:
+        if not self._stream_dirty or self._active_stream_id is None:
+            return
+        buffer = self._streams.get(self._active_stream_id)
+        if buffer is None or buffer.entry_id not in {
+            entry.id for entry in self._entries[self._window_start:self._window_end]
+        }:
+            return
+        entry = self._entries_by_id.get(buffer.entry_id)
+        if entry is None:
+            return
+        entry.content = buffer.materialize()
+        entry.revision += 1
+        self._renderable_cache.pop(entry.id, None)
+        self._stream_dirty = False
+        self._source_revision += 1
+
+    def _reflow_is_stale(
+        self,
+        generation: int,
+        revision: int,
+        width: int,
+        window_start: int,
+        window_end: int,
+    ) -> bool:
+        return bool(
+            generation != self._reflow_generation
+            or revision != self._source_revision
+            or width != max(1, self.scrollable_content_region.width)
+            or window_start != self._window_start
+            or window_end != self._window_end
+        )
+
+    def _trim_rendered_window(
+        self,
+        window_start: int,
+        window_end: int,
+        rendered: list[tuple[HistoryEntry, list[Strip]]],
+        width: int,
+    ) -> tuple[int, int, list[tuple[HistoryEntry, list[Strip]]]]:
+        line_limit = max(1, self._policy.history_window_lines)
+        sentinel_lines = int(window_start > 0) + int(bool(rendered))
+        entry_line_limit = max(1, line_limit - sentinel_lines)
+        total_lines = sum(len(lines) for _entry, lines in rendered)
+        while total_lines > entry_line_limit and len(rendered) > 1:
+            if self._window_bias == "start":
+                _entry, removed = rendered.pop()
+                window_end -= 1
+            else:
+                _entry, removed = rendered.pop(0)
+                window_start += 1
+            total_lines -= len(removed)
+            sentinel_lines = int(window_start > 0) + int(bool(rendered))
+            entry_line_limit = max(1, line_limit - sentinel_lines)
+        if rendered and len(rendered[0][1]) > entry_line_limit:
+            entry, entry_lines = rendered[0]
+            rendered[0] = (
+                entry,
+                self._limit_entry_lines(entry_lines, width, entry_line_limit),
+            )
+        return window_start, window_end, rendered
+
+    def _prune_renderable_cache(self) -> None:
+        visible_ids = {
+            entry.id for entry in self._entries[self._window_start:self._window_end]
+        }
+        self._renderable_cache = {
+            entry_id: cached
+            for entry_id, cached in self._renderable_cache.items()
+            if entry_id in visible_ids
+        }
+
+    def _record_reflow(
+        self,
+        *,
+        reason: str,
+        width: int,
+        started: float,
+        rendered: list[tuple[HistoryEntry, list[Strip]]],
+    ) -> None:
+        if self._diagnostics is None:
+            return
+        self._diagnostics.record(
+            "history_reflow_finished",
+            generation=self._reflow_generation,
+            reason=reason,
+            width=width,
+            duration_ms=round((time.perf_counter() - started) * 1000, 3),
+            cancelled_reflows=self._cancelled_reflows,
+            source_entries=len(self._entries),
+            rendered_entries=len(rendered),
+            rendered_chars=sum(self._entry_length(entry) for entry, _lines in rendered),
+            rendered_lines=len(self.lines),
+            window_start=self._window_start,
+            window_end=self._window_end,
+        )
+        self._cancelled_reflows = 0
 
     def _commit_line_metadata(
         self,
@@ -593,10 +1069,9 @@ class HistoryLog(RichLog):
         if follow_tail or not self._entry_ranges:
             return _ViewportAnchor(None, 0, follow_tail)
         line = min(max(0, round(self.scroll_y)), max(0, len(self.lines) - 1))
-        for entry in self._entries:
-            row_range = self._entry_ranges.get(entry.id)
-            if row_range is not None and row_range[0] <= line < row_range[1]:
-                return _ViewportAnchor(entry.id, line - row_range[0], False)
+        for entry_id, row_range in self._entry_ranges.items():
+            if row_range[0] <= line < row_range[1]:
+                return _ViewportAnchor(entry_id, line - row_range[0], False)
         return _ViewportAnchor(None, line, False)
 
     def _restore_viewport_anchor(self, anchor: _ViewportAnchor) -> None:
@@ -612,7 +1087,14 @@ class HistoryLog(RichLog):
         self.scroll_to(y=target, animate=False, immediate=True)
 
     def _is_following_tail(self) -> bool:
-        return not self.lines or self.scroll_y >= self.max_scroll_y - 1
+        return bool(
+            not self.lines
+            or (
+                not self.has_newer
+                and self._window_end == len(self._entries)
+                and self.scroll_y >= self.max_scroll_y - 1
+            )
+        )
 
     def _scroll_to_end(self) -> None:
         self.scroll_end(animate=False, immediate=True, x_axis=False)

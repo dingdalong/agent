@@ -40,6 +40,7 @@ from src.interfaces.tui.dialogs import (
     InlineSelectionWidget,
     SelectionDialog,
 )
+from src.interfaces.tui.render_policy import TuiRenderPolicy
 from src.interfaces.tui.widgets import (
     Composer,
     KeyboardNavigation,
@@ -55,6 +56,7 @@ def _app(
     *,
     platform: str = "darwin",
     get_model_info=None,
+    render_policy: TuiRenderPolicy | None = None,
 ) -> AgentTuiApp:
     return AgentTuiApp(
         store or AgentViewStore(),
@@ -66,6 +68,7 @@ def _app(
         get_model_info=get_model_info,
         platform_name=platform,
         native_clipboard=False,
+        render_policy=render_policy,
     )
 
 
@@ -479,6 +482,28 @@ def test_responsive_input_history_and_ctrl_c() -> None:
             await pilot.press("ctrl+c")
             await pilot.pause()
             assert exit_future.cancelled()
+
+    asyncio.run(scenario())
+
+
+def test_render_policy_controls_history_tick_and_focus_pause() -> None:
+    async def scenario() -> None:
+        policy = TuiRenderPolicy(activity_interval=0.25)
+        app = _app(render_policy=policy)
+        async with app.run_test(size=(100, 30)) as pilot:
+            assert app.render_policy is policy
+            assert app.history_journal._policy is policy
+            assert app._history._policy is policy
+            assert app._history._diagnostics is app.diagnostics
+            assert app._tick_timer._interval == policy.activity_interval
+
+            app.post_message(events.AppBlur())
+            await pilot.pause()
+            assert not app._tick_timer._active.is_set()
+
+            app.post_message(events.AppFocus())
+            await pilot.pause()
+            assert app._tick_timer._active.is_set()
 
     asyncio.run(scenario())
 
@@ -1984,7 +2009,8 @@ def test_selection_stays_stable_across_scroll_and_platform_copy_rules() -> None:
             app.clear_selection()
             text = "可复制的生产 TUI 文本"
             entry_id = app._history.append_entry(text)
-            await pilot.pause()
+            app._history.jump_to_tail()
+            await app._history.wait_for_reflow()
             start, _end = app._history.entry_ranges[entry_id]
             app.screen.selections = {
                 app._history: Selection(Offset(0, start), Offset(len(text), start))

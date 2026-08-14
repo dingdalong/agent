@@ -50,6 +50,7 @@ from src.interfaces.tui.diagnostics import TuiDiagnostics
 from src.interfaces.tui.dialogs import InlineWidget, InteractionCoordinator
 from src.interfaces.tui.history_log import HistoryEntry, HistoryLog
 from src.interfaces.tui.history_journal import PlainHistoryJournal
+from src.interfaces.tui.render_policy import TuiRenderPolicy
 from src.mgr.session_state import SessionRecord
 from src.interfaces.tui.widgets import (
 
@@ -173,6 +174,7 @@ class AgentTuiApp(App[None]):
         native_clipboard: bool = True,
         history_journal: PlainHistoryJournal | None = None,
         diagnostics: TuiDiagnostics | None = None,
+        render_policy: TuiRenderPolicy | None = None,
     ) -> None:
         # ansi_color=True：禁用 ANSIToTruecolor 行过滤器，让 ansi_default 背景输出
         # SGR 49（终端真实默认背景），而非被改写为 ansi_theme 的固定 RGB。
@@ -193,7 +195,8 @@ class AgentTuiApp(App[None]):
         )
         self.native_clipboard_enabled = native_clipboard
         self._native_clipboard = NativeClipboard(self.target_platform)
-        self.history_journal = history_journal or PlainHistoryJournal()
+        self.render_policy = render_policy or TuiRenderPolicy()
+        self.history_journal = history_journal or PlainHistoryJournal(self.render_policy)
         self.diagnostics = diagnostics or TuiDiagnostics(None)
         self.fatal_error: BaseException | None = None
         self.ready = asyncio.Event()
@@ -264,7 +267,11 @@ class AgentTuiApp(App[None]):
         return bool(self._completion_matches)
 
     def compose(self) -> ComposeResult:
-        yield HistoryLog(id="history")
+        yield HistoryLog(
+            id="history",
+            policy=self.render_policy,
+            diagnostics=self.diagnostics,
+        )
         yield Vertical(id="interaction-slot")
         with Vertical(id="transient-zone"):
             yield SelectionStatic("", id="activity", markup=False)
@@ -314,7 +321,10 @@ class AgentTuiApp(App[None]):
         )
         self._resize_composer()
         self._update_separators()
-        self._tick_timer = self.set_interval(0.1, self._tick)
+        self._tick_timer = self.set_interval(
+            self.render_policy.activity_interval,
+            self._tick,
+        )
         self.refresh_chrome()
         self.ready.set()
         self.diagnostics.record(
@@ -371,7 +381,7 @@ class AgentTuiApp(App[None]):
         self._schedule_transcript_refresh()
         if self._chrome_dirty:
             self.refresh_chrome()
-        elif self._chrome_is_dynamic():
+        elif self._chrome_is_dynamic() and not self._history.reflow_pending:
             self._render_activity()
             self._render_status()
 
@@ -555,7 +565,15 @@ class AgentTuiApp(App[None]):
 
     def on_app_focus(self, _event: events.AppFocus) -> None:
         """终端窗口重新激活后，把键盘交还给当前交互面板。"""
+        if hasattr(self, "_tick_timer"):
+            self._tick_timer.resume()
+            self._tick()
         self.call_after_refresh(self.restore_focus)
+
+    def on_app_blur(self, _event: events.AppBlur) -> None:
+        """终端失焦时暂停周期动画，静态事件仍可正常更新界面。"""
+        if hasattr(self, "_tick_timer"):
+            self._tick_timer.pause()
 
     def restore_focus(self) -> None:
         self.sync_input_state()
@@ -604,7 +622,8 @@ class AgentTuiApp(App[None]):
         if not visible:
             return
         now = time.monotonic()
-        frame = _SPINNER[int(now * 10) % len(_SPINNER)]
+        interval = max(0.001, self.render_policy.activity_interval)
+        frame = _SPINNER[int(now / interval) % len(_SPINNER)]
 
         # ── 现有三种模式产出 base_content ──
         if self._retry_deadline is not None:
