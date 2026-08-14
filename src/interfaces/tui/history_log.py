@@ -24,6 +24,7 @@ from textual.widgets import RichLog
 
 from src.interfaces.tui.diagnostics import TuiDiagnostics
 from src.interfaces.tui.render_policy import TuiRenderPolicy
+from src.interfaces.tui.widgets import PointerScrollMixin
 
 
 _OMISSION_NOTICE = "\n\n[内容过长，中间部分未渲染]\n\n"
@@ -82,7 +83,7 @@ def _first_strip_difference(left: list[Strip], right: list[Strip]) -> int | None
     return common_length if len(left) != len(right) else None
 
 
-class HistoryLog(RichLog):
+class HistoryLog(PointerScrollMixin, RichLog):
     """保留轻量逻辑历史，只渲染有预算的分页窗口。"""
 
     FOCUS_ON_CLICK = False

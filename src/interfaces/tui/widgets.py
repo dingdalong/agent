@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+from collections import deque
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from functools import partial
 from typing import Literal
 
@@ -24,6 +26,85 @@ from src.mgr.frozen import clean_env
 
 
 _SELECT_AUTO_SCROLL_FPS = 20
+_POINTER_SCROLL_BURST_WINDOW = 0.120
+
+
+@dataclass(slots=True)
+class _PointerScrollBurst:
+    direction: Literal[-1, 1] | None = None
+    event_times: deque[float] = field(default_factory=deque)
+
+    def reset(self) -> None:
+        self.direction = None
+        self.event_times.clear()
+
+    def record(self, direction: Literal[-1, 1], event_time: float) -> int:
+        if (
+            self.direction != direction
+            or (
+                self.event_times
+                and (
+                    event_time < self.event_times[-1]
+                    or event_time - self.event_times[-1]
+                    > _POINTER_SCROLL_BURST_WINDOW
+                )
+            )
+        ):
+            self.reset()
+        self.direction = direction
+        cutoff = event_time - _POINTER_SCROLL_BURST_WINDOW
+        while self.event_times and self.event_times[0] < cutoff:
+            self.event_times.popleft()
+        self.event_times.append(event_time)
+        count = len(self.event_times)
+        if count <= 2:
+            return 1
+        if count <= 5:
+            return 2
+        return 3
+
+
+class PointerScrollMixin:
+    """按同向滚轮事件密度加速垂直滚动。"""
+
+    def __init__(self, *args, **kwargs) -> None:
+        self._pointer_scroll_burst = _PointerScrollBurst()
+        super().__init__(*args, **kwargs)
+
+    def _on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
+        self._scroll_for_pointer_burst(event, -1)
+
+    def _on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
+        self._scroll_for_pointer_burst(event, 1)
+
+    def _scroll_for_pointer_burst(
+        self,
+        event: events.MouseScrollUp | events.MouseScrollDown,
+        direction: Literal[-1, 1],
+    ) -> None:
+        if event.ctrl or event.shift:
+            self._pointer_scroll_burst.reset()
+            return
+        if not self.allow_vertical_scroll:
+            self._pointer_scroll_burst.reset()
+            return
+        multiplier = self._pointer_scroll_burst.record(direction, event.time)
+        scrolled = self._scroll_to(
+            y=(
+                self.scroll_target_y
+                + direction * self.app.scroll_sensitivity_y * multiplier
+            ),
+            animate=False,
+            release_anchor=direction < 0,
+        )
+        event.prevent_default()
+        reached_boundary = (direction < 0 and self.scroll_y <= 0) or (
+            direction > 0 and self.scroll_y >= self.max_scroll_y
+        )
+        if not scrolled or reached_boundary:
+            self._pointer_scroll_burst.reset()
+        if scrolled:
+            event.stop()
 
 
 class SelectionScreen(Screen[None]):
@@ -322,7 +403,7 @@ class AgentList(ListView):
         super().action_cursor_up()
 
 
-class TranscriptPanel(VerticalScroll, can_focus=True):
+class TranscriptPanel(PointerScrollMixin, VerticalScroll, can_focus=True):
     """可分页、切换 Agent 的只读转录面板。"""
 
     FOCUS_ON_CLICK = False
