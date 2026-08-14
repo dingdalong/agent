@@ -391,12 +391,12 @@ def test_double_enter_submits_once() -> None:
     asyncio.run(scenario())
 
 
-# ---------- Esc 取消 ----------
+# ---------- Esc 后退与快捷键 ----------
 
 
 @pytest.mark.parametrize("state", ["provider", "credentials", "verifying", "model"])
-def test_escape_returns_none_and_cancels_verify_from_every_state(state: str) -> None:
-    """Esc 在任意态均返回 None；verifying 态还取消后台验证任务。"""
+def test_ctrl_c_exits_none_and_cancels_verify_from_every_state(state: str) -> None:
+    """Ctrl+C 在任意态均返回 None；verifying 态还取消后台验证任务。"""
 
     async def scenario() -> None:
         stub = StubVerify()
@@ -415,10 +415,325 @@ def test_escape_returns_none_and_cancels_verify_from_every_state(state: str) -> 
                 await _wait_until(
                     lambda: app.query_one("#model-panel", Vertical).display, pilot
                 )
-            await pilot.press("escape")
+            await pilot.press("ctrl+c")
             if state == "verifying":
                 await _wait_until(lambda: stub.cancelled.is_set(), pilot)
                 assert stub.cancelled.is_set()
+            await _wait_until(lambda: app._state == "exit", pilot)
+        assert app._return_value is None
+
+    asyncio.run(scenario())
+
+
+def test_escape_in_provider_list_is_noop() -> None:
+    """provider 态 Esc 不退出，列表仍可正常选择 Provider。"""
+
+    async def scenario() -> None:
+        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], verify=StubVerify())
+        async with app.run_test(size=(80, 24)) as pilot:
+            provider_list = app.query_one("#provider-list", KeyboardOptionList)
+            provider_panel = app.query_one("#provider-panel", Vertical)
+            model_panel = app.query_one("#model-panel", Vertical)
+            assert provider_list.has_focus
+            assert provider_panel.display is True
+            assert model_panel.display is False
+
+            await pilot.press("escape")
+
+            assert app._state == "provider"
+            assert provider_list.has_focus
+            assert provider_panel.display is True
+            assert model_panel.display is False
+
+            await pilot.press("enter")
+            url_input = app.query_one("#url-input", Input)
+            assert app._state == "credentials"
+            assert url_input.value == _DEEPSEEK.base_url
+            assert url_input.has_focus
+
+    asyncio.run(scenario())
+
+
+def test_escape_from_credentials_returns_to_provider_list() -> None:
+    """credentials 态 Esc 返回 Provider 列表并允许重新选择。"""
+
+    async def scenario() -> None:
+        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], verify=StubVerify())
+        async with app.run_test(size=(80, 24)) as pilot:
+            await _choose_provider(app, pilot, 0)
+            url_input = app.query_one("#url-input", Input)
+            url_input.value = ""
+            await pilot.press("enter")
+            assert _feedback(app) == "API 地址不能为空"
+
+            await pilot.press("escape")
+
+            provider_list = app.query_one("#provider-list", KeyboardOptionList)
+            assert app._state == "provider"
+            assert provider_list.has_focus
+            assert _feedback(app) == ""
+
+            await pilot.press("enter")
+            assert app._state == "credentials"
+            assert url_input.value == _DEEPSEEK.base_url
+            assert url_input.has_focus
+
+    asyncio.run(scenario())
+
+
+def test_escape_from_verifying_cancels_and_returns_to_credentials() -> None:
+    """verifying 态 Esc 取消验证、恢复凭据输入，并允许重新提交。"""
+
+    async def scenario() -> None:
+        stub = StubVerify()
+        stub.gate()
+        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], verify=stub)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await _choose_provider(app, pilot, 0)
+            url_input = app.query_one("#url-input", Input)
+            key_input = app.query_one("#key-input", Input)
+            url_input.value = "https://custom.test/v1"
+            key_input.value = "sk-test-123"
+            await pilot.press("enter")
+            await _wait_until(lambda: bool(stub.calls), pilot)
+
+            await pilot.press("escape")
+            await _wait_until(lambda: stub.cancelled.is_set(), pilot)
+
+            assert stub.cancelled.is_set()
+            assert app._state == "credentials"
+            assert url_input.disabled is False
+            assert key_input.disabled is False
+            assert url_input.value == "https://custom.test/v1"
+            assert key_input.value == "sk-test-123"
+            assert "正在验证" not in _feedback(app)
+            assert url_input.has_focus
+
+            stub.release()
+            await pilot.press("enter")
+            await _wait_until(
+                lambda: app.query_one("#model-panel", Vertical).display, pilot
+            )
+            assert app._state == "model"
+            assert app.query_one("#model-panel", Vertical).display is True
+
+    asyncio.run(scenario())
+
+
+def test_stale_verify_result_is_ignored_after_resubmit() -> None:
+    """旧验证吞掉取消并返回结果时，不得覆盖重新提交的新验证任务。"""
+
+    async def scenario() -> None:
+        calls: list[tuple[ProviderOption, str | None, str]] = []
+        stale_cancelled = asyncio.Event()
+        stale_release = asyncio.Event()
+        fresh_release = asyncio.Event()
+
+        async def verify(option, api_key, base_url) -> list[str]:
+            calls.append((option, api_key, base_url))
+            if len(calls) == 1:
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    stale_cancelled.set()
+                    await stale_release.wait()
+                return ["stale-model"]
+            await fresh_release.wait()
+            return ["fresh-model"]
+
+        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], verify=verify)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await _choose_provider(app, pilot, 0)
+            url_input = app.query_one("#url-input", Input)
+            key_input = app.query_one("#key-input", Input)
+            key_input.value = "sk-old"
+            await pilot.press("enter")
+            await _wait_until(lambda: len(calls) == 1, pilot)
+            stale_task = app._verify_task
+            assert stale_task is not None
+
+            await pilot.press("escape")
+            await _wait_until(stale_cancelled.is_set, pilot)
+            url_input.value = "https://fresh.test/v1"
+            key_input.value = "sk-fresh"
+            await pilot.press("enter")
+            await _wait_until(lambda: len(calls) == 2, pilot)
+            fresh_task = app._verify_task
+            assert fresh_task is not None
+            assert fresh_task is not stale_task
+
+            stale_release.set()
+            await _wait_until(stale_task.done, pilot)
+            await pilot.pause()
+
+            model_list = app.query_one("#model-list", KeyboardOptionList)
+            assert app._state == "verifying"
+            assert app._verify_task is fresh_task
+            assert app.query_one("#model-panel", Vertical).display is False
+            assert [
+                model_list.get_option_at_index(index).prompt
+                for index in range(model_list.option_count)
+            ] == []
+
+            fresh_release.set()
+            await _wait_until(
+                lambda: app.query_one("#model-panel", Vertical).display, pilot
+            )
+            assert app._state == "model"
+            assert [
+                model_list.get_option_at_index(index).prompt
+                for index in range(model_list.option_count)
+            ] == ["fresh-model"]
+
+    asyncio.run(scenario())
+
+
+def test_stale_verify_error_is_ignored_after_resubmit() -> None:
+    """旧验证吞掉取消并晚抛错时，不得污染新验证的空模型反馈。"""
+
+    async def scenario() -> None:
+        calls: list[tuple[ProviderOption, str | None, str]] = []
+        stale_cancelled = asyncio.Event()
+        stale_release = asyncio.Event()
+        fresh_release = asyncio.Event()
+
+        async def verify(option, api_key, base_url) -> list[str]:
+            calls.append((option, api_key, base_url))
+            if len(calls) == 1:
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    stale_cancelled.set()
+                    await stale_release.wait()
+                raise TimeoutError("stale boom")
+            await fresh_release.wait()
+            return []
+
+        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], verify=verify)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await _choose_provider(app, pilot, 0)
+            app.query_one("#key-input", Input).value = "sk-test-123"
+            await pilot.press("enter")
+            await _wait_until(lambda: len(calls) == 1, pilot)
+            stale_task = app._verify_task
+            assert stale_task is not None
+
+            await pilot.press("escape")
+            await _wait_until(stale_cancelled.is_set, pilot)
+            await pilot.press("enter")
+            await _wait_until(lambda: len(calls) == 2, pilot)
+            fresh_task = app._verify_task
+            assert fresh_task is not None
+            assert fresh_task is not stale_task
+
+            stale_release.set()
+            await _wait_until(stale_task.done, pilot)
+            await pilot.pause()
+            assert app._state == "verifying"
+            assert app._verify_task is fresh_task
+
+            fresh_release.set()
+            await _wait_until(lambda: app._state == "credentials", pilot)
+            assert _feedback(app) == "未发现可用模型"
+            assert "stale" not in _feedback(app)
+
+    asyncio.run(scenario())
+
+
+def test_escape_from_model_returns_to_credentials() -> None:
+    """model 态 Esc 恢复凭据页，并允许再次验证进入模型页。"""
+
+    async def scenario() -> None:
+        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], verify=StubVerify())
+        async with app.run_test(size=(80, 24)) as pilot:
+            await _choose_provider(app, pilot, 0)
+            url_input = app.query_one("#url-input", Input)
+            key_input = app.query_one("#key-input", Input)
+            key_input.value = "sk-test-123"
+            await pilot.press("enter")
+            await _wait_until(
+                lambda: app.query_one("#model-panel", Vertical).display, pilot
+            )
+
+            await pilot.press("escape")
+
+            assert app._state == "credentials"
+            assert app.query_one("#model-panel", Vertical).display is False
+            assert app.query_one("#provider-panel", Vertical).display is True
+            assert url_input.disabled is False
+            assert key_input.disabled is False
+            assert url_input.has_focus
+
+            await pilot.press("enter")
+            await _wait_until(
+                lambda: app.query_one("#model-panel", Vertical).display, pilot
+            )
+            assert app._state == "model"
+            assert app.query_one("#model-panel", Vertical).display is True
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("state", ["provider", "credentials", "verifying", "model"])
+def test_ctrl_q_does_not_exit(state: str) -> None:
+    """Ctrl+Q 在任意态均无效果，界面仍可操作，Ctrl+C 仍可取消。"""
+
+    async def scenario() -> None:
+        stub = StubVerify()
+        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], verify=stub)
+        async with app.run_test(size=(80, 24)) as pilot:
+            if state in ("credentials", "verifying", "model"):
+                await _choose_provider(app, pilot, 0)
+            if state in ("verifying", "model"):
+                stub.gate()
+                app.query_one("#key-input", Input).value = "sk-test-123"
+                await pilot.press("enter")
+                await _wait_until(lambda: bool(stub.calls), pilot)
+            if state == "model":
+                stub.release()
+                await _wait_until(
+                    lambda: app.query_one("#model-panel", Vertical).display, pilot
+                )
+
+            verify_task = app._verify_task
+            focused = app.focused
+            await pilot.press("ctrl+q")
+            await pilot.pause()
+
+            assert app._state == state
+            assert app.focused is focused
+            assert app.query_one("#provider-panel", Vertical).display is (state != "model")
+            assert app.query_one("#model-panel", Vertical).display is (state == "model")
+            if state == "verifying":
+                assert verify_task is not None
+                assert app._verify_task is verify_task
+                assert verify_task.done() is False
+                assert stub.cancelled.is_set() is False
+
+            if state == "provider":
+                await pilot.press("enter")
+                assert app._state == "credentials"
+                assert app.query_one("#url-input", Input).has_focus
+            elif state == "credentials":
+                app.query_one("#key-input", Input).value = "sk-test-123"
+                await pilot.press("enter")
+                await _wait_until(
+                    lambda: app.query_one("#model-panel", Vertical).display, pilot
+                )
+            elif state == "verifying":
+                stub.release()
+                await _wait_until(
+                    lambda: app.query_one("#model-panel", Vertical).display, pilot
+                )
+                assert stub.cancelled.is_set() is False
+            else:
+                model_list = app.query_one("#model-list", KeyboardOptionList)
+                assert model_list.highlighted == 0
+                await pilot.press("down")
+                assert model_list.highlighted == 1
+
+            await pilot.press("ctrl+c")
+            await _wait_until(lambda: app._state == "exit", pilot)
         assert app._return_value is None
 
     asyncio.run(scenario())

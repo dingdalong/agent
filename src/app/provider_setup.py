@@ -157,7 +157,7 @@ async def _run_setup_app(
         await app.run_async() -> SetupResult | None
 
     其中 verify(option, api_key, base_url) 为可等待调用，返回规范化模型列表；
-    api_key 为 None 表示未输入（Ollama 场景）。任意状态 Esc/取消返回 None。
+    api_key 为 None 表示未输入（Ollama 场景）。任意状态 Ctrl+C/取消返回 None。
 
     Args:
         options: 候选 Provider 列表。

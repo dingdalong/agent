@@ -1,8 +1,11 @@
 """首次 LLM Provider 配置的独立 Textual 向导 App。
 
-状态机（线性，Esc 任意态取消）::
+状态机（Esc 逐级后退，Ctrl+C 任意态取消退出）::
 
     provider -> credentials -> verifying -> model -> exit
+
+Esc 在 provider 态无操作；credentials 回 Provider 列表；verifying 取消验证、
+model 回凭据页。
 
 credentials 态下 URL/Key 输入框用 Up/Down 纵向移动焦点（URL Up 回 Provider
 列表，Key Down 停留原地）；回列表后 Up/Down 恢复为切换高亮，Enter 重新选择。
@@ -56,7 +59,7 @@ class SetupInput(Input):
         self.post_message(self.Navigate(self.id or "", "down"))
 
 
-class SetupApp(App[SetupResult | None]):
+class SetupApp(App[SetupResult | None], inherit_bindings=False):
     """独立运行的首次 Provider 配置向导。
 
     Args:
@@ -106,7 +109,8 @@ class SetupApp(App[SetupResult | None]):
     """
 
     BINDINGS = [
-        Binding("escape", "cancel", show=False, priority=True),
+        Binding("escape", "back", show=False, priority=True),
+        Binding("ctrl+c", "cancel", show=False, priority=True),
     ]
 
     def __init__(self, *, options: list[ProviderOption], verify: VerifyFunc) -> None:
@@ -118,8 +122,7 @@ class SetupApp(App[SetupResult | None]):
         self._url = ""
         self._api_key: str | None = None
         self._models: list[str] = []
-        self._verify_error = ""
-        self._verify_task: asyncio.Task[list[str]] | None = None
+        self._verify_task: asyncio.Task[tuple[list[str], str]] | None = None
 
     def compose(self) -> ComposeResult:
         with Vertical(id="provider-panel"):
@@ -199,7 +202,6 @@ class SetupApp(App[SetupResult | None]):
             return
         self._url = url
         self._api_key = api_key if api_key else None
-        self._verify_error = ""
         self._state = "verifying"
         self._set_inputs_enabled(False)
         self._set_feedback(_VERIFYING_TEXT, verifying=True)
@@ -215,26 +217,26 @@ class SetupApp(App[SetupResult | None]):
         option: ProviderOption,
         api_key: str | None,
         url: str,
-    ) -> list[str]:
-        """运行 verify；失败把安全化消息存入 _verify_error 并返回空列表。
+    ) -> tuple[list[str], str]:
+        """运行 verify，返回模型列表及安全化错误消息。
 
-        取消与控制流（Esc 取消/中断/退出）原样传播，由 _on_verify_done 识别后不触碰 UI；
-        其余普通异常经 classify_llm_error 安全化后展示。
+        Esc 后退或 Ctrl+C 退出时取消验证任务；取消/中断/退出控制流原样传播。
+        任务已取消时 _on_verify_done 不触碰 UI；其余普通异常经 classify_llm_error
+        安全化后随任务结果返回。
         """
         try:
-            return await self._verify(option, api_key, url)
+            return await self._verify(option, api_key, url), ""
         except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
             raise
         except Exception as exc:
-            self._verify_error = classify_llm_error(exc).message
-            return []
+            return [], classify_llm_error(exc).message
 
     def _on_verify_done(self, task: asyncio.Task) -> None:
-        if task.cancelled():
-            return  # Esc 已取消任务并退出
-        self._finish_verify(task.result())
+        if task is not self._verify_task or task.cancelled():
+            return  # Esc 后退或 Ctrl+C 退出时已取消或替换任务
+        self._finish_verify(*task.result())
 
-    def _finish_verify(self, models: list[str]) -> None:
+    def _finish_verify(self, models: list[str], error: str) -> None:
         if self._state != "verifying":
             return
         self._verify_task = None
@@ -242,7 +244,7 @@ class SetupApp(App[SetupResult | None]):
             # verify 抛错或防御性返回空列表：安全展示、保留输入、恢复 credentials。
             self._state = "credentials"
             self._set_inputs_enabled(True)
-            self._set_feedback(self._verify_error or "未发现可用模型")
+            self._set_feedback(error or "未发现可用模型")
             self.query_one("#url-input", Input).focus()
             return
         self._models = models
@@ -265,8 +267,24 @@ class SetupApp(App[SetupResult | None]):
             default_model=self._models[index],
         ))
 
+    def action_back(self) -> None:
+        """Esc：按当前状态返回 Provider 列表或凭据页。"""
+        if self._state == "provider":
+            return
+        if self._verify_task is not None:
+            self._verify_task.cancel()
+            self._verify_task = None
+        if self._state == "model":
+            self.query_one("#model-panel", Vertical).display = False
+            self.query_one("#provider-panel", Vertical).display = True
+        self._set_inputs_enabled(True)
+        self._set_feedback("")
+        back = self._state in ("verifying", "model")
+        self._state = "credentials" if back else "provider"
+        self.query_one("#url-input" if back else "#provider-list").focus()
+
     def action_cancel(self) -> None:
-        """Esc：取消正在运行的验证任务并以 None 退出。"""
+        """Ctrl+C：取消正在运行的验证任务并以 None 退出。"""
         if self._verify_task is not None:
             self._verify_task.cancel()
             self._verify_task = None
