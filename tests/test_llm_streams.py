@@ -1506,6 +1506,25 @@ def _anthropic_message_stop() -> SimpleNamespace:
     return SimpleNamespace(type="message_stop")
 
 
+def test_anthropic_usage_includes_cache_read_and_creation_in_input() -> None:
+    """Anthropic 总输入应包含未缓存、缓存读取和缓存写入三部分。"""
+    provider = _bare_provider(AnthropicProvider)
+    usage = SimpleNamespace(
+        input_tokens=11,
+        output_tokens=7,
+        cache_read_input_tokens=13,
+        cache_creation_input_tokens=17,
+    )
+
+    assert provider._extract_token_usage(usage) == {
+        "input_tokens": 41,
+        "output_tokens": 7,
+        "total_tokens": None,
+        "cache_read_input_tokens": 13,
+        "cache_creation_input_tokens": 17,
+    }
+
+
 def test_anthropic_request_uses_128k_output_limit() -> None:
     """Anthropic Messages 请求应固定下发 128,000 token 输出上限。
 

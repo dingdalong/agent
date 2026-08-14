@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from collections import deque
 from collections.abc import Callable
@@ -21,6 +22,8 @@ from src.events.types import (
     ToolCallCompleted,
     ToolCallStarted,
 )
+
+logger = logging.getLogger(__name__)
 
 # 截断阶段分类到转录用中文标签的映射。
 _TRUNCATION_KIND_LABELS = {
@@ -548,6 +551,32 @@ class AgentViewStore:
             max(0, event.cache_read_input_tokens or 0),
         )
         self._session_usage = self._add_usage(self._session_usage, delta)
+        logger.info(
+            "LLM token核账 call_id=%s model=%s caller_type=%s caller_uuid=%s "
+            "raw_input_tokens=%s raw_output_tokens=%s raw_total_tokens=%s "
+            "raw_cache_read_input_tokens=%s raw_cache_creation_input_tokens=%s "
+            "delta_input_tokens=%d delta_output_tokens=%d delta_total_tokens=%d "
+            "delta_cache_read_input_tokens=%d session_input_tokens=%d "
+            "session_output_tokens=%d session_total_tokens=%d "
+            "session_cache_read_input_tokens=%d",
+            event.call_id,
+            event.model,
+            event.caller_agent_type,
+            event.caller_uuid,
+            event.input_tokens,
+            event.output_tokens,
+            event.total_tokens,
+            event.cache_read_input_tokens,
+            event.cache_creation_input_tokens,
+            delta.input_tokens,
+            delta.output_tokens,
+            delta.input_tokens + delta.output_tokens,
+            delta.cache_read_tokens,
+            self._session_usage.input_tokens,
+            self._session_usage.output_tokens,
+            self._session_usage.input_tokens + self._session_usage.output_tokens,
+            self._session_usage.cache_read_tokens,
+        )
         state = self._ensure_event_state(event)
         if state is None:
             return

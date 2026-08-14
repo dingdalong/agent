@@ -66,7 +66,7 @@ LLM 调用使用 `emit_telemetry_safely()`（`src/events/bus.py:36-65`）发布�
 
 `LLMCallFailed`（`types.py` `LLMCallFailed`）只在终态失败时发出。它包含安全摘要和有限诊断字段，不包含请求、响应体、凭据或原始异常对象。长度恢复耗尽也发同一事件，并使用 `output_limit` 类别（`agent.py` `_fail_response_recovery`）。
 
-`LLMCallCompleted` 只对应成功尝试；失败尝试不会产生完成事件。成功事件用于 token/context 统计，失败事件用于终态诊断，两者职责不混合。
+`LLMCallCompleted` 只对应成功尝试；失败尝试不会产生完成事件。成功事件用于 token/context 统计，失败事件用于终态诊断，两者职责不混合。只有 provider 在成功响应中返回的 usage 能被本地计数；供应商后台账单还可能包含失败、客户端超时或未完成返回的请求，核账时需将这类请求单独比对。
 
 ## 4. `AgentViewStore`
 
@@ -79,7 +79,7 @@ LLM 调用使用 `emit_telemetry_safely()`（`src/events/bus.py:36-65`）发布�
 - `LLMRetrying`：活动改为“重试中”，追加独立 `retry` 段，写安全类别、摘要、尝试号和片段状态（`:387-405`）。该段会阻断失败尝试正文与下一尝试正文的合并。
 - `LLMLengthRetrying`：活动改为“恢复中”，追加独立 `retry` 段（`_record_length_retry`），按 `strategy` 写「⚠ 输出截断（阶段）：<从中断处继续生成/降低推理力度至 X 后重生成/压缩思考后重生成> (attempt/max)」。重生成会丢弃被截断的思考/正文流，该段隔断被丢弃流与重生成流在转录中被误合并。
 - `LLMCallFailed`：活动改为“失败”，追加独立 `error` 段；记录 attempts、partial、工具状态及可用的状态码、provider code、request ID、diagnostic ID（`:407-437`）。
-- `LLMCallCompleted`：累计会话与 Agent token，并以实际输入 token 更新上下文用量（`:338-361`）。
+- `LLMCallCompleted`：`_record_completion()` 把每个成功调用计入会话总量；有 UUID 时再计入对应 Agent，并以实际输入 token 更新该 Agent 的上下文用量。主 Agent、子 Agent 以及无 caller 的内部调用都属于会话总量，无 caller 的调用不会覆盖前台上下文。每次入账后写一条 INFO 核账日志，包含 `call_id`、模型、caller 身份、provider 原始 usage（`None` 原样保留）、实际非负增量和更新后的会话累计；日志不包含消息正文或请求参数。
 
 Store 无 UUID 时只累计会话 token，不虚构 Agent。完成子 Agent 先保留在 active，前台下一次 `LLMCallStarted` 时由 Router 触发 `flush_completed()` 迁入有界历史。
 
@@ -141,7 +141,7 @@ TTY 只缓冲前台 Agent 当前一轮的工具。实时区优先级为”重试
 
 **非 TTY 与 Store 转录**：非 TTY 输出使用 `display.title` 和内容的前 20 行（含截断提示）。`AgentViewStore` 转录使用 `display.title` 和前 10 行内容，回退到 `result_preview`。
 
-`StatusPresenter` 从不可变快照统一生成 token、上下文和 elapsed 文本。主会话 elapsed 是跨回合累计的有效耗时；纯人工等待仅在没有叶子工具继续计算时暂停。Agent 转录覆盖层显示当前 Agent 自身的生命周期、token 与上下文。
+`StatusPresenter` 从不可变快照统一生成 token、上下文和 elapsed 文本。状态栏中的 token 从 1,000 起按最接近的 100 舍入并使用 `k`/`m` 紧凑显示，精确核账应使用 Store 的 INFO 日志。主会话 elapsed 是跨回合累计的有效耗时；纯人工等待仅在没有叶子工具继续计算时暂停，权限等内嵌交互不会结算当前回合，只有返回主输入态时由 `begin_input()` 结算一次。Agent 转录覆盖层显示当前 Agent 自身的生命周期、token 与上下文。
 
 ## 9. Textual UI 组件
 

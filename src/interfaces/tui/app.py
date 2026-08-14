@@ -478,7 +478,6 @@ class AgentTuiApp(App[None]):
     async def mount_inline_widget(self, widget: InlineWidget) -> None:
         """将唯一活动表单挂载到临时交互槽。"""
         await self.flush_round()
-        self._session_elapsed += self._turn_elapsed(time.monotonic())
         await self._interaction_slot.remove_children()
         await self._interaction_slot.mount(widget)
         self._interaction_slot.display = True

@@ -2087,6 +2087,45 @@ def test_external_cancellation_cleans_modal_before_future_completion() -> None:
     asyncio.run(scenario())
 
 
+def test_permission_menu_settles_turn_elapsed_only_when_input_resumes(
+    monkeypatch,
+) -> None:
+    """权限交互只暂停当前回合，回到主输入态时才统一结算一次。"""
+    async def scenario() -> None:
+        app = _app()
+        async with app.run_test(size=(100, 30)) as pilot:
+            app._turn_started = 1.0
+            monkeypatch.setattr(app, "_turn_elapsed", lambda _now: 7.0)
+            loop = asyncio.get_running_loop()
+            permission = PermissionMenu(
+                timestamp=1.0,
+                source="test",
+                tool_name="shell",
+                detail="pwd",
+                future=loop.create_future(),
+            )
+            next_input = InputMenu(
+                timestamp=2.0,
+                source="test",
+                prompt="输入",
+                future=loop.create_future(),
+            )
+
+            await app.coordinator.submit(permission)
+            await app.coordinator.submit(next_input)
+            await pilot.pause()
+            assert app._session_elapsed == 0.0
+
+            await pilot.press("1")
+            assert await permission.future == "yes"
+            await pilot.pause()
+
+            assert app.coordinator.input_active
+            assert app._session_elapsed == 7.0
+
+    asyncio.run(scenario())
+
+
 def test_close_cancels_active_model_menu_and_waits_for_removal() -> None:
     """关闭 UI 应能等待活动模型菜单卸载，不接受 coroutine 的限制不得泄漏。"""
     async def scenario() -> None:
