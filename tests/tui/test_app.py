@@ -1011,6 +1011,83 @@ def test_keyboard_focus_moves_between_composer_agent_list_and_transcript() -> No
     asyncio.run(scenario())
 
 
+def test_visible_agent_list_animates_only_running_row_without_worker(
+    monkeypatch,
+) -> None:
+    async def scenario() -> None:
+        store = AgentViewStore(clock=lambda: 100.0)
+        store.register_foreground("main", "main")
+        store.record(SubagentLifecycle(
+            timestamp=1.0,
+            source="subagent",
+            agent_uuid="worker-0",
+            agent_type="worker",
+            phase="start",
+            task="分析代码结构",
+        ))
+        app = _app(store)
+        async with app.run_test(size=(100, 30)) as pilot:
+            app._tick_timer.pause()
+            app._schedule_agent_refresh(now=0.01)
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            assert app._agent_list.display
+            assert app._agent_ids == ["main", "worker-0"]
+            app._agent_list.index = 1
+            children = tuple(app._agent_list.children)
+            main_label = next(iter(children[0].query(Static)))
+            worker_label = next(iter(children[1].query(Static)))
+            main_updates: list[str] = []
+            worker_updates: list[str] = []
+
+            main_update = main_label.update
+            worker_update = worker_label.update
+
+            def record_main(content, *, layout=True) -> None:
+                main_updates.append(str(content))
+                main_update(content, layout=layout)
+
+            def record_worker(content, *, layout=True) -> None:
+                worker_updates.append(
+                    content.plain if isinstance(content, Text) else str(content)
+                )
+                worker_update(content, layout=layout)
+
+            monkeypatch.setattr(main_label, "update", record_main)
+            monkeypatch.setattr(worker_label, "update", record_worker)
+            presentation_workers: list[str] = []
+            monkeypatch.setattr(
+                app,
+                "_run_presentation_worker",
+                lambda _factory, *, group: presentation_workers.append(group),
+            )
+
+            app._schedule_agent_refresh(now=0.05)
+            for index in range(1, 11):
+                app._schedule_agent_refresh(now=index / 10 + 0.01)
+
+            assert main_updates == []
+            assert [update[0] for update in worker_updates] == list(
+                "⠙⠹⠸⠼⠴⠦⠧⠇⠏⠋"
+            )
+            assert presentation_workers == []
+            assert tuple(app._agent_list.children) == children
+            assert app._agent_list.index == 1
+
+            worker_updates.clear()
+            app._agent_list.display = False
+            app._schedule_agent_refresh(now=1.11)
+            app._schedule_agent_refresh(now=1.21)
+            assert worker_updates == []
+
+            app._agent_list.display = True
+            app._schedule_agent_refresh(now=1.21)
+            assert [update[0] for update in worker_updates] == ["⠹"]
+
+    asyncio.run(scenario())
+
+
 def test_modal_controls_are_keyboard_only() -> None:
     async def scenario() -> None:
         app = _app()

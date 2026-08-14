@@ -100,6 +100,8 @@ def present_agent_identity(
     snapshot: AgentSnapshot,
     base_style: str = "",
     show_status: bool = True,
+    *,
+    now: float | None = None,
 ) -> Text:
     """Present one agent identity and its status slot.
 
@@ -107,13 +109,15 @@ def present_agent_identity(
         snapshot: Immutable agent view snapshot.
         base_style: Optional Rich style applied to the whole line.
         show_status: 为真时在身份后追加状态槽（实时活动 / 已完成）；为假时仅身份，不含任何状态词。
+        now: 可选单调时间戳，用于让同一批状态行使用相同 spinner 帧。
 
     Returns:
         Rich text containing identity, optionally followed by the status slot.
     """
     # 状态图标：运行中用 spinner 动画帧，已完成用 ✔
     if snapshot.running:
-        frame = _SPINNER[int(time.monotonic() * 10) % len(_SPINNER)]
+        render_time = time.monotonic() if now is None else now
+        frame = _SPINNER[int(render_time * 10) % len(_SPINNER)]
         icon = f"{frame} "
     else:
         icon = "✔ "
@@ -131,17 +135,23 @@ def present_agent_identity(
     return text
 
 
-def present_agent(snapshot: AgentSnapshot, base_style: str = "") -> Text:
+def present_agent(
+    snapshot: AgentSnapshot,
+    base_style: str = "",
+    *,
+    now: float | None = None,
+) -> Text:
     """Present one agent summary for live, history, and status use.
 
     Args:
         snapshot: Immutable agent view snapshot.
         base_style: Optional Rich style applied to the whole line.
+        now: 可选单调时间戳，用于让同一批状态行使用相同 spinner 帧。
 
     Returns:
         Rich text containing identity, the status slot（实时活动 / 已完成）, and canonical metrics.
     """
-    line = present_agent_identity(snapshot, base_style)
+    line = present_agent_identity(snapshot, base_style, now=now)
     line.append("  ", style=base_style)
     line.append_text(_present_metrics(
         snapshot.usage,

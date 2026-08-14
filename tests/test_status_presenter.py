@@ -59,6 +59,22 @@ def test_present_agent_running_with_task_shows_spinner_and_task() -> None:
     assert "思考中" not in rendered
 
 
+def test_present_agent_uses_supplied_time_for_spinner_frame() -> None:
+    snapshot = _snapshot(running=True, activity="思考中", task="分析代码结构")
+
+    first = status_presenter.present_agent(snapshot, now=0.01).plain
+    second = status_presenter.present_agent(snapshot, now=0.11).plain
+    identity = status_presenter.present_agent_identity(
+        snapshot,
+        show_status=False,
+        now=0.11,
+    ).plain
+
+    assert first[0] == "⠋"
+    assert second[0] == "⠙"
+    assert identity[0] == "⠙"
+
+
 def test_present_agent_completed_with_task_shows_checkmark_and_task() -> None:
     """验证已完成的 agent 显示 ✔ 图标 + 任务描述（无状态文字）。
 

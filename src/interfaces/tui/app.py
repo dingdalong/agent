@@ -131,6 +131,12 @@ def _rich_text_signature(text: Text) -> tuple[Any, ...]:
     return text.plain, text.style, tuple(text.spans)
 
 
+def _static_content_signature(content: str | Text) -> tuple[Any, ...]:
+    if isinstance(content, Text):
+        return "rich", *_rich_text_signature(content)
+    return "plain", content
+
+
 class AgentTuiApp(App[None]):
     """生产全屏 TUI。"""
 
@@ -219,7 +225,8 @@ class AgentTuiApp(App[None]):
         self._completion_matches: list[tuple[str, str]] = []
         self._completion_index = 0
         self._agent_ids: list[str] = []
-        self._agent_signature: tuple[Any, ...] = ()
+        self._agent_signature: tuple[Any, ...] | None = None
+        self._agent_label_signatures: dict[str, tuple[Any, ...]] = {}
         self._main_focus_target = "composer"
         self.viewing_agent_id: str | None = None
         self._transcript_ids: list[str] = []
@@ -831,26 +838,37 @@ class AgentTuiApp(App[None]):
             self.coordinator._finish_inline_widget(event.result)
         )
 
-    def _schedule_agent_refresh(self) -> None:
+    def _schedule_agent_refresh(self, now: float | None = None) -> None:
         snapshots = self._browser_snapshots()
-        signature = tuple(
-            (
-                snapshot.uuid,
-                snapshot.running,
-                snapshot.activity,
-                snapshot.task,
-                snapshot.usage.input_tokens,
-                snapshot.usage.output_tokens,
-                snapshot.context.used_tokens,
-                int(snapshot.elapsed_seconds),
-            )
-            for snapshot in snapshots
+        ids = [snapshot.uuid for snapshot in snapshots]
+        structure_stable = (
+            ids == self._agent_ids
+            and len(self._agent_list.children) == len(ids)
         )
+        if structure_stable and self._agent_list.display:
+            render_time = time.monotonic() if now is None else now
+        else:
+            render_time = 0.0
+        labels: list[str | Text] = [
+            snapshot.agent_type
+            if snapshot.is_main
+            else present_agent(snapshot, now=render_time)
+            for snapshot in snapshots
+        ]
+        label_signatures = [
+            _static_content_signature(label)
+            for label in labels
+        ]
+        signature = tuple(zip(ids, label_signatures))
         if signature == self._agent_signature:
             return
         self._agent_signature = signature
+        if structure_stable:
+            self._update_agent_list_labels(ids, labels, label_signatures)
+            self._sync_agent_list_visibility()
+            return
         self._run_presentation_worker(
-            lambda: self._sync_agent_list(snapshots),
+            lambda: self._sync_agent_list(snapshots, labels, label_signatures),
             group="agent-list",
         )
 
@@ -885,9 +903,17 @@ class AgentTuiApp(App[None]):
                 worker_group=group,
             )
 
-    async def _sync_agent_list(self, snapshots) -> None:
+    async def _sync_agent_list(
+        self,
+        snapshots,
+        labels: list[str | Text],
+        label_signatures: list[tuple[Any, ...]],
+    ) -> None:
         ids = [snapshot.uuid for snapshot in snapshots]
-        if ids != self._agent_ids:
+        if (
+            ids != self._agent_ids
+            or len(self._agent_list.children) != len(ids)
+        ):
             selected_uuid = (
                 self._agent_ids[self._agent_list.index]
                 if self._agent_list.index is not None
@@ -895,23 +921,37 @@ class AgentTuiApp(App[None]):
                 else None
             )
             await self._agent_list.remove_children()
-            for snapshot in snapshots:
-                label = snapshot.agent_type if snapshot.is_main else present_agent(snapshot)
+            for label in labels:
                 await self._agent_list.mount(
                     KeyboardListItem(SelectionStatic(label, markup=False))
                 )
             self._agent_ids = ids
+            self._agent_label_signatures = dict(zip(ids, label_signatures))
             if ids:
                 self._agent_list.index = ids.index(selected_uuid) if selected_uuid in ids else 0
         else:
-            for item, snapshot in zip(self._agent_list.children, snapshots):
-                label = next(iter(item.query(Static)), None)
-                if label is not None:
-                    label.update(
-                        snapshot.agent_type if snapshot.is_main else present_agent(snapshot),
-                        layout=False,
-                    )
+            self._update_agent_list_labels(ids, labels, label_signatures)
         self._sync_agent_list_visibility()
+
+    def _update_agent_list_labels(
+        self,
+        ids: list[str],
+        labels: list[str | Text],
+        label_signatures: list[tuple[Any, ...]],
+    ) -> None:
+        for item, uuid, content, signature in zip(
+            self._agent_list.children,
+            ids,
+            labels,
+            label_signatures,
+        ):
+            if self._agent_label_signatures.get(uuid) == signature:
+                continue
+            label = next(iter(item.query(Static)), None)
+            if label is None:
+                continue
+            label.update(content, layout=False)
+            self._agent_label_signatures[uuid] = signature
 
     def _sync_agent_list_visibility(self) -> None:
         if not hasattr(self, "_agent_list"):
@@ -1677,7 +1717,8 @@ class AgentTuiApp(App[None]):
     def reload_session_state(self) -> None:
         self._session_elapsed = 0.0
         self._reset_turn_status()
-        self._agent_signature = ()
+        self._agent_signature = None
+        self._agent_label_signatures.clear()
         self._main_focus_target = "composer"
         self._transcript_positions.clear()
         self.coordinator.reset()
