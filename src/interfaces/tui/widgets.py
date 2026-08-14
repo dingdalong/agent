@@ -369,14 +369,14 @@ class Composer(KeyboardTextArea):
         if getattr(self.app, "completion_visible", False):
             self.app.select_previous_completion()
             return
-        row, column = self.cursor_location
-        if row == 0 and not select:
-            if column == 0:
-                # 已在行首：进入历史回溯
+        location = self.cursor_location
+        if not select and self.navigator.is_first_wrapped_line(location):
+            if location == (0, 0):
+                # 已在全文开头：进入历史回溯
                 if getattr(self.app, "history_prev", lambda: False)():
                     return
             else:
-                # 首行但非行首：先跳到行首
+                # 第一视觉行但不在全文开头：先跳到全文开头
                 self.move_cursor((0, 0))
                 return
         super().action_cursor_up(select)

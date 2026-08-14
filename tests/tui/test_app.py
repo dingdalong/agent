@@ -2665,6 +2665,74 @@ def test_up_key_on_first_line_moves_to_line_start_before_history() -> None:
     asyncio.run(scenario())
 
 
+def test_up_key_on_soft_wrapped_line_moves_one_visual_line_before_history() -> None:
+    """软折行草稿按上键应逐视觉行上移，到文首后才回溯历史。"""
+
+    def provider() -> list[str]:
+        return ["较早历史", "最新历史"]
+
+    draft = "a" * 500
+    app = AgentTuiApp(
+        AgentViewStore(),
+        [],
+        TurnClock(),
+        lambda: None,
+        lambda: False,
+        lambda: None,
+        get_input_history=provider,
+        native_clipboard=False,
+    )
+
+    async def scenario() -> None:
+        async with app.run_test(size=(48, 24)) as pilot:
+            app.refresh_input_history()
+            composer = app.query_one("#input", Composer)
+            composer.read_only = False
+            composer.focus()
+            composer.load_text(draft)
+            await pilot.pause()
+
+            assert composer.has_focus
+            assert composer.text == draft
+            assert "\n" not in composer.text
+            wrapped_document = composer.wrapped_document
+            assert wrapped_document.height >= 3
+
+            composer.move_cursor(wrapped_document.offset_to_location(Offset(1, 2)))
+            start_offset = wrapped_document.location_to_offset(composer.cursor_location)
+            assert composer.cursor_location[0] == 0
+            assert start_offset.y == 2
+
+            for _ in range(start_offset.y):
+                before = composer.cursor_location
+                before_y = wrapped_document.location_to_offset(before).y
+                expected = composer.get_cursor_up_location()
+                expected_y = wrapped_document.location_to_offset(expected).y
+                assert expected_y == before_y - 1
+
+                await pilot.press("up")
+
+                assert composer.text == draft
+                assert composer.cursor_location == expected
+                after_y = wrapped_document.location_to_offset(composer.cursor_location).y
+                assert after_y == before_y - 1
+
+            assert wrapped_document.location_to_offset(composer.cursor_location).y == 0
+            assert composer.cursor_location != (0, 0)
+            expected = composer.get_cursor_up_location()
+            assert expected == (0, 0)
+
+            await pilot.press("up")
+
+            assert composer.text == draft
+            assert composer.cursor_location == expected
+
+            await pilot.press("up")
+            assert composer.text == "最新历史"
+
+    asyncio.run(scenario())
+
+
 def test_composer_mouse_drag_selects_for_copy() -> None:
     """回归：Composer 放开鼠标拖选后，可拖选文本并经 _selected_text 取到（复制数据源）。
 
