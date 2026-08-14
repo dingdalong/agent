@@ -67,7 +67,7 @@ LOCAL_READ 可以读取工作区外的普通文件或目录，但拒绝设备、
 
 ## LLM 智能权限审查
 
-`LLMJudgeClient` 使用 `llm.fast`，由 `LLMMgr` 在未配置 fast 时回退 default。调用最长 15 秒，并强制通过 `record_verdict` 工具返回 allow、deny 或 ask。
+`LLMJudgeClient` 使用 `llm.fast`，由 `LLMMgr` 在未配置 fast 时回退 default。调用最长 15 秒，并强制通过 `record_verdict` 工具返回 allow、deny 或 ask。结构化裁决通过 `max_attempts_cap=3` 限制为最多三次尝试；若全局 `llm.retry.max_attempts` 更低则采用全局值。
 
 智能权限请求只包含：工具名和来源、动作类别、数据流、规范化路径分类、网络主机、参数类型与长度、风险标志、最多 2 KiB 的脱敏用户意图。Shell 额外发送最多 8 KiB 的脱敏命令。文件正文、待写内容、完整 body、header、cookie、环境变量和值、完整 URL query 都不会进入请求。参数摘要在系统提示词中明确标记为不可信数据。
 
@@ -75,7 +75,7 @@ LOCAL_READ 可以读取工作区外的普通文件或目录，但拒绝设备、
 
 权限裁决会以一行提示展示给用户，格式 `{标记} {来源} · {中文工具名} · {结论}(理由)`（组装见 `src/tools/display.py` 的 `permission_line`）。标记 `✘`/`✔`/`?` 分别对应拒绝/放行/需确认；来源标签由 `AuthorizationResult.source` 决定，映射见 `PERMISSION_SOURCES`（`hard_rule`→硬规则、`plan`→计划模式、`policy`→策略放行、`judge`→智能权限、`web_safety`→网页安全、`user`→用户、`failure`→授权失败）。理由完整展示、由历史区自动折行，不截断。所有拒绝都发 `PermissionNotice`（携带 `decision_source`），放行仅 `source="judge"` 的智能权限裁决提示，本地读取、普通工作区写入等策略放行不打断输出；拒绝亮红、放行亮黄。ask 走 `PermissionMenu`，其理由在确认弹窗之前的输出区提示，标签固定「智能权限」。
 
-Web 外部读取另使用 `WebPrivacyGuard` 与 `LLMWebSafetyClient`。本地预检先拒绝秘密、URL userinfo 和认证/签名 query；疑似个人信息、源代码、专有文本或高熵私有标识符不进入 LLM，直接一次性确认。其余请求由当前 Agent 模型审查，不切换到 `llm.fast`；搜索只发送最多 2 KiB 的脱敏查询，抓取只发送 scheme、host、path 和 query key，不发送 query value。两种审查共用 15 秒超时、结构化 `allow/deny/ask` 和失败后一次性确认逻辑。
+Web 外部读取另使用 `WebPrivacyGuard` 与 `LLMWebSafetyClient`。本地预检先拒绝秘密、URL userinfo 和认证/签名 query；疑似个人信息、源代码、专有文本或高熵私有标识符不进入 LLM，直接一次性确认。其余请求由当前 Agent 模型审查，不切换到 `llm.fast`；搜索只发送最多 2 KiB 的脱敏查询，抓取只发送 scheme、host、path 和 query key，不发送 query value。两种审查共用最多三次尝试、15 秒超时、结构化 `allow/deny/ask` 和失败后一次性确认逻辑。
 
 ## DataGuard
 

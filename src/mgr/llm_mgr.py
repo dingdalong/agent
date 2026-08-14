@@ -94,7 +94,7 @@ class LLMMgr:
         if not isinstance(retry_cfg, Mapping):
             raise LLMConfigurationError("llm.retry 必须是 mapping")
 
-        max_attempts = retry_cfg.get("max_attempts", 3)
+        max_attempts = retry_cfg.get("max_attempts", 10)
         if (
             isinstance(max_attempts, bool)
             or not isinstance(max_attempts, int)
@@ -108,7 +108,7 @@ class LLMMgr:
             key="llm.retry.base_delay_seconds",
         )
         max_delay_seconds = _positive_finite_number(
-            retry_cfg.get("max_delay_seconds", 60.0),
+            retry_cfg.get("max_delay_seconds", 300.0),
             key="llm.retry.max_delay_seconds",
         )
         if max_delay_seconds < base_delay_seconds:

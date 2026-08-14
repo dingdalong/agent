@@ -413,9 +413,9 @@ class LLMProvider(ABC):
     model: str
     event_bus: EventBus
     concurrency: int = 5
-    max_attempts: int = 3
+    max_attempts: int = 10
     base_delay_seconds: float = 2.0
-    max_delay_seconds: float = 60.0
+    max_delay_seconds: float = 300.0
     timeout: float = 120.0
     context_limit: int = 0
     page_token_rate: float = 0.03
@@ -492,6 +492,7 @@ class LLMProvider(ABC):
                     self._log_llm_failure(
                         info=info,
                         attempt=attempt,
+                        max_attempts=self.max_attempts,
                         diagnostic_id=diagnostic_id,
                         exc=exc,
                     )
@@ -851,6 +852,7 @@ class LLMProvider(ABC):
         enable_thinking: bool = True,
         reasoning_effort_override: str | None = None,
         ephemeral_instruction: str | None = None,
+        max_attempts_cap: int | None = None,
     ) -> LLMResponse:
         """执行带统一分类、退避和尝试级隔离的 LLM 调用。
 
@@ -867,12 +869,15 @@ class LLMProvider(ABC):
                 None 时沿用 provider 的 reasoning_effort，不修改共享实例。
             ephemeral_instruction: 一次性追加到消息尾部的 user 指令；
                 仅作用于本次调用，不写回调用方 messages。
+            max_attempts_cap: 本次调用的最大尝试次数上限；None 时使用 provider
+                配置。有效次数取该值与 provider 配置的较小值，不修改共享实例。
 
         Returns:
             最终成功尝试产生的 LLM 响应。
 
         Raises:
             LLMCallError: 不可重试或重试耗尽时的结构化终态错误。
+            ValueError: max_attempts_cap 不是非 bool 正整数。
             asyncio.CancelledError: 调用被取消时原样传播。
             KeyboardInterrupt: 收到键盘中断时原样传播。
             SystemExit: 进程退出时原样传播。
@@ -882,8 +887,22 @@ class LLMProvider(ABC):
             if ephemeral_instruction
             else messages
         )
+        if (
+            max_attempts_cap is not None
+            and (
+                isinstance(max_attempts_cap, bool)
+                or not isinstance(max_attempts_cap, int)
+                or max_attempts_cap < 1
+            )
+        ):
+            raise ValueError("max_attempts_cap 必须是非 bool 且大于等于 1 的整数")
+        effective_max_attempts = (
+            self.max_attempts
+            if max_attempts_cap is None
+            else min(self.max_attempts, max_attempts_cap)
+        )
         async with self._semaphore:
-            for attempt in range(1, self.max_attempts + 1):
+            for attempt in range(1, effective_max_attempts + 1):
                 call = LLMCallContext(
                     attempt=attempt,
                     caller_agent_type=caller_agent_type,
@@ -895,6 +914,7 @@ class LLMProvider(ABC):
                         prompt,
                         tools,
                         call,
+                        effective_max_attempts,
                     )
                     call_token = _ACTIVE_LLM_CALL.set(call)
                     try:
@@ -939,10 +959,15 @@ class LLMProvider(ABC):
                     self._log_llm_failure(
                         info=info,
                         attempt=attempt,
+                        max_attempts=effective_max_attempts,
                         diagnostic_id=diagnostic_id,
                         exc=exc,
                     )
-                    if not self._retry_policy.should_retry(info, attempt):
+                    if not self._retry_policy.should_retry(
+                        info,
+                        attempt,
+                        max_attempts=effective_max_attempts,
+                    ):
                         terminal = LLMCallError(
                             info=info,
                             attempts=attempt,
@@ -956,7 +981,7 @@ class LLMProvider(ABC):
                         info=info,
                         call=call,
                         attempt=attempt,
-                        max_attempts=self.max_attempts,
+                        max_attempts=effective_max_attempts,
                         wait_seconds=wait_time,
                     )
                     await self._sleep(wait_time)
@@ -967,6 +992,7 @@ class LLMProvider(ABC):
         *,
         info: LLMErrorInfo,
         attempt: int,
+        max_attempts: int,
         diagnostic_id: str,
         exc: Exception,
     ) -> None:
@@ -975,6 +1001,7 @@ class LLMProvider(ABC):
         Args:
             info: 已安全化的结构化错误信息。
             attempt: 已失败的 1 基尝试序号。
+            max_attempts: 本次调用允许的最大尝试次数。
             diagnostic_id: 本次失败的日志关联 ID。
             exc: 原始底层异常，仅未知类别保留安全化堆栈。
 
@@ -993,7 +1020,7 @@ class LLMProvider(ABC):
             info.request_id,
             info.original_exception_type,
             attempt,
-            self.max_attempts,
+            max_attempts,
             diagnostic_id,
             info.message,
         )
@@ -1148,6 +1175,7 @@ class LLMProvider(ABC):
         prompt: list[dict] | None,
         tools: list[ToolDict] | None,
         call: LLMCallContext,
+        max_attempts: int,
     ) -> float:
         """发出 LLMCallStarted 事件并返回起始时间戳。
 
@@ -1156,6 +1184,7 @@ class LLMProvider(ABC):
             prompt: 系统提示词消息列表（可为 None）。
             tools: 本次可用工具列表（可为 None）。
             call: 当前尝试序号与调用方身份。
+            max_attempts: 本次调用允许的最大尝试次数。
         Returns:
             本次调用的起始时间戳（time.time()），供完成事件计算耗时。
         """
@@ -1177,7 +1206,7 @@ class LLMProvider(ABC):
             message_count=len(all_messages),
             tool_count=len(tools or []),
             attempt=call.attempt,
-            max_attempts=self.max_attempts,
+            max_attempts=max_attempts,
             caller_agent_type=call.caller_agent_type,
             caller_uuid=call.caller_uuid,
         ))

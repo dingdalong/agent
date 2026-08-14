@@ -131,9 +131,9 @@
 | `llm.fast` | str | 不填时回退 `default` | 任一可用模型名 | 别名 `fast` 的解析目标（Claude Code 别名 `haiku` 映射到此） |
 | `llm.concurrency` | int | `5` | `>= 1` 的整数 | provider 并发上限 |
 | `llm.timeout_seconds` | int \| float | `120` | 有限正数 | 单次 provider LLM 请求的 SDK 超时秒数；不影响模型发现 |
-| `llm.retry.max_attempts` | int | `3` | `>= 1` 的整数 | 最大尝试次数，包含首次调用；`1` 表示不自动重试 |
+| `llm.retry.max_attempts` | int | `10` | `>= 1` 的整数 | 最大尝试次数，包含首次调用；`1` 表示不自动重试 |
 | `llm.retry.base_delay_seconds` | int \| float | `2` | 有限正数 | 无有效等待响应头时的指数退避基础秒数 |
-| `llm.retry.max_delay_seconds` | int \| float | `60` | 有限正数，且不小于基础延迟 | 单次退避等待封顶秒数 |
+| `llm.retry.max_delay_seconds` | int \| float | `300` | 有限正数，且不小于基础延迟 | 相邻尝试之间的单次退避等待封顶秒数；不影响请求超时 |
 | `llm.user_agent` | str | `claude-cli/2.1.201 (external, cli)` | 任意字符串 | 非空时作为五个 provider 及模型发现请求的自定义 User-Agent；空串沿用 SDK 默认值 |
 
 **别名体系**：`default`/`best`/`fast` 是框架三个通用别名，子 agent 在其 `*.md` frontmatter 的 `model:` 字段通过这些别名引用（`model: inherit` 表示委派时继承父 agent 已解析的真实模型 ID）。`resolve_model`（`llm_mgr.py:270-306`）解析顺序：`None → "default" → Claude Code 映射（opus/sonnet/haiku → best/default/fast）→ 配置别名 → 精确匹配 → 唯一或最短子串匹配 → 回退默认`。启动期会精确验证配置的 `llm.default`，不会切换到其他可用 provider。
@@ -231,9 +231,9 @@ llm:
   concurrency: 5                         # provider 并发上限
   timeout_seconds: 120                   # 单次 LLM 请求超时秒数
   retry:
-    max_attempts: 3                      # 最大尝试次数，包含首次调用
+    max_attempts: 10                     # 最大尝试次数，包含首次调用
     base_delay_seconds: 2                # 指数退避基础秒数
-    max_delay_seconds: 60                # 单次等待封顶秒数
+    max_delay_seconds: 300               # 单次等待封顶秒数
   user_agent: "claude-cli/2.1.201 (external, cli)"
 
 # ── 工具结果分页 ────────────────────────────────────────

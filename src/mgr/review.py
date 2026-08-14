@@ -11,6 +11,9 @@ from src.mgr.data_guard import DataGuard
 from src.tools import ToolDict
 
 
+_STRUCTURED_REVIEW_MAX_ATTEMPTS = 3
+
+
 @dataclass(frozen=True, slots=True)
 class ReviewVerdict:
     decision: Literal["allow", "deny", "ask"]
@@ -60,6 +63,7 @@ class StructuredVerdictRunner:
             temperature=0.0,
             enable_thinking=False,
             reasoning_effort_override="low",
+            max_attempts_cap=_STRUCTURED_REVIEW_MAX_ATTEMPTS,
         )
         for call in (getattr(response, "tool_calls", None) or {}).values():
             if call.get("name") != "record_verdict":

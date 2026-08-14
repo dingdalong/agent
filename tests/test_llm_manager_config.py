@@ -95,9 +95,9 @@ def _base_config() -> dict[str, Any]:
             "concurrency": 5,
             "timeout_seconds": 120,
             "retry": {
-                "max_attempts": 3,
+                "max_attempts": 10,
                 "base_delay_seconds": 2,
-                "max_delay_seconds": 60,
+                "max_delay_seconds": 300,
             },
             "user_agent": "agent-test",
         },
@@ -250,9 +250,9 @@ def test_manager_uses_interface_defaults_for_missing_optional_keys() -> None:
 
     assert manager._default_concurrency == 5
     assert manager._request_timeout_seconds == 120.0
-    assert manager._retry_config.max_attempts == 3
+    assert manager._retry_config.max_attempts == 10
     assert manager._retry_config.base_delay_seconds == 2.0
-    assert manager._retry_config.max_delay_seconds == 60.0
+    assert manager._retry_config.max_delay_seconds == 300.0
 
 
 def test_builtin_config_declares_complete_retry_and_timeout_values() -> None:
@@ -267,9 +267,9 @@ def test_builtin_config_declares_complete_retry_and_timeout_values() -> None:
     assert config["llm"]["timeout_seconds"] == 120
     assert "timeout_seconds: 120 # 单次 LLM 请求超时秒数" in config_text
     assert config["llm"]["retry"] == {
-        "max_attempts": 3,
+        "max_attempts": 10,
         "base_delay_seconds": 2,
-        "max_delay_seconds": 60,
+        "max_delay_seconds": 300,
     }
     assert "max_retries" not in config["llm"]
 

@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from src.events import EventBus
-from src.events.types import Event, LLMRetrying, OutputRequested
+from src.events.types import Event, LLMCallStarted, LLMRetrying, OutputRequested
 from src.llm.base import LLMCallContext, LLMProvider, LLMResponse
 from src.llm.anthropic import AnthropicProvider
 from src.llm.deepseek import DeepSeekProvider
@@ -516,6 +516,97 @@ def test_chat_terminal_error_reports_attempts_and_last_partial_output() -> None:
     assert raised.value.__cause__ is not None
     assert provider.calls[0].partial_output == "partial-1"
     assert provider.calls[1].partial_output == "partial-2"
+
+
+def test_chat_attempt_cap_is_local_and_reported_in_events() -> None:
+    """调用级上限应限制当前调用，但不修改共享 provider 的全局重试次数。
+
+    Returns:
+        None。
+    """
+    event_bus = RecordingEventBus()
+    provider = RetryProvider(
+        api_key="",
+        base_url="",
+        model="stub",
+        event_bus=event_bus,
+        max_attempts=10,
+    )
+    provider.script = [
+        LLMStreamResponseError("capped-1"),
+        LLMStreamResponseError("capped-2"),
+        LLMStreamResponseError("capped-3"),
+    ]
+
+    with pytest.raises(LLMCallError) as raised:
+        asyncio.run(provider.chat(
+            [{"role": "user", "content": "review"}],
+            max_attempts_cap=3,
+        ))
+
+    assert raised.value.attempts == 3
+    assert provider.max_attempts == 10
+    assert [call.attempt for call in provider.calls] == [1, 2, 3]
+    capped_started = [event for event in event_bus.events if isinstance(event, LLMCallStarted)]
+    capped_retries = [event for event in event_bus.events if isinstance(event, LLMRetrying)]
+    assert [event.max_attempts for event in capped_started] == [3, 3, 3]
+    assert [event.max_attempts for event in capped_retries] == [3, 3]
+
+    event_bus.events.clear()
+    provider.calls.clear()
+    provider.script = [
+        LLMStreamResponseError("regular-1"),
+        LLMStreamResponseError("regular-2"),
+        LLMStreamResponseError("regular-3"),
+        LLMResponse(content="ok"),
+    ]
+    response = asyncio.run(provider.chat([{"role": "user", "content": "regular"}]))
+
+    assert response.content == "ok"
+    assert [call.attempt for call in provider.calls] == [1, 2, 3, 4]
+    regular_started = [event for event in event_bus.events if isinstance(event, LLMCallStarted)]
+    assert [event.max_attempts for event in regular_started] == [10, 10, 10, 10]
+
+
+def test_chat_attempt_cap_never_raises_provider_limit() -> None:
+    """调用级上限高于 provider 配置时仍应采用较小的全局值。
+
+    Returns:
+        None。
+    """
+    provider = _provider(max_attempts=2)
+    provider.script = [
+        LLMStreamResponseError("first"),
+        LLMStreamResponseError("second"),
+    ]
+
+    with pytest.raises(LLMCallError) as raised:
+        asyncio.run(provider.chat(
+            [{"role": "user", "content": "review"}],
+            max_attempts_cap=3,
+        ))
+
+    assert raised.value.attempts == 2
+    assert [call.attempt for call in provider.calls] == [1, 2]
+
+
+@pytest.mark.parametrize("value", [True, 0, -1, 1.5, "3"])
+def test_chat_rejects_invalid_attempt_cap(value: object) -> None:
+    """调用级上限只接受非 bool 正整数。
+
+    Args:
+        value: 待验证的非法上限。
+
+    Returns:
+        None。
+    """
+    provider = _provider()
+
+    with pytest.raises(ValueError, match="max_attempts_cap"):
+        asyncio.run(provider.chat(
+            [{"role": "user", "content": "review"}],
+            max_attempts_cap=value,  # type: ignore[arg-type]
+        ))
 
 
 def test_retrying_event_is_the_only_attempt_boundary_and_carries_partial_state() -> None:

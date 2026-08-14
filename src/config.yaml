@@ -46,9 +46,9 @@ llm:
   concurrency: 5 # 最大并发数量
   timeout_seconds: 120 # 单次 LLM 请求超时秒数
   retry:
-    max_attempts: 3 # 最大尝试次数，包含首次调用
+    max_attempts: 10 # 最大尝试次数，包含首次调用
     base_delay_seconds: 2 # 指数退避基础秒数
-    max_delay_seconds: 60 # 单次退避最大秒数
+    max_delay_seconds: 300 # 单次退避最大秒数
   user_agent: "claude-cli/2.1.201 (external, cli)" # 自定义所有 LLM 请求的 User-Agent；留空则沿用各 SDK 默认 UA
 
 tool:

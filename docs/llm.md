@@ -40,9 +40,9 @@ token 用量统一为 `input_tokens`、`output_tokens`、`total_tokens`、`cache
 |---|---:|---|
 | `api_key`、`base_url`、`model`、`event_bus` | 必填 | 连接信息、精确模型 ID 与事件总线 |
 | `concurrency` | `5` | 同一 provider 实例的并发信号量上限 |
-| `max_attempts` | `3` | 最大尝试次数，包含首次调用 |
+| `max_attempts` | `10` | 最大尝试次数，包含首次调用 |
 | `base_delay_seconds` | `2.0` | 指数退避基础秒数 |
-| `max_delay_seconds` | `60.0` | 单次等待封顶秒数 |
+| `max_delay_seconds` | `300.0` | 单次等待封顶秒数 |
 | `timeout` | `120.0` | SDK 请求超时秒数 |
 | `context_limit` | `0` | 模型上下文窗口；非正值表示未知 |
 | `page_token_rate` | `0.03` | 单页工具结果占上下文窗口的比例 |
@@ -66,14 +66,14 @@ token 用量统一为 `input_tokens`、`output_tokens`、`total_tokens`、`cache
 `chat()`（`src/llm/base.py` 的 `chat`）是唯一公共调用入口，采用模板方法：
 
 1. 构造 `effective_messages`：`ephemeral_instruction` 非空时在尾部追加一条一次性 `user` 指令（用 `user` 角色避开 `normalize_messages` 的 developer 门控），**不改动调用方 `messages` 列表**；较“append 后回滚”更稳、天然一次性且并发安全。
-2. 在信号量内按 `1..max_attempts` 创建独立 `LLMCallContext`。
+2. 计算本次调用的有效尝试次数：未传 `max_attempts_cap` 时使用 provider 配置，否则取配置值与 cap 的较小值；再按 `1..有效次数` 创建独立 `LLMCallContext`。
 3. 发出 `LLMCallStarted`，再调用子类 `_do_chat(..., reasoning_effort_override=...)`。
 4. `finish_reason=="length"` 时用 `classify_truncation(response, call)` 计算并写入 `response.truncation_kind`（其余终态不设）。
 5. 成功后补齐工具片段完成态，发出 `LLMCallCompleted` 并返回 `LLMResponse`。
 6. 异常由统一分类器转换成 `LLMErrorInfo`；不可重试或尝试耗尽时发出 `LLMCallFailed`，抛出 `LLMCallError`。
 7. 可重试时计算等待时间、发出 `LLMRetrying`、异步等待，再以全新的尝试上下文重试。
 
-`chat()` 另有两个默认 `None` 的按调用参数：`reasoning_effort_override`（临时替换本次调用的推理力度档位，不改共享 `reasoning_effort`）与 `ephemeral_instruction`（见步骤 1）。`reasoning_effort_override` 现由两条来源驱动：其一是 **per-agent 推理力度**——`Agent._on_llm_call` 用 `ctx.length_effort_override or self.reasoning_effort` 取值，`self.reasoning_effort` 源自 role.md / 子 agent frontmatter 的 `reasoning_effort` 字段（子 agent 未声明时继承父 agent 已解析值，主 agent 未声明为 `None` → 退回 provider 共享档位），见 [roles-subagents-skills.md](roles-subagents-skills.md)；其二是**长度恢复降档**——`ctx.length_effort_override` 由恢复链经 `next_lower_effort()` 从 `_base_reasoning_effort()`（即 `self.reasoning_effort or self.llm.reasoning_effort`）起步逐级降档。两参默认 `None`，故退出总结、compact 等调用不受影响。
+`chat()` 另有三个默认 `None` 的按调用参数：`reasoning_effort_override`（临时替换本次调用的推理力度档位，不改共享 `reasoning_effort`）、`ephemeral_instruction`（见步骤 1）与 `max_attempts_cap`（限制本次调用的最大尝试次数，不修改共享 provider）。`reasoning_effort_override` 现由两条来源驱动：其一是 **per-agent 推理力度**——`Agent._on_llm_call` 用 `ctx.length_effort_override or self.reasoning_effort` 取值，`self.reasoning_effort` 源自 role.md / 子 agent frontmatter 的 `reasoning_effort` 字段（子 agent 未声明时继承父 agent 已解析值，主 agent 未声明为 `None` → 退回 provider 共享档位），见 [roles-subagents-skills.md](roles-subagents-skills.md)；其二是**长度恢复降档**——`ctx.length_effort_override` 由恢复链经 `next_lower_effort()` 从 `_base_reasoning_effort()`（即 `self.reasoning_effort or self.llm.reasoning_effort`）起步逐级降档。`StructuredVerdictRunner` 固定传入 cap 3，使智能权限与 Web 安全审查最多尝试三次；全局配置低于三次时仍采用更低值。
 
 `CancelledError`、`KeyboardInterrupt`、`SystemExit` 始终原样传播。事件发布调用 `emit_telemetry_safely()`，普通遥测发布故障不会改变 LLM 调用结果，控制流异常仍传播（`src/events/bus.py:36-65`）。
 
@@ -138,14 +138,14 @@ provider code 内部先识别上下文、输出、内容政策和额度语义，
 
 `RetryConfig` 自身执行严格校验（`src/llm/retry.py:15-52`）：`max_attempts` 必须是非 bool 的 `int` 且大于等于 1；两项延迟必须是非 bool 的 `int | float`、有限且大于 0；`max_delay_seconds` 不得小于基础延迟。错误类型、字符串、bool、NaN、Infinity、零和负数都会以 `ValueError` 拒绝。`max_attempts` 包含首次，因此配置为 1 表示只调用一次；`LLMMgr` 在构造 provider 前执行同等规则的配置级校验。
 
-`RetryPolicy.should_retry()` 只在错误分类可重试且当前尝试尚未达到上限时返回真（`retry.py:79-89`）。等待时间优先级（`retry.py:110-151`）：
+`RetryPolicy.should_retry()` 只在错误分类可重试且当前尝试尚未达到本次调用的有效上限时返回真（`retry.py` 的 `should_retry`）。等待时间优先级（`retry.py` 的 `calculate_retry_delay`）：
 
 1. 合法且有限的 `retry-after-ms`，换算为秒；
 2. 合法且有限的 `Retry-After` 秒数或 HTTP date；
 3. 指数退避 `base_delay_seconds × 2^(attempt-1)`，乘以 `[0.75, 1.0]` 的随机抖动；
 4. 最终夹在 `[0, max_delay_seconds]`。
 
-响应头等待时间也受最大延迟封顶。每次失败在等待前发 `LLMRetrying`，下一次调用会再发新的 `LLMCallStarted`。
+响应头等待时间也受最大延迟封顶。默认封顶 300 秒只约束相邻尝试之间的等待，不改变单次请求 120 秒超时，也不构成整条重试链的总时限。每次失败在等待前发 `LLMRetrying`，下一次调用会再发新的 `LLMCallStarted`；两种事件均携带本次调用的有效尝试次数。
 
 ## 5. 流式响应协议
 

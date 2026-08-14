@@ -16,9 +16,9 @@ from src.llm.errors import LLMErrorInfo
 class RetryConfig:
     """LLM 自动重试次数与退避范围配置。"""
 
-    max_attempts: int = 3
+    max_attempts: int = 10
     base_delay_seconds: float = 2.0
-    max_delay_seconds: float = 60.0
+    max_delay_seconds: float = 300.0
 
     def __post_init__(self) -> None:
         """校验尝试次数与退避范围。
@@ -76,17 +76,30 @@ class RetryPolicy:
         self._random_value = random_value or random.random
         self._now = now or (lambda: datetime.now(timezone.utc))
 
-    def should_retry(self, info: LLMErrorInfo, attempt: int) -> bool:
+    def should_retry(
+        self,
+        info: LLMErrorInfo,
+        attempt: int,
+        *,
+        max_attempts: int | None = None,
+    ) -> bool:
         """判断当前失败后是否仍可自动重试。
 
         Args:
             info: 已分类错误信息。
             attempt: 已失败的 1 基尝试序号。
+            max_attempts: 本次调用的最大尝试次数；None 时使用策略配置。
 
         Returns:
             错误可重试且尚未耗尽最大尝试次数时为 True。
+
+        Raises:
+            ValueError: max_attempts 不是非 bool 正整数。
         """
-        return info.retryable and attempt < self.config.max_attempts
+        limit = self.config.max_attempts if max_attempts is None else max_attempts
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError("max_attempts 必须是非 bool 且大于等于 1 的整数")
+        return info.retryable and attempt < limit
 
     def delay(self, info: LLMErrorInfo, *, attempt: int) -> float:
         """按响应头优先级计算下一次尝试前的等待秒数。
