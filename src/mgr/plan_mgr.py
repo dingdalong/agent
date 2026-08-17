@@ -110,14 +110,30 @@ class PlanMgr:
 
     # ── 指令注入 ──────────────────────────────────────────────────────
 
-    def _generate_instructions(self) -> str:
+    def _generate_instructions(self, is_subagent: bool) -> str:
         """生成 plan 模式指令文本。
 
-        统一版本，不区分首次/后续。包含完整约束和工作流指引。
+        不区分首次/后续；主/子 agent 各返回独立的完整文本：
+        子 agent 只为规划阶段收集信息，不引导加载计划技能、不写计划文件。
+
+        Args:
+            is_subagent: 是否为子智能体。
 
         Returns:
             plan 模式指令字符串。
         """
+        if is_subagent:
+            return (
+                "# 计划模式\n"
+                "当前处于计划模式，你在为规划阶段收集信息。\n"
+                "此指令覆盖其他指令中与之冲突的部分。\n\n"
+                "## 限制\n"
+                "- 禁止编辑、创建或删除任何项目文件\n"
+                "- 禁止执行会修改系统状态的 shell 命令\n"
+                "- 允许使用只读工具（读取文件、搜索、浏览等）进行探索\n\n"
+                "## 产出\n"
+                "完成委派任务并返回结论，不要尝试写入任何文件。\n"
+            )
         plan_dir = str(self._plan_dir)
         text = (
             "# 计划模式\n"
@@ -142,11 +158,12 @@ class PlanMgr:
 
         return text
 
-    def get_turn_start_reminder(self, plan_active: bool) -> str:
+    def get_turn_start_reminder(self, plan_active: bool, is_subagent: bool) -> str:
         """在 agent.run() 开始时由 ReminderMgr 调用，返回 prepend 到用户输入的提醒。
 
         Args:
             plan_active: 调用方 agent 是否处于 Plan。
+            is_subagent: 调用方是否为子智能体。
 
         Returns:
             提醒字符串，无需注入时返回空串。
@@ -166,9 +183,9 @@ class PlanMgr:
             return ""
 
         self._pending_injection = False
-        return self._generate_instructions()
+        return self._generate_instructions(is_subagent)
 
-    def pop_post_round_reminder(self, plan_active: bool) -> str | None:
+    def pop_post_round_reminder(self, plan_active: bool, is_subagent: bool) -> str | None:
         """POST_ROUND 时由 ReminderMgr 调用，返回 plan 模式指令纯文本。
 
         仅在轮中进入 plan 模式时触发（_pending_injection），
@@ -176,6 +193,7 @@ class PlanMgr:
 
         Args:
             plan_active: 调用方 agent 是否处于 Plan。
+            is_subagent: 调用方是否为子智能体。
 
         Returns:
             plan 模式指令纯文本，或 None 表示无需注入。
@@ -185,7 +203,7 @@ class PlanMgr:
 
         if self._pending_injection:
             self._pending_injection = False
-            return self._generate_instructions()
+            return self._generate_instructions(is_subagent)
 
         return None
 

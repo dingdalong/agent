@@ -7,9 +7,9 @@
 - post round: 收集需要追加到 messages 的提醒消息
 
 提醒源通过 duck typing 识别：
-- get_turn_start_reminder(plan_active) -> str: 返回纯文本内容
+- get_turn_start_reminder(plan_active, is_subagent) -> str: 返回纯文本内容
 - notify_tool_round(tool_names) -> None
-- pop_post_round_reminder(plan_active) -> str | None: 返回纯文本内容
+- pop_post_round_reminder(plan_active, is_subagent) -> str | None: 返回纯文本内容
 提醒源只需实现所需的方法，未实现的方法会被跳过。
 所有注入内容统一用 <reminder> 标签包装，由 ReminderMgr 处理。
 """
@@ -50,7 +50,7 @@ class ReminderMgr:
             pass
 
     def build_turn_start_instructions(
-        self, plan_active: bool,
+        self, plan_active: bool, is_subagent: bool,
     ) -> str:
         """收集所有提醒源的 turn start 注入文本，用 <reminder> 标签包装后拼接。
 
@@ -58,6 +58,7 @@ class ReminderMgr:
 
         Args:
             plan_active: 调用方 agent 是否处于 Plan。
+            is_subagent: 调用方是否为子智能体。
 
         Returns:
             用 <reminder> 包装并拼接后的注入文本。无注入时返回空串。
@@ -67,7 +68,7 @@ class ReminderMgr:
             fn = getattr(p, "get_turn_start_reminder", None)
             if fn is None:
                 continue
-            text = fn(plan_active)
+            text = fn(plan_active, is_subagent)
             if text:
                 parts.append(f"<reminder>{text}</reminder>")
         return "\n\n".join(parts)
@@ -86,7 +87,7 @@ class ReminderMgr:
                 fn(tool_names)
 
     def collect_post_round_messages(
-        self, plan_active: bool,
+        self, plan_active: bool, is_subagent: bool,
     ) -> list[dict]:
         """收集所有提醒源的 post-round 消息，用 <reminder> 标签包装后构造消息字典。
 
@@ -95,6 +96,7 @@ class ReminderMgr:
 
         Args:
             plan_active: 调用方 agent 是否处于 Plan。
+            is_subagent: 调用方是否为子智能体。
 
         Returns:
             需追加到 messages 的消息字典列表。
@@ -104,7 +106,7 @@ class ReminderMgr:
             fn = getattr(p, "pop_post_round_reminder", None)
             if fn is None:
                 continue
-            text = fn(plan_active)
+            text = fn(plan_active, is_subagent)
             if text:
                 msgs.append({
                     "role": "user",

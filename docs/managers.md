@@ -372,9 +372,11 @@ MCP 连接配置和授权边界见 [mcp-and-hooks.md](mcp-and-hooks.md)。
 | `enter_mode` | `agent`, `reminder_mgr` | `bool` | 设置 `plan_active=True` 并注册提醒源；已激活时返回 False |
 | `exit_mode` | `agent`, `reminder_mgr` | `bool` | 设置 `plan_active=False` 并置退出提醒标志；未激活时返回 False |
 | `set_last_plan_path` | `path: str` | `None` | 记录最后提交的计划文件路径（供重入提示词引用） |
-| `get_turn_start_reminder` | `mode` | `str` | turn 开始时注入 plan 指令，或退出后一次性退出提醒 |
-| `pop_post_round_reminder` | `mode` | `str \| None` | 轮中进入 plan 时注入指令 |
+| `get_turn_start_reminder` | `plan_active, is_subagent` | `str` | turn 开始时注入 plan 指令，或退出后一次性退出提醒 |
+| `pop_post_round_reminder` | `plan_active, is_subagent` | `str \| None` | 轮中进入 plan 时注入指令 |
 | `reload` | — | `None` | 重置会话级状态 |
+
+Plan 指令按调用方身份分叉：主 agent 版含 `load_skill` 计划工作流引导、计划目录与「当前计划」段；子 agent 版只声明只读约束与「返回结论、不写文件」，不含任何计划文件写入引导。
 
 **feature 门控**：`plan`（依赖 `file`；未启用时 `bootstrap` 注入 `None`）。 **reload**：有。
 
@@ -434,9 +436,9 @@ MCP 连接配置和授权边界见 [mcp-and-hooks.md](mcp-and-hooks.md)。
 | `get_task` | `task_id` | `dict` | 单任务完整详情（不存在抛 `ValueError`） |
 | `has_open_items` | — | `bool` | 是否有未完成任务 |
 | `describe` | `is_subagent` | `str` | 任务管理提示词（主/子 agent 各返回独立文本） |
-| `get_turn_start_reminder` | `mode` | `str` | 未完成且连续 ≥3 轮未用任务工具时注入任务列表 |
+| `get_turn_start_reminder` | `mode, is_subagent` | `str` | 未完成且连续 ≥3 轮未用任务工具时注入任务列表 |
 | `notify_tool_round` | `tool_names` | `None` | 含任意 `task_*` 工具则重置计数，否则 +1 |
-| `pop_post_round_reminder` | `mode` | `str \| None` | 同条件下提示“更新你的任务列表” |
+| `pop_post_round_reminder` | `mode, is_subagent` | `str \| None` | 同条件下提示“更新你的任务列表” |
 | `cleanup_if_all_completed` | — | `bool` | 轮末收尾：全部任务 `completed` 时清空内存列表、删除 tasks 目录并发布空快照（隐藏 UI 面板）；否则返回 `False` 不清理 |
 
 **feature 门控**：`task`（未启用时 `Agent` 中为 `None`）。 **reload**：无（`/clear` 由 `Agent` 侧新建实例处理，非实例 `reload()`）。
@@ -576,9 +578,9 @@ hook 协议、JSON 字段与插件 `CLAUDE_PLUGIN_ROOT` 环境变量见 [mcp-and
 |---|---|---|---|
 | `register` | `provider` | `None` | 注册提醒源（重复注册忽略） |
 | `unregister` | `provider` | `None` | 注销（不存在静默跳过） |
-| `build_turn_start_instructions` | `mode` | `str` | turn 开始：收集各源 `get_turn_start_reminder(mode)`，`<reminder>` 包装拼接（prepend 用户输入） |
+| `build_turn_start_instructions` | `plan_active, is_subagent` | `str` | turn 开始：收集各源 `get_turn_start_reminder(plan_active, is_subagent)`，`<reminder>` 包装拼接（prepend 用户输入） |
 | `notify_tool_round` | `tool_names` | `None` | 工具轮后：调各源 `notify_tool_round(tool_names)` |
-| `collect_post_round_messages` | `mode` | `list[dict]` | POST_ROUND：收集各源 `pop_post_round_reminder(mode)`，构造 `user` 消息追加到历史 |
+| `collect_post_round_messages` | `plan_active, is_subagent` | `list[dict]` | POST_ROUND：收集各源 `pop_post_round_reminder(plan_active, is_subagent)`，构造 `user` 消息追加到历史 |
 
 **feature 门控**：否（但注册的提醒源受各自 feature 门控）。 **reload**：无（随新 Agent 重建）。
 

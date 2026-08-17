@@ -383,7 +383,7 @@ class Agent:
                 turn_start_messages=list(self.history),
                 round_start_idx=len(self.history),
             )
-            turn_instr = self._reminder_mgr.build_turn_start_instructions(self.plan_active)
+            turn_instr = self._reminder_mgr.build_turn_start_instructions(self.plan_active, self.is_subagent)
             if turn_instr:
                 input = f"{turn_instr}\n\n{input}"
             self._append_message(self.history, {"role": "user", "content": input})
@@ -620,7 +620,7 @@ class Agent:
                     str(item) for item in hook_result.additional_context
                 )
 
-        turn_instr = self._reminder_mgr.build_turn_start_instructions(self.plan_active)
+        turn_instr = self._reminder_mgr.build_turn_start_instructions(self.plan_active, self.is_subagent)
         if turn_instr:
             user_input = f"{turn_instr}\n\n{user_input}"
 
@@ -1133,7 +1133,7 @@ class Agent:
         return AgentState.DONE
 
     async def _on_post_round(self, ctx: RunContext) -> AgentState:
-        for msg in self._reminder_mgr.collect_post_round_messages(self.plan_active):
+        for msg in self._reminder_mgr.collect_post_round_messages(self.plan_active, self.is_subagent):
             self._append_message(ctx.messages, msg)
 
         if ctx.manual_compact:

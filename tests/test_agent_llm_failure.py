@@ -76,28 +76,30 @@ class RecordingEventBus:
 class NoopReminder:
     """不生成任何提示词的测试 reminder。"""
 
-    def build_turn_start_instructions(self, mode: object) -> str:
+    def build_turn_start_instructions(self, mode: object, is_subagent: bool) -> str:
         """返回空轮次提示词。
 
         Args:
             mode: 当前权限模式。
+            is_subagent: 调用方是否为子智能体。
 
         Returns:
             空字符串。
         """
-        del mode
+        del mode, is_subagent
         return ""
 
-    def collect_post_round_messages(self, mode: object) -> list[dict]:
+    def collect_post_round_messages(self, mode: object, is_subagent: bool) -> list[dict]:
         """返回空的工具轮后消息。
 
         Args:
             mode: 当前权限模式。
+            is_subagent: 调用方是否为子智能体。
 
         Returns:
             空消息列表。
         """
-        del mode
+        del mode, is_subagent
         return []
 
 

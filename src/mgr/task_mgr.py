@@ -671,7 +671,7 @@ class TaskManager:
 
     # ── 提醒注入接口（由 ReminderMgr 调用）──────────────────────────
 
-    def get_turn_start_reminder(self, mode: object | None) -> str:
+    def get_turn_start_reminder(self, mode: object | None, is_subagent: bool) -> str:
         """在 turn 开始时注入当前任务状态摘要。
 
         当存在未完成任务且连续多轮未使用任务工具时，
@@ -679,6 +679,7 @@ class TaskManager:
 
         Args:
             mode: 调用方 agent 的权限模式（TaskManager 不使用，遵循统一接口）。
+            is_subagent: 调用方是否为子智能体（TaskManager 不使用，遵循统一接口）。
 
         Returns:
             任务状态摘要文本，无未完成任务或近期使用过任务工具时返回空串。
@@ -705,7 +706,7 @@ class TaskManager:
         else:
             self._rounds_without_update += 1
 
-    def pop_post_round_reminder(self, mode: object | None) -> str | None:
+    def pop_post_round_reminder(self, mode: object | None, is_subagent: bool) -> str | None:
         """检查是否需要提醒更新任务列表。
 
         当存在未完成项且连续多轮未调用任务工具时，返回提醒文本。
@@ -713,6 +714,7 @@ class TaskManager:
 
         Args:
             mode: 调用方 agent 的权限模式（TaskManager 不使用，遵循统一接口）。
+            is_subagent: 调用方是否为子智能体（TaskManager 不使用，遵循统一接口）。
 
         Returns:
             提醒纯文本，或 None 表示无需注入。

@@ -267,28 +267,30 @@ class StaticPromptMgr:
 class NoopReminder:
     """不生成轮次提示或工具后提醒的测试 reminder。"""
 
-    def build_turn_start_instructions(self, mode: object) -> str:
+    def build_turn_start_instructions(self, mode: object, is_subagent: bool) -> str:
         """返回空轮次提示。
 
         Args:
             mode: 当前权限模式。
+            is_subagent: 调用方是否为子智能体。
 
         Returns:
             空字符串。
         """
-        del mode
+        del mode, is_subagent
         return ""
 
-    def collect_post_round_messages(self, mode: object) -> list[dict]:
+    def collect_post_round_messages(self, mode: object, is_subagent: bool) -> list[dict]:
         """返回空工具后提醒列表。
 
         Args:
             mode: 当前权限模式。
+            is_subagent: 调用方是否为子智能体。
 
         Returns:
             空列表。
         """
-        del mode
+        del mode, is_subagent
         return []
 
 
