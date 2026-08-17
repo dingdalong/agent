@@ -59,7 +59,9 @@ class StructuredVerdictRunner:
             messages=[{"role": "user", "content": json.dumps(request, ensure_ascii=False)}],
             prompt=[{"role": "system", "content": system_prompt}],
             tools=[RECORD_VERDICT_TOOL],
-            tool_choice={"type": "function", "function": {"name": "record_verdict"}},
+            # Kimi K3 thinking 恒开，"specified" 形式 tool_choice 会被服务端拒绝（400）；
+            # 本调用只声明 record_verdict 一个工具，"required" 与指定函数语义等价。
+            tool_choice="required",
             temperature=0.0,
             enable_thinking=False,
             reasoning_effort_override="low",

@@ -53,6 +53,7 @@ def test_permission_judge_caps_structured_review_at_three_attempts() -> None:
     assert verdict.decision == "allow"
     assert llm_mgr.models == ["fast"]
     assert provider.calls[0]["max_attempts_cap"] == 3
+    assert provider.calls[0]["tool_choice"] == "required"
 
 
 def test_web_safety_caps_structured_review_at_three_attempts() -> None:
@@ -66,3 +67,4 @@ def test_web_safety_caps_structured_review_at_three_attempts() -> None:
     assert verdict.decision == "allow"
     assert llm_mgr.models == ["current"]
     assert provider.calls[0]["max_attempts_cap"] == 3
+    assert provider.calls[0]["tool_choice"] == "required"
