@@ -41,7 +41,7 @@ REQUEST_INPUT → CHECK_COMPACT → [COMPACT →] LLM_CALL → PROCESS_RESPONSE
 ```
 另有边缘/退出状态：`LENGTH_RETRY`（响应因长度截断时重试，上限 `RunContext.max_length_recoveries`）、`CONTEXT_OVERFLOW`（上下文溢出处理）、`SUMMARIZE_EXIT`（退出前总结）。`RunContext` 持有每轮的可变状态，避免线程/异步冲突。
 
-**Manager 服务层** — `src/mgr/` 下的各 Manager 类各司其职：`RoleMgr`（角色发现与激活）、`LLMMgr`（模型管理）、`ToolsMgr`（工具注册与执行）、`PermissionManager`（单入口授权）、`CompactMgr`（上下文压缩）、`PromptMgr`（系统提示词构建）、`SubAgentMgr`（子智能体调度）、`SkillMgr`（技能加载）等。部分 Manager 受 feature 门控（见下）：未启用对应 feature 时在 `bootstrap.create_app()` 注入 `None`（如 `MemoryMgr`/`PlanMgr`），其工具与提示词段随之从 schema 中排除。
+**Manager 服务层** — `src/mgr/` 下的各 Manager 类各司其职：`RoleMgr`（角色发现与激活）、`LLMMgr`（模型管理）、`ToolsMgr`（工具注册与执行）、`PermissionManager`（单入口授权）、`CompactMgr`（上下文压缩）、`PromptMgr`（系统提示词构建）、`SubAgentMgr`（子智能体调度）、`SkillMgr`（技能加载）、`ContextMgr`（跨 agent 共享上下文账本）等。部分 Manager 受 feature 门控（见下）：未启用对应 feature 时在 `bootstrap.create_app()` 注入 `None`（如 `MemoryMgr`/`PlanMgr`），其工具与提示词段随之从 schema 中排除。
 
 ### 角色系统（Roles）
 
@@ -96,6 +96,8 @@ MCP server 连接配置在独立的 `mcp_servers.json`（角色 `src/roles/<role
   - **禁止**：`async def` 里直接跑同步阻塞工作而不 `await`。排查此类问题可用 `python main.py --debug`（启用 asyncio 调试，事件循环被占用超过 0.1s 即打印 `Executing ... took N seconds` 告警）。
 
 **子智能体** — 定义为 `*.md`（YAML frontmatter 声明 `agent_type`、`tools`、`model`、`memory`、`startInPlanMode`、`thinking`、`reasoning_effort`、`features` 等 + body 作提示词），由 `SubAgentMgr` 四层扫描加载。主 Agent 通过 `task_delegator` 调度子智能体；子智能体继承父 Agent 当前的 `plan_active`，并共享 `AgentDeps`。
+
+**跨 agent 共享上下文** — 子 agent 的 `history` 从空开始，唯一输入是委派 prompt，因此天然会重复探索。`ContextMgr`（`src/mgr/context_mgr.py`，deps 层单例，挂 `subagent` feature）维护会话级「已核实事实」账本：`SubAgentMgr.task_delegator` 在 `run()` 前把 `digest()` 拼到 prompt 之前，在 `SubagentStop` hook 后把子 agent 的返回报告自动记账；`note_context` 工具供 agent 显式记录对话中确认的决策。改这块前必须知道三条约束：**(1)** 动态内容绝不能进 system prompt——Anthropic 把整个 system 包成单个 ephemeral 缓存断点（`src/llm/anthropic.py:_system_blocks`），进去会让 tools+system 整个前缀每次委派全部失效；**(2)** 注入点必须是 `task_delegator` 而非 `ReminderMgr`——后者的 provider 拿不到本次委派信息，按委派过滤就得在进程级单例存槽位，而并行委派会互相覆盖；**(3)** 落盘必须由 `ContextMgr` 直接写，改用 `write_file` 会因 `.agent/context/**` 属 `PathClass.PROTECTED` 而在 Plan 模式下必然被拒。静态环境基线（git/技术栈/目录树）走另一条路：`collect_env_baseline()` 在 `AgentApp._reset_session` 中经 `to_thread` 采集一次存 `deps.env_baseline`，因恒定而可以安全地进 system prompt。
 
 **统一授权与 Plan** — `PermissionManager.authorize()` 是唯一授权入口；工具声明冻结的 `ToolPolicy`，不从用户配置提升权限。`Agent.plan_active` 是独立状态，Shift+Tab 可双向切换；Plan 激活时只允许本地读取、明确安全的内部工具和 `.agent/plans/**` 写入，其余操作直接拒绝且不调用智能权限。
 

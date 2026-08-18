@@ -160,6 +160,7 @@ class SubAgentMgr:
         parent_agent: Any = None,
         task_id: str | None = None,
         description: str = "",
+        shared_context: str = "auto",
     ) -> str:
         """委派任务给子智能体并返回执行结果。
 
@@ -167,12 +168,23 @@ class SubAgentMgr:
         子智能体异常退出时自动回滚为 pending。正常返回时不标 completed，
         留给主 agent 评估结果后决定。
 
+        本方法同时是**跨 agent 上下文交接的唯一枢纽**：委派前把共享账本摘要拼到
+        prompt 前面，委派后把子智能体的返回报告自动记账供后续委派复用。之所以放在
+        这里而不是 ReminderMgr，是因为 ReminderMgr 的 provider 只收
+        `(plan_active, is_subagent)`，拿不到本次委派信息，按委派过滤就得在进程级
+        单例上存槽位——而计划工作流要求最多 3 个 explore 并行委派，`asyncio.gather`
+        会互相覆盖那个槽位（PlanMgr 的 `_pending_injection` / `_reminder_mgr` 已经
+        踩过同一个坑）。本方法的局部变量天然 per-delegation、并发安全。
+
         Args:
             agent_type: 目标子智能体类型标识。
             prompt: 传给子智能体的完整任务正文。
             parent_agent: 调用方 Agent 实例，用于管理父任务状态和触发 hooks。
             task_id: 关联的任务 ID（可选），指定后框架自动管理任务状态。
-            description: 委派的任务摘要，传入生命周期事件供 UI 展示。
+            description: 委派的任务摘要，传入生命周期事件供 UI 展示，
+                并作为共享上下文条目的标题。
+            shared_context: "auto" 注入已积累的共享上下文；"none" 完全隔离，
+                用于需要独立复核、避免先前结论影响判断的场景。
 
         Returns:
             子智能体的执行结果文本，或错误信息。
@@ -208,8 +220,11 @@ class SubAgentMgr:
                 pass
 
         event_bus = getattr(self.deps, "event_bus", None)
+        context_mgr = getattr(self.deps, "context_mgr", None)
         agent: Any = None
         primary_error: BaseException | None = None
+        # 提到 try 之外初始化：异常/取消路径下也要能在记账处判断"这次委派没有正常完成"
+        run_result: Any = None
 
         try:
             # 解析子 agent 的最终工具集（自动注入 subagent=True、排除 subagent=False）
@@ -276,6 +291,17 @@ class SubAgentMgr:
                     task=description,
                 ))
 
+            # —— 注入共享上下文 ——
+            # 必须在 run() 之前：run() 内部会 redact 并 prepend turn-start reminder。
+            # 摘要在前、任务正文在最后（recency）——参考材料靠前、指令靠后，同时降低
+            # 子 agent 把背景事实误当成任务的概率（摘要头部另有显式声明）。
+            # 只拼字符串、不进 system prompt：system 带着 Anthropic 的单一缓存断点，
+            # 动态内容进去会让 tools+system 整个前缀每次委派全部失效。
+            if context_mgr is not None and shared_context != "none":
+                digest = context_mgr.digest()
+                if digest:
+                    prompt = f"{digest}\n\n{prompt}"
+
             run_result = await agent.run(prompt)
             result = run_result.final_text
             if run_result.llm_error is not None:
@@ -319,5 +345,23 @@ class SubAgentMgr:
         except BaseException:
             _rollback_task()
             raise
+
+        # —— 自动记账 ——
+        # 记的是父 agent 实际收到的 result（在 SubagentStop hook 可能改写之后），
+        # 保证账本与主 agent 看到的内容一致。异常/取消路径走不到这里，天然不记账，
+        # 与 _rollback_task() 的语义保持一致。
+        if (
+            context_mgr is not None
+            and run_result is not None
+            and run_result.llm_error is None
+            and agent_type in context_mgr.record_types
+            and isinstance(result, str)
+        ):
+            await context_mgr.record(
+                kind="delegation",
+                topic=description or agent_type,
+                content=result,
+                author=agent_type,
+            )
 
         return result

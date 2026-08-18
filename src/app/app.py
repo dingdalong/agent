@@ -16,6 +16,7 @@ from src.interfaces.agent_view_store import AgentViewStore
 from src.app.plan_mode_controller import PlanModeController
 from src.events.types import InterruptRequested
 from src.mgr.data_guard import register_runtime_secrets
+from src.mgr.env_baseline import collect_env_baseline
 from src.mgr.features import resolve_features
 from src.mgr.session_mgr import ResumeResult
 from src.mgr.session_state import SessionState
@@ -269,12 +270,22 @@ class AgentApp:
                             bool(getattr(config_mgr, "project_trusted", False)),
                         )
 
-                    for attr in ("memory_mgr", "tools_mgr", "plan_mgr", "ui"):
+                    for attr in ("memory_mgr", "tools_mgr", "plan_mgr", "context_mgr", "ui"):
                         mgr = getattr(self.deps, attr, None)
                         if mgr is not None and hasattr(mgr, "reload"):
                             mgr.reload()
                     self.agent_view_store.reset()
                     self.deps.session_context.clear()
+                    # 环境基线：同步 I/O（git 子进程 + 目录扫描），必须卸载到线程，
+                    # 且只能在这里算一次——本方法同时覆盖 startup 与 /clear，而下面
+                    # 才创建新 Agent → 新 PromptMgr 自然读到新值，无需 invalidate_cache。
+                    if workdir is not None:
+                        self.deps.env_baseline = await asyncio.to_thread(
+                            collect_env_baseline, workdir
+                        )
+                    context_mgr = getattr(self.deps, "context_mgr", None)
+                    if context_mgr is not None:
+                        context_mgr.bind_session(self.deps.session_id)
                     self._install_plan_mode_controller()
                     self.deps.plan_mode_controller = self._plan_mode_controller
                     agent = Agent.from_manifest(
@@ -331,6 +342,12 @@ class AgentApp:
                 self.output_router.bind_session_state(result.state)
                 self.agent_view_store.reset()
                 self.deps.session_context.clear()
+                # resume **不恢复**共享上下文账本：恢复的历史里主 agent 已经带着全部
+                # 工具结果，账本只服务后续的新委派。这是刻意设计，不是遗漏。
+                context_mgr = getattr(self.deps, "context_mgr", None)
+                if context_mgr is not None:
+                    context_mgr.reload()
+                    context_mgr.bind_session(result.session_id)
                 self._install_plan_mode_controller()
                 self.deps.plan_mode_controller = self._plan_mode_controller
 

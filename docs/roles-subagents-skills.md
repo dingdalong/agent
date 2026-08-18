@@ -125,8 +125,11 @@ onboard 的续跑只适用于同一未发布运行：`cross_module`、四个维�
 6. `reasoning_effort` 自身合法声明优先；否则依次继承 `parent_agent.reasoning_effort`、父 agent Provider 的 `reasoning_effort`。继承的是父 agent 已解析的有效值，与子 agent 选择 default 还是 fast 槽位无关。
 7. `features` 未声明时继承父 agent 已解析集；同时继承父 agent 当前 `plan_active`。
 8. 用 `Agent.from_manifest(is_subagent=True, ...)` 构造完整子 agent，触发 start hook/事件，运行后在 `finally` 发 end 事件，再触发 stop hook。
+9. **上下文交接**：`run()` 前把 `ContextMgr.digest()` 拼到 `prompt` 之前（子 agent 的 history 从空开始，这是它唯一能拿到「别人已核实了什么」的通道）；`SubagentStop` hook 之后把最终 `result` 记入账本，供后续委派复用。委派时传 `shared_context="none"` 可完全隔离，用于需要独立判断的场景（如代码审查）。详见 [managers.md](managers.md#contextmgr--跨-agent-共享上下文)。
 
 > Plan 工作流工具标记 `subagent=False`，不会进入子 Agent schema；但子 Agent 继承父 Agent 当前 `plan_active`，因此授权层的 Plan 限制仍然生效。
+
+> 共享上下文的注入点刻意选在 `task_delegator` 而非 `ReminderMgr`：后者的 provider 只收 `(plan_active, is_subagent)`，要按委派过滤就得在进程级单例上存槽位，而并行委派会互相覆盖它。
 
 
 ### 子智能体清单（当前仓库）

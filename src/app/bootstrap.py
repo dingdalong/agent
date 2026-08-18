@@ -14,7 +14,7 @@ from src.interfaces import AgentViewStore, OutputRouter, TextualInterface, TurnC
 from src.interfaces.tui.plain import LineReader, read_console_line
 from src.events import EventBus, EventLevel
 from src.events.types import TaskStateChanged
-from src.mgr import ConfigManager, HooksMgr, LLMMgr, McpMgr, MemoryMgr, PermissionManager, PlanMgr, PluginMgr, RoleMgr, SessionMgr, ToolsMgr, WebAccessMgr, resolve_features
+from src.mgr import ConfigManager, ContextMgr, HooksMgr, LLMMgr, McpMgr, MemoryMgr, PermissionManager, PlanMgr, PluginMgr, RoleMgr, SessionMgr, ToolsMgr, WebAccessMgr, resolve_features
 from src.mgr.data_guard import DataGuard, register_runtime_secrets
 from src.mgr.session_state import SessionState
 from src.mgr.permission_mgr import LLMJudgeClient
@@ -139,6 +139,25 @@ async def create_app(
     )
     tools_mgr = ToolsMgr()
     memory_mgr = MemoryMgr(work_dir, data_guard=data_guard) if "memory" in feats else None
+    # 共享上下文挂在 subagent feature 上而非新增 feature：它的价值完全依附于子 agent
+    # 的存在，无子 agent 的角色不该为它付任何代价。
+    context_cfg = config_mgr.get_config("context") or {}
+    context_mgr = (
+        ContextMgr(
+            workdir=work_dir,
+            data_guard=data_guard,
+            enabled=bool(context_cfg.get("enabled", True)),
+            max_entries=int(context_cfg.get("max_entries", 60)),
+            max_entry_chars=int(context_cfg.get("max_entry_chars", 8000)),
+            inject_char_budget=int(context_cfg.get("inject_char_budget", 6000)),
+            inject_entry_chars=int(context_cfg.get("inject_entry_chars", 2000)),
+            record_types=frozenset(
+                context_cfg.get("record_types")
+                or ("explore", "plan", "debug", "review", "coder")
+            ),
+        )
+        if "subagent" in feats else None
+    )
     plugin_mgr = PluginMgr(
         workdir=work_dir,
         global_dir=global_dir,
@@ -193,6 +212,7 @@ async def create_app(
         web_access_mgr=web_access_mgr,
         config_mgr=config_mgr,
         memory_mgr=memory_mgr,
+        context_mgr=context_mgr,
         hooks_mgr=hooks_mgr,
         plan_mgr=plan_mgr,
         plugin_mgr=plugin_mgr,

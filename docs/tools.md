@@ -120,7 +120,17 @@ MCP 工具通过 `_PassThroughArgs(extra="allow")` 接收上游 schema 所描述
 `ToolsMgr.get_schemas()` 按 access 类别和工具名稳定排序。Agent 的 `tools` 白名单、`subagent` 元数据和 feature 门控共同决定 schema：
 
 - 主 Agent 使用角色工具白名单，未声明表示全量注册工具。
-- 子 Agent 在自身白名单基础上自动加入 `subagent=True`，强制移除 `subagent=False`。
+- 子 Agent 在自身白名单基础上自动加入 `subagent=True`（如 `read_tool_result`、`note_context`），强制移除 `subagent=False`（如 `task_delegator` 与四个 plan 工具）。
 - 未启用 feature 的工具始终排除，即使白名单显式列出。
 
 Plan 不通过隐藏 schema 表达安全边界；调用时由 `PermissionManager` 独立执行 Plan 约束，避免动态工具或缓存 schema 绕过。
+
+## 共享上下文工具
+
+`note_context`（`src/tools/builtin/note_context.py`）把关键发现写入跨 agent 账本，`subagent=True` 因此对所有子 agent 自动可见，`feature="subagent"`、`counts_as_work=False`。
+
+它与自动记账的分工：`SubAgentMgr.task_delegator` 已经自动把每个子智能体的返回报告记账，那是主力且零 LLM 纪律成本；`note_context` 覆盖自动记账抓不到的部分——主 agent 与用户对话中确认的决策与约束，以及长任务中途得出的阶段性结论。
+
+策略取 `INTERNAL + LOCAL + plan_safe=True`，与 `save_memory`、`task_create` 同构：**落盘由 `ContextMgr` 内部完成，不经 `write_file`**。这一点是刻意的——`.agent` 被 `PathResolver` 归为 protected，`.agent/context/**` 因此是 `PathClass.PROTECTED`，而 Plan 模式下 `_authorize_plan()` 只放行 `PathClass.PLAN`，改用 `write_file` 落盘会让本工具在 Plan 模式下必然被拒。
+
+`task_delegator` 相应增加 `shared_context: "auto" | "none"` 字段：默认注入账本摘要，`"none"` 完全隔离供独立复核（如代码审查）使用。

@@ -182,6 +182,8 @@ def _session_app(order: list[str]) -> tuple[AgentApp, _SessionBus]:
         workdir="/workspace",
         mcp_mgr=None,
         memory_mgr=None,
+        context_mgr=None,
+        env_baseline="",
         tools_mgr=None,
         plugin_mgr=None,
         plan_mgr=None,
@@ -245,6 +247,45 @@ def test_clear_outputs_one_banner_with_reloaded_session_details() -> None:
     assert order.index("replace") < order.index("hook:SessionStart:clear")
     assert order.index("hook:SessionStart:clear") < order.index("banner")
     assert order.index("banner") < order.index("join", order.index("banner"))
+
+
+def test_reset_session_refreshes_env_baseline_and_rebinds_ledger(tmp_path) -> None:
+    """会话重置时重算环境基线、清空共享账本并绑定新会话 ID。
+
+    环境基线只在这一处采集（本方法同时覆盖 startup 与 /clear），采集后才创建新
+    Agent，因此新 PromptMgr 自然读到新值，不需要 invalidate_cache。
+
+    Args:
+        tmp_path: 测试工作目录。
+
+    Returns:
+        None。
+    """
+    from src.mgr.context_mgr import ContextMgr
+
+    order: list[str] = []
+    app, _bus = _session_app(order)
+    ledger = ContextMgr(workdir=tmp_path)
+    ledger.bind_session("old-session")
+    ledger.add(
+        kind="note", topic="旧会话遗留",
+        content="上一个会话里核实过的结论，重置后不应再出现在账本里。",
+        author="explore",
+    )
+    app.deps.context_mgr = ledger
+    app.deps.workdir = tmp_path
+    new_agent = SimpleNamespace(uuid="clear-agent", agent_type="main")
+
+    with (
+        patch("src.app.app.Agent.from_manifest", return_value=new_agent),
+        patch.object(AgentApp, "_install_plan_mode_controller"),
+    ):
+        asyncio.run(app.reset_session(source="clear"))
+
+    assert app.deps.env_baseline
+    assert ledger.session_id == app.deps.session_id
+    assert ledger.entry_ids() == []
+    assert ledger.digest() == ""
 
 
 def _app(

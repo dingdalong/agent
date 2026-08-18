@@ -136,6 +136,7 @@ ConfigManager 三层合并
 | `web_access_mgr` | `WebAccessMgr` | 否 | 本地/provider 原生 Web 统一路由 |
 | `config_mgr` | `ConfigManager` | 否 | 三层配置合并 |
 | `memory_mgr` | `MemoryMgr \| None` | **memory** | 记忆读写，未启用注入 None |
+| `context_mgr` | `ContextMgr \| None` | **subagent** | 跨 agent 共享上下文账本，未启用注入 None |
 | `hooks_mgr` | `HooksMgr \| None` | 否 | 生命周期钩子 |
 | `plan_mgr` | `PlanMgr \| None` | **plan** | 计划模式，未启用注入 None |
 | `plugin_mgr` | `PluginMgr \| None` | 否 | 插件发现 |
@@ -144,11 +145,12 @@ ConfigManager 三层合并
 | `role_mgr` | `RoleMgr \| None` | 否 | 角色发现与激活，提供 manifest |
 | `plan_mode_controller` | `Any` | 否 | 入口 Agent 的 Plan 状态与快捷键协调器，`_reset_session` 时注入 |
 | `session_context` | `list[str]` | 否 | 会话级附加上下文（SessionStart hook、resume 摘要注入） |
+| `env_baseline` | `str` | 否 | 静态环境基线（git/技术栈/目录树），`_reset_session` 采集一次，进 system prompt |
 | `session_id` | `str` | 否 | 当前会话 ID，`_reset_session` 时生成 |
 | `workdir` | `Path \| None` | 否 | 用户工作目录 |
 | `global_dir` | `Path \| None` | 否 | 全局配置目录 |
 
-> 说明：`memory_mgr` 与 `plan_mgr` 在 `bootstrap.create_app()` 处即按 feature 门控决定是否实例化（`bootstrap.py:50,53`）。而 `FileMgr`、`SkillMgr`、`SubAgentMgr`、`TaskManager` 则是在每个 `Agent.__post_init__` 内按该 agent 自身的 feature 集创建（见 [agent-runtime.md](./agent-runtime.md) 第 6 节），不进入 `AgentDeps`。
+> 说明：`memory_mgr`、`plan_mgr` 与 `context_mgr` 在 `bootstrap.create_app()` 处即按 feature 门控决定是否实例化（`bootstrap.py:50,53`）。而 `FileMgr`、`SkillMgr`、`SubAgentMgr`、`TaskManager` 则是在每个 `Agent.__post_init__` 内按该 agent 自身的 feature 集创建（见 [agent-runtime.md](./agent-runtime.md) 第 6 节），不进入 `AgentDeps`。
 
 `AgentViewStore` 与 `OutputRouter` 属于 app/UI 层，不进入业务依赖容器 `AgentDeps`。同一个 Store 实例由 `TextualInterface`、`OutputRouter` 和 `AgentApp` 共享，避免业务 Agent 持有展示状态。
 

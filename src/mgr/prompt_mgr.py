@@ -85,11 +85,26 @@ class PromptMgr:
         return "\n\n".join(parts)
 
     def _build_environment(self) -> str:
+        """构建运行环境段。
+
+        环境基线（git 分支、技术栈入口、顶层目录结构）由 `AgentApp._reset_session`
+        经 `collect_env_baseline` 一次性采集并缓存在 `deps.env_baseline`，本方法只做
+        字符串拼接——它在 `build()` 里被 `Agent._on_check_compact` 这个 async 函数调用，
+        不能在此做 git 子进程或目录扫描等阻塞 I/O；且每个子 agent 都新建自己的
+        PromptMgr，在此现算会让一次计划流程重复采集十几次。
+
+        Returns:
+            「# 运行环境」提示词段。
+        """
         lines = [
             f"运行平台：`{platform.system()}`",
             f"llm模型：`{self.model}`",
             f"工作目录：`{self.workdir}`",
         ]
+        # getattr 带默认值：大量测试用 SimpleNamespace 造 deps，不能假设字段存在
+        baseline = getattr(getattr(self.agent, "deps", None), "env_baseline", "") or ""
+        if baseline:
+            lines.append(baseline)
         return "# 运行环境\n" + "\n".join(lines)
 
     def _build_memory_context(self) -> str:

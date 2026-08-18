@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from src.mgr.tools_mgr import ToolsMgr
     from src.mgr.permission_mgr import PermissionManager
     from src.mgr.config_mgr import ConfigManager
+    from src.mgr.context_mgr import ContextMgr
     from src.mgr.memory_mgr import MemoryMgr
     from src.mgr.hooks_mgr import HooksMgr
     from src.mgr.plan_mgr import PlanMgr
@@ -136,6 +137,7 @@ class AgentDeps:
     web_access_mgr: WebAccessMgr | None = None
     config_mgr: ConfigManager = None
     memory_mgr: MemoryMgr | None = None
+    context_mgr: ContextMgr | None = None
     hooks_mgr: HooksMgr | None = None
     plan_mgr: PlanMgr | None = None
     plugin_mgr: PluginMgr | None = None
@@ -148,6 +150,11 @@ class AgentDeps:
     data_guard: Any = None
     trust_gate: Any = None
     session_context: list[str] = field(default_factory=list)
+    # 静态环境基线（git 分支、技术栈入口、顶层目录结构）。由 AgentApp._reset_session
+    # 用 asyncio.to_thread 采集一次后写入，进 system prompt 的「# 运行环境」段。
+    # 必须对所有 agent 逐字节相同——它落在 Anthropic 的 tools+system 缓存前缀里，
+    # 因 agent 而异会让跨委派的前缀缓存全部失效。详见 src/mgr/env_baseline.py。
+    env_baseline: str = ""
     session_state: SessionState | None = None
     session_id: str = ""
     workdir: Path | None = None

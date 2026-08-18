@@ -10,7 +10,7 @@ from pydantic import ValidationError
 from src.events.types import ToolCallCompleted, ToolCallStarted, caller_identity
 from src.mgr.permission_mgr import tool_sort_order
 from src.tools import ToolDict, ToolEntry
-from src.tools import AccessKind, ToolPolicy
+from src.tools import AccessKind, PathRole, ToolPolicy
 
 if TYPE_CHECKING:
     from src.llm.base import LLMProvider
@@ -430,6 +430,11 @@ class ToolsMgr:
             if track_work:
                 turn_clock.exit_work()
 
+        # 工具写过的文件，标记共享上下文里提到它们的条目为「可能过时」。
+        # 账本最高危的失败模式就是「文件已改但笔记还在描述旧代码」，而授权层已经把
+        # 写路径解析好放在 authorization.grants 里，这里白拿即可。
+        self._mark_context_stale(deps, authorization)
+
         # 提取 ToolResult：工具可返回 ToolResult 携带展示侧数据
         tool_display_result = None
         from src.tools.display import ToolResult as _ToolResult
@@ -486,6 +491,33 @@ class ToolsMgr:
             content = message.get("content", "")
             return content if isinstance(content, str) else str(content)
         return ""
+
+    @staticmethod
+    def _mark_context_stale(deps: Any, authorization: Any) -> None:
+        """把共享上下文中提及本次写入文件的条目标记为可能过时。
+
+        授权层已经把工具参数里的路径解析成 PathGrant 并标好 role，这里只挑写入类
+        （WRITE / DESTINATION）回喂给 ContextMgr。纯读工具的 grants 里没有写角色，
+        自然不会触发。
+
+        Args:
+            deps: 依赖容器，从中取 context_mgr。
+            authorization: 本次调用的授权结果，其 grants 携带已解析的路径。
+
+        Returns:
+            None。
+        """
+        context_mgr = getattr(deps, "context_mgr", None) if deps is not None else None
+        if context_mgr is None:
+            return
+        grants = getattr(authorization, "grants", None) or ()
+        written = [
+            grant.path
+            for grant in grants
+            if getattr(grant, "role", None) in (PathRole.WRITE, PathRole.DESTINATION)
+        ]
+        if written:
+            context_mgr.mark_stale(written)
 
     @staticmethod
     def _limit_result(result: str) -> str:

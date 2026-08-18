@@ -51,6 +51,16 @@ compact:
   keep_recent_user_turns: 3 # 优先保留原文的最近 N 个用户轮次范围
   keep_recent_messages_token_rate: 0.25 # 近期原文的硬预算比例；超限时可在优先轮次内部按原子消息块切分
 
+# 跨 agent 共享上下文：子 agent 的返回报告自动记账，并在后续委派时自动透传，
+# 避免每个子 agent 重新探索同一处代码。仅在角色启用 subagent feature 时生效。
+context:
+  enabled: true # 总开关；false 时完全退化为无账本行为，便于 A/B 对比与回滚
+  max_entries: 60 # 内存中保留的条目上限，超限丢最旧
+  max_entry_chars: 8000 # 单条正文的存储上限，超出截尾
+  inject_char_budget: 6000 # 单次委派注入的总字符预算（约 2000-2500 token）
+  inject_entry_chars: 2000 # 单条注入的字符上限，超出截尾并指向完整记录文件
+  record_types: [explore, plan, debug, review, coder] # 允许自动记账的子 agent 类型白名单
+
 # 激活角色（role.default）及各角色的模型与推理力度。缺省角色时回退 coding。
 # 模型按角色隔离为两个槽位，两个都必填且无内置兜底值，由首次配置向导或 /models
 # 写入全局 ~/.agent/config.yaml 或项目 .agent/config.yaml：

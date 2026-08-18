@@ -248,3 +248,135 @@ def test_coding_coordinator_guidance_only_reaches_main_prompt(
     assert "你是总控 agent" not in child_content
     assert "# 编码角色共享行为准则" in main_content
     assert "# 编码角色共享行为准则" in child_content
+
+
+def _build_env_section(deps: SimpleNamespace, workdir: Path) -> str:
+    """构建单个 agent 的「# 运行环境」段。
+
+    Args:
+        deps: 注入的依赖对象。
+        workdir: 工作目录。
+
+    Returns:
+        运行环境段正文。
+    """
+    agent = SimpleNamespace(deps=deps, is_subagent=False, memory=None)
+    prompt_mgr = PromptMgr(
+        agent=agent,
+        model="test-model",
+        workdir=workdir,
+        global_dir=None,
+        role_prompt="身份",
+    )
+    return prompt_mgr._build_environment()
+
+
+def test_environment_section_includes_env_baseline(tmp_path: Path) -> None:
+    """deps.env_baseline 非空时进入运行环境段，且原有三行仍在。
+
+    Args:
+        tmp_path: 测试工作目录。
+
+    Returns:
+        None。
+    """
+    deps = SimpleNamespace(
+        role_mgr=None, memory_mgr=None, session_context=[],
+        env_baseline="git：分支 `main`\n技术栈入口：pyproject.toml",
+    )
+
+    section = _build_env_section(deps, tmp_path)
+
+    assert "运行平台：" in section
+    assert "llm模型：" in section
+    assert "工作目录：" in section
+    assert "技术栈入口：pyproject.toml" in section
+
+
+def test_environment_section_tolerates_missing_env_baseline(tmp_path: Path) -> None:
+    """deps 上没有 env_baseline 属性时不抛错。
+
+    仓库里大量测试用 SimpleNamespace 造 deps，PromptMgr 不能假设字段存在。
+
+    Args:
+        tmp_path: 测试工作目录。
+
+    Returns:
+        None。
+    """
+    deps = SimpleNamespace(role_mgr=None, memory_mgr=None, session_context=[])
+
+    section = _build_env_section(deps, tmp_path)
+
+    assert "运行平台：" in section
+
+
+def test_env_baseline_is_identical_across_agents(tmp_path: Path) -> None:
+    """共享同一 deps 的不同 agent 拿到逐字节相同的环境基线。
+
+    基线落在 Anthropic 的 tools+system 缓存前缀里，因 agent 而异会让跨委派的
+    前缀缓存命中率崩掉。
+
+    Args:
+        tmp_path: 测试工作目录。
+
+    Returns:
+        None。
+    """
+    deps = SimpleNamespace(
+        role_mgr=None, memory_mgr=None, session_context=[],
+        env_baseline="git：分支 `main`\n顶层结构（深度 2，仅目录）：\n  src/{mgr}",
+    )
+
+    main_agent = SimpleNamespace(deps=deps, is_subagent=False, memory=None)
+    child_agent = SimpleNamespace(deps=deps, is_subagent=True, memory=None)
+    sections = [
+        PromptMgr(
+            agent=agent, model="test-model", workdir=tmp_path,
+            global_dir=None, role_prompt="身份",
+        )._build_environment()
+        for agent in (main_agent, child_agent)
+    ]
+
+    assert sections[0] == sections[1]
+
+
+def test_shared_context_never_enters_system_prompt(tmp_path: Path) -> None:
+    """账本内容不得出现在 system prompt 里——缓存代价的硬护栏。
+
+    Anthropic 把整个 system 包成单个 ephemeral 缓存断点，断点覆盖 tools+system
+    整个前缀。账本是每次委派都在变的动态内容，一旦进 system，一个子 agent 约
+    8-15k token 的前缀就会每次委派全部 miss。它只能走首条 user 消息
+    （由 `SubAgentMgr.task_delegator` 注入）。
+
+    Args:
+        tmp_path: 测试工作目录。
+
+    Returns:
+        None。
+    """
+    from src.mgr.context_mgr import ContextMgr
+
+    ledger = ContextMgr(workdir=tmp_path)
+    ledger.bind_session("sess")
+    ledger.add(
+        kind="delegation", topic="账本里的标题", author="explore",
+        content="账本正文：这条内容绝对不该出现在任何 agent 的 system prompt 里。",
+    )
+    deps = SimpleNamespace(
+        role_mgr=None, memory_mgr=None, session_context=[],
+        context_mgr=ledger, env_baseline="git：分支 `main`",
+    )
+    agent = SimpleNamespace(deps=deps, is_subagent=True, memory=None)
+
+    content = PromptMgr(
+        agent=agent, model="test-model", workdir=tmp_path,
+        global_dir=None, role_prompt="身份",
+    ).build()[0]["content"]
+
+    # 断言实际的注入标记而非裸词——工作目录路径也会进 system prompt，
+    # 而 pytest 的 tmp_path 目录名恰好含本用例名。
+    assert "<shared_context>" not in content
+    assert "账本里的标题" not in content
+    assert "账本正文" not in content
+    assert "git：分支 `main`" in content  # 静态基线仍然应当在

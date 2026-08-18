@@ -144,7 +144,22 @@
 
 > **换算说明**：`config.yaml` 里存的是**比例**，`Agent` 在构造 `CompactMgr` 时用当前 agent 所用模型的 `context_limit`（`self.llm.context_limit`，`agent.py:203`）乘以比例得到绝对 token 数。不同 agent 若用不同 `context_limit` 的模型，绝对阈值也不同；窗口未知（非正数）时不会自动压缩。`CompactMgr` 细节见 [managers.md](managers.md)。
 
-### 3.5 `role` — 激活角色、模型槽位与推理力度
+### 3.5 `context` — 跨 agent 共享上下文
+
+仅在激活角色启用 `subagent` feature 时生效（未启用则 `bootstrap` 注入 `None`，整段配置无作用）。
+
+| 键 | 类型 | 默认值 | 可选值 | 效果 |
+|----|------|--------|--------|------|
+| `context.enabled` | bool | `true` | `true`/`false` | 总开关。`false` 时不记账、不注入、不落盘，行为与无此机制完全一致——用于 A/B 对比与一键回滚 |
+| `context.max_entries` | int | `60` | 正整数 | 内存中保留的条目上限，超限丢最旧并记 log。覆盖一次完整 plan+execute 流程（经验 10-25 次委派）仍有余量 |
+| `context.max_entry_chars` | int | `8000` | 正整数 | 单条正文的**存储**上限，超出截尾 |
+| `context.inject_char_budget` | int | `6000` | 正整数 | 单次委派**注入**的总字符预算（约 2000-2500 token）。恰好容纳计划工作流规定的最多 3 个并行 `explore` 的完整报告 |
+| `context.inject_entry_chars` | int | `2000` | 正整数 | 单条注入的字符上限，超出截尾并在注入文本中指向完整记录文件 |
+| `context.record_types` | list[str] | `[explore, plan, debug, review, coder]` | 子 agent 类型名 | 允许**自动记账**的 agent_type 白名单。`shell`/`doc` 这类返回"命令执行完毕"的委派不进账本，避免挤占注入预算 |
+
+> 预算单位取**字符**而非 token：`ContextMgr` 不该依赖 `LLMProvider`（子 agent 的 tokenizer 各异、`estimate_tokens` 是阻塞调用）。保守按 2.4-3 字符/token 换算。落盘路径为 `{workdir}/.agent/context/{session_id}.md`（append-only）。机制说明见 [managers.md](managers.md#contextmgr--跨-agent-共享上下文)。
+
+### 3.6 `role` — 激活角色、模型槽位与推理力度
 
 `role` 必须是 mapping。`role.default` 先确定实际激活角色；缺省、空值或未发现的角色回退 `coding`。角色目录名作为 mapping key 原样使用，允许 Unicode、点号和长名称；`common` 与 `default` 是保留名，不会进入角色发现结果。
 
@@ -160,7 +175,7 @@
 
 `/models` 将 `model` mapping 与 `reasoning_effort` 一次写入可信项目层。只改 fast 时当前主 agent 不热切；新建子 agent 和智能权限会立即现读新槽位。default 或 effort 变化时，当前主 agent 原地切换并保留会话历史。角色与子 agent 细节见 [roles-subagents-skills.md](roles-subagents-skills.md)。
 
-### 3.6 `events` — 事件级别
+### 3.7 `events` — 事件级别
 
 | 键 | 类型 | 默认值 | 可选值 | 效果 |
 |----|------|--------|--------|------|
@@ -168,13 +183,13 @@
 
 > `src/config.yaml` 内置值为 `detail`；`bootstrap` 读取时 `config_mgr.get_config("events").get("level", "progress")` 的 `"progress"` 只在整个 `events.level` 键缺失时才生效。事件级别语义见 [events-and-ui.md](events-and-ui.md)。
 
-### 3.7 `logging` — 运行日志级别
+### 3.8 `logging` — 运行日志级别
 
 | 键 | 类型 | 默认值 | 可选值 | 效果 |
 |----|------|--------|--------|------|
 | `logging.level` | str | `info`（本仓库；`bootstrap` 内 `.get` 回退同） | `debug` \| `info` \| `warning` \| `error` | 根 logger 级别，作用于写入 `{workdir}/.agent/logs/agent.log` 的文件 handler（`bootstrap.create_app()`）。`info` 下记录所有授权拒绝与非确定性放行；`debug` 额外记录 `source=policy` 的确定性放行（见 [permissions.md](permissions.md)「授权日志」） |
 
-### 3.8 完整注释版 `config.yaml` 示例
+### 3.9 完整注释版 `config.yaml` 示例
 
 ```yaml
 # ── LLM provider 连接配置 ────────────────────────────────
@@ -230,6 +245,15 @@ compact:
   auto_compact_rate: 0.8
   keep_recent_user_turns: 3
   keep_recent_messages_token_rate: 0.25
+
+# ── 跨 agent 共享上下文（仅 subagent feature 启用时生效）────
+context:
+  enabled: true                         # false 完全退化为无账本行为，便于 A/B 与回滚
+  max_entries: 60
+  max_entry_chars: 8000
+  inject_char_budget: 6000              # 单次委派注入的总字符预算
+  inject_entry_chars: 2000
+  record_types: [explore, plan, debug, review, coder]
 
 # ── 激活角色、角色模型双槽位与共享推理力度 ───────────────
 role:
