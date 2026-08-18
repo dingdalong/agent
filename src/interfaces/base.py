@@ -294,23 +294,52 @@ class UserInterface(ABC):
         prompt: str,
         models: list[tuple[str, str]],
         efforts: list[str],
-        model_index: int,
+        default_model_index: int,
+        fast_model_index: int,
         effort_index: int,
         markdown: bool = False,
     ) -> str:
-        """以双轴菜单选择模型和推理强度，返回 JSON 结果。"""
-        model = await self._read_choice(prompt, models, model_index, markdown)
-        if not model:
+        """以三次串行选择读取两个模型槽位与推理强度，返回 JSON 结果。
+
+        非 TTY 环境没有单屏三轴交互，退化为「default 槽位模型 → fast 槽位模型 →
+        推理强度」三次串行菜单，每步提示显式标注正在设置哪个槽位。
+
+        Args:
+            prompt: 菜单上文提示。
+            models: 可选模型列表，每项为 (模型ID, 展示标签)。
+            efforts: 可选推理强度列表（角色级单值，两槽位共用）。
+            default_model_index: default 槽位的初始选中下标。
+            fast_model_index: fast 槽位的初始选中下标。
+            effort_index: 推理强度的初始选中下标。
+            markdown: 上文提示与选项标签是否按 Markdown 渲染。
+
+        Returns:
+            JSON 编码的 {"default": ..., "fast": ..., "reasoning_effort": ...} 串；
+            任一步取消即整体返回空串。
+        """
+        head = f"{prompt}\n" if prompt else ""
+        default_model = await self._read_choice(
+            f"{head}设置 default 槽位模型", models, default_model_index, markdown
+        )
+        if not default_model:
+            return ""
+        fast_model = await self._read_choice(
+            "设置 fast 槽位模型", models, fast_model_index, markdown
+        )
+        if not fast_model:
             return ""
         effort = await self._read_choice(
-            "推理强度",
+            "设置推理强度（角色级，两槽位共用）",
             [(value, value) for value in efforts],
             effort_index,
             False,
         )
         if not effort:
             return ""
-        return json.dumps({"model": model, "reasoning_effort": effort}, ensure_ascii=False)
+        return json.dumps(
+            {"default": default_model, "fast": fast_model, "reasoning_effort": effort},
+            ensure_ascii=False,
+        )
 
     @abstractmethod
     async def _read_form(
@@ -405,7 +434,8 @@ class UserInterface(ABC):
                 prompt=prompt,
                 models=models,
                 efforts=efforts,
-                model_index=model_index,
+                default_model_index=default_model_index,
+                fast_model_index=fast_model_index,
                 effort_index=effort_index,
                 markdown=markdown,
             ):
@@ -414,7 +444,8 @@ class UserInterface(ABC):
                     prompt,
                     models,
                     efforts,
-                    model_index,
+                    default_model_index,
+                    fast_model_index,
                     effort_index,
                     markdown,
                 )

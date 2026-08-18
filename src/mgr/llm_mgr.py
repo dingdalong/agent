@@ -18,21 +18,33 @@ from src.llm import (
     get_provider,
 )
 from src.llm.errors import safe_exception_traceback
+from src.mgr.role_mgr import (
+    DEFAULT_ROLE,
+    format_role_config_key,
+    role_model_yaml_example,
+)
 
 if TYPE_CHECKING:
     from src.mgr.config_mgr import ConfigManager
+    from src.mgr.role_mgr import RoleMgr
     from src.events import EventBus
 
 logger = logging.getLogger(__name__)
 
 _MODEL_DISCOVERY_TIMEOUT_SECONDS = 3.0
 
-# Claude Code 兼容映射：将 Claude Code 的模型别名映射到本项目的通用别名
+# Claude Code 兼容映射：将 Claude Code 的模型别名映射到本项目的角色模型槽位
 _CLAUDECODE_ALIASES: dict[str, str] = {
-    "opus": "best",
+    "opus": "default",
     "sonnet": "default",
     "haiku": "fast",
 }
+
+# 角色模型槽位名 — 每个角色都必须同时配置这两个槽位，无内置兜底值。
+_SLOT_NAMES = frozenset({"default", "fast"})
+
+# 子 agent manifest 的 model 字段允许出现的全部别名。
+MODEL_ALIASES = _SLOT_NAMES | set(_CLAUDECODE_ALIASES)
 
 
 def _alphabetical_key(value: str) -> tuple[str, str]:
@@ -53,12 +65,14 @@ class LLMMgr:
     """LLM 管理器 — 根据模型名返回可用的 LLMProvider 实例。"""
 
     config_mgr: ConfigManager
+    role_mgr: RoleMgr
     event_bus: EventBus
 
     _model_to_provider: dict[str, str] = field(init=False, default_factory=dict)
     _cache: dict[str, LLMProvider] = field(init=False, default_factory=dict)
     _provider_web_mode: dict[str, str] = field(init=False, default_factory=dict)
     provider_errors: dict[str, LLMErrorInfo] = field(init=False, default_factory=dict)
+    _model_discovery_completed: bool = field(init=False, default=False)
     _default_concurrency: int = field(init=False)
     _request_timeout_seconds: float = field(init=False)
     _retry_config: RetryConfig = field(init=False)
@@ -232,6 +246,7 @@ class LLMMgr:
         self._provider_web_mode = {
             name: cfg["web"] for name, cfg in providers_cfg.items()
         }
+        self._model_discovery_completed = True
         self._cache.clear()
 
     async def reconfigure(self) -> None:
@@ -242,7 +257,7 @@ class LLMMgr:
 
         Raises:
             LLMConfigurationError: 新的 llm.* 或 llm_provider 配置非法。
-            ModelUnavailableError: 重新发现后默认模型不可用。
+            ModelUnavailableError: 重新发现后任一角色模型槽位不可用。
         """
         # 必须最先执行：__post_init__ 的检查全部先于赋值，非法 llm.* 配置既不会留下半套
         # 标量字段，也不会清掉 _cache，manager 保持完整可用。
@@ -254,7 +269,7 @@ class LLMMgr:
         # 不可在此预清空 _model_to_provider / provider_errors：load_models() 以局部变量
         # 原子换入，发现失败或跨 provider 冲突时旧状态原样保留。
         await self.load_models()
-        self.ensure_default_available()
+        self.ensure_slots_available()
 
     def _log_model_discovery_failure(
         self,
@@ -302,53 +317,168 @@ class LLMMgr:
             ),
         )
 
+    @property
+    def _active_role_name(self) -> str:
+        """返回槽位配置所属的激活角色名。
+
+        Returns:
+            RoleMgr 给出的角色名；无激活角色时为 DEFAULT_ROLE。
+        """
+        return self.role_mgr.role_name or DEFAULT_ROLE
+
+    def _role_model_slots(self) -> dict[str, str]:
+        """读取激活角色的 default/fast 双槽位模型配置。
+
+        每次调用都现读配置，因此 /models 切换并 reload 后立即生效。
+
+        Returns:
+            以槽位名为键、真实模型 ID 为值的映射，必含 default 与 fast。
+
+        Raises:
+            LLMConfigurationError: 槽位配置缺失、仍是旧标量格式或槽位值非法。
+        """
+        role_name = self._active_role_name
+        key = format_role_config_key(role_name, "model")
+        try:
+            raw = self.config_mgr.get_config_parts(("role", role_name, "model"))
+        except KeyError:
+            raise LLMConfigurationError(
+                self._slot_config_help(role_name, f"{key} 未配置")
+            ) from None
+
+        if isinstance(raw, str):
+            raise LLMConfigurationError(
+                self._slot_config_help(
+                    role_name,
+                    f"{key} 的旧标量格式已废弃，模型已改为按角色隔离的双槽位",
+                )
+            )
+        if not isinstance(raw, Mapping):
+            raise LLMConfigurationError(
+                self._slot_config_help(role_name, f"{key} 必须是 mapping")
+            )
+
+        slots: dict[str, str] = {}
+        for slot in ("default", "fast"):
+            if slot not in raw:
+                raise LLMConfigurationError(
+                    self._slot_config_help(
+                        role_name,
+                        f"{format_role_config_key(role_name, 'model', slot)} 未配置",
+                    )
+                )
+            value = raw[slot]
+            if isinstance(value, bool) or not isinstance(value, str) or not value.strip():
+                raise LLMConfigurationError(
+                    self._slot_config_help(
+                        role_name,
+                        f"{format_role_config_key(role_name, 'model', slot)} 必须是非空 str",
+                    )
+                )
+            slots[slot] = value.strip()
+        return slots
+
+    def _slot_config_help(self, role_name: str, detail: str) -> str:
+        """拼装含完整键名、YAML 样例与目标配置文件路径的槽位配置错误消息。
+
+        LLMConfigurationError 会把消息压成单行并限长，故 YAML 样例使用流式写法，
+        保证折行后仍可直接粘贴。
+
+        Args:
+            role_name: 激活角色名。
+            detail: 具体错误原因，已包含完整配置键名。
+
+        Returns:
+            面向用户的可操作提示。
+        """
+        default_key = format_role_config_key(role_name, "model", "default")
+        fast_key = format_role_config_key(role_name, "model", "fast")
+        example = role_model_yaml_example(role_name)
+        base = (
+            f"{detail}。必填 {default_key} 与 {fast_key}，无内置兜底值。"
+            f"YAML 样例：{example}。"
+            f"请写入全局 {self.config_mgr.global_config_path} "
+            f"或项目 {self.config_mgr.project_config_path}；"
+            f"项目未信任时项目层配置会被忽略，此时只能改全局配置。"
+        )
+        budget = max(0, 498 - len(base))
+        summary = self._available_models_summary(budget)
+        return f"{base}{summary}"
+
+    def _available_models_summary(self, budget: int) -> str:
+        """在给定字符预算内格式化模型发现状态。"""
+        models = sorted(self._model_to_provider)
+        if not models:
+            summary = (
+                "模型发现尚未执行。"
+                if not self._model_discovery_completed
+                else "当前可用模型：(无)。"
+            )
+            return summary if len(summary) <= budget else ""
+
+        prefix = f"当前可用模型：共{len(models)}个"
+        if len(prefix) + 1 > budget:
+            return ""
+        shown: list[str] = []
+        for model in models:
+            candidate = f"{prefix}（{'、'.join([*shown, model])}）。"
+            if len(candidate) > budget:
+                break
+            shown.append(model)
+        return f"{prefix}（{'、'.join(shown)}）。" if shown else f"{prefix}。"
+
     def resolve_model(self, model: str | None = None) -> str:
         """解析模型名或别名为真实模型标识符。
 
-        解析顺序：None → "default" → Claude Code 兼容映射 → 配置别名 → 精确匹配 → 模糊匹配 → 回退默认。
+        解析顺序：None/空串 → "default" → Claude Code 兼容映射 → 角色双槽位查表
+        （仅别名走这一步）→ 精确匹配。无法精确命中即报错，不做子串模糊匹配，
+        也不静默回退到 default。
 
         Args:
-            model: 模型名、别名或 None。
+            model: 模型名、槽位别名或 None。
 
         Returns:
             真实模型标识符。
-        """
-        if model is None:
-            model = "default"
-
-        # Claude Code 兼容映射（opus→best 等）
-        model = _CLAUDECODE_ALIASES.get(model, model)
-
-        # 别名解析（default/best/fast → 实际模型 ID，best/fast 不存在时回退 default）
-        llm_cfg = self.config_mgr.get_config("llm")
-        default_model = llm_cfg["default"]
-        aliases = {
-            "default": default_model,
-            "best": llm_cfg.get("best", default_model),
-            "fast": llm_cfg.get("fast", default_model),
-        }
-        if model in aliases:
-            model = aliases[model]
-
-        if model in self._model_to_provider:
-            return model
-        candidates = [m for m in self._model_to_provider if model in m]
-        if len(candidates) == 1:
-            return candidates[0]
-        if len(candidates) > 1:
-            return min(candidates, key=len)
-        logger.warning("未找到匹配模型 %r，使用默认模型", model)
-        return default_model
-
-    def ensure_default_available(self) -> None:
-        """精确校验配置的默认模型已成功加载。
 
         Raises:
-            ModelUnavailableError: 默认模型不在已加载的可用模型集合中。
+            LLMConfigurationError: 需要查表但激活角色的槽位配置非法。
+            ModelUnavailableError: 解析结果不在已加载的可用模型集合中。
         """
-        default_model = self.config_mgr.get_config("llm")["default"]
-        if default_model in self._model_to_provider:
+        requested = model or "default"
+        name = _CLAUDECODE_ALIASES.get(requested, requested)
+        # 仅别名读槽位配置：传入完整模型 ID 时不与槽位配置产生耦合。
+        if name in _SLOT_NAMES:
+            name = self._role_model_slots()[name]
+
+        if name in self._model_to_provider:
+            return name
+        available = ", ".join(sorted(self._model_to_provider)) or "(无)"
+        raise ModelUnavailableError(
+            f"模型 {requested!r}（解析为 {name!r}）不可用。\n"
+            f"可用别名：{', '.join(sorted(MODEL_ALIASES))}\n"
+            f"当前可用模型：{available}"
+        )
+
+    def ensure_slots_available(self) -> None:
+        """精确校验激活角色的两个模型槽位都已成功加载。
+
+        Raises:
+            LLMConfigurationError: 激活角色的槽位配置非法。
+            ModelUnavailableError: 任一槽位模型不在已加载的可用模型集合中。
+        """
+        role_name = self._active_role_name
+        slots = self._role_model_slots()
+        missing = {
+            slot: name
+            for slot, name in slots.items()
+            if name not in self._model_to_provider
+        }
+        if not missing:
             return
+        missing_note = "、".join(
+            f"{format_role_config_key(role_name, 'model', slot)} → {name!r}"
+            for slot, name in sorted(missing.items())
+        )
         available = ", ".join(sorted(self._model_to_provider)) or "(无)"
         failure_details = "\n".join(
             _format_provider_error(provider_name, info)
@@ -360,13 +490,15 @@ class LLMMgr:
             else ""
         )
         raise ModelUnavailableError(
-            f"默认模型 {default_model!r} 不可用，无法启动。\n"
+            f"角色模型槽位 {missing_note} 不可用，无法启动。\n"
             f"当前可用模型：{available}{failure_note}\n"
             f"请排查：\n"
             f"  1. 该模型所属 provider 的认证/连通性 —— 检查 .env 中的 "
             f"*_API_KEY / *_API_URL 是否被正确加载"
             f"（.env 需位于 ~/.agent/.env、仓库根 .env 或 .agent/.env）。\n"
-            f"  2. src/config.yaml 中 llm.default 是否指向一个可用模型。"
+            f"  2. config.yaml 中 "
+            f"{format_role_config_key(role_name, 'model', 'default')} 与 "
+            f"{format_role_config_key(role_name, 'model', 'fast')} 是否都指向可用模型。"
         )
 
     def get(self, model: str | None = None) -> LLMProvider:
@@ -419,7 +551,6 @@ class LLMMgr:
             max_pause_turn_continuations=provider_cfg[
                 "max_pause_turn_continuations"
             ],
-            reasoning_effort=provider_cfg.get("reasoning_effort", "max"),
             preserve_thinking=provider_cfg.get("preserve_thinking", False),
             concurrency=self._default_concurrency,
             timeout=self._request_timeout_seconds,

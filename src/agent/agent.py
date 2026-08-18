@@ -766,7 +766,7 @@ class Agent:
         """返回本 agent 无长度降档时实际使用的推理力度档位。
 
         Returns:
-            自身 manifest 声明的 reasoning_effort，未声明时回退 provider 配置档位。
+            自身 manifest 声明的 reasoning_effort，未声明时回退 Provider 类默认档位。
         """
         return self.reasoning_effort or self.llm.reasoning_effort
 

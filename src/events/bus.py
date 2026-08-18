@@ -208,7 +208,11 @@ class EventBus:
         if isinstance(event, ModelMenu):
             try:
                 value = json.loads(answer)
-                return f"选择：{value.get('model', '')} / {value.get('reasoning_effort', '')}"
+                return (
+                    f"选择：default={value.get('default', '')}"
+                    f" / fast={value.get('fast', '')}"
+                    f" / 强度={value.get('reasoning_effort', '')}"
+                )
             except (json.JSONDecodeError, AttributeError):
                 return f"选择：{answer}"
         if isinstance(event, ChoiceInputMenu):
@@ -285,12 +289,27 @@ class EventBus:
         prompt: str,
         models: list[tuple[str, str]],
         efforts: list[str],
-        model_index: int = 0,
+        default_model_index: int = 0,
+        fast_model_index: int = 0,
         effort_index: int = 0,
         source: str = "ui",
         markdown: bool = False,
-    ) -> tuple[str, str]:
-        """通过双轴菜单选择模型和推理强度。"""
+    ) -> tuple[str, str, str]:
+        """通过三轴菜单选择两个模型槽位与角色级推理强度。
+
+        Args:
+            prompt: 菜单上文提示（打印到 scrollback）。
+            models: 可选模型列表，每项为 (模型ID, 展示标签)。
+            efforts: 可选推理强度列表（角色级单值，两槽位共用）。
+            default_model_index: default 槽位的初始选中下标。
+            fast_model_index: fast 槽位的初始选中下标。
+            effort_index: 推理强度的初始选中下标。
+            source: 事件来源标识。
+            markdown: 上文提示是否按 Markdown 渲染。
+
+        Returns:
+            (default_model, fast_model, effort)；用户取消（Esc）时返回 ("", "", "")。
+        """
         raw = await self._request(
             ModelMenu(
                 timestamp=time.time(),
@@ -298,16 +317,21 @@ class EventBus:
                 prompt=prompt,
                 models=models,
                 efforts=efforts,
-                model_index=model_index,
+                default_model_index=default_model_index,
+                fast_model_index=fast_model_index,
                 effort_index=effort_index,
                 markdown=markdown,
             ),
             "model",
         )
         if not raw:
-            return "", ""
+            return "", "", ""
         payload = json.loads(raw)
-        return str(payload.get("model", "")), str(payload.get("reasoning_effort", ""))
+        return (
+            str(payload.get("default", "")),
+            str(payload.get("fast", "")),
+            str(payload.get("reasoning_effort", "")),
+        )
 
     async def request_form(
         self,

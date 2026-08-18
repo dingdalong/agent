@@ -164,11 +164,11 @@ async def create_app(
     )
     await mcp_mgr.start()
     session_mgr = SessionMgr(global_dir=global_dir, workdir=work_dir, data_guard=data_guard)
-    llm_mgr = LLMMgr(config_mgr=config_mgr, event_bus=event_bus)
+    llm_mgr = LLMMgr(config_mgr=config_mgr, role_mgr=role_mgr, event_bus=event_bus)
     await llm_mgr.load_models()
-    # 启动前置校验：默认模型不可用时抛 ModelUnavailableError，由 main.cli 捕获后
+    # 启动前置校验：角色模型槽位不可用时抛 ModelUnavailableError，由 main.cli 捕获后
     # 清晰退出（提示而非深层堆栈）。须在 UI 启动前完成。
-    llm_mgr.ensure_default_available()
+    llm_mgr.ensure_slots_available()
 
     async def confirm_once(tool_name: str, detail: str, reason: str = "") -> bool:
         if not ui.is_tty:

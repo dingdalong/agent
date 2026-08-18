@@ -60,7 +60,7 @@ allow 仅用于任务范围内的常规操作；deny 用于明显有害、越权
 必须调用 record_verdict，reason 用一句不超过 30 字的短说明，只给结论不展开。"""
 
 class LLMJudgeClient:
-    """使用 `llm.fast`（由 LLMMgr 的 fast 别名回退 default）执行裁决。"""
+    """使用激活角色的 `fast` 模型槽位执行裁决。"""
 
     def __init__(self, llm_mgr: Any, data_guard: DataGuard) -> None:
         self.llm_mgr = llm_mgr

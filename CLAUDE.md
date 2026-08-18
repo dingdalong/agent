@@ -45,7 +45,7 @@ REQUEST_INPUT → CHECK_COMPACT → [COMPACT →] LLM_CALL → PROCESS_RESPONSE
 
 ### 角色系统（Roles）
 
-**角色是框架的顶层组织单位**——一套角色决定了主 agent 的身份提示词、可用子 agent、技能、MCP server 与启用的 feature 集。`RoleMgr`（`src/mgr/role_mgr.py`）三层发现所有角色（低→高优先级）：内置 `src/roles/` → 全局 `~/.agent/roles/` → 项目 `.agent/roles/`，同名后者覆盖。激活角色由 `config.yaml` 的 `role.default` 指定（缺省回退 `coding`）；`role.<角色名>.model` 与 `role.<角色名>.reasoning_effort` 可覆盖激活主角色 `role.md` 的同名字段。
+**角色是框架的顶层组织单位**——一套角色决定了主 agent 的身份提示词、可用子 agent、技能、MCP server 与启用的 feature 集。`RoleMgr`（`src/mgr/role_mgr.py`）三层发现所有角色（低→高优先级）：内置 `src/roles/` → 全局 `~/.agent/roles/` → 项目 `.agent/roles/`，同名后者覆盖。激活角色由 `config.yaml` 的 `role.default` 指定（缺省回退 `coding`）；每个角色在 `role.<角色名>.model.default/fast` 配置两个必填模型槽位，`role.<角色名>.reasoning_effort` 是该角色的调用级推理强度覆盖。
 
 每个角色目录 `src/roles/<role>/` 结构：
 - `role.md` — 角色定义文件（YAML frontmatter + body，与子 agent 的 `*.md` 同格式）。body 成为主 agent 的核心身份与主控职责提示词；frontmatter 的 `features` 声明启用能力，`startInPlanMode` 声明初始 Plan 状态，`reasoning_effort` 声明推理力度，`agent_type` 固定视为 `main`。
@@ -70,7 +70,7 @@ REQUEST_INPUT → CHECK_COMPACT → [COMPACT →] LLM_CALL → PROCESS_RESPONSE
 
 ### 配置系统
 
-3 层合并，后者覆盖前者：内置 `src/config.yaml` → 全局 `~/.agent/config.yaml` → 项目 `.agent/config.yaml`。环境变量通过 `.env` 文件加载（全局 `~/.agent/.env`、项目 `.agent/.env`）。`config.yaml` 的 `role.default` 选定激活角色；`role.<角色名>.model` 与 `role.<角色名>.reasoning_effort` 覆盖该主角色 `role.md`，未配置时保留 manifest 值，再由 `llm.default` 与 provider 推理强度兜底。子 agent 不使用这些覆盖项。`llm.default` 指定默认模型（子 agent 通过别名引用），`llm.best`/`llm.fast` 可选。
+3 层合并，后者覆盖前者：内置 `src/config.yaml` → 全局 `~/.agent/config.yaml` → 项目 `.agent/config.yaml`。环境变量通过 `.env` 文件加载（全局 `~/.agent/.env`、项目 `.agent/.env`）。`config.yaml` 的 `role.default` 选定激活角色；主 agent 恒用该角色的 `model.default`，子 agent 可声明 `default`、`fast`、Claude Code 兼容别名或完整模型 ID。两个模型槽位均无内置兜底值。角色目录名作为 YAML mapping key 原样处理，允许 Unicode、点号和长名称；`common` 与 `default` 是不可激活的保留名。
 
 `settings.json`（全局 `~/.agent/` + 项目 `.agent/` 两层深度合并）承载 Hook 与 MCP 连接开关。`mcp.enabledServers` 非空时作白名单，`mcp.disabledServers` 始终剔除；被禁用的 server 不连接、其工具不注册、不进 LLM schema。授权策略不从配置加载。
 

@@ -783,12 +783,12 @@ def test_inline_widgets_define_their_own_completion_history() -> None:
                 future=loop.create_future(),
             )
             await app.coordinator.submit(model)
+            await app.coordinator.submit(model)
             await pilot.pause()
             await pilot.press("enter")
             assert await model.future == (
-                '{"model": "model-a", "reasoning_effort": "low"}'
+                '{"default": "model-a", "fast": "model-a", "reasoning_effort": "low"}'
             )
-            await pilot.pause()
             assert app.history_journal.snapshot() == ""
 
             cancelled_model = ModelMenu(
@@ -2768,10 +2768,18 @@ def test_composer_mouse_drag_selects_for_copy() -> None:
     asyncio.run(scenario())
 
 
-def test_model_menu_uses_vertical_models_and_horizontal_effort() -> None:
-    """模型菜单应分别用上下键和左右键调整两个维度。"""
+def test_model_menu_moves_active_slot_effort_and_submits_three_axis_payload() -> None:
+    """单屏三轴：↑↓ 只移动激活槽位、Tab 切槽位跳到该槽位已选模型、←→ 改角色级强度。"""
     app = _app()
     selection_color = Color.parse("#76d7c4")
+
+    def highlighted(widget: Static) -> list[str]:
+        text = widget.render()
+        return [
+            text.plain[span.start:span.end]
+            for span in text.spans
+            if span.style.foreground == selection_color
+        ]
 
     async def scenario() -> None:
         async with app.run_test(size=(100, 30)) as pilot:
@@ -2779,50 +2787,60 @@ def test_model_menu_uses_vertical_models_and_horizontal_effort() -> None:
             request = ModelMenu(
                 timestamp=1.0,
                 source="models",
-                models=[("model-a", "model-a (one)"), ("model-b", "model-b (two)")],
+                models=[
+                    ("model-a", "stub/model-a"),
+                    ("model-b", "stub/model-b"),
+                    ("model-c", "stub/model-c"),
+                ],
                 efforts=["low", "medium", "high", "xhigh", "max"],
-                model_index=0,
+                default_model_index=0,
+                fast_model_index=2,
                 effort_index=2,
                 future=loop.create_future(),
             )
             await app.coordinator.submit(request)
             await pilot.pause()
 
+            slots = app._interaction_slot.query_one("#model-menu-slots", Static)
             body = app._interaction_slot.query_one("#model-menu-body", KeyboardNavigation)
             effort = app._interaction_slot.query_one("#model-menu-effort", Static)
             assert body.has_focus
-            body_text = body.render()
-            effort_text = effort.render()
-            assert "› model-a (one)" in body_text.plain
-            assert "› high" in effort_text.plain
-            assert [
-                body_text.plain[span.start:span.end]
-                for span in body_text.spans
-                if span.style.foreground == selection_color
-            ] == ["› model-a (one)"]
-            assert [
-                effort_text.plain[span.start:span.end]
-                for span in effort_text.spans
-                if span.style.foreground == selection_color
-            ] == ["› high"]
 
-            await pilot.press("down", "right")
-            body_text = body.render()
-            effort_text = effort.render()
-            assert [
-                body_text.plain[span.start:span.end]
-                for span in body_text.spans
-                if span.style.foreground == selection_color
-            ] == ["› model-b (two)"]
-            assert [
-                effort_text.plain[span.start:span.end]
-                for span in effort_text.spans
-                if span.style.foreground == selection_color
-            ] == ["› xhigh"]
+            # 初始激活 default 槽位：光标落在 default 已选模型，fast 行按当前选择标注
+            assert highlighted(slots) == ["› default"]
+            assert highlighted(body) == ["› stub/model-a  [default]"]
+            assert "  stub/model-c  [fast]" in body.render().plain
+            assert highlighted(effort) == ["› high"]
+
+            # ↑↓ 只移动激活槽位（default）的选择，fast 标注不动
+            await pilot.press("down")
+            assert highlighted(body) == ["› stub/model-b  [default]"]
+            assert "  stub/model-c  [fast]" in body.render().plain
+
+            # Tab 切到 fast 槽位：光标跳到该槽位当前已选模型
+            await pilot.press("tab")
+            assert highlighted(slots) == ["› fast"]
+            assert highlighted(body) == ["› stub/model-c  [fast]"]
+            assert "  stub/model-b  [default]" in body.render().plain
+
+            # 现在 ↑↓ 只移动 fast 槽位；两槽位指向同一模型时标注合并
+            await pilot.press("up")
+            assert highlighted(body) == ["› stub/model-b  [default, fast]"]
+            await pilot.press("up")
+            assert highlighted(body) == ["› stub/model-a  [fast]"]
+            assert "  stub/model-b  [default]" in body.render().plain
+
+            # ←→ 改角色级强度，且切槽位不影响强度
+            await pilot.press("right")
+            assert highlighted(effort) == ["› xhigh"]
+            await pilot.press("tab")
+            assert highlighted(slots) == ["› default"]
+            assert highlighted(body) == ["› stub/model-b  [default]"]
+            assert highlighted(effort) == ["› xhigh"]
 
             await pilot.press("enter")
             assert await request.future == (
-                '{"model": "model-b", "reasoning_effort": "xhigh"}'
+                '{"default": "model-b", "fast": "model-a", "reasoning_effort": "xhigh"}'
             )
 
             await pilot.pause()
@@ -2853,7 +2871,8 @@ def test_model_menu_scrolls_models_while_effort_and_hint_stay_visible() -> None:
                 source="models",
                 models=[(f"model-{index}", f"model-{index}") for index in range(16)],
                 efforts=["low", "medium", "high", "xhigh", "max"],
-                model_index=0,
+                default_model_index=0,
+                fast_model_index=0,
                 effort_index=2,
                 future=loop.create_future(),
             )
@@ -2888,7 +2907,7 @@ def test_model_menu_scrolls_models_while_effort_and_hint_stay_visible() -> None:
 
             await pilot.press("right", "enter")
             assert await request.future == (
-                '{"model": "model-14", "reasoning_effort": "xhigh"}'
+                '{"default": "model-14", "fast": "model-0", "reasoning_effort": "xhigh"}'
             )
 
     asyncio.run(scenario())

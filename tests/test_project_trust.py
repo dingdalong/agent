@@ -22,7 +22,9 @@ from src.app.bootstrap import _confirm_project_trust
 from src.interfaces.agent_view_store import AgentViewStore
 from src.mgr.config_mgr import ConfigManager
 from src.mgr.data_guard import DataGuard, REDACTED, register_runtime_secrets
+from src.mgr.llm_mgr import LLMMgr
 from src.mgr.project_trust import ProjectTrustGate
+from src.mgr.role_mgr import RoleMgr
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -336,11 +338,189 @@ def test_restricted_config_ignores_project_executable_inputs(tmp_path, monkeypat
 
     config = ConfigManager(global_dir, workdir, project_trusted=False)
     assert os.getenv("PROJECT_TRUST_SENTINEL") is None
-    assert config.get_config("llm.default") != "project-model"
+    with pytest.raises(KeyError):
+        config.get_config("llm.default")
     with pytest.raises(KeyError):
         config.get_config("llm_provider.project")
     assert config.get_user_setting("hooks") == {}
     assert config.load_mcp_servers() == {}
+
+def _config_with_role(
+    tmp_path: Path,
+    *,
+    project_yaml: str,
+    global_yaml: str = "",
+    trusted: bool = False,
+) -> ConfigManager:
+    """按指定的全局/项目 config.yaml 文本构造 ConfigManager。
+
+    Args:
+        tmp_path: pytest 临时目录。
+        project_yaml: 项目层 .agent/config.yaml 内容。
+        global_yaml: 全局层 config.yaml 内容，空串表示不写该文件。
+        trusted: 项目是否受信任。
+
+    Returns:
+        构造好的 ConfigManager。
+    """
+    workdir = tmp_path / "work"
+    global_dir = tmp_path / "global"
+    project_dir = workdir / ".agent"
+    project_dir.mkdir(parents=True)
+    global_dir.mkdir()
+    (project_dir / "config.yaml").write_text(project_yaml)
+    if global_yaml:
+        (global_dir / "config.yaml").write_text(global_yaml)
+    return ConfigManager(global_dir, workdir, project_trusted=trusted)
+
+
+def test_restricted_config_ignores_project_role_model_slots(tmp_path):
+    """未信任项目不得改写实际使用的模型，两个槽位都回落到全局层。"""
+    config = _config_with_role(
+        tmp_path,
+        project_yaml=(
+            "role:\n  coding:\n    model:\n"
+            "      default: attacker-model\n      fast: attacker-fast\n"
+        ),
+        global_yaml=(
+            "role:\n  coding:\n    model:\n"
+            "      default: global-model\n      fast: global-fast\n"
+        ),
+    )
+
+    assert config.get_config("role.coding.model.default") == "global-model"
+    assert config.get_config("role.coding.model.fast") == "global-fast"
+
+
+def test_restricted_config_role_model_without_global_layer_raises(tmp_path):
+    """全局层没有模型槽位时，未信任项目的模型配置被剥离后应缺失。"""
+    config = _config_with_role(
+        tmp_path,
+        project_yaml="role:\n  coding:\n    model:\n      default: attacker-model\n",
+    )
+
+    with pytest.raises(KeyError):
+        config.get_config("role.coding.model.default")
+
+
+def test_restricted_config_ignores_project_role_reasoning_effort(tmp_path):
+    """reasoning_effort 与 model 成对剥离，避免半套生效。"""
+    config = _config_with_role(
+        tmp_path,
+        project_yaml="role:\n  coding:\n    reasoning_effort: low\n",
+    )
+
+    assert config.get_config("role.coding.reasoning_effort") != "low"
+
+
+def test_restricted_config_keeps_project_active_role(tmp_path):
+    """激活角色名不属于模型行为配置，未信任项目仍可指定。"""
+    config = _config_with_role(
+        tmp_path,
+        project_yaml="role:\n  default: mijia\n  mijia:\n    model:\n      default: attacker\n",
+    )
+
+    assert config.get_config("role.default") == "mijia"
+    with pytest.raises(KeyError):
+        config.get_config("role.mijia.model.default")
+
+
+def test_trusted_config_keeps_project_role_model(tmp_path):
+    """对照组：信任项目的角色模型配置正常生效。"""
+    config = _config_with_role(
+        tmp_path,
+        project_yaml=(
+            "role:\n  coding:\n    reasoning_effort: low\n    model:\n"
+            "      default: project-model\n      fast: project-fast\n"
+        ),
+        trusted=True,
+    )
+
+    assert config.get_config("role.coding.model.default") == "project-model"
+    assert config.get_config("role.coding.model.fast") == "project-fast"
+    assert config.get_config("role.coding.reasoning_effort") == "low"
+
+
+def test_restricted_config_drops_non_mapping_role_and_keeps_global_role(tmp_path):
+    """项目层 role 非 mapping 时整段丢弃，完整保留全局角色配置。"""
+    config = _config_with_role(
+        tmp_path,
+        project_yaml="role: attacker\n",
+        global_yaml=(
+            "role:\n  default: coding\n  coding:\n    model:\n"
+            "      default: global-model\n      fast: global-fast\n"
+        ),
+    )
+
+    assert config.get_config("role.default") == "coding"
+    assert config.get_config("role.coding.model.default") == "global-model"
+    assert config.get_config("role.coding.model.fast") == "global-fast"
+
+
+def test_restricted_config_drops_non_mapping_role_entry_but_keeps_default(tmp_path):
+    """项目层非 mapping 角色 entry 被丢弃，字符串叶子 role.default 仍生效。"""
+    config = _config_with_role(
+        tmp_path,
+        project_yaml="role:\n  default: mijia\n  coding: attacker\n",
+        global_yaml=(
+            "role:\n  default: coding\n  coding:\n    model:\n"
+            "      default: global-model\n      fast: global-fast\n"
+        ),
+    )
+
+    assert config.get_config("role.default") == "mijia"
+    assert config.get_config("role.coding.model.default") == "global-model"
+    assert config.get_config("role.coding.model.fast") == "global-fast"
+
+
+def test_restricted_nested_path_cannot_control_exact_dotted_role_key(
+    tmp_path: Path,
+) -> None:
+    """未信任项目的嵌套 foo/bar 配置不能覆盖全局精确 foo.bar 角色 key。"""
+    workdir = tmp_path / "work"
+    global_dir = tmp_path / "global"
+    dotted_role = global_dir / "roles" / "foo.bar"
+    dotted_role.mkdir(parents=True)
+    (dotted_role / "role.md").write_text(
+        "---\nreasoning_effort: high\n---\n不安全角色。\n"
+    )
+    global_dir.joinpath("config.yaml").write_text(
+        "role:\n"
+        "  'foo.bar':\n"
+        "    model:\n"
+        "      default: trusted-default\n"
+        "      fast: trusted-fast\n"
+        "    reasoning_effort: high\n"
+    )
+    project_dir = workdir / ".agent"
+    project_dir.mkdir(parents=True)
+    project_dir.joinpath("config.yaml").write_text(
+        "role:\n"
+        "  default: foo.bar\n"
+        "  foo:\n"
+        "    bar:\n"
+        "      model:\n"
+        "        default: attacker-model\n"
+        "        fast: attacker-fast\n"
+        "      reasoning_effort: low\n"
+    )
+    config_mgr = ConfigManager(global_dir, workdir, project_trusted=False)
+    role_mgr = RoleMgr(config_mgr, workdir, global_dir)
+    llm_mgr = LLMMgr(config_mgr, role_mgr, event_bus=None)
+    llm_mgr._model_to_provider.update(
+        {
+            "trusted-default": "stub",
+            "trusted-fast": "stub",
+            "attacker-model": "stub",
+            "attacker-fast": "stub",
+        }
+    )
+
+    assert role_mgr.role_name == "foo.bar"
+    assert role_mgr.manifest is not None
+    assert role_mgr.manifest.reasoning_effort == "high"
+    assert llm_mgr.resolve_model("default") == "trusted-default"
+    assert llm_mgr.resolve_model("fast") == "trusted-fast"
 
 
 def test_runtime_secret_registration_tracks_trusted_env(tmp_path):

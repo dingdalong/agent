@@ -1,6 +1,5 @@
 ---
 description: 米家智能家居控制助手 — 设备管理、场景自动化、状态查询
-model: fast
 startInPlanMode: false
 thinking: false
 features: [subagent]

@@ -110,7 +110,6 @@ def test_provider_web_config_defaults_and_validation():
 def test_llm_mgr_resolves_web_mode_from_model():
     config = {
         "llm": {
-            "default": "model-a",
             "concurrency": 1,
             "timeout_seconds": 10,
             "retry": {"max_attempts": 1, "base_delay_seconds": 1, "max_delay_seconds": 1},
@@ -131,7 +130,7 @@ def test_llm_mgr_resolves_web_mode_from_model():
                 return config[key]
             return config[key]
 
-    mgr = LLMMgr(Config(), event_bus=None)
+    mgr = LLMMgr(Config(), role_mgr=SimpleNamespace(role_name="coding"), event_bus=None)
     mgr._model_to_provider = {"model-a": "openai"}
     mgr._provider_web_mode = {"openai": "provider"}
     assert mgr.provider_name_for_model("model-a") == "openai"

@@ -16,6 +16,20 @@
 
 `get_provider(name)` 按精确名称返回实现类，未知名称抛 `ValueError`（`src/llm/__init__.py:25-29`）。模型到 provider 的归属由 `LLMMgr.load_models()` 建立，本层只接收已经解析的模型 ID。
 
+### 模型解析与调用归属
+
+`LLMMgr` 把模型选择隔离在激活角色下。每个角色必须配置 `role.<角色>.model.default` 与 `.fast`，两个值都是已加载的完整模型 ID；内置配置不兜底。`resolve_model()` 只执行以下解析：
+
+| 输入 | 结果 |
+|---|---|
+| `None` 或空串 | `default` 槽位 |
+| `default` / `fast` | 现读激活角色的对应槽位 |
+| `opus` / `sonnet` | `default` 槽位（Claude Code 兼容） |
+| `haiku` | `fast` 槽位（Claude Code 兼容） |
+| 完整模型 ID | 在已加载模型表中精确匹配 |
+
+没有 `best`、`inherit`、子串模糊匹配或静默回退。主 agent 的 `model` 固定为 `None`，因此使用 default；子 agent 使用 manifest 的合法别名或完整 ID。每个 Agent 的 `CompactMgr` 和退出总结直接复用该 Agent 的 Provider。智能权限每次解析 fast 槽位；原生 Web 搜索/抓取则由工具传入调用方 Agent 自己的 Provider。
+
 `LLMResponse`（`src/llm/base.py:168-176`）统一五家的返回值：
 
 | 字段 | 含义 |
@@ -46,7 +60,7 @@ token 用量统一为 `input_tokens`、`output_tokens`、`total_tokens`、`cache
 | `timeout` | `120.0` | SDK 请求超时秒数 |
 | `context_limit` | `0` | 模型上下文窗口；非正值表示未知 |
 | `page_token_rate` | `0.03` | 单页工具结果占上下文窗口的比例 |
-| `reasoning_effort` | `"max"` | provider 共享的默认推理力度（agent 未声明 `reasoning_effort` 时的最终回退）；**per-agent 覆盖与按调用降档只经 `reasoning_effort_override` 参数传递，绝不修改此共享字段**（provider 被缓存并跨子 agent 共享） |
+| `reasoning_effort` | `"max"` | Provider 类内部的共享默认推理力度，不从配置读取；per-agent 覆盖与按调用降档只经 `reasoning_effort_override` 传递，不修改缓存实例 |
 | `preserve_thinking` | `False` | Ollama 历史思考保留开关 |
 | `max_pause_turn_continuations` | `0` | 协议续接上限；仅 Anthropic 从配置读取正整数，内置默认值为 `5` |
 
@@ -73,7 +87,9 @@ token 用量统一为 `input_tokens`、`output_tokens`、`total_tokens`、`cache
 6. 异常由统一分类器转换成 `LLMErrorInfo`；不可重试或尝试耗尽时发出 `LLMCallFailed`，抛出 `LLMCallError`。
 7. 可重试时计算等待时间、发出 `LLMRetrying`、异步等待，再以全新的尝试上下文重试。
 
-`chat()` 另有三个默认 `None` 的按调用参数：`reasoning_effort_override`（临时替换本次调用的推理力度档位，不改共享 `reasoning_effort`）、`ephemeral_instruction`（见步骤 1）与 `max_attempts_cap`（限制本次调用的最大尝试次数，不修改共享 provider）。`reasoning_effort_override` 现由两条来源驱动：其一是 **per-agent 推理力度**——`Agent._on_llm_call` 用 `ctx.length_effort_override or self.reasoning_effort` 取值，`self.reasoning_effort` 源自 role.md / 子 agent frontmatter 的 `reasoning_effort` 字段（子 agent 未声明时继承父 agent 已解析值，主 agent 未声明为 `None` → 退回 provider 共享档位），见 [roles-subagents-skills.md](roles-subagents-skills.md)；其二是**长度恢复降档**——`ctx.length_effort_override` 由恢复链经 `next_lower_effort()` 从 `_base_reasoning_effort()`（即 `self.reasoning_effort or self.llm.reasoning_effort`）起步逐级降档。`StructuredVerdictRunner` 固定传入 cap 3，使智能权限与 Web 安全审查最多尝试三次；全局配置低于三次时仍采用更低值。
+`chat()` 另有三个默认 `None` 的按调用参数：`reasoning_effort_override`（临时替换本次调用档位，不改共享 Provider）、`ephemeral_instruction` 与 `max_attempts_cap`。effort 的运行时层级是：主 agent 先取角色配置覆盖后的 manifest effort（`role.<角色>.reasoning_effort` 覆盖 `role.md`），缺失才用 Provider 类默认值 `max`；default/fast 两个槽位共用这一角色级单值。子 agent 自身 frontmatter effort 合法时优先，否则继承父 agent 已解析值，父值为空时再取父 Provider effort，而不是按子 agent 模型槽位重新取一套角色 effort。
+
+`Agent._on_llm_call` 传 `ctx.length_effort_override or self.reasoning_effort`；长度恢复会从 `self.reasoning_effort or self.llm.reasoning_effort` 起步，按 Provider 的 `next_lower_effort()` 逐级降档。智能权限使用 `StructuredVerdictRunner`，固定对单次调用传 `reasoning_effort_override="low"`、关闭 thinking 并把尝试次数封顶为 3；这不会修改按模型缓存的 Provider。当前 Web 外部读取授权路径只执行本地隐私预检，没有调用已构造的 LLM Web 审查客户端。
 
 `CancelledError`、`KeyboardInterrupt`、`SystemExit` 始终原样传播。事件发布调用 `emit_telemetry_safely()`，普通遥测发布故障不会改变 LLM 调用结果，控制流异常仍传播（`src/events/bus.py:36-65`）。
 
@@ -202,4 +218,4 @@ assistant 的 provider 专属字段在判断“真正为空”之前由 `_normal
 
 基类 `list_models()` 用 OpenAI 兼容 Models API，外层 `asyncio.wait_for` 与 SDK 共用调用方传入的超时，并保证关闭临时客户端（`src/llm/base.py:368-394`）。Anthropic 覆写为分页读取全部模型（`src/llm/anthropic.py:107-145`）。`LLMMgr.load_models()` 固定传入 3 秒；该约束写在代码中，不受 `llm.timeout_seconds` 或项目配置覆盖。
 
-`LLMMgr.load_models()` 并发发现所有已配置 provider；响应必须是仅含非空字符串的列表并按首次出现去重。发现失败先进入统一分类与安全日志；该 provider 配有非空静态 `models` 时使用静态列表，否则不注册模型，并把错误保存到 `provider_errors`。模型在不同 provider 间重复归属属于配置错误（`src/mgr/llm_mgr.py:121-223,443-504`）。启动时仍会精确验证 `llm.default`，不会因其他 provider 可用而切换默认模型（`src/mgr/llm_mgr.py:308-335`）。
+`LLMMgr.load_models()` 并发发现所有已配置 Provider；响应必须是仅含非空字符串的列表并按首次出现去重。发现失败先进入统一分类与安全日志；该 Provider 配有非空静态 `models` 时使用静态列表，否则不注册模型，并把错误保存到 `provider_errors`。模型在不同 Provider 间重复归属属于配置错误。启动时 `ensure_slots_available()` 会精确验证激活角色的 default 与 fast 两个槽位；任一槽位缺失、仍是旧标量格式或模型不可用都阻止启动，不会改选其他模型或 Provider。

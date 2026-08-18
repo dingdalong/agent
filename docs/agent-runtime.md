@@ -88,7 +88,7 @@ LLM_CALL → PROCESS_RESPONSE ──length────→ LENGTH_RETRY ──可
 | 交互终态 | `user_input`、`user_record_id`、`command`、`exit_requested`、`stop_hook_used` |
 | LLM 终态 | `llm_error: LLMErrorInfo | None` |
 
-`RunResult` 返回 `final_text`、`command`、`exit_requested`、`user_input` 和 `llm_error`。调用方无需从错误文本反向推断类别。`/plan`、`/models` 在 Agent 内处理；`/clear`、`/resume` 与 `/agents` 通过 `command` 交给应用层。`/models` 原地替换当前 Agent 的 provider、推理强度、压缩器和提示词模型信息，不更换 Agent UUID、会话或消息历史。
+`RunResult` 返回 `final_text`、`command`、`exit_requested`、`user_input` 和 `llm_error`。调用方无需从错误文本反向推断类别。`/plan`、`/models` 在 Agent 内处理；`/clear`、`/resume` 与 `/agents` 通过 `command` 交给应用层。`/models` 一次提交 default/fast 槽位与角色 effort：default 或 effort 变化时原地替换当前 Agent 的 Provider、推理强度、压缩器和提示词模型信息，不更换 UUID、会话或消息历史；只改变 fast 时当前 Agent 保持不变，新建子 agent 与智能权限现读新槽位。
 
 ## 4. 单点 LLM 错误收口
 

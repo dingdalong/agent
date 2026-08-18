@@ -60,44 +60,33 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 
 `src/mgr/role_mgr.py`
 
-**单一职责**：三层发现所有已安装角色，激活 `config.yaml` 的 `role` 键指定的角色，并暴露该角色的资产路径。角色是框架的顶层组织单位。
+**单一职责**：按信任状态发现角色，解析实际激活角色及其 `role.md`，暴露角色资产路径，并把角色级 `reasoning_effort` 覆盖应用到主角色 manifest。模型槽位由 `LLMMgr` 读取，`RoleMgr` 不从 `role.md` 取模型。
 
-**消费的配置或文件**：
-- `config.yaml` 的 `role` 键（`_resolve()`，`role_mgr.py:228`）——缺省或角色不存在时回退 `_DEFAULT_ROLE`（`"coding"`，`role_mgr.py:28`）。
-- 三层扫描目录（低→高优先级，同名后者覆盖，`_discover()` `role_mgr.py:195-216`）：内置 `builtin_root()/roles` → 全局 `~/.agent/roles` → 项目 `.agent/roles`。**跳过 `common/` 目录**（`role_mgr.py:211`，它是共享资源而非角色）。
-- 角色目录内：`role.md`（仅主 agent 身份与主控职责）、`AGENTS.md`（主/子 agent 共用行为准则）、`agents/`、`skills/`、`plugins/`、`mcp_servers.json`。
+**发现与激活**：
+- `discover_roles()` 按内置 `src/roles/` → 全局 `~/.agent/roles/` → 可信项目 `.agent/roles/` 扫描，同名后者覆盖；目录须含 `role.md`。
+- 角色目录名作为配置 mapping key 原样使用，允许 Unicode、点号和长名称；`common`、`default` 是保留名，冲突目录告警并忽略。
+- `active_role_name()` 读取 `role.default`；缺键、非字符串或空白回退 `coding`。`resolve_role_name()` 在配置角色未发现时同样回退 `coding`。
+- 项目未信任时不发现项目角色；`ConfigManager` 仍可保留项目层 `role.default`，但实际只能激活已发现的内置或全局角色。
 
-**模块级函数**（RoleMgr/SubAgentMgr 共用）：
+**manifest 契约**：`role.md` body 是主 agent 的角色提示词；frontmatter 可声明 features、thinking、reasoning_effort、memory、tools、startInPlanMode 等。`model` 键已禁止，哪怕值为空或 `null` 也会由 `_reject_manifest_model()` 抛 `LLMConfigurationError`，错误包含文件路径与应使用的 `role.<角色>.model.default/fast` 配置键；随后主角色 manifest 的 `model` 固定为 `None`，使主 agent 经 `LLMMgr.get(None)` 使用 default 槽位。
 
-| 函数 | 关键参数 | 返回 | 作用 |
-|---|---|---|---|
-| `parse_frontmatter` | `text: str` | `tuple[dict, str]` | 从 `.md` 文本分离 YAML frontmatter 与 body |
-| `extract_manifest` | `meta: dict`, `path: Path`, `prompt`, `id_field`, `default_id`, `default_description` | `AgentManifest` | 从 frontmatter+body 构造 `AgentManifest` |
+`role.<实际角色>.reasoning_effort` 是角色级单值覆盖：合法字符串经去空白、转小写后写入 manifest；缺键或 `null` 保留 `role.md` 值，非法值告警并忽略。模型 mapping 不写入 manifest，而由 `LLMMgr` 按实际角色名现读。
 
-**`AgentManifest` 数据类字段**：`agent_type`（角色固定 `"main"`）、`description`、`path`、`prompt`、`tools`、`memory`、`model`、`start_in_plan_mode`、`enable_thinking`、`reasoning_effort`、`features`。
+**模块级函数**：
 
-**公共方法/属性**：
+| 函数 | 作用 |
+|---|---|
+| `discover_roles` | 按信任状态发现合法角色目录 |
+| `active_role_name` | 读取并规范化 `role.default` |
+| `resolve_role_name` | 在发现结果中解析角色，未命中回退 `coding` |
+| `parse_frontmatter` | 从 `.md` 文本分离 YAML frontmatter 与 body |
+| `extract_manifest` | 从 frontmatter 与 body 构造 `AgentManifest`，由角色和子 agent 共用 |
 
-| 方法 | 关键参数 | 返回 | 作用 |
-|---|---|---|---|
-| `active` (property) | — | `bool` | 是否有已激活角色 |
-| `manifest` (property) | — | `AgentManifest \| None` | 当前角色的 manifest |
-| `role_name` (property) | — | `str \| None` | 当前角色名（文件夹名） |
-| `agents_dir` | — | `Path \| None` | 角色 `agents/` 目录（存在时） |
-| `skills_dir` | — | `Path \| None` | 角色 `skills/` 目录 |
-| `plugins_dir` | — | `Path \| None` | 角色 `plugins/` 目录 |
-| `agent_md_path` | — | `Path \| None` | 角色共享 `AGENTS.md` 文件 |
-| `mcp_servers_path` | — | `Path \| None` | 角色 `mcp_servers.json` 文件 |
-| `common_dir` | — | `Path \| None` | 共享资源目录 `roles/common/` |
-| `common_agents_dir` | — | `Path \| None` | 共享 `agents/` 目录 |
-| `common_skills_dir` | — | `Path \| None` | 共享 `skills/` 目录 |
-| `common_agent_md_path` | — | `Path \| None` | 跨角色共享 `AGENTS.md` 文件 |
+**公共属性与资产方法**：`active`、`manifest`、`role_name`；`agents_dir()`、`skills_dir()`、`plugins_dir()`、`agent_md_path()`、`mcp_servers_path()`；以及 `common_dir()`、`common_agents_dir()`、`common_skills_dir()`、`common_agent_md_path()`。
 
-**feature 门控**：否。 **reload**：有；按当前信任状态重新发现并解析角色。
+**feature 门控**：否。**reload**：有；按当前信任与配置重新发现、激活和解析角色。**关键状态**：`_role_path`、`_manifest`、`_all_roles`。
 
-**持有的关键状态**：`_role_path`（激活角色目录）、`_manifest`（激活角色 manifest）、`_all_roles`（角色名 → 目录）。
-
-角色系统整体见 [roles-subagents-skills.md](roles-subagents-skills.md)。
+角色结构与配置示例见 [roles-subagents-skills.md](roles-subagents-skills.md) 和 [configuration-reference.md](configuration-reference.md)。
 
 ---
 
@@ -105,32 +94,31 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 
 `src/mgr/llm_mgr.py`
 
-**单一职责**：把模型名或别名解析为真实模型 ID，并返回对应的、按模型缓存的 `LLMProvider` 实例。
+**单一职责**：把激活角色的 `default`/`fast` 槽位、固定兼容别名或完整模型 ID 解析为可用模型，并返回按完整模型 ID 缓存的 `LLMProvider`。构造依赖为 `ConfigManager`、`RoleMgr`、`EventBus`；`RoleMgr` 是确定槽位配置所属角色的权威。
 
 **消费的配置**：
-- `llm`（`__post_init__`，`llm_mgr.py:59-119`）：顶层与 `retry` 必须是 mapping；`concurrency` 必须是非 bool 且 `>= 1` 的整数；`timeout_seconds`、`retry.base_delay_seconds`、`retry.max_delay_seconds` 必须是非 bool 的有限正数；`retry.max_attempts` 必须是非 bool 且 `>= 1` 的整数，最大延迟不得小于基础延迟。`default` 必填，`best`/`fast` 缺省回退 `default`。
-- `tool.page_token_rate`（`llm_mgr.py:118`）——传给 provider 用于分页预算。
-- `llm_provider.*`（`load_models`/`_create_provider`）：顶层与每个 provider 项必须是 mapping，provider 名和 `base_url` 必须是非空字符串；`models` 必须是仅含非空字符串的列表，并按首次出现顺序去重（`llm_mgr.py:407-478`）。其余字段包括 `api_key`、`reasoning_effort`、`preserve_thinking`、`context_limit`。
-- **Claude Code 兼容别名**（`_CLAUDECODE_ALIASES` `llm_mgr.py:17-21`）：`opus`→`best`、`sonnet`→`default`、`haiku`→`fast`。
+- `llm` 只含调用参数：`concurrency`、`timeout_seconds`、`retry`、`user_agent`。顶层和 `retry` 必须是 mapping，各数值执行严格类型与范围校验。
+- `role.<实际角色>.model` 必须是 mapping，且 `default`、`fast` 都是非空字符串。内置配置没有槽位兜底；父键缺失、旧字符串格式、缺槽位或非法值均抛 `LLMConfigurationError`。
+- `llm_provider.*` 提供模型发现与 Provider 构造字段；Provider effort 沿用类默认值 `max`，角色或 manifest 通过每次调用参数覆盖。
+- Claude Code 兼容映射固定为 `opus`/`sonnet`→`default`、`haiku`→`fast`。`MODEL_ALIASES` 只包含这三个名称和 `default`/`fast`。
 
 **公共方法**：
 
-| 方法 | 关键参数 | 返回 | 作用 |
-|---|---|---|---|
-| `load_models` (async) | — | `None` | 并发发现模型；单个 provider 失败时记录 `provider_errors`，仅在静态 `models` 非空时回退；跨 provider 的同名模型归属冲突会抛配置错误 |
-| `reconfigure` (async) | — | `None` | 重解析配置 → 丢弃 provider 实例缓存 → 重跑发现 → 校验默认模型；任一步失败保留上一次的模型表与 `provider_errors`，配置校验失败时连实例缓存都不丢弃 |
-| `resolve_model` | `model: str \| None` | `str` | 解析顺序：`None`→`"default"`→CC 别名→config 别名→精确匹配→子串模糊匹配（多个取最短）→回退 `default` |
-| `ensure_default_available` | — | `None` | 启动前精确校验配置的默认模型；不可用时携安全化的 provider 发现错误抛 `ModelUnavailableError`，不切换到其他 provider |
-| `get` | `model: str \| None` | `LLMProvider` | 解析并返回缓存的 provider 实例（未知模型抛 `ValueError`） |
-| `list_models` | — | `list[str]` | 已加载可用模型名（排序） |
+| 方法 | 作用 |
+|---|---|
+| `load_models()` | 并发发现模型；单个 Provider 失败时记录 `provider_errors`，仅静态 `models` 非空时回退；跨 Provider 同名模型冲突时报配置错误 |
+| `reconfigure()` | 重读调用配置、清空 Provider 实例缓存、重跑模型发现，再调用 `ensure_slots_available()`；用于 `/clear` |
+| `resolve_model(model)` | `None`/空串视为 `default`；固定兼容别名先映射槽位，槽位再查当前角色 mapping，完整 ID 只做精确匹配；失败报错，不做子串匹配或静默回退 |
+| `ensure_slots_available()` | 启动或重配时同时验证 default/fast 槽位配置与模型可用性；错误列出精确键、可用模型和安全化的发现失败摘要 |
+| `get(model)` | 返回解析后完整模型 ID 对应的缓存 Provider 实例 |
+| `provider_name_for_model()` / `web_mode_for_model()` | 查询完整模型或别名所属 Provider 及 Web 路由模式 |
+| `list_models()` / `models_by_provider()` | 返回排序后的模型列表或 Provider 分组 |
 
-**feature 门控**：否。 **reload**：通过异步 `reconfigure()` 显式完成。
+槽位配置在每次 `resolve_model("default"|"fast")` 时现读，因此 `/models` 写入并 reload 后，新建子 agent 与智能权限立即使用新槽位。完整模型 ID 不依赖槽位 mapping，可供子 agent manifest 精确指定。`ensure_slots_available()` 仍要求激活角色的两个槽位都可用。
 
-**模型发现规则**（`llm_mgr.py:121-223`）：每个 provider 独立调用 `list_models()`，统一使用代码内固定的 3 秒 SDK/外层等待超时，不受 `llm.timeout_seconds` 影响；发现响应同样执行严格模型列表校验。失败信息经统一分类后写入 `provider_errors`，静态 `models` 为空时该 provider 不注册模型。模型 ID 只能归属一个 provider，冲突会终止启动。
+**feature 门控**：否。**reload**：通过异步 `reconfigure()` 显式完成。**关键状态**：`_model_to_provider`、`_cache`、`_provider_web_mode`、`provider_errors` 以及统一调用参数。
 
-**持有的关键状态**：`_model_to_provider`（模型→provider 名）、`_cache`（模型→provider 实例）、`provider_errors`（provider→安全结构化发现错误）、`_default_concurrency`、`_request_timeout_seconds`、`_retry_config`、`_page_token_rate`、`_user_agent`。
-
-模型解析、Provider 抽象与流式细节见 [llm.md](llm.md)。配置键见 [configuration-reference.md](configuration-reference.md)。
+模型别名、effort 和 Provider 调用细节见 [llm.md](llm.md)。
 
 ---
 
@@ -183,7 +171,7 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 |---|---|---|---|
 | `authorize` (async) | `tool_name`, `policy`, `arguments`, `origin`, `plan_active`, `user_intent`, `review_model` | `AuthorizationResult` | 每次调用独立裁决；不缓存、不创建后续放行 |
 
-**关键协作者**：`PathResolver` 统一规范化和分类路径，`HardDenyDetector` 处理不可覆盖的高危动作，`LLMJudgeClient` 通过 `llm.fast` 返回通用结构化裁决，`WebPrivacyGuard` 与 `LLMWebSafetyClient` 用当前 Agent 模型审查最小化 Web 请求，`DataGuard` 保证审查请求、原因和展示详情不含原始秘密。**feature 门控**：否。**reload**：无。
+**关键协作者**：`PathResolver` 统一规范化和分类路径，`HardDenyDetector` 处理不可覆盖的高危动作，`LLMJudgeClient` 每次通过 `llm_mgr.get("fast")` 现读激活角色的 fast 槽位，`StructuredVerdictRunner` 对该次结构化裁决覆盖 `reasoning_effort="low"`（并关闭 thinking、最多尝试三次），不修改缓存 Provider。fast 缺失或不可用是配置错误，不回退 default。`WebPrivacyGuard` 负责 Web 外部读取的本地隐私预检；`LLMWebSafetyClient` 虽在装配时注入，但当前 `_review_web()` 路径未调用，不应视为已启用的 LLM Web 审查。`DataGuard` 保证裁决请求、原因和展示详情不含原始秘密。**feature 门控**：否。**reload**：无。
 
 ---
 
@@ -255,30 +243,27 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 
 `src/mgr/subagent_mgr.py`
 
-**单一职责**：四层扫描子 agent 定义，暴露列表提示词段，并通过 `task_delegator` 委派任务给子智能体。
+**单一职责**：四层扫描子 agent 定义，在加载期验证模型字段，暴露列表提示词段，并通过 `task_delegator` 构造和运行完整子 Agent。
 
-**消费的配置或文件**：四层扫描 `*.md`（低→高优先级，同名后者覆盖，`_load_all` `subagent_mgr.py:36-67`）：共享 `roles/common/agents/` → 角色 `agents/` → 全局 `~/.agent/agents/` → 项目 `.agent/agents/`。每个 `.md` 经 `parse_frontmatter`+`extract_manifest` 解析为 `AgentManifest`。
+**扫描与模型校验**：共享 `roles/common/agents/` → 激活角色 `agents/` → 全局 `~/.agent/agents/` → 项目 `.agent/agents/`，同名 `agent_type` 后者覆盖。每份文件经 `parse_frontmatter` 与 `extract_manifest` 解析后立即调用 `_validate_model()`：
 
-**公共方法**：
+- `None` 合法，委派时由 `LLMMgr.get(None)` 使用角色 default 槽位；
+- 固定别名只允许 `default`、`fast`、`opus`、`sonnet`、`haiku`；
+- 其他字符串必须精确位于 `LLMMgr.list_models()` 的已加载完整模型 ID 集合；
+- 非法值抛 `LLMConfigurationError`，消息包含 manifest 路径、合法域和当前可用模型。没有 `best`、`inherit`、子串匹配或静默回退。
 
-| 方法 | 关键参数 | 返回 | 作用 |
-|---|---|---|---|
-| `describe` | — | `str \| None` | 子 agent 列表（`- type: description`，按 type 排序） |
-| `prompt_section` | — | `str` | `# 可用子智能体` 段，无则空串 |
-| `task_delegator` (async) | `agent_type`, `prompt`, `parent_agent`, `task_id` | `str` | 委派并返回子 agent 结果文本 |
+**公共方法**：`describe()` 返回按 type 排序的列表，`prompt_section()` 生成可用子智能体段，`task_delegator(agent_type, prompt, parent_agent, task_id, description)` 执行委派。
 
-**`task_delegator` 关键行为**（`subagent_mgr.py:84-211`）：
-- 未知 `agent_type` 返回错误并列出已知；
-- 有 `task_id` 时委派前将任务置 `in_progress` 并设 `owner`；异常退出或 `RunResult.llm_error` 非空时均回滚为无 owner 的 `pending`，其余正常返回**不**自动标 `completed`，留给主 agent 评估；
-- 工具集经 `tools_mgr.resolve_subagent_tools(manifest.tools)` 解析；`model == "inherit"` 继承父 agent 已解析的真实模型 ID；`enable_thinking`/`reasoning_effort`/`features` 未声明时继承父 agent；
-- 用 `Agent.from_manifest(is_subagent=True, ...)` 构造子 agent 实例；
-- 触发 `SubagentStart`/`SubagentStop` hook 与 `SubagentLifecycle`（start/end）事件（异常/取消也发 end）；`SubagentStop` hook 的 `blocked`/`additional_context` 可覆盖或追加结果。
+**`task_delegator` 关键行为**：
+- 未知 `agent_type` 返回错误并列出已知；带 `task_id` 时先置 `in_progress` 并设 owner，异常或 `RunResult.llm_error` 时回滚为无 owner 的 `pending`，正常返回不自动 completed；
+- 工具集经 `resolve_subagent_tools()` 解析，模型原样传 manifest：`None`、槽位别名、兼容别名或完整 ID 最终都由 `LLMMgr.get()` 解析；
+- `thinking` 自身未声明时继承父 agent；`reasoning_effort` 自身合法声明优先，否则继承 `parent_agent.reasoning_effort`，父值仍为空时继承父 Provider 的 effort；该 effort 继承与子 agent 选择哪个模型槽位相互独立；
+- `features` 未声明时继承父 agent 已解析集，同时继承父 agent 当前 `plan_active`；
+- 用 `Agent.from_manifest(is_subagent=True, ...)` 构造实例，触发 `SubagentStart`/`SubagentStop` hook 与 start/end 生命周期事件，异常和取消路径也发 end。
 
-**feature 门控**：`subagent`（未启用时 `Agent` 中为 `None`）。 **reload**：无（随新 Agent 重建）。
+**feature 门控**：`subagent`。**reload**：无，随新 Agent 重建。**关键状态**：`_documents`（`agent_type` → `AgentManifest`）。
 
-**持有的关键状态**：`_documents`（`agent_type` → `AgentManifest`）。
-
-子 Agent 定义格式、feature 与 Plan 继承见 [roles-subagents-skills.md](roles-subagents-skills.md)。
+子 Agent 定义格式见 [roles-subagents-skills.md](roles-subagents-skills.md)。
 
 ---
 
@@ -528,10 +513,12 @@ hook 协议、JSON 字段与插件 `CLAUDE_PLUGIN_ROOT` 环境变量见 [mcp-and
 | `load_mcp_servers` | — | `dict` | 双层合并 `mcpServers` |
 | `load_user_settings` | — | `dict` | 按信任状态深合并 settings |
 | `get_config` | `key`（点路径） | `Any` | 取配置值（缺失抛 `KeyError`） |
+| `get_config_parts` | `parts`（原样路径段 tuple） | `Any` | 取含点号等动态 mapping key 下的配置值（缺失抛 `KeyError`） |
 | `get_user_setting` | `key`（点路径） | `Any` | 取设置值（缺失返回空 dict） |
 | `set_project_trusted` | `trusted` | `None` | 更新信任状态并重载配置 |
 | `set_config` | `key`, `value`, `scope`（`"global"`/`"project"`） | `None` | 原子写单个点路径到指定配置层（YAML 规范化输出，不保留原注释格式）；写后需 `reload()` 或重启才生效 |
 | `set_configs` | `values`, `scope` | `None` | 原子批量写多个点路径到同一配置层 |
+| `set_config_parts` / `set_configs_parts` | 原样路径段、值、scope | `None` | 原子写入动态 mapping key；路径段内部的点不会被拆分 |
 | `set_global_env` | `values` | `None` | 批量原子写全局 `.env`（`global_dir/.env`）：只改目标变量、保留注释与无关原文，目录 0700/文件 0600，不修改 `os.environ`；写后需 `reload()` 或重启才生效 |
 | `has_explicit_provider_config` | — | `bool` | 用户层是否已有显式 Provider 配置（有效环境含内置 `{NAME}_API_KEY`/`{NAME}_API_URL` 键、全局或 trusted 项目非空 `llm_provider`）；首次 Provider 向导据此决定是否跳过 |
 

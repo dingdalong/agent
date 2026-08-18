@@ -6,7 +6,7 @@
 
 `EventBus` 使用每订阅者一条 `asyncio.Queue`。`emit()` 先以 reset 拒绝 gate 取消不得跨会话入队的 `UiRequest`，再按 `EventLevel` 门控和订阅者事件类型集合广播（`src/events/bus.py:88-143`）。`PROGRESS=1`、`DETAIL=2`、`TRACE=3`；交互、LLM 边界和正文均为 PROGRESS，思考与状态转换为 DETAIL。
 
-主要请求 API（`bus.py:145-417`）：
+主要请求 API：
 
 | 方法 | 返回 |
 |---|---|
@@ -14,12 +14,13 @@
 | `request_interrupt()` | 无 |
 | `request_input(prompt, default, markdown)` | 用户文本 |
 | `request_choice(...)` | 选项 value；空串表示取消 |
+| `request_model_selection(...)` | `(default_model, fast_model, effort)`；取消时三个空串 |
 | `request_form(...)` | answers/discussion JSON |
 | `request_choice_input(...)` | choice/text JSON |
 | `request_transcript_view(uuid)` | 空串 |
 | `request_permission(...)` | 权限决策字符串 |
 
-`UiRequest` 是所有窗口请求的共同基类，携 future 并由 `complete()` / `cancel()` / `fail()` 落定；`MenuRequest` 表示需要作答的窗口，`ViewRequest` 表示只读窗口（当前为 `TranscriptView`）。无订阅者时抛 `NoEventSubscribers`。
+`UiRequest` 是所有窗口请求的共同基类，携 future 并由 `complete()` / `cancel()` / `fail()` 落定；`MenuRequest` 表示需要作答的窗口，`ViewRequest` 表示只读窗口。`ModelMenu` 在 future 中传递 JSON `{"default": "<模型ID>", "fast": "<模型ID>", "reasoning_effort": "<档位>"}`，`EventBus.request_model_selection()` 解码为三元组；Esc 以空串取消。无订阅者时抛 `NoEventSubscribers`。
 
 LLM 调用使用 `emit_telemetry_safely()`（`src/events/bus.py:36-65`）发布开始、重试、完成、失败及流增量。普通发布异常只写不含 payload 的告警，不改变调用成功/失败；`CancelledError`、`KeyboardInterrupt`、`SystemExit` 仍原样传播。
 
@@ -151,15 +152,21 @@ TTY 只缓冲前台 Agent 当前一轮的工具。实时区优先级为”重试
 |---|---|
 | `app.py` | Textual App、历史/流输出、活动区、状态栏、Agent 与转录切换 |
 | `widgets.py` | 多行输入、历史锚定、跨视口选择补偿、系统剪贴板后端 |
-| `dialogs.py` | 权限、选择、组合输入、表单 Modal 与 FIFO 协调器 |
-| `plain.py` | 非 TTY 输入输出，保证无 ANSI |
+| `dialogs.py` | 权限、选择、ModelMenu、组合输入、表单与 FIFO 协调器 |
+| `plain.py` | 非 TTY 输入输出与菜单串行降级，保证无 ANSI |
 | `diagnostics.py` | TUI 生命周期、降级和转录渲染的后台滚动诊断日志 |
 | `history_journal.py` | 当前前台的纯文本降级缓存；会话切换时从 `SessionRecord.view` 重建 |
 | `agent.tcss` | 宽窄和高矮窗口的响应式布局 |
 
-TTY 的 `InteractionCoordinator` 是交互请求状态权威写入者。它最多保留一个转录视图和一个活动作答窗口：普通输入、权限、选择、模型双轴选择、表单和组合输入不会抢占已有作答窗口，而是按 FIFO 排队；状态栏显示“等待 N：来源”，来源优先使用发起 agent 类型、缺失时回退事件 source。`ModelMenu` 用上下键选择模型、左右键选择 `low/medium/high/xhigh/max` 强度，Enter 提交、Esc 取消。只有真正激活的请求才打印调用方标记和菜单上文。
+TTY 的 `InteractionCoordinator` 是交互请求状态权威写入者。普通输入、权限、选择、模型、表单和组合输入按 FIFO 排队；真正激活时才挂载内嵌 Widget 并打印请求上下文。
 
-内嵌交互结束后默认静默：`InteractionCoordinator` 只移除控件并写入 Widget 返回的非空摘要，是否保留成功或取消历史由各 Widget 显式声明。`ask_user` 专用的 `FormMenu` 取消时保留 `[用户取消了作答]`，普通选择和组合输入取消不留摘要；权限 Esc 作为拒绝结果保留权限确认摘要。`ModelMenu` 成功和取消都不留摘要，`/models` 与其他命令一样保留用户输入，但菜单上文不进入历史；取消后只留下命令，成功后再显示命令最终输出。
+`ModelMenu` 是单屏三轴选择器：两个模型下标分别保存 default 与 fast 槽位选择，另有一个角色级 effort 下标。初始激活 default 槽位；`↑`/`↓` 只移动当前槽位的模型，`←`/`→` 移动共享 effort，`Tab` 在 default/fast 间切换并把光标跳到该槽位已选模型。模型行实时标注 `[default]`、`[fast]` 或两者；`Enter` 一次提交 `default`、`fast`、`reasoning_effort` 三键 JSON，`Esc` 整体取消。角色 effort 可选值为 `low`、`medium`、`high`、`xhigh`、`max`，两个槽位共用。
+
+非 TTY 的 `PlainFrontend.read_model_selection()` 不模拟三轴按键，而是按 `default → fast → reasoning_effort` 三次编号选择串行读取；每一步默认高亮各自当前值，任一步取消则整体取消，三步完成后生成相同三键 JSON。
+
+`/models` 只在可信项目执行，提交后把完整模型 mapping 与角色 effort 一次写入项目层。只改变 fast 时不热切当前主 agent，新建子 agent 和智能权限立即现读新槽位；default 或 effort 变化时调用 `Agent.switch_model()` 原地切换，保留会话历史、Agent 身份和 compact 状态。未信任项目直接拒绝，不写配置、不切换模型。
+
+内嵌交互结束后默认静默：`InteractionCoordinator` 只移除控件并写入 Widget 返回的非空摘要，是否保留成功或取消历史由各 Widget 显式声明。`ModelMenu` 成功和取消都不留控件摘要；`/models` 成功时由命令输出最终应用结果。
 
 转录是只读面板，不占用作答队列。`/agents` 创建带 future 的 `TranscriptView`，Esc 关闭后才完成该 future；Agent 列表实时查看不创建请求 future。Modal 覆盖转录时拥有键盘，结束后转录的 UUID 和每 Agent 独立滚动位置原样恢复。权限、表单和选择期间不能进入 Agent 列表。
 

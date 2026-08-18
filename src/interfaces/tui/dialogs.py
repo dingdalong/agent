@@ -186,25 +186,132 @@ class SelectionDialog(KeyboardDialog):
 
 
 _MODEL_MENU_SELECTION_STYLE = "#76d7c4"
+_MODEL_MENU_SLOTS = ("default", "fast")
 
 
-def _model_menu_models_text(request: ModelMenu, model_index: int) -> Text:
-    text = Text("模型")
-    for index, (_value, label) in enumerate(request.models):
-        selected = index == model_index
+class _ModelMenuState:
+    """模型菜单三轴选择状态：两个槽位各自的模型光标 + 角色级推理强度。"""
+
+    def __init__(self, request: ModelMenu) -> None:
+        """按请求的初始下标建立状态，并把越界下标收敛到合法范围。
+
+        Args:
+            request: 待作答的模型菜单请求。
+
+        Returns:
+            None。
+        """
+        last_model = max(0, len(request.models) - 1)
+        self.request = request
+        self.slot = 0
+        self.model_indexes = [
+            min(max(0, request.default_model_index), last_model),
+            min(max(0, request.fast_model_index), last_model),
+        ]
+        self.effort_index = min(max(0, request.effort_index), max(0, len(request.efforts) - 1))
+
+    @property
+    def model_index(self) -> int:
+        """当前激活槽位的模型光标下标（↑↓ 与滚动都以它为准）。"""
+        return self.model_indexes[self.slot]
+
+    def slot_labels(self, index: int) -> list[str]:
+        """给出当前选择状态下指向该模型行的槽位名列表。
+
+        Args:
+            index: 模型行下标。
+
+        Returns:
+            指向该行的槽位名（如 ["default"]、["default", "fast"]）；无则为空列表。
+        """
+        return [
+            name
+            for slot, name in enumerate(_MODEL_MENU_SLOTS)
+            if self.model_indexes[slot] == index
+        ]
+
+    def move_model(self, delta: int) -> bool:
+        """在当前激活槽位内移动模型光标。
+
+        Args:
+            delta: 位移量（-1 上移、1 下移）。
+
+        Returns:
+            是否发生了可渲染的状态变化。
+        """
+        if not self.request.models:
+            return False
+        self.model_indexes[self.slot] = min(
+            max(0, self.model_index + delta), len(self.request.models) - 1
+        )
+        return True
+
+    def move_effort(self, delta: int) -> bool:
+        """移动角色级推理强度光标（与激活槽位无关）。
+
+        Args:
+            delta: 位移量（-1 左移、1 右移）。
+
+        Returns:
+            是否发生了可渲染的状态变化。
+        """
+        if not self.request.efforts:
+            return False
+        self.effort_index = min(
+            max(0, self.effort_index + delta), len(self.request.efforts) - 1
+        )
+        return True
+
+    def toggle_slot(self) -> bool:
+        """切换激活槽位（default ⇄ fast）；模型光标随之落到该槽位已选模型。
+
+        Returns:
+            恒为 True（切换总需重绘）。
+        """
+        self.slot = (self.slot + 1) % len(_MODEL_MENU_SLOTS)
+        return True
+
+    @property
+    def submittable(self) -> bool:
+        """模型与强度都有可选项时才允许提交。"""
+        return bool(self.request.models and self.request.efforts)
+
+
+def _model_menu_slots_text(state: _ModelMenuState) -> Text:
+    """渲染槽位行，标出当前激活槽位。"""
+    text = Text("槽位")
+    for slot, name in enumerate(_MODEL_MENU_SLOTS):
+        selected = slot == state.slot
         marker = "›" if selected else " "
-        text.append("\n")
+        text.append("  ")
         text.append(
-            f"{marker} {label}",
+            f"{marker} {name}",
             style=_MODEL_MENU_SELECTION_STYLE if selected else None,
         )
     return text
 
 
-def _model_menu_effort_text(request: ModelMenu, effort_index: int) -> Text:
-    text = Text("强度")
-    for index, value in enumerate(request.efforts):
-        selected = index == effort_index
+def _model_menu_models_text(state: _ModelMenuState) -> Text:
+    """渲染模型行：激活槽位光标行反显，各行按当前选择状态标注槽位。"""
+    text = Text("模型")
+    for index, (_value, label) in enumerate(state.request.models):
+        selected = index == state.model_index
+        marker = "›" if selected else " "
+        labels = state.slot_labels(index)
+        suffix = f"  [{', '.join(labels)}]" if labels else ""
+        text.append("\n")
+        text.append(
+            f"{marker} {label}{suffix}",
+            style=_MODEL_MENU_SELECTION_STYLE if selected else None,
+        )
+    return text
+
+
+def _model_menu_effort_text(state: _ModelMenuState) -> Text:
+    """渲染角色级推理强度行。"""
+    text = Text("强度（角色级）")
+    for index, value in enumerate(state.request.efforts):
+        selected = index == state.effort_index
         marker = "›" if selected else " "
         text.append("  ")
         text.append(
@@ -214,24 +321,30 @@ def _model_menu_effort_text(request: ModelMenu, effort_index: int) -> Text:
     return text
 
 
-def _model_menu_payload(request: ModelMenu, model_index: int, effort_index: int) -> str:
+def _model_menu_payload(state: _ModelMenuState) -> str:
+    """把三轴选择编码为 {"default", "fast", "reasoning_effort"} JSON 串。"""
     return json.dumps(
         {
-            "model": request.models[model_index][0],
-            "reasoning_effort": request.efforts[effort_index],
+            "default": state.request.models[state.model_indexes[0]][0],
+            "fast": state.request.models[state.model_indexes[1]][0],
+            "reasoning_effort": state.request.efforts[state.effort_index],
         },
         ensure_ascii=False,
     )
 
 
+_MODEL_MENU_HINT = "↑↓ 模型 · ←→ 强度 · Tab 槽位 · Enter 应用 · Esc 取消"
+
+
 class ModelSelectionDialog(KeyboardDialog):
-    """模型与推理强度双轴选择窗口。"""
+    """模型双槽位与推理强度的单屏三轴选择窗口。"""
 
     BINDINGS = [
         Binding("up", "move_model(-1)", show=False, priority=True),
         Binding("down", "move_model(1)", show=False, priority=True),
         Binding("left", "move_effort(-1)", show=False, priority=True),
         Binding("right", "move_effort(1)", show=False, priority=True),
+        Binding("tab", "toggle_slot", show=False, priority=True),
         Binding("enter", "submit", show=False, priority=True),
         Binding("escape", "cancel", show=False, priority=True),
     ]
@@ -239,38 +352,41 @@ class ModelSelectionDialog(KeyboardDialog):
     def __init__(self, request: ModelMenu) -> None:
         super().__init__()
         self.request = request
-        self.model_index = min(max(0, request.model_index), max(0, len(request.models) - 1))
-        self.effort_index = min(max(0, request.effort_index), max(0, len(request.efforts) - 1))
+        self.state = _ModelMenuState(request)
 
     def compose(self) -> ComposeResult:
         with Vertical(id="dialog-shell", classes="dialog-model-menu"):
-            yield SelectionStatic("选择模型", classes="dialog-title", markup=False)
+            yield SelectionStatic("选择模型与推理强度", classes="dialog-title", markup=False)
             source = _source_label(self.request)
             if source:
                 yield SelectionStatic(f"发起 Agent  {source}", classes="dialog-source", markup=False)
             if self.request.prompt:
                 yield _prompt_widget(self.request)
+            yield SelectionStatic("", id="model-menu-slots", markup=False)
             with VerticalScroll(id="model-menu-scroll"):
                 yield KeyboardNavigation("", id="model-menu-body", markup=False)
             yield SelectionStatic("", id="model-menu-effort", markup=False)
-            yield SelectionStatic("↑↓ 模型 · ←→ 强度 · Enter 应用 · Esc 取消", classes="dialog-hint", markup=False)
+            yield SelectionStatic(_MODEL_MENU_HINT, classes="dialog-hint", markup=False)
 
     def on_mount(self) -> None:
         self._render_menu()
 
     def _render_menu(self) -> None:
+        self.query_one("#model-menu-slots", Static).update(
+            _model_menu_slots_text(self.state)
+        )
         self.query_one("#model-menu-body", KeyboardNavigation).update(
-            _model_menu_models_text(self.request, self.model_index)
+            _model_menu_models_text(self.state)
         )
         self.query_one("#model-menu-effort", Static).update(
-            _model_menu_effort_text(self.request, self.effort_index)
+            _model_menu_effort_text(self.state)
         )
         self.restore_focus()
         self.call_after_refresh(self._scroll_selected_model)
 
     def _scroll_selected_model(self) -> None:
         self.query_one("#model-menu-scroll", VerticalScroll).scroll_to_region(
-            Region(0, self.model_index + 1, 1, 1),
+            Region(0, self.state.model_index + 1, 1, 1),
             animate=False,
             immediate=True,
         )
@@ -279,18 +395,20 @@ class ModelSelectionDialog(KeyboardDialog):
         self.query_one("#model-menu-body", KeyboardNavigation).focus()
 
     def action_move_model(self, delta: int) -> None:
-        if self.request.models:
-            self.model_index = min(max(0, self.model_index + delta), len(self.request.models) - 1)
+        if self.state.move_model(delta):
             self._render_menu()
 
     def action_move_effort(self, delta: int) -> None:
-        if self.request.efforts:
-            self.effort_index = min(max(0, self.effort_index + delta), len(self.request.efforts) - 1)
+        if self.state.move_effort(delta):
+            self._render_menu()
+
+    def action_toggle_slot(self) -> None:
+        if self.state.toggle_slot():
             self._render_menu()
 
     def action_submit(self) -> None:
-        if self.request.models and self.request.efforts:
-            self.dismiss(DialogResult(value=_model_menu_payload(self.request, self.model_index, self.effort_index)))
+        if self.state.submittable:
+            self.dismiss(DialogResult(value=_model_menu_payload(self.state)))
 
     def action_cancel(self) -> None:
         self.dismiss(DialogResult(cancelled=True))
@@ -422,13 +540,18 @@ class InlineSelectionWidget(InlineWidget):
 
 
 class InlineModelSelectionWidget(InlineWidget):
-    """内嵌模型与推理强度双轴选择器。"""
+    """内嵌模型双槽位与推理强度的单屏三轴选择器。
+
+    交互与 `ModelSelectionDialog` 一致（↑↓ 模型 · ←→ 强度 · Tab 槽位），
+    区别是完成时发送 Completed Message 而非 dismiss。
+    """
 
     BINDINGS = [
         Binding("up", "move_model(-1)", show=False, priority=True),
         Binding("down", "move_model(1)", show=False, priority=True),
         Binding("left", "move_effort(-1)", show=False, priority=True),
         Binding("right", "move_effort(1)", show=False, priority=True),
+        Binding("tab", "toggle_slot", show=False, priority=True),
         Binding("enter", "submit", show=False, priority=True),
         Binding("escape", "cancel", show=False, priority=True),
     ]
@@ -436,38 +559,43 @@ class InlineModelSelectionWidget(InlineWidget):
     def __init__(self, request: ModelMenu) -> None:
         super().__init__()
         self.request = request
-        self.model_index = min(max(0, request.model_index), max(0, len(request.models) - 1))
-        self.effort_index = min(max(0, request.effort_index), max(0, len(request.efforts) - 1))
+        self.state = _ModelMenuState(request)
 
     def compose(self) -> ComposeResult:
         with Vertical(id="dialog-shell", classes="dialog-model-menu"):
-            yield SelectionStatic("选择模型", classes="dialog-title", markup=False)
+            yield SelectionStatic("选择模型与推理强度", classes="dialog-title", markup=False)
             source = _source_label(self.request)
             if source:
                 yield SelectionStatic(f"发起 Agent  {source}", classes="dialog-source", markup=False)
             if self.request.prompt:
                 yield _prompt_widget(self.request)
+            yield SelectionStatic("", id="model-menu-slots", markup=False)
             with VerticalScroll(id="model-menu-scroll"):
                 yield KeyboardNavigation("", id="model-menu-body", markup=False)
             yield SelectionStatic("", id="model-menu-effort", markup=False)
-            yield SelectionStatic("↑↓ 模型 · ←→ 强度 · Enter 应用 · Esc 取消", classes="dialog-hint", markup=False)
+            yield SelectionStatic(_MODEL_MENU_HINT, classes="dialog-hint", markup=False)
 
     def on_mount(self) -> None:
         self._render_menu()
 
     def _render_menu(self) -> None:
+        """按当前三轴状态重绘槽位行、模型行与强度行，并把光标行滚入视野。"""
+        self.query_one("#model-menu-slots", Static).update(
+            _model_menu_slots_text(self.state)
+        )
         self.query_one("#model-menu-body", KeyboardNavigation).update(
-            _model_menu_models_text(self.request, self.model_index)
+            _model_menu_models_text(self.state)
         )
         self.query_one("#model-menu-effort", Static).update(
-            _model_menu_effort_text(self.request, self.effort_index)
+            _model_menu_effort_text(self.state)
         )
         self.restore_focus()
         self.call_after_refresh(self._scroll_selected_model)
 
     def _scroll_selected_model(self) -> None:
+        """把激活槽位的光标行滚入模型滚动区（首行是「模型」表头，故偏移 1）。"""
         self.query_one("#model-menu-scroll", VerticalScroll).scroll_to_region(
-            Region(0, self.model_index + 1, 1, 1),
+            Region(0, self.state.model_index + 1, 1, 1),
             animate=False,
             immediate=True,
         )
@@ -476,21 +604,41 @@ class InlineModelSelectionWidget(InlineWidget):
         self.query_one("#model-menu-body", KeyboardNavigation).focus()
 
     def action_move_model(self, delta: int) -> None:
-        if self.request.models:
-            self.model_index = min(max(0, self.model_index + delta), len(self.request.models) - 1)
+        """在当前激活槽位内移动模型光标。
+
+        Args:
+            delta: 位移量（-1 上移、1 下移）。
+
+        Returns:
+            None。
+        """
+        if self.state.move_model(delta):
             self._render_menu()
 
     def action_move_effort(self, delta: int) -> None:
-        if self.request.efforts:
-            self.effort_index = min(max(0, self.effort_index + delta), len(self.request.efforts) - 1)
+        """移动角色级推理强度光标（与激活槽位无关）。
+
+        Args:
+            delta: 位移量（-1 左移、1 右移）。
+
+        Returns:
+            None。
+        """
+        if self.state.move_effort(delta):
+            self._render_menu()
+
+    def action_toggle_slot(self) -> None:
+        """切换激活槽位（default ⇄ fast），光标随之跳到该槽位已选模型。"""
+        if self.state.toggle_slot():
             self._render_menu()
 
     def action_submit(self) -> None:
-        if not self._completed and self.request.models and self.request.efforts:
+        """一次提交三键 payload（default、fast、reasoning_effort）。"""
+        if not self._completed and self.state.submittable:
             self._completed = True
-            self.post_message(self.Completed(DialogResult(
-                value=_model_menu_payload(self.request, self.model_index, self.effort_index)
-            )))
+            self.post_message(
+                self.Completed(DialogResult(value=_model_menu_payload(self.state)))
+            )
 
     def action_cancel(self) -> None:
         if self._completed:

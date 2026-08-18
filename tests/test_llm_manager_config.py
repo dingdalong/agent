@@ -22,11 +22,16 @@ from src.llm.deepseek import DeepSeekProvider
 from src.llm.moonshot import MoonshotProvider
 from src.llm.ollama import OllamaProvider
 from src.llm.openai import OpenAIProvider
-from src.mgr.llm_mgr import LLMMgr, ModelUnavailableError
+from src.mgr.llm_mgr import MODEL_ALIASES, LLMMgr, ModelUnavailableError
 
 
 class ConfigStub:
     """提供点路径读取的最小配置管理器。"""
+
+    # 取真实长度量级的绝对路径：LLMConfigurationError 会把消息限长到 500 字符，
+    # 短路径无法暴露截断风险。
+    global_config_path = Path("/Users/example-user/.agent/config.yaml")
+    project_config_path = Path("/Users/example-user/workspace/example-project/.agent/config.yaml")
 
     def __init__(self, config: dict[str, Any]) -> None:
         """保存测试配置。
@@ -52,6 +57,28 @@ class ConfigStub:
         for part in key.split("."):
             value = value[part]
         return value
+
+    def get_config_parts(self, parts: tuple[str, ...]) -> Any:
+        """按原样路径段返回配置值。"""
+        value: Any = self.config
+        for part in parts:
+            value = value[part]
+        return value
+
+class RoleMgrStub:
+    """提供 LLMMgr 所需的最小激活角色名接口。"""
+
+    def __init__(self, role_name: str | None = "coding") -> None:
+        """保存激活角色名。
+
+        Args:
+            role_name: 激活角色名；None 表示没有角色被激活。
+
+        Returns:
+            None。
+        """
+        self.role_name = role_name
+
 
 
 class DiscoveryError(Exception):
@@ -91,7 +118,6 @@ def _base_config() -> dict[str, Any]:
     """
     return {
         "llm": {
-            "default": "model-a",
             "concurrency": 5,
             "timeout_seconds": 120,
             "retry": {
@@ -107,20 +133,54 @@ def _base_config() -> dict[str, Any]:
                 "base_url": "https://example.test/v1",
             },
         },
+        "role": {
+            "default": "coding",
+            "coding": {
+                "model": {"default": "model-a", "fast": "model-f"},
+            },
+        },
         "tool": {"page_token_rate": 0.03},
     }
 
 
-def _manager(config: dict[str, Any] | None = None) -> LLMMgr:
+def _manager(
+    config: dict[str, Any] | None = None,
+    *,
+    role_name: str | None = "coding",
+) -> LLMMgr:
     """构造不连接网络的 LLM 管理器。
 
     Args:
         config: 可选完整配置；缺省时使用合法默认配置。
+        role_name: 激活角色名，决定读取哪个角色的模型槽位。
 
     Returns:
         已完成配置解析的管理器。
     """
-    return LLMMgr(config_mgr=ConfigStub(config or _base_config()), event_bus=None)
+    return LLMMgr(
+        config_mgr=ConfigStub(config or _base_config()),
+        role_mgr=RoleMgrStub(role_name),
+        event_bus=None,
+    )
+
+
+def _resolving_manager(
+    config: dict[str, Any] | None = None,
+    *,
+    role_name: str | None = "coding",
+) -> LLMMgr:
+    """构造已注册两个槽位模型的 LLM 管理器。
+
+    Args:
+        config: 可选完整配置；缺省时使用合法默认配置。
+        role_name: 激活角色名。
+
+    Returns:
+        default/fast 槽位模型均可用的管理器。
+    """
+    manager = _manager(config, role_name=role_name)
+    manager._model_to_provider.update({"model-a": "stub", "model-f": "stub"})
+    return manager
 
 
 def _set_path(config: dict[str, Any], path: str, value: Any) -> None:
@@ -285,6 +345,22 @@ def test_builtin_config_declares_anthropic_pause_turn_limit() -> None:
     assert config["llm_provider"]["anthropic"]["max_pause_turn_continuations"] == 5
 
 
+def test_builtin_config_omits_provider_reasoning_efforts() -> None:
+    """Provider effort 使用类默认值，不应出现在内置配置中。"""
+    config = yaml.safe_load(Path("src/config.yaml").read_text())
+    provider_configs = config["llm_provider"]
+
+    assert set(provider_configs) == {
+        "anthropic",
+        "deepseek",
+        "moonshot",
+        "ollama",
+        "openai",
+    }
+    for provider_config in provider_configs.values():
+        assert "reasoning_effort" not in provider_config
+
+
 @pytest.mark.parametrize(
     "value",
     [
@@ -428,6 +504,27 @@ def test_provider_creation_receives_validated_runtime_options(monkeypatch: pytes
     assert captured["base_delay_seconds"] == 1.5
     assert captured["max_delay_seconds"] == 22.0
     assert "max_retries" not in captured
+
+
+@pytest.mark.parametrize(
+    "configured_effort", [None, "low", "ultra", True, 1, [], {}],
+)
+def test_provider_creation_does_not_consume_configured_reasoning_effort(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_effort: Any,
+) -> None:
+    """配置中的同名残留键不校验、不传入 Provider 构造器。"""
+    provider_factory = Mock()
+    config = _base_config()
+    if configured_effort is not None:
+        config["llm_provider"]["stub"]["reasoning_effort"] = configured_effort
+    manager = _manager(config)
+    manager._model_to_provider["model-a"] = "stub"
+    monkeypatch.setattr("src.mgr.llm_mgr.get_provider", lambda name: provider_factory)
+
+    manager.get("model-a")
+
+    assert "reasoning_effort" not in provider_factory.call_args.kwargs
 
 
 @pytest.mark.parametrize(
@@ -622,7 +719,10 @@ def test_load_models_uses_fixed_timeout_and_static_fallback_for_failed_provider(
             )
 
     config = _base_config()
-    config["llm"]["default"] = "static-model"
+    config["role"]["coding"]["model"] = {
+        "default": "static-model",
+        "fast": "static-model",
+    }
     config["llm"]["timeout_seconds"] = 33
     config["llm_provider"] = {
         "auth": {
@@ -638,7 +738,7 @@ def test_load_models_uses_fixed_timeout_and_static_fallback_for_failed_provider(
     asyncio.run(manager.load_models())
 
     assert manager.list_models() == ["static-model"]
-    manager.ensure_default_available()
+    manager.ensure_slots_available()
     assert calls["auth"]["timeout"] == 3.0
     assert calls["rate"]["timeout"] == 3.0
     assert manager.provider_errors["auth"].kind is LLMErrorKind.AUTHENTICATION
@@ -653,7 +753,7 @@ def test_unknown_provider_is_configuration_error_even_with_static_default() -> N
         None。
     """
     config = _base_config()
-    config["llm"]["default"] = "typo-model"
+    config["role"]["coding"]["model"]["default"] = "typo-model"
     config["llm_provider"] = {
         "opneai": {
             "base_url": "https://example.test/v1",
@@ -798,7 +898,10 @@ def test_invalid_api_model_list_is_protocol_error_with_static_fallback(
             return api_models
 
     config = _base_config()
-    config["llm"]["default"] = "static-model"
+    config["role"]["coding"]["model"] = {
+        "default": "static-model",
+        "fast": "static-model",
+    }
     config["llm_provider"]["stub"]["models"] = ["static-model"]
     monkeypatch.setattr("src.mgr.llm_mgr.get_provider", lambda name: InvalidProvider)
     manager = _manager(config)
@@ -807,7 +910,7 @@ def test_invalid_api_model_list_is_protocol_error_with_static_fallback(
 
     assert manager.list_models() == ["static-model"]
     assert manager.provider_errors["stub"].kind is LLMErrorKind.RESPONSE_PROTOCOL
-    manager.ensure_default_available()
+    manager.ensure_slots_available()
 
 
 def test_invalid_api_model_list_without_static_models_registers_nothing(
@@ -1047,7 +1150,10 @@ def test_reconfigure_keeps_previous_state_when_discovery_conflicts(
         return ScriptedProvider
 
     config = _base_config()
-    config["llm"]["default"] = "alpha-model"
+    config["role"]["coding"]["model"] = {
+        "default": "alpha-model",
+        "fast": "zeta-model",
+    }
     config["llm_provider"] = {
         name: {"base_url": f"https://{name}.example.test/v1"}
         for name in scripts
@@ -1145,12 +1251,30 @@ def test_reconfigure_replaces_state_and_clears_cache_on_success(
     asyncio.run(manager.load_models())
     manager._cache["model-a"] = object()
     api_models[:] = ["model-b"]
-    _set_path(config, "llm.default", "model-b")
+    _set_path(config, "role.coding.model.default", "model-b")
+    _set_path(config, "role.coding.model.fast", "model-b")
 
     asyncio.run(manager.reconfigure())
 
     assert manager.list_models() == ["model-b"]
     assert manager._cache == {}
+
+
+@pytest.mark.parametrize("role_name", ["review.v2", "研发角色", "r" * 64])
+def test_role_slots_use_exact_dynamic_mapping_key(role_name: str) -> None:
+    """动态角色名必须作为单个 mapping key 读取，不能按点拆分。"""
+    config = _base_config()
+    config["role"] = {
+        "default": role_name,
+        role_name: {
+            "model": {"default": "model-a", "fast": "model-f"},
+        },
+    }
+    manager = _manager(config, role_name=role_name)
+    manager._model_to_provider.update({"model-a": "stub", "model-f": "stub"})
+
+    assert manager.resolve_model("default") == "model-a"
+    assert manager.resolve_model("fast") == "model-f"
 
 
 def test_unknown_discovery_error_logging_never_contains_secret(
@@ -1195,7 +1319,7 @@ def test_unknown_discovery_error_logging_never_contains_secret(
     assert manager.provider_errors["stub"].kind is LLMErrorKind.UNKNOWN
     assert secret not in caplog.text
     with pytest.raises(ModelUnavailableError) as exc_info:
-        manager.ensure_default_available()
+        manager.ensure_slots_available()
     assert secret not in str(exc_info.value)
     assert "opaque failure" not in str(exc_info.value)
 
@@ -1248,7 +1372,7 @@ def test_model_discovery_logging_cannot_break_static_fallback_when_traceback_get
 
     monkeypatch.setattr("src.mgr.llm_mgr.get_provider", lambda name: FailedProvider)
     config = _base_config()
-    config["llm"]["default"] = "static-model"
+    config["role"]["coding"]["model"]["default"] = "static-model"
     config["llm_provider"]["stub"]["models"] = ["static-model"]
     manager = _manager(config)
 
@@ -1330,7 +1454,7 @@ def test_discovery_logs_and_startup_error_redact_generic_credentials(
     with caplog.at_level(logging.WARNING, logger="src.mgr.llm_mgr"):
         asyncio.run(manager.load_models())
     with pytest.raises(ModelUnavailableError) as exc_info:
-        manager.ensure_default_available()
+        manager.ensure_slots_available()
 
     rendered = f"{caplog.text}\n{exc_info.value}"
     assert secret not in rendered
@@ -1381,10 +1505,10 @@ def test_load_models_propagates_control_flow_errors(
     assert exc_info.value is control_error
 
 
-def test_ensure_default_available_requires_exact_model_match(
+def test_ensure_slots_available_requires_exact_model_match(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """默认模型校验不得接受模糊匹配到的其他模型。
+    """槽位模型校验不得接受模糊匹配到的其他模型。
 
     Args:
         monkeypatch: pytest 属性替换工具。
@@ -1412,7 +1536,7 @@ def test_ensure_default_available_requires_exact_model_match(
     asyncio.run(manager.load_models())
 
     with pytest.raises(ModelUnavailableError) as exc_info:
-        manager.ensure_default_available()
+        manager.ensure_slots_available()
 
     assert "model-a" in str(exc_info.value)
     assert "model-a-latest" in str(exc_info.value)
@@ -1459,7 +1583,7 @@ def test_unavailable_default_reports_safe_discovery_reason(
     asyncio.run(manager.load_models())
 
     with pytest.raises(ModelUnavailableError) as exc_info:
-        manager.ensure_default_available()
+        manager.ensure_slots_available()
 
     message = str(exc_info.value)
     assert "authentication" in message
@@ -1558,3 +1682,369 @@ def test_models_by_provider_empty() -> None:
     manager = _manager()
 
     assert manager.models_by_provider() == {}
+
+
+# ── 角色双槽位模型解析 ────────────────────────────────────────────────
+
+
+def test_model_aliases_export_covers_slots_and_claudecode_names() -> None:
+    """导出的别名集合只含两个槽位与三个 Claude Code 名，不得含 best。"""
+    assert set(MODEL_ALIASES) == {"default", "fast", "opus", "sonnet", "haiku"}
+
+
+@pytest.mark.parametrize(
+    ("requested", "expected"),
+    [
+        (None, "model-a"),
+        ("", "model-a"),
+        ("default", "model-a"),
+        ("fast", "model-f"),
+        ("opus", "model-a"),
+        ("sonnet", "model-a"),
+        ("haiku", "model-f"),
+        ("model-a", "model-a"),
+        ("model-f", "model-f"),
+    ],
+)
+def test_resolve_model_maps_aliases_to_role_slots(
+    requested: str | None,
+    expected: str,
+) -> None:
+    """空值、槽位名与 Claude Code 别名都应解析到当前角色的槽位模型。
+
+    Args:
+        requested: 传入 resolve_model 的原始值。
+        expected: 期望解析出的真实模型 ID。
+
+    Returns:
+        None。
+    """
+    manager = _resolving_manager()
+
+    assert manager.resolve_model(requested) == expected
+
+
+def test_resolve_model_falls_back_to_default_role_without_active_role() -> None:
+    """RoleMgr 暂无活动角色名时，槽位解析应回退到 DEFAULT_ROLE。"""
+    manager = _resolving_manager(role_name=None)
+
+    assert manager.resolve_model("default") == "model-a"
+    assert manager.resolve_model("fast") == "model-f"
+
+
+def test_resolve_model_reads_slots_of_active_role_only() -> None:
+    """槽位来源必须是 RoleMgr 给出的激活角色，而非其它角色。
+
+    Returns:
+        None。
+    """
+    config = _base_config()
+    config["role"]["reviewer"] = {
+        "model": {"default": "model-f", "fast": "model-a"},
+    }
+    manager = _resolving_manager(config, role_name="reviewer")
+
+    assert manager.resolve_model("default") == "model-f"
+    assert manager.resolve_model("fast") == "model-a"
+
+
+def test_resolve_model_rereads_slots_on_every_call() -> None:
+    """槽位配置变更后无需 reconfigure 即可实时生效。
+
+    ConfigStub 直接读活字典，等价于 config_mgr.reload() 之后的效果。
+
+    Returns:
+        None。
+    """
+    config = _base_config()
+    manager = _resolving_manager(config)
+    assert manager.resolve_model("fast") == "model-f"
+
+    config["role"]["coding"]["model"]["fast"] = "model-a"
+
+    assert manager.resolve_model("fast") == "model-a"
+
+
+@pytest.mark.parametrize("broken", ["missing", "legacy-scalar"])
+def test_resolve_model_keeps_exact_model_id_when_slots_are_broken(
+    broken: str,
+) -> None:
+    """传入完整模型 ID 时不得触碰槽位配置。
+
+    Args:
+        broken: 槽位配置的破坏方式。
+
+    Returns:
+        None。
+    """
+    config = _base_config()
+    if broken == "missing":
+        del config["role"]["coding"]["model"]
+    else:
+        config["role"]["coding"]["model"] = "claude-opus-5"
+    manager = _resolving_manager(config)
+
+    assert manager.resolve_model("model-a") == "model-a"
+    assert manager.resolve_model("model-f") == "model-f"
+
+
+@pytest.mark.parametrize(
+    "requested",
+    ["best", "inherit", "model-", "model", "unknown-model"],
+)
+def test_resolve_model_rejects_unknown_names_without_fuzzy_or_fallback(
+    requested: str,
+) -> None:
+    """废弃别名、子串与未知模型名都必须报错，不模糊匹配也不回退 default。
+
+    Args:
+        requested: 传入 resolve_model 的非法值。
+
+    Returns:
+        None。
+    """
+    manager = _resolving_manager()
+
+    with pytest.raises(ModelUnavailableError) as exc_info:
+        manager.resolve_model(requested)
+
+    message = str(exc_info.value)
+    assert requested in message
+    assert "model-a" in message
+
+
+@pytest.mark.parametrize(
+    "role_name", ["secret", "token", "password"],
+)
+def test_slot_help_preserves_sensitive_role_name_yaml_key(
+    role_name: str,
+) -> None:
+    """敏感词角色名经错误清洗后仍应保留完整、可解析的 YAML 样例。
+
+    Args:
+        role_name: 会命中凭据清洗关键字的合法角色名。
+    Returns:
+        None。
+    """
+    config = _base_config()
+    config["role"][role_name] = {}
+    manager = _manager(config, role_name=role_name)
+
+    with pytest.raises(LLMConfigurationError) as exc_info:
+        manager.resolve_model("default")
+
+    message = exc_info.value.info.message
+    prefix, separator, remainder = message.partition("YAML 样例：")
+    assert separator, prefix
+    flow_yaml, separator, _suffix = remainder.partition("。")
+    assert separator, remainder
+    parsed = yaml.safe_load(flow_yaml)
+    parsed_key = next(iter(parsed["role"]))
+    print(
+        f"role={role_name!r} yaml={flow_yaml} parsed_key={parsed_key!r} "
+        f"message_length={len(message)}"
+    )
+    assert parsed == {
+        "role": {
+            role_name: {
+                "model": {
+                    "default": "<模型ID>",
+                    "fast": "<模型ID>",
+                }
+            }
+        }
+    }
+    assert f'role["{role_name}"].model.default' in message
+    assert f'role["{role_name}"].model.fast' in message
+    assert "[REDACTED]" not in message
+    assert len(message) < 500
+    assert not message.endswith(("…", "..."))
+
+
+def test_missing_role_model_config_reports_actionable_error() -> None:
+    """角色模型配置缺失时应给出完整键名、YAML 样例与配置文件路径。
+
+    Returns:
+        None。
+    """
+    config = _base_config()
+    del config["role"]["coding"]["model"]
+    manager = _manager(config)
+    manager._model_to_provider.update({"model-a": "stub", "model-f": "stub"})
+    manager._model_discovery_completed = True
+
+    with pytest.raises(LLMConfigurationError) as exc_info:
+        manager.resolve_model("default")
+
+    message = exc_info.value.info.message
+    assert 'role["coding"].model.default' in message
+    assert 'role["coding"].model.fast' in message
+    assert str(ConfigStub.global_config_path) in message
+    assert str(ConfigStub.project_config_path) in message
+    assert "未信任" in message
+    assert "当前可用模型：共2个" in message
+    assert "model-a" in message
+    assert "model-f" in message
+    assert "api_key" not in message
+
+
+def test_legacy_scalar_role_model_reports_migration() -> None:
+    """旧标量格式必须报错并指出废弃与迁移写法。
+
+    Returns:
+        None。
+    """
+    config = _base_config()
+    config["role"]["coding"]["model"] = "claude-opus-5"
+    manager = _manager(config)
+
+    with pytest.raises(LLMConfigurationError) as exc_info:
+        manager.resolve_model("fast")
+
+    message = exc_info.value.info.message
+    assert "废弃" in message
+    assert 'role["coding"].model.fast' in message
+    assert "default:" in message and "fast:" in message
+
+
+def test_role_model_must_be_mapping() -> None:
+    """角色模型配置为非 mapping 非 str 时应报错。
+
+    Returns:
+        None。
+    """
+    config = _base_config()
+    config["role"]["coding"]["model"] = ["model-a", "model-f"]
+    manager = _manager(config)
+
+    with pytest.raises(LLMConfigurationError) as exc_info:
+        manager.resolve_model("default")
+
+    assert 'role["coding"].model' in exc_info.value.info.message
+
+
+@pytest.mark.parametrize("missing_slot", ["default", "fast"])
+def test_missing_single_slot_names_that_slot(missing_slot: str) -> None:
+    """只配置一个槽位时错误消息必须点名缺失的那个槽位。
+
+    Args:
+        missing_slot: 被删除的槽位名。
+
+    Returns:
+        None。
+    """
+    config = _base_config()
+    del config["role"]["coding"]["model"][missing_slot]
+    manager = _manager(config)
+
+    with pytest.raises(LLMConfigurationError) as exc_info:
+        manager.resolve_model("default")
+
+    assert f'role["coding"].model.{missing_slot} 未配置' in exc_info.value.info.message
+
+
+@pytest.mark.parametrize("value", ["", "   ", 1, 1.5, True, False, None, ["model-a"]])
+def test_slot_value_must_be_non_empty_string(value: Any) -> None:
+    """槽位值必须是非空且非 bool 的字符串。
+
+    Args:
+        value: 待校验的非法槽位值。
+
+    Returns:
+        None。
+    """
+    config = _base_config()
+    config["role"]["coding"]["model"]["fast"] = value
+    manager = _manager(config)
+
+    with pytest.raises(LLMConfigurationError) as exc_info:
+        manager.resolve_model("fast")
+
+    assert 'role["coding"].model.fast' in exc_info.value.info.message
+
+
+def test_ensure_slots_available_rejects_unavailable_fast_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """fast 槽位模型未被发现时应报错并列出可用模型。
+
+    Args:
+        monkeypatch: pytest 属性替换工具。
+
+    Returns:
+        None。
+    """
+    class DefaultOnlyProvider:
+        """只返回 default 槽位模型的 provider。"""
+
+        @classmethod
+        async def list_models(cls, **kwargs: Any) -> list[str]:
+            """返回仅含 default 槽位模型的列表。
+
+            Args:
+                kwargs: 模型发现参数。
+
+            Returns:
+                只含 default 槽位模型的列表。
+            """
+            return ["model-a"]
+
+    monkeypatch.setattr("src.mgr.llm_mgr.get_provider", lambda name: DefaultOnlyProvider)
+    manager = _manager()
+    asyncio.run(manager.load_models())
+
+    with pytest.raises(ModelUnavailableError) as exc_info:
+        manager.ensure_slots_available()
+
+    message = str(exc_info.value)
+    assert "model-f" in message
+    assert "model-a" in message
+    assert 'role["coding"].model.fast' in message
+
+
+def test_ensure_slots_available_passes_when_both_slots_registered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """两个槽位模型都已发现时校验必须通过。
+
+    Args:
+        monkeypatch: pytest 属性替换工具。
+
+    Returns:
+        None。
+    """
+    class BothSlotsProvider:
+        """返回两个槽位模型的 provider。"""
+
+        @classmethod
+        async def list_models(cls, **kwargs: Any) -> list[str]:
+            """返回两个槽位模型。
+
+            Args:
+                kwargs: 模型发现参数。
+
+            Returns:
+                含 default 与 fast 槽位模型的列表。
+            """
+            return ["model-a", "model-f"]
+
+    monkeypatch.setattr("src.mgr.llm_mgr.get_provider", lambda name: BothSlotsProvider)
+    manager = _manager()
+    asyncio.run(manager.load_models())
+
+    manager.ensure_slots_available()
+
+
+def test_builtin_config_has_no_global_model_aliases_or_role_fallback() -> None:
+    """内置配置不得再声明全局模型别名或角色模型兜底值。
+
+    Returns:
+        None。
+    """
+    config = yaml.safe_load(Path("src/config.yaml").read_text())
+
+    assert "default" not in config["llm"]
+    assert "best" not in config["llm"]
+    assert "fast" not in config["llm"]
+    assert config["role"]["default"] == "coding"
+    assert "model" not in config["role"]["coding"]

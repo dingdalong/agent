@@ -2,10 +2,14 @@
 
 状态机（Esc 逐级后退，Ctrl+C 任意态取消退出）::
 
-    provider -> credentials -> verifying -> model -> exit
+    provider -> credentials -> verifying -> model_default -> model_fast -> exit
 
-Esc 在 provider 态无操作；credentials 回 Provider 列表；verifying 取消验证、
-model 回凭据页。
+Esc 在 provider 态无操作；credentials 回 Provider 列表；verifying 取消验证回凭据页；
+model_default 回凭据页；model_fast 回 model_default（保留其所选高亮）。
+
+model_default 与 model_fast 共用 verify 返回的同一份模型列表与 #model-list 控件，
+只切换标题与高亮下标，不重新拉取模型；进入 model_fast 时默认高亮 model_default
+所选下标，直接回车即两个槽位用同一模型。
 
 credentials 态下 URL/Key 输入框用 Up/Down 纵向移动焦点（URL Up 回 Provider
 列表，Key Down 停留原地）；回列表后 Up/Down 恢复为切换高亮，Enter 重新选择。
@@ -32,6 +36,12 @@ from src.interfaces.tui.widgets import KeyboardOptionList, SelectionStatic
 from src.llm.errors import classify_llm_error
 
 _VERIFYING_TEXT = "正在验证…"
+
+# 两个模型槽位屏的标题，说明各槽位的实际用途。
+_MODEL_TITLES = {
+    "model_default": "选择默认模型（default 槽位：主 Agent 与大部分子 agent）",
+    "model_fast": "选择快速模型（fast 槽位：轻量子 agent 与智能权限裁决）",
+}
 
 
 class SetupInput(Input):
@@ -122,6 +132,8 @@ class SetupApp(App[SetupResult | None], inherit_bindings=False):
         self._url = ""
         self._api_key: str | None = None
         self._models: list[str] = []
+        self._default_index = 0
+        self._default_model = ""
         self._verify_task: asyncio.Task[tuple[list[str], str]] | None = None
 
     def compose(self) -> ComposeResult:
@@ -138,7 +150,9 @@ class SetupApp(App[SetupResult | None], inherit_bindings=False):
             yield SetupInput("", id="key-input", placeholder="输入 API Key", password=True)
             yield SelectionStatic("", id="setup-error", markup=False)
         with Vertical(id="model-panel"):
-            yield SelectionStatic("选择默认模型", id="model-title", markup=False)
+            yield SelectionStatic(
+                _MODEL_TITLES["model_default"], id="model-title", markup=False
+            )
             yield KeyboardOptionList(id="model-list", markup=False)
 
     def on_mount(self) -> None:
@@ -156,7 +170,10 @@ class SetupApp(App[SetupResult | None], inherit_bindings=False):
             "credentials",
         ):
             self._choose_provider(event.option_index)
-        elif event.option_list.id == "model-list" and self._state == "model":
+        elif event.option_list.id == "model-list" and self._state in (
+            "model_default",
+            "model_fast",
+        ):
             self._choose_model(event.option_index)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
@@ -248,38 +265,68 @@ class SetupApp(App[SetupResult | None], inherit_bindings=False):
             self.query_one("#url-input", Input).focus()
             return
         self._models = models
-        self._state = "model"
         self.query_one("#provider-panel", Vertical).display = False
         model_list = self.query_one("#model-list", KeyboardOptionList)
         model_list.clear_options()
         for model in models:
             model_list.add_option(Option(model))
-        model_list.highlighted = 0
         self.query_one("#model-panel", Vertical).display = True
-        model_list.focus()
+        # 两个槽位共用这份列表：model_fast 屏只换标题与高亮，不再重新拉取模型。
+        self._enter_model_slot("model_default", 0)
 
     def _choose_model(self, index: int) -> None:
+        """按当前槽位屏处理模型选择。
+
+        model_default 屏记录默认槽位所选并前进到 model_fast 屏；model_fast 屏
+        携两个槽位模型退出。
+
+        Args:
+            index: 模型列表中被选中项的下标。
+        """
+        if self._state == "model_default":
+            self._default_index = index
+            self._default_model = self._models[index]
+            self._enter_model_slot("model_fast", index)
+            return
         self._state = "exit"
         self.exit(SetupResult(
             provider=self._options[self._provider_index].name,
             base_url=self._url,
             api_key=self._api_key,
-            default_model=self._models[index],
+            default_model=self._default_model,
+            fast_model=self._models[index],
         ))
 
+    def _enter_model_slot(self, state: str, highlighted: int) -> None:
+        """切到指定模型槽位屏：只换标题与高亮下标，复用同一份模型列表控件。
+
+        Args:
+            state: 目标状态，``"model_default"`` 或 ``"model_fast"``。
+            highlighted: 进入该屏时默认高亮的模型下标。
+        """
+        self._state = state
+        self.query_one("#model-title", SelectionStatic).update(_MODEL_TITLES[state])
+        model_list = self.query_one("#model-list", KeyboardOptionList)
+        model_list.highlighted = highlighted
+        model_list.focus()
+
     def action_back(self) -> None:
-        """Esc：按当前状态返回 Provider 列表或凭据页。"""
+        """Esc：逐级后退 model_fast → model_default → credentials → provider。"""
         if self._state == "provider":
+            return
+        if self._state == "model_fast":
+            # 回到 default 槽位屏并恢复其所选高亮，模型列表与凭据均不重置。
+            self._enter_model_slot("model_default", self._default_index)
             return
         if self._verify_task is not None:
             self._verify_task.cancel()
             self._verify_task = None
-        if self._state == "model":
+        if self._state == "model_default":
             self.query_one("#model-panel", Vertical).display = False
             self.query_one("#provider-panel", Vertical).display = True
         self._set_inputs_enabled(True)
         self._set_feedback("")
-        back = self._state in ("verifying", "model")
+        back = self._state in ("verifying", "model_default")
         self._state = "credentials" if back else "provider"
         self.query_one("#url-input" if back else "#provider-list").focus()
 

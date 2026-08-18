@@ -77,7 +77,7 @@ def test_model_role_overrides_are_written_together(tmp_path: Path) -> None:
 
     manager.set_configs(
         {
-            "role.coding.model": "new-model",
+            "role.coding.model": {"default": "new-model", "fast": "fast-model"},
             "role.coding.reasoning_effort": "xhigh",
         },
         "project",
@@ -86,8 +86,38 @@ def test_model_role_overrides_are_written_together(tmp_path: Path) -> None:
     assert yaml.safe_load(manager.project_config_path.read_text()) == {
         "role": {
             "coding": {
-                "model": "new-model",
+                "model": {"default": "new-model", "fast": "fast-model"},
                 "reasoning_effort": "xhigh",
+            }
+        }
+    }
+
+
+def test_model_slots_mapping_overwrites_legacy_scalar_model(tmp_path: Path) -> None:
+    """项目层残留旧标量 model 时，整体写父键 mapping 应成功抹平旧格式。"""
+    manager = ConfigManager(
+        global_dir=tmp_path / "global",
+        workdir=tmp_path / "work",
+        project_trusted=True,
+    )
+    manager.project_config_path.parent.mkdir(parents=True)
+    manager.project_config_path.write_text(
+        "role:\n  coding:\n    model: old-model\n    reasoning_effort: high\n"
+    )
+
+    manager.set_configs(
+        {
+            "role.coding.model": {"default": "new-model", "fast": "fast-model"},
+            "role.coding.reasoning_effort": "max",
+        },
+        "project",
+    )
+
+    assert yaml.safe_load(manager.project_config_path.read_text()) == {
+        "role": {
+            "coding": {
+                "model": {"default": "new-model", "fast": "fast-model"},
+                "reasoning_effort": "max",
             }
         }
     }

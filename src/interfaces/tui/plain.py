@@ -161,22 +161,43 @@ class PlainFrontend:
         prompt: str,
         models: list[tuple[str, str]],
         efforts: list[str],
-        model_index: int,
+        default_model_index: int,
+        fast_model_index: int,
         effort_index: int,
     ) -> str:
+        """以三次串行编号输入读取两个模型槽位与推理强度。
+
+        Args:
+            prompt: 菜单上文提示。
+            models: 可选模型列表，每项为 (模型ID, 展示标签)。
+            efforts: 可选推理强度列表（角色级单值，两槽位共用）。
+            default_model_index: default 槽位的初始选中下标。
+            fast_model_index: fast 槽位的初始选中下标。
+            effort_index: 推理强度的初始选中下标。
+
+        Returns:
+            JSON 编码的 {"default": ..., "fast": ..., "reasoning_effort": ...} 串；
+            任一步取消即整体返回空串。
+        """
         if prompt:
             self.write(prompt + "\n")
-        model = await self.read_choice("模型", models, model_index)
-        if not model:
+        default_model = await self.read_choice("设置 default 槽位模型", models, default_model_index)
+        if not default_model:
+            return ""
+        fast_model = await self.read_choice("设置 fast 槽位模型", models, fast_model_index)
+        if not fast_model:
             return ""
         effort = await self.read_choice(
-            "推理强度",
+            "设置推理强度（角色级，两槽位共用）",
             [(value, value) for value in efforts],
             effort_index,
         )
         if not effort:
             return ""
-        return json.dumps({"model": model, "reasoning_effort": effort}, ensure_ascii=False)
+        return json.dumps(
+            {"default": default_model, "fast": fast_model, "reasoning_effort": effort},
+            ensure_ascii=False,
+        )
 
     async def read_choice_input(
         self,

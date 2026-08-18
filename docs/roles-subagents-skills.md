@@ -1,6 +1,6 @@
 # 角色、子智能体与技能
 
-本篇讲清框架的三个"可扩展装配单位"：**角色**（顶层组织单位）、**子智能体**（可被主 agent 委派的完整 Agent）、**技能**（按需注入的提示词包）。三者都以 `*.md`（YAML frontmatter + body）定义，共用同一套 frontmatter 解析（`parse_frontmatter` / `extract_manifest`，`src/mgr/role_mgr.py:34-147`）。
+本篇讲清框架的三个"可扩展装配单位"：**角色**（顶层组织单位）、**子智能体**（可被主 agent 委派的完整 Agent）、**技能**（按需注入的提示词包）。三者都以 `*.md`（YAML frontmatter + body）定义，共用 `src/mgr/role_mgr.py` 的 `parse_frontmatter()` / `extract_manifest()` 解析。
 
 相关：feature 门控见 [architecture.md](architecture.md)；统一授权和 Plan 见 [permissions.md](permissions.md)；提示词拼装见 [managers.md](managers.md) 的 `PromptMgr`。
 
@@ -10,64 +10,55 @@
 
 ### 三层发现与激活
 
-`RoleMgr._discover()`（`role_mgr.py:195-216`）按低→高优先级扫描三处目录，同名后者覆盖：
+`RoleMgr` 按低→高优先级扫描内置 `src/roles/`、全局 `~/.agent/roles/`、可信项目 `<workdir>/.agent/roles/`，同名后者覆盖。目录必须含 `role.md`；目录名作为配置 mapping key 原样使用，允许 Unicode、点号和长名称。`common` 与 `default` 是保留名，不可激活；`src/roles/common/` 是共享资源层，不是角色。
 
-| 层 | 路径 | 说明 |
-|---|---|---|
-| 内置 | `src/roles/`（`builtin_root()/roles`） | 框架自带角色 |
-| 全局 | `~/.agent/roles/`（`global_dir/roles`，可缺省） | 跨项目自定义 |
-| 项目 | `<workdir>/.agent/roles/` | 项目专属 |
-
-发现规则：每个子目录须含 `role.md` 才算一个角色；目录名 `common` **显式跳过**（`role_mgr.py:211`，它是共享目录不是角色）。
-
-激活角色由 `config.yaml` 的 `role.default` 指定（`_resolve()`）：缺省或空值回退 `_DEFAULT_ROLE = "coding"`；指定角色不存在时告警并回退 `coding`；连 `coding` 都不存在则无角色激活（`active == False`）。`role` 必须是 mapping，旧标量格式不会被解析为激活角色。
-
-主角色还可在同一段配置中覆盖 `role.md` 的模型和推理力度，例如为自定义 `reviewer` 角色配置：
+激活角色由 `config.yaml` 的 `role.default` 指定：缺省、非字符串或空值回退 `coding`；指定角色未发现时也告警并回退 `coding`；连 `coding` 都不存在时无角色激活。模型按角色配置为两个必填槽位：
 
 ```yaml
 role:
   default: reviewer
   reviewer:
-    model: best
+    model:
+      default: claude-opus-5
+      fast: deepseek-v4-flash
     reasoning_effort: xhigh
 ```
 
-`RoleMgr` 先解析实际激活角色的 `role.md`，再应用 `role.<实际角色名>.model` 与 `role.<实际角色名>.reasoning_effort`。模型只接受非空字符串；推理力度只接受 `low`、`medium`、`high`、`xhigh` 或 `max`，并按 `normalize_reasoning_effort` 规整。缺失或无效覆盖保留 `role.md` 的值；模型仍缺失时由 `llm.default` 兜底，推理力度仍缺失时由当前 provider 兜底。角色不存在而回退到 `coding` 时，应用的是 `role.coding` 的覆盖。该配置只影响主角色，不改变子 agent 的模型继承规则。
+每个可能被激活的角色都必须在全局或可信项目配置中同时提供 `role.<角色>.model.default` 与 `.fast`，内置 `src/config.yaml` 不提供模型兜底。主 agent 恒用 default 槽位；`reasoning_effort` 是角色级单值，两个槽位共用。角色配置中的合法 effort 覆盖 `role.md`；缺键或 `null` 保留 manifest 值，非法值告警并忽略，最终都未声明时使用 Provider 类默认值 `max`。
 
 ### `role.md` 的结构与作用
 
-`role.md` 经 `extract_manifest(..., id_field="agent_type", default_id="main")` 解析为 `AgentManifest`（`role_mgr.py:150-168`）：
+`role.md` 经 `parse_frontmatter()` 与 `extract_manifest()` 解析为 `AgentManifest`：
 
-- **body** → 成为主 agent 的**核心身份与主控职责提示词**（`PromptMgr._build_core` 的"# 核心身份"段）；仅主 agent 的身份、委派职责与工作流写在这里，不放入共享准则文件。
-- **frontmatter**：`agent_type` 对角色固定视为 `"main"`；`description`、`features`、`thinking`、`reasoning_effort`、`model`、`startInPlanMode` 等字段同子 Agent。`startInPlanMode` 只设置初始 `plan_active`，授权策略仍由工具策略和统一授权入口决定。
+- **body**：成为主 agent 的核心身份与主控职责提示词；仅主 agent 的身份、委派职责与工作流写在这里。
+- **frontmatter**：可声明 `description`、`features`、`thinking`、`reasoning_effort`、`memory`、`tools`、`startInPlanMode` 等；`agent_type` 固定视为 `main`。
+- **禁止 `model`**：主 agent 恒用角色的 default 槽位。frontmatter 只要出现 `model` 键，`RoleMgr` 就抛 `LLMConfigurationError`，错误包含 `role.md` 路径和应使用的两个配置键。
 
 角色目录内其他资产由 `RoleMgr` 暴露路径（仅在目录/文件存在时返回，否则 `None`）：
 
 | 方法 | 资产 | 用途 |
 |---|---|---|
-| `agent_md_path()` | `AGENTS.md` | 激活角色内主/子 agent 共用的行为准则 → "# 行为准则"段 |
+| `agent_md_path()` | `AGENTS.md` | 激活角色内主/子 agent 共用的行为准则 |
 | `agents_dir()` | `agents/*.md` | 角色专属子 agent |
 | `skills_dir()` | `skills/*/SKILL.md` | 角色专属技能 |
 | `plugins_dir()` | `plugins/` | 角色专属插件 |
-| `mcp_servers_path()` | `mcp_servers.json` | 角色专属 MCP server（见 [mcp-and-hooks.md](mcp-and-hooks.md)） |
+| `mcp_servers_path()` | `mcp_servers.json` | 角色专属 MCP server |
 
 ### `common/` 共享目录
 
-`src/roles/common/` 不是角色，而是**对所有角色生效的最低优先级共享层**（`RoleMgr` 的 `common_*` 系列方法，`role_mgr.py:337-355`，基于 `common_role_dir()`）。其 `agents/`、`skills/`、`AGENTS.md` 会被叠加到任意激活角色之下（后续层同名覆盖）。当前 `common/agents/` 提供四个通用子 agent：`explore`、`general-purpose`、`plan`、`shell`。
+`src/roles/common/` 对所有角色生效，作为最低优先级共享层叠加其 `agents/`、`skills/`、`AGENTS.md`。后续角色、全局和项目层可覆盖同名子 agent 或技能。
 
 ### 内置角色一览
 
-| 角色 | `model` | `startInPlanMode` | `thinking` / `reasoning_effort` | `memory` | `features` | 子 agent（`agents/`） | 说明 |
-|---|---|---|---|---|---|---|---|
-| `coding` | `best` | `true` | `true` / `max` | `project` | 未声明（全部启用） | coder、debug、doc、review | 通用编程助手（默认角色） |
-| `mijia` | `fast` | `false` | `false` / 未声明 | 未声明 | `[subagent]` | device-control、home-diagnostics、home-status、scene-automation | 米家智能家居管家 |
-| `onboard` | `best` | `false` | `true` / `high` | 未声明 | `[subagent, file, task]` | repository-map、module-analyst、cross-module、dimension-classifier、verifier、manual-writer、manual-reviewer | 证据驱动的项目开发手册分析与发布角色 |
+| 角色 | `startInPlanMode` | `thinking` / `reasoning_effort` | `memory` | `features` | 子 agent（`agents/`） | 说明 |
+|---|---|---|---|---|---|---|
+| `coding` | `true` | `true` / `max` | `project` | 未声明（全部启用） | coder、debug、doc、explore、plan、review、shell | 通用编程助手（默认角色） |
+| `mijia` | `false` | `false` / 未声明 | 未声明 | `[subagent]` | device-control、home-diagnostics、home-status、scene-automation | 米家智能家居管家 |
+| `onboard` | `false` | `true` / `high` | 未声明 | `[subagent, file, task]` | repository-map、module-analyst、cross-module、dimension-classifier、verifier、manual-writer、manual-reviewer | 证据驱动的项目开发手册分析与发布角色 |
 
-> `coding` 与 `mijia` 都刻意省略 `tools`。`extract_manifest` 将缺失或空值解析为 `None`，即不设静态工具白名单，因此动态注册的 MCP 工具不会受静态白名单限制（仍受 feature 与权限过滤）。`coding` 也刻意省略 `features`；其 `None` 经 `resolve_features()` 解析为全部 feature。`onboard` 则声明固定工具白名单和 `[subagent, file, task]` feature 集，以限制其只执行证据流水线。
+`model` 不属于角色定义，因此不列入上表；每个角色实际使用的 default/fast 模型来自运行配置。`coding` 与 `mijia` 省略 `tools`，即不设静态工具白名单；`coding` 也省略 `features`，经 `resolve_features()` 解析为全部 feature。`onboard` 声明固定工具白名单和 `[subagent, file, task]`，限制其只执行证据流水线。
 
-> 插件目前仅提供 skill 和 hook，不注册工具。`PluginMgr` 的发现和插件 hook 不受角色 feature 集限制；但插件 skill 需要 `skill` feature，因此 `mijia` 的 `features: [subagent]` 下不可用。
-
-> `mijia` 声明 `features: [subagent]`，故 `task`/`skill`/`file`/`memory`/`plan` 均关闭——`MemoryMgr` 与 `PlanMgr` 在 `create_app()` 中注入 `None`；`file` feature 未启用时，不会为该 agent 创建 `FileMgr`，对应工具不会进入 schema。
+插件目前仅提供 skill 和 hook，不注册工具。插件发现与插件 hook 不受角色 feature 集限制；插件 skill 仍要求 `skill` feature。`mijia` 只启用 `subagent`，因此 `task`、`skill`、`file`、`memory`、`plan` 均关闭。
 
 ### onboard 证据流水线
 
@@ -99,7 +90,7 @@ onboard 的续跑只适用于同一未发布运行：`cross_module`、四个维�
 
 ### 四层扫描
 
-`SubAgentMgr._load_all()`（`subagent_mgr.py:36-67`）按低→高优先级扫描，同名 `agent_type` 后者覆盖：
+`SubAgentMgr._load_all()` 按低→高优先级扫描，同名 `agent_type` 后者覆盖：
 
 | 层 | 来源 | 路径 |
 |---|---|---|
@@ -113,33 +104,30 @@ onboard 的续跑只适用于同一未发布运行：`cross_module`、四个维�
 | 字段 | 类型 | 缺省 | 效果 |
 |---|---|---|---|
 | `agent_type` | str | 文件名 `path.stem` | 子 agent 标识（委派时用）；也是 `Agent.agent_type` |
-| `description` | str | `"没有说明内容"` | 出现在主 agent 的"# 可用子智能体"提示词段，供 LLM 选择 |
+| `description` | str | `"没有说明内容"` | 出现在主 agent 的可用子智能体提示词段 |
 | `tools` | 逗号分隔 str | 空 → `None`（全部工具） | 工具白名单；再经 `resolve_subagent_tools` 注入 `subagent=True`、排除 `subagent=False` |
-| `model` | str | `None`（用 `default`） | 模型别名（`default`/`best`/`fast`）或真实 ID；`inherit` = 继承父 agent 已解析的真实模型 ID |
+| `model` | str | `None`（解析角色 default 槽位） | 只允许 `default`、`fast`、`opus`、`sonnet`、`haiku` 或已加载的完整模型 ID |
 | `startInPlanMode` | bool | `False` | 独立构造时的初始 Plan 状态；经 `task_delegator` 构造时由父 Agent 当前状态覆盖 |
 | `thinking` | bool | `None`（继承父 agent） | 是否启用思考；仅 bool 有效 |
-| `reasoning_effort` | str | `None`（继承父 agent，主 agent 回退 provider 配置） | 推理力度档位；经 `normalize_reasoning_effort` 规整（小写去空白），合法值 `low`/`medium`/`high`/`xhigh`/`max`，非法值告警忽略 |
+| `reasoning_effort` | str | `None`（继承父 agent 已解析值） | 合法值 `low`/`medium`/`high`/`xhigh`/`max`；字符串会去空白并转小写，非法值告警后视为未声明 |
 | `memory` | str | `None` | 记忆范围（如 `project`），控制 `MemoryMgr` 注入 |
 | `features` | YAML 列表 | `None`（继承父 agent 已解析集） | 该子 agent 的 feature 集；空列表 = 全部禁用 |
 
-解析规则细节见 `extract_manifest`（`role_mgr.py:50-147`）：`tools` 为空串则整体工具可见；`model` 空串视为未设置；`features` 非列表会告警丢弃。
+模型别名固定映射为 `opus`/`sonnet` → `default`，`haiku` → `fast`。`SubAgentMgr` 加载每份 manifest 时会把别名与 `LLMMgr.list_models()` 返回的完整 ID 集合校验；非法值抛 `LLMConfigurationError` 并在消息中包含定义文件路径、合法域和当前可用模型。字段缺失、`null`、空字符串或纯空白均视为未设置，委派时由 `LLMMgr.get(None)` 解析到 default 槽位；其他非字符串类型直接报错。
 
 ### 委派流程 `task_delegator`
 
-`SubAgentMgr.task_delegator(agent_type, prompt, parent_agent, task_id)`（`subagent_mgr.py:84-211`）：
-
 1. 查表定位 `manifest`，不存在则返回错误文本（含可用列表）。
-2. 若带 `task_id`：委派前把任务标记 `in_progress` 并设 `owner`；子 agent 异常退出时回滚为 `pending`（正常返回**不**自动标 `completed`，留给主 agent 评估）。
+2. 若带 `task_id`：委派前把任务标记 `in_progress` 并设 `owner`；子 agent 异常退出或返回 LLM 错误时回滚为 `pending`，正常返回不自动标 `completed`。
 3. 解析工具集：`tools_mgr.resolve_subagent_tools(manifest.tools)`。
-4. 解析模型：`inherit` → `parent_agent.llm.model`。
-5. 解析思考：`enable_thinking is None` → 继承父 agent。
-6. 解析推理力度：`reasoning_effort is None` → 继承父 agent 已解析值。
-7. 解析 feature：`features is None` → 继承父 agent 已解析集。
-8. 继承 `parent_agent.plan_active`，再由 `Agent.from_manifest(...)` 构造子 agent 实例（`is_subagent=True`）。
-9. 触发 `SubagentStart` hook（若有）→ 发 `SubagentLifecycle(phase="start")` 事件 → `await agent.run(prompt)` → `finally` 发 `phase="end"` 事件 → 触发 `SubagentStop` hook。
-10. `SubagentStop` 若 `blocked` 则用 `block_reason` 覆盖结果；若有 `additional_context` 则追加到结果末尾。
+4. 模型直接传 `manifest.model`；`None` 由 `LLMMgr` 解析 default，合法别名解析对应槽位，完整模型 ID 精确使用。
+5. `thinking` 未声明时继承父 agent。
+6. `reasoning_effort` 自身合法声明优先；否则依次继承 `parent_agent.reasoning_effort`、父 agent Provider 的 `reasoning_effort`。继承的是父 agent 已解析的有效值，与子 agent 选择 default 还是 fast 槽位无关。
+7. `features` 未声明时继承父 agent 已解析集；同时继承父 agent 当前 `plan_active`。
+8. 用 `Agent.from_manifest(is_subagent=True, ...)` 构造完整子 agent，触发 start hook/事件，运行后在 `finally` 发 end 事件，再触发 stop hook。
 
 > Plan 工作流工具标记 `subagent=False`，不会进入子 Agent schema；但子 Agent 继承父 Agent 当前 `plan_active`，因此授权层的 Plan 限制仍然生效。
+
 
 ### 子智能体清单（当前仓库）
 
@@ -149,17 +137,17 @@ onboard 的续跑只适用于同一未发布运行：`cross_module`、四个维�
 |---|---|---|---|
 | `explore` | 只读检索 + `web_search`/`web_fetch` | `default` | 只读探索代码/架构、联网研究并总结证据 |
 | `general-purpose` | 全部（未声明） | `default` | 无专用 agent 匹配时的兜底任务执行 |
-| `plan` | 只读检索（无写） | `best` | 架构设计与实现方案规划 |
+| `plan` | 只读检索（无写） | `default` | 架构设计与实现方案规划 |
 | `shell` | `shell` | `fast` | 独立上下文运行命令 / Git 查询 / 测试执行 |
 
 **coding 角色**
 
 | agent_type | tools | model | 用途 |
 |---|---|---|---|
-| `coder` | 只读检索 + 写文件三件套 + `shell` | `best` | 实现功能 / 修 bug / 重构 / 写测试 |
-| `debug` | 只读检索 + `shell` | `best` | 复现问题、定位根因、给诊断报告 |
+| `coder` | 只读检索 + 写文件三件套 + `shell` | `default` | 实现功能 / 修 bug / 重构 / 写测试 |
+| `debug` | 只读检索 + `shell` | `default` | 复现问题、定位根因、给诊断报告 |
 | `doc` | 只读检索 + 写文件三件套 | `default` | 编写/维护文档 |
-| `review` | 只读检索（无写） | `best` | 只读代码审查 |
+| `review` | 只读检索（无写） | `default` | 只读代码审查 |
 
 **mijia 角色**
 
@@ -176,13 +164,13 @@ onboard 的续跑只适用于同一未发布运行：`cross_module`、四个维�
 
 | agent_type | tools | model | 用途 |
 |---|---|---|---|
-| `repository-map` | 文件检索/报告写入 + `shell` + codebase-memory 索引/架构工具 | `best` | 建立索引、模块地图、生成物边界与分片计划 |
-| `module-analyst` | 文件检索/卡写入 + codebase-memory 查询工具 | `best` | MAP：只读单分片源码+代码图，产出四维度证据卡 |
-| `cross-module` | 文件检索/账本写入 + codebase-memory 查询/调用图工具 | `best` | 跨模块消解，产出事实账本 |
-| `dimension-classifier` | 文件检索/报告写入 + `shell` + codebase-memory 查询/调用图工具 | `best` | REDUCE：按指派维度归类证据 |
-| `verifier` | 文件检索/侧车写入 + `shell` + codebase-memory 查询/调用图工具 | `best` | 对残留桶发现做源码复核 |
-| `manual-writer` | 文件读取与编辑 | `best` | 生成、修订并发布手册 |
-| `manual-reviewer` | 文件检索/报告写入 + `shell` + codebase-memory 查询工具 | `best` | 反查候选规则并给出发布判定 |
+| `repository-map` | 文件检索/报告写入 + `shell` + codebase-memory 索引/架构工具 | `default` | 建立索引、模块地图、生成物边界与分片计划 |
+| `module-analyst` | 文件检索/卡写入 + codebase-memory 查询工具 | `default` | MAP：只读单分片源码+代码图，产出四维度证据卡 |
+| `cross-module` | 文件检索/账本写入 + codebase-memory 查询/调用图工具 | `default` | 跨模块消解，产出事实账本 |
+| `dimension-classifier` | 文件检索/报告写入 + `shell` + codebase-memory 查询/调用图工具 | `default` | REDUCE：按指派维度归类证据 |
+| `verifier` | 文件检索/侧车写入 + `shell` + codebase-memory 查询/调用图工具 | `default` | 对残留桶发现做源码复核 |
+| `manual-writer` | 文件读取与编辑 | `default` | 生成、修订并发布手册 |
+| `manual-reviewer` | 文件检索/报告写入 + `shell` + codebase-memory 查询工具 | `default` | 反查候选规则并给出发布判定 |
 
 这些子 agent 都显式声明 `features: [file]`，不会继承主 agent 的 `task` 或 `subagent` feature。codebase-memory 的 MCP 工具（`mcp__codebase-memory__*`）`feature=None`、不受 feature 门控，但 `subagent=None` 既不自动注入也不排除，故各 agent 必须在 frontmatter `tools:` 逐一列出所需 MCP 工具名。获准使用 `shell` 的代理只执行只读 Git 查询；所有分析报告、证据卡、跨模块账本与核实侧车的写入路径由角色提示词限制在 `.agent/onboard/`。
 

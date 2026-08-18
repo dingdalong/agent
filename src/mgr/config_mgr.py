@@ -21,6 +21,7 @@ from src.mgr.secure_io import atomic_write_text
 logger = logging.getLogger(__name__)
 
 ConfigScope = Literal["global", "project"]
+ConfigPath = tuple[str, ...]
 
 _ENV_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
@@ -209,6 +210,21 @@ class ConfigManager:
         if not self.project_trusted:
             project_config.pop("llm_provider", None)
             project_config.pop("llm", None)
+            # 模型配置在 role.<角色>.model/reasoning_effort 下，未信任项目静默指定
+            # 实际使用的模型同样越过信任边界。role 整体或单个角色格式畸形时
+            # 丢弃对应覆盖；role.default 是激活角色名，仍按普通字符串叶子保留。
+            role_cfg = project_config.get("role")
+            if not isinstance(role_cfg, dict):
+                project_config.pop("role", None)
+            else:
+                for role_name, entry in list(role_cfg.items()):
+                    if role_name == "default":
+                        continue
+                    if not isinstance(entry, dict):
+                        role_cfg.pop(role_name)
+                        continue
+                    entry.pop("model", None)
+                    entry.pop("reasoning_effort", None)
 
         config = _deep_merge(builtin_config, global_config)
         config = _deep_merge(config, project_config)
@@ -241,8 +257,8 @@ class ConfigManager:
         - 全局 config.yaml 存在非空 ``llm_provider`` mapping；项目 trusted 时项目
           config.yaml 同规则，未信任项目忽略；
         - 用户层 ``llm_provider`` 非 mapping 或 YAML 无效时保守视为显式，避免向导覆盖。
-        内置 ``src/config.yaml`` 的 ``llm_provider`` 与用户层仅配置 ``llm.default``
-        均不视为显式配置。
+        内置 ``src/config.yaml`` 的 ``llm_provider`` 与用户层仅配置
+        ``role.coding.model.default`` 均不视为显式配置。
 
         Returns:
             是否存在显式 LLM Provider 配置。
@@ -299,29 +315,51 @@ class ConfigManager:
 
             return _deep_merge(global_settings, project_settings)
 
-    def _get_value(self, source: dict[str, Any], key: str, default: Any = None) -> Any:
-        """按点分隔路径从嵌套 dict 中取值。
+    @staticmethod
+    def _validate_config_parts(parts: ConfigPath) -> None:
+        """校验结构化配置路径。"""
+        if (
+            not isinstance(parts, tuple)
+            or not parts
+            or any(not isinstance(part, str) or not part for part in parts)
+        ):
+            raise ValueError(f"无效配置路径段: {parts!r}")
+
+    def _get_value_parts(
+        self,
+        source: dict[str, Any],
+        parts: ConfigPath,
+        default: Any = None,
+    ) -> Any:
+        """按路径段从嵌套 dict 中取值。
 
         Args:
             source: 数据源 dict。
-            key: 点分隔的键路径，如 "llm.default.model"。
+            parts: 配置路径段，如 ``("role", "coding", "model", "default")``。
             default: 键不存在时的默认值，为 None 时抛 KeyError。
 
         Returns:
             找到的值，或 default。
         """
         value: Any = source
-        for part in key.split("."):
+        self._validate_config_parts(parts)
+        for part in parts:
             if not isinstance(value, dict):
                 if default is not None:
                     return default
-                raise KeyError(key)
+                raise KeyError(parts)
             if part not in value:
                 if default is not None:
                     return default
-                raise KeyError(key)
+                raise KeyError(parts)
             value = value[part]
         return value
+
+    def _get_value(self, source: dict[str, Any], key: str, default: Any = None) -> Any:
+        """按点分隔路径从嵌套 dict 中取值。"""
+        if not isinstance(key, str):
+            raise ValueError(f"无效配置路径: {key!r}")
+        return self._get_value_parts(source, tuple(key.split(".")), default)
 
     def get_config(self, key: str) -> Any:
         """获取配置值。
@@ -333,6 +371,10 @@ class ConfigManager:
             配置值。
         """
         return self._get_value(self._config, key)
+
+    def get_config_parts(self, parts: ConfigPath) -> Any:
+        """按原样路径段获取配置值，段内的点不会被解释为分隔符。"""
+        return self._get_value_parts(self._config, parts)
 
     def _config_path(self, scope: ConfigScope) -> Path:
         """返回可回写配置层的目标路径。"""
@@ -349,14 +391,23 @@ class ConfigManager:
         新值在下次 ``reload()`` 或重启后生效。
 
         Args:
-            key: 非空点分隔配置路径，如 ``"llm.default"``。
+            key: 非空点分隔配置路径，如 ``"llm.user_agent"``。
             value: YAML 可序列化的配置值。
             scope: 目标配置层，仅支持 ``"global"`` 或 ``"project"``。
         """
         if not isinstance(key, str) or not key or any(not part for part in key.split(".")):
             raise ValueError(f"无效配置路径: {key!r}")
 
-        self.set_configs({key: value}, scope)
+        self.set_config_parts(tuple(key.split(".")), value, scope)
+
+    def set_config_parts(
+        self,
+        parts: ConfigPath,
+        value: Any,
+        scope: ConfigScope,
+    ) -> None:
+        """将值写入原样路径段，段内的点不会被解释为分隔符。"""
+        self.set_configs_parts({parts: value}, scope)
 
     def set_configs(self, values: Mapping[str, Any], scope: ConfigScope) -> None:
         """原子地将多个 YAML 值写入同一配置层。"""
@@ -366,17 +417,34 @@ class ConfigManager:
             if not isinstance(key, str) or not key or any(not part for part in key.split(".")):
                 raise ValueError(f"无效配置路径: {key!r}")
 
+        self.set_configs_parts(
+            {tuple(key.split(".")): value for key, value in values.items()},
+            scope,
+        )
+
+    def set_configs_parts(
+        self,
+        values: Mapping[ConfigPath, Any],
+        scope: ConfigScope,
+    ) -> None:
+        """按原样路径段原子写入多个 YAML 值。"""
+        if not values:
+            return
+        for parts in values:
+            self._validate_config_parts(parts)
+
         with self._lock:
             path = self._config_path(scope)
             config = _load_writable_yaml(path)
-            for key, value in values.items():
-                parts = key.split(".")
+            for parts, value in values.items():
                 target = config
                 for part in parts[:-1]:
                     if part not in target:
                         target[part] = {}
                     elif not isinstance(target[part], dict):
-                        raise ValueError(f"配置路径 {key!r} 的中间节点 {part!r} 必须是对象")
+                        raise ValueError(
+                            f"配置路径 {parts!r} 的中间节点 {part!r} 必须是对象"
+                        )
                     target = target[part]
                 target[parts[-1]] = value
 

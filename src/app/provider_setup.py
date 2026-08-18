@@ -20,6 +20,13 @@ from functools import partial
 from typing import TYPE_CHECKING, Optional
 
 from src.llm import LLMConfigurationError, get_provider
+from src.mgr.role_mgr import (
+    active_role_name,
+    discover_roles,
+    format_role_config_key,
+    resolve_role_name,
+    role_model_yaml_example,
+)
 
 if TYPE_CHECKING:
     from src.mgr.config_mgr import ConfigManager
@@ -38,12 +45,17 @@ class ProviderOption:
 
 @dataclass(frozen=True, slots=True)
 class SetupResult:
-    """向导确认的完整 Provider 配置结果；repr 不含 api_key。"""
+    """向导确认的完整 Provider 配置结果；repr 不含 api_key。
+
+    default_model 写入激活角色的 default 槽位，fast_model 写入 fast 槽位；
+    两者可以是同一个模型。
+    """
 
     provider: str
     base_url: str
-    api_key: "str | None" = field(repr=False)
+    api_key: str | None = field(repr=False)
     default_model: str
+    fast_model: str
 
 
 VerifyFunc = Callable[[ProviderOption, Optional[str], str], Awaitable[list[str]]]
@@ -174,6 +186,24 @@ async def _run_setup_app(
     normalize_line_input()
     return await SetupApp(options=options, verify=verify).run_async()
 
+
+def _setup_role_name(config_mgr: ConfigManager) -> str:
+    """解析 setup 与随后 RoleMgr 共用的有效角色名。
+
+    Args:
+        config_mgr: 配置管理器，提供角色配置、目录与项目信任状态。
+
+    Returns:
+        已发现的配置角色名；配置角色不存在时返回 DEFAULT_ROLE。
+    """
+    roles = discover_roles(
+        config_mgr.workdir,
+        config_mgr.global_dir,
+        config_mgr.project_trusted,
+    )
+    return resolve_role_name(active_role_name(config_mgr), roles)
+
+
 def _persist_failure_message(config_mgr: ConfigManager) -> str:
     """构造持久化失败的安全可操作指引（不含原始异常文本或任何 key 值）。
 
@@ -184,10 +214,10 @@ def _persist_failure_message(config_mgr: ConfigManager) -> str:
         指向全局 config.yaml / .env 与目录权限、磁盘空间的排查提示。
     """
     return (
-        "写入 LLM Provider 配置失败。请检查全局 "
-        f"{config_mgr.global_dir / 'config.yaml'} 中 llm 与 llm_provider 段是否为合法对象、"
-        f"{config_mgr.global_dir / '.env'} 及配置目录是否可写（目录权限、磁盘空间），"
-        "修正后重新运行配置向导。"
+        "写入 LLM Provider 配置失败。请检查 role 与 llm_provider 段为合法对象，"
+        "并检查配置目录可写（目录权限、磁盘空间）；"
+        f"配置：{config_mgr.global_dir / 'config.yaml'}；"
+        f"凭据：{config_mgr.global_dir / '.env'}。修正后重新运行配置向导。"
     )
 
 
@@ -226,16 +256,17 @@ async def maybe_run_provider_setup(config_mgr: ConfigManager) -> None:
 
 
 def persist_setup(config_mgr: ConfigManager, result: SetupResult) -> None:
-    """同步持久化向导结果：先全局 llm.default，再一次性写 Provider 环境变量。
+    """同步持久化向导结果：先全局角色模型双槽位，再一次性写 Provider 环境变量。
 
     写入顺序（避免留下会让下次跳过向导的半套凭据）::
 
-      1. 校验 result 的 provider 是候选、URL 非空、云 provider key 非空、默认模型非空；
-      2. 原子写全局 llm.default；
-      3. reload 后确认有效 llm.default 等于所选模型；被可信项目覆盖时在写 env 前抛错；
+      1. 校验 result 的 provider 是候选、URL 非空、云 provider key 非空、两个槽位模型非空；
+      2. 原子写全局 role.<激活角色>.model —— 整体写父键 mapping，一并抹平该层残留的
+         旧标量格式（点路径会因中间节点已是标量而被 ConfigManager 拒绝）；
+      3. reload 后确认两个有效槽位都等于所选模型；被更高优先级层覆盖时在写 env 前抛错；
       4. 一次 set_global_env 写 {PROVIDER}_API_URL，云 provider 同批写 API_KEY
          （Ollama 只写 URL）；
-      5. reload 后确认有效 llm.default、base_url 与（云）api_key 与 result 一致。
+      5. reload 后确认两个有效槽位、base_url 与（云）api_key 与 result 一致。
 
     本函数不日志、不输出、不 repr key。
 
@@ -244,26 +275,67 @@ def persist_setup(config_mgr: ConfigManager, result: SetupResult) -> None:
         result: 向导确认的配置结果。
 
     Raises:
-        LLMConfigurationError: 校验失败、项目覆盖冲突或 reload 后置检查不一致
+        LLMConfigurationError: 校验失败、更高优先级层覆盖冲突或 reload 后置检查不一致
             （消息均不含 key）。
     """
     option = _validate_result(config_mgr, result)
-    config_mgr.set_config("llm.default", result.default_model, "global")
+    role_name = _setup_role_name(config_mgr)
+    model_key = format_role_config_key(role_name, "model")
+    expected = _expected_slots(result)
+    config_mgr.set_config_parts(
+        ("role", role_name, "model"),
+        dict(expected),
+        "global",
+    )
     config_mgr.reload()
-    llm_cfg = config_mgr.get_config("llm")
-    effective_default = llm_cfg.get("default") if isinstance(llm_cfg, Mapping) else None
-    if effective_default != result.default_model:
+    effective = _effective_slots(config_mgr, role_name)
+    if effective != expected:
         raise LLMConfigurationError(
-            f"全局默认模型 {result.default_model!r} 与配置生效值 {effective_default!r} 不一致"
-            "（可能被项目 config.yaml 的 llm.default 覆盖）。为避免写入后跳过首次配置向导，"
-            "已终止且未写入 Provider 环境变量。请调整全局/项目 config.yaml 的 llm.default 后重试。"
+            f"角色模型槽位 {model_key}.default / {model_key}.fast 的所选值 "
+            f"{result.default_model!r} / {result.fast_model!r} 与配置生效值 "
+            f"{effective['default']!r} / {effective['fast']!r} 不一致"
+            "（可能被更高优先级配置层，如项目 .agent/config.yaml 覆盖）。"
+            "为避免写入后跳过首次配置向导，已终止且未写入 Provider 环境变量。"
+            f"请移除覆盖 {model_key} 的更高优先级配置后重试。"
         )
     env_values: dict[str, str] = {f"{result.provider.upper()}_API_URL": result.base_url}
     if option.requires_key:
         env_values[f"{result.provider.upper()}_API_KEY"] = result.api_key or ""
     config_mgr.set_global_env(env_values)
     config_mgr.reload()
-    _check_persisted(config_mgr, result, option)
+    _check_persisted(config_mgr, result, option, role_name)
+
+
+def _expected_slots(result: SetupResult) -> dict[str, str]:
+    """把向导结果转成角色模型双槽位 mapping。
+
+    Args:
+        result: 向导确认的配置结果。
+
+    Returns:
+        ``{"default": 默认模型, "fast": 快速模型}``。
+    """
+    return {"default": result.default_model, "fast": result.fast_model}
+
+
+def _effective_slots(config_mgr: ConfigManager, role_name: str) -> dict[str, object]:
+    """读取合并配置中角色模型父键的两个槽位有效值。
+
+    Args:
+        config_mgr: 配置管理器。
+        role_name: 角色 mapping 的真实 key。
+
+    Returns:
+        以槽位名为键的有效值 mapping；父键缺失或不是 mapping（含旧标量格式）时
+        两个槽位均为 None。
+    """
+    try:
+        raw = config_mgr.get_config_parts(("role", role_name, "model"))
+    except KeyError:
+        raw = None
+    if not isinstance(raw, Mapping):
+        return {"default": None, "fast": None}
+    return {"default": raw.get("default"), "fast": raw.get("fast")}
 
 
 def _validate_result(config_mgr: ConfigManager, result: SetupResult) -> ProviderOption:
@@ -271,7 +343,7 @@ def _validate_result(config_mgr: ConfigManager, result: SetupResult) -> Provider
 
     Raises:
         LLMConfigurationError: provider 不是候选、URL 为空、云 provider key 为空或
-            默认模型为空（消息不含 key 值）。
+            任一槽位模型为空（消息不含 key 值）。
     """
     options = build_provider_options(config_mgr)
     option = next(
@@ -288,6 +360,8 @@ def _validate_result(config_mgr: ConfigManager, result: SetupResult) -> Provider
         raise LLMConfigurationError(f"{result.provider} 的 API key 不能为空")
     if not isinstance(result.default_model, str) or not result.default_model.strip():
         raise LLMConfigurationError("default_model 必须是非空 str")
+    if not isinstance(result.fast_model, str) or not result.fast_model.strip():
+        raise LLMConfigurationError("fast_model 必须是非空 str")
     return option
 
 
@@ -295,8 +369,15 @@ def _check_persisted(
     config_mgr: ConfigManager,
     result: SetupResult,
     option: ProviderOption,
+    role_name: str,
 ) -> None:
-    """reload 后置检查：有效 llm.default、base_url 与（云）api_key 必须与 result 一致。
+    """reload 后置检查：两个模型槽位、base_url 与（云）api_key 必须与 result 一致。
+
+    Args:
+        config_mgr: 配置管理器。
+        result: 向导确认的配置结果。
+        option: result 对应的候选 ProviderOption。
+        role_name: 角色 mapping 的真实 key。
 
     Raises:
         LLMConfigurationError: 任一后置检查不一致（消息不含 key 值）。
@@ -307,9 +388,12 @@ def _check_persisted(
     provider_cfg = providers.get(result.provider)
     if not isinstance(provider_cfg, Mapping):
         raise LLMConfigurationError(f"reload 后无法读取 provider {result.provider!r} 的配置")
-    llm_cfg = config_mgr.get_config("llm")
-    if not isinstance(llm_cfg, Mapping) or llm_cfg.get("default") != result.default_model:
-        raise LLMConfigurationError("reload 后 llm.default 与所选默认模型不一致，请检查全局配置")
+    if _effective_slots(config_mgr, role_name) != _expected_slots(result):
+        raise LLMConfigurationError(
+            f"reload 后 {format_role_config_key(role_name, 'model', 'default')} / "
+            f"{format_role_config_key(role_name, 'model', 'fast')} "
+            "与所选模型不一致，请检查全局配置"
+        )
     if provider_cfg.get("base_url") != result.base_url:
         raise LLMConfigurationError(
             f"reload 后 {result.provider!r} 的 base_url 与所选值不一致，"
@@ -323,14 +407,36 @@ def _check_persisted(
 
 
 def _non_tty_message(config_mgr: ConfigManager, options: list[ProviderOption]) -> str:
-    """构造非 TTY 手工配置指引（含实际路径与变量命名，不含任何秘密）。"""
+    """构造清洗成单行后仍完整、可粘贴且不含秘密的非 TTY 配置指引。
+
+    Args:
+        config_mgr: 配置管理器。
+        options: 可配置的 Provider 候选。
+
+    Returns:
+        完整槽位键、流式 YAML、配置路径与凭据路径指引。
+    """
     candidates = "、".join(option.name for option in options)
+    role = _setup_role_name(config_mgr)
+    model_key = format_role_config_key(role, "model")
+    default_key = format_role_config_key(role, "model", "default")
+    fast_key = format_role_config_key(role, "model", "fast")
+    example = role_model_yaml_example(
+        role,
+        "<default-model-id>",
+        "<fast-model-id>",
+    )
+    required_keys = (
+        f"{default_key} 与 {fast_key}"
+        if len(role) <= 48
+        else f"{model_key} 下的 default 与 fast"
+    )
     return (
-        "未检测到 LLM Provider 配置，且当前不是交互式终端（stdin/stdout 非 TTY），"
-        "无法启动配置向导。请手工配置后重新运行本程序：\n"
-        f"  1. 在 {config_mgr.global_dir / '.env'} 中写入 {{NAME}}_API_URL 与 {{NAME}}_API_KEY"
-        "（NAME 为 provider 名，如 DEEPSEEK；Ollama 只需 OLLAMA_API_URL）；\n"
-        f"  2. 在 {config_mgr.global_dir / 'config.yaml'} 中设置 llm.default 为可用的默认模型；\n"
-        "  3. 重新运行本程序。\n"
-        f"内置候选 Provider：{candidates}"
+        "未检测到 LLM Provider 配置，非 TTY 无法启动向导。必填 "
+        f"{required_keys}。"
+        f"YAML 样例：{example}。"
+        f"配置：{config_mgr.global_dir / 'config.yaml'}；"
+        f"凭据：{config_mgr.global_dir / '.env'}，写入 {{NAME}}_API_URL 与 "
+        "{NAME}_API_KEY（Ollama 只需 OLLAMA_API_URL）。"
+        f"候选 Provider：{candidates}。配置后重新运行。"
     )

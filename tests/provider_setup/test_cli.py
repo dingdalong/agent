@@ -58,7 +58,7 @@ def test_cli_non_tty_provider_setup_exits_cleanly(
 ) -> None:
     """真实 main.cli() 非 TTY 缺配置：SystemExit(1) + 启动失败指引 + 零落盘。
 
-    断言 stderr 含实际 .env/config.yaml 路径与 API_URL/API_KEY/llm.default 指引、
+    断言 stderr 含实际 .env/config.yaml 路径与 API_URL/API_KEY/角色模型双槽位指引、
     无 Traceback；且未创建任何 Provider 配置文件。
     """
     _clear_provider_env(monkeypatch)
@@ -89,7 +89,8 @@ def test_cli_non_tty_provider_setup_exits_cleanly(
     assert str(global_dir / "config.yaml") in stderr
     assert "API_URL" in stderr
     assert "API_KEY" in stderr
-    assert "llm.default" in stderr
+    assert 'role["coding"].model.default' in stderr
+    assert 'role["coding"].model.fast' in stderr
     assert "Traceback" not in stderr
     # 失败即止：未创建任何 Provider 配置文件
     assert not (global_dir / ".env").exists()

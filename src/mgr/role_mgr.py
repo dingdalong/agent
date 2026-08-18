@@ -8,8 +8,10 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -24,7 +26,117 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # 缺省角色名 — 当 config 未指定或指定的角色不存在时回退到此角色。
-_DEFAULT_ROLE = "coding"
+DEFAULT_ROLE = "coding"
+
+_RESERVED_ROLE_NAMES = frozenset({"common", "default"})
+
+
+def _valid_role_name(name: str) -> bool:
+    """判断角色目录名是否与框架保留结构冲突。
+
+    Args:
+        name: 角色目录名。
+
+    Returns:
+        非空字符串且不是保留名时为 True，否则为 False。
+    """
+    return isinstance(name, str) and bool(name) and name not in _RESERVED_ROLE_NAMES
+
+
+def format_role_config_key(role_name: str, *suffix: str) -> str:
+    """格式化不受角色名中点号影响的配置诊断路径。"""
+    quoted_name = json.dumps(role_name, ensure_ascii=False)
+    tail = "".join(f".{part}" for part in suffix)
+    return f"role[{quoted_name}]{tail}"
+
+
+def role_model_yaml_example(
+    role_name: str,
+    default_model: str = "<模型ID>",
+    fast_model: str = "<模型ID>",
+) -> str:
+    """生成以真实角色名为 mapping key 的单行可粘贴 YAML。"""
+    return yaml.safe_dump(
+        {
+            "role": {
+                role_name: {
+                    "model": {
+                        "default": default_model,
+                        "fast": fast_model,
+                    }
+                }
+            }
+        },
+        allow_unicode=True,
+        default_flow_style=True,
+        sort_keys=False,
+    ).strip()
+
+
+def discover_roles(
+    workdir: Path,
+    global_dir: Path | None,
+    project_trusted: bool,
+) -> dict[str, Path]:
+    """按内置、全局、可信项目的优先级发现可激活角色。
+
+    Args:
+        workdir: 用户工作目录。
+        global_dir: 全局配置目录；为 None 时跳过全局层。
+        project_trusted: 是否允许读取项目层角色。
+
+    Returns:
+        角色名到角色目录的映射；同名后层覆盖前层，保留名不包含在内。
+    """
+    scan_dirs: list[Path] = [builtin_root() / "roles"]
+    if global_dir:
+        scan_dirs.append(global_dir / "roles")
+    if project_trusted:
+        scan_dirs.append(workdir / ".agent" / "roles")
+
+    roles: dict[str, Path] = {}
+    for directory in scan_dirs:
+        if not directory.exists():
+            continue
+        for path in sorted(directory.iterdir()):
+            if not path.is_dir() or not (path / "role.md").exists():
+                continue
+            if not _valid_role_name(path.name):
+                logger.warning("角色目录名与保留结构冲突，已忽略：%s", path)
+                continue
+            roles[path.name] = path
+    return roles
+
+
+def active_role_name(config_mgr: ConfigManager) -> str:
+    """读取并规范化配置中的 ``role.default``。
+
+    Args:
+        config_mgr: 配置管理器。
+
+    Returns:
+        配置角色名；配置缺失、非字符串或空值时返回 DEFAULT_ROLE。
+    """
+    try:
+        val = config_mgr.get_config("role.default")
+    except KeyError:
+        return DEFAULT_ROLE
+    if isinstance(val, str) and val.strip():
+        return val.strip()
+    return DEFAULT_ROLE
+
+
+def resolve_role_name(role_name: str, roles: Mapping[str, Path]) -> str:
+    """根据已发现角色解析有效角色名。
+
+    Args:
+        role_name: 规范化后的 ``role.default`` 角色名。
+        roles: 已发现的角色名到路径映射。
+
+    Returns:
+        已发现时返回原角色名，否则返回 DEFAULT_ROLE。
+    """
+    return role_name if role_name in roles else DEFAULT_ROLE
 
 
 # ── frontmatter 解析（RoleMgr / SubAgentMgr 共用）────────────────────
@@ -204,61 +316,36 @@ class RoleMgr:
     # —— 发现 ————————————————————————————————————————————————————————
 
     def _discover(self) -> None:
-        """三层扫描发现所有已安装角色，同名后者覆盖。
-
-        扫描顺序（低→高优先级）：内置 → 全局 → 项目。
-        """
-        scan_dirs: list[Path] = [builtin_root() / "roles"]
-        if self.global_dir:
-            scan_dirs.append(self.global_dir / "roles")
-        if self.config_mgr.project_trusted:
-            scan_dirs.append(self.workdir / ".agent" / "roles")
-
-        for directory in scan_dirs:
-            if not directory.exists():
-                continue
-            for path in sorted(directory.iterdir()):
-                if not path.is_dir():
-                    continue
-                if path.name == "common":
-                    continue
-                role_md = path / "role.md"
-                if not role_md.exists():
-                    continue
-                self._all_roles[path.name] = path
+        """通过共享发现逻辑刷新所有已安装角色。"""
+        self._all_roles.update(
+            discover_roles(
+                self.workdir,
+                self.global_dir,
+                self.config_mgr.project_trusted,
+            )
+        )
 
     # —— 解析 ————————————————————————————————————————————————————————
 
     def _resolve(self) -> None:
         """从配置读取角色名，定位角色目录并解析 role.md。
 
-        若配置不存在或无值 → 回退 _DEFAULT_ROLE。
+        若配置不存在或无值 → 回退 DEFAULT_ROLE。
         若指定角色在 _all_roles 中不存在 → warning + 回退。
         """
-        role_name: str | None = None
-        try:
-            val = self.config_mgr.get_config("role.default")
-            if isinstance(val, str) and val.strip():
-                role_name = val.strip()
-        except KeyError:
-            pass
-
-        if not role_name:
-            role_name = _DEFAULT_ROLE
-
+        configured_role = active_role_name(self.config_mgr)
+        role_name = resolve_role_name(configured_role, self._all_roles)
+        if configured_role != role_name:
+            logger.warning(
+                "角色 '%s' 未找到，回退到 '%s'。可用角色：%s",
+                configured_role,
+                DEFAULT_ROLE,
+                ", ".join(sorted(self._all_roles)) or "(无)",
+            )
         path = self._all_roles.get(role_name)
-        if path is None:
-            if role_name != _DEFAULT_ROLE:
-                logger.warning(
-                    "角色 '%s' 未找到，回退到 '%s'。可用角色：%s",
-                    role_name,
-                    _DEFAULT_ROLE,
-                    ", ".join(sorted(self._all_roles)) or "(无)",
-                )
-            path = self._all_roles.get(_DEFAULT_ROLE)
 
         if path is None:
-            logger.warning("默认角色 '%s' 也未找到，无角色激活。", _DEFAULT_ROLE)
+            logger.warning("默认角色 '%s' 也未找到，无角色激活。", DEFAULT_ROLE)
             self._role_path = None
             self._manifest = None
             return
@@ -271,6 +358,7 @@ class RoleMgr:
             except Exception as exc:
                 logger.warning("角色定义 %s 解析失败：%s", role_md_path, exc)
                 meta, prompt = {}, ""
+            self._reject_manifest_model(meta, role_md_path, path.name)
             self._manifest = extract_manifest(
                 meta, role_md_path,
                 prompt=prompt,
@@ -278,27 +366,46 @@ class RoleMgr:
                 default_id="main",
                 default_description="",
             )
+            # 主 agent 恒用 default 槽位，角色 manifest 不再承载模型名。
+            self._manifest.model = None
             self._apply_config_overrides(path.name)
         else:
             self._manifest = None
 
         logger.info("激活角色：%s（%s）", self.role_name, path)
 
+    @staticmethod
+    def _reject_manifest_model(meta: dict, role_md_path: Path, role_name: str) -> None:
+        """role.md 残留 model 字段时报错，避免模型配置被静默忽略。
+
+        Args:
+            meta: role.md 的 frontmatter 解析结果。
+            role_md_path: role.md 文件路径（写入报错消息）。
+            role_name: 角色名（用于提示正确的配置键）。
+
+        Raises:
+            LLMConfigurationError: frontmatter 中存在 model 键时。
+        """
+        if "model" not in meta:
+            return
+
+        from src.llm.errors import LLMConfigurationError
+
+        raise LLMConfigurationError(
+            f"角色定义 {role_md_path} 的 model 字段已废弃：主 agent 恒用 default 槽位，"
+            f"模型改由配置 {format_role_config_key(role_name, 'model', 'default')} 与 "
+            f"{format_role_config_key(role_name, 'model', 'fast')} 控制，请删除该字段。"
+            "当前阶段模型发现尚未执行。"
+        )
+
     def _apply_config_overrides(self, role_name: str) -> None:
-        """将活动角色的模型与推理力度配置覆盖到已解析 manifest。"""
+        """将活动角色的推理力度配置覆盖到已解析 manifest。"""
         if self._manifest is None:
             return
 
         try:
-            raw_model = self.config_mgr.get_config(f"role.{role_name}.model")
-        except KeyError:
-            raw_model = None
-        if isinstance(raw_model, str) and raw_model.strip():
-            self._manifest.model = raw_model.strip()
-
-        try:
-            raw_effort = self.config_mgr.get_config(
-                f"role.{role_name}.reasoning_effort"
+            raw_effort = self.config_mgr.get_config_parts(
+                ("role", role_name, "reasoning_effort")
             )
         except KeyError:
             raw_effort = None
@@ -309,9 +416,10 @@ class RoleMgr:
 
         reasoning_effort = normalize_reasoning_effort(str(raw_effort))
         if reasoning_effort is None:
+            effort_key = format_role_config_key(role_name, "reasoning_effort")
             logger.warning(
-                "角色配置 role.%s.reasoning_effort 非法：%r，已忽略",
-                role_name,
+                "角色配置 %s 非法：%r，已忽略",
+                effort_key,
                 raw_effort,
             )
             return

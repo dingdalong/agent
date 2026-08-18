@@ -1,6 +1,5 @@
 ---
 description: 通用编程助手 — 编写、调试、审查代码
-model: best
 startInPlanMode: true
 thinking: true
 reasoning_effort: max

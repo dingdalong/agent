@@ -109,7 +109,7 @@ Shell 固定为 `REVIEW + DYNAMIC`，不会因命令看似只读而绕过智能�
 
 `web_search` 和 `web_fetch` 共用 provider 级 `llm_provider.<name>.web` 路由配置。`local` 使用本地后端；`provider` 优先使用当前 Agent 模型所属 provider 的原生能力。OpenAI 原生提供搜索、抓取回退本地；Anthropic 原生提供搜索和抓取；DeepSeek 与其他未声明能力的 provider 回退本地。只有明确的“能力不支持”会回退，认证、网络、限流、超时和响应协议错误不会再次外发。
 
-两者固定为 `EXTERNAL_READ + EXTERNAL`，可在 Plan 中使用，但每次仍经过 Web 隐私预检与安全审查。查询/URL 含已识别秘密时本地拒绝；疑似个人信息、专有代码或私有标识符时不发送给审查模型，直接请求一次性确认。Web 安全审查使用发起调用的 Agent 当前模型，不使用 `llm.fast`，请求只包含脱敏查询或不含 query value 的 URL 摘要。
+两者固定为 `EXTERNAL_READ + EXTERNAL`，可在 Plan 中使用，但每次仍经过 `WebPrivacyGuard` 本地隐私预检。查询或 URL 含已识别秘密时本地拒绝；疑似个人信息、专有代码或私有标识符时直接请求一次性确认；其余请求本地放行。当前授权路径未调用 LLM Web 安全审查。工具执行阶段仍把发起调用的 Agent 自己的 Provider 传给 `WebAccessMgr`，供上段的原生能力路由使用。
 
 本地抓取只允许标准端口 HTTP/HTTPS，拒绝 URL 凭据和非公网 IPv4/IPv6；DNS 解析结果检查后固定连接 IP，HTTPS 仍按原主机名执行 SNI 与证书校验。重定向最多 5 次，只允许同主机且禁止 HTTPS 降级；不使用系统代理、cookie、认证或 referer，解压后正文上限 1 MiB。Web 完成事件只记录状态和结果长度，不记录搜索结果、网页正文或 URL query value；原始 Web 内容不建立额外磁盘缓存。
 

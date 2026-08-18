@@ -17,7 +17,7 @@
 
 | 文件 | 职责 | 加载入口 |
 |------|------|----------|
-| `config.yaml` | **运行配置** — LLM provider、模型别名、压缩、激活角色、事件级别 | `ConfigManager.load_config()` |
+| `config.yaml` | **运行配置** — LLM provider、角色模型槽位、压缩、激活角色、事件级别 | `ConfigManager.load_config()` |
 | `settings.json` | **运行时开关与 Hooks** — MCP server 开关、生命周期 Hook | `ConfigManager.load_user_settings()` + `HooksMgr._load_hooks()` |
 | `mcp_servers.json` | **MCP 连接** — 各 MCP server 的传输方式与连接参数 | `ConfigManager.load_mcp_servers()` + `McpMgr.start()`（角色层） |
 | `.env` | **环境变量** — API key / API URL 等敏感值，覆盖 provider 字段 | `ConfigManager.load_config()` 内 `dotenv_values()` |
@@ -39,9 +39,9 @@
 | `mcp_servers.json` | 角色层 `src/roles/<role>/mcp_servers.json` | `~/.agent/mcp_servers.json` | `{workdir}/.agent/mcp_servers.json` | 按 server 名深合并，项目覆盖全局；角色层最低优先级 | 只读（框架不写回） | 是，`/clear` 重新检查信任后重连 |
 | `.env` | 无 | `~/.agent/.env` | `{workdir}/.env` 与 `{workdir}/.agent/.env` | `dotenv_values()` 读入私有有效环境，后覆盖前，不修改 `os.environ` | 全局：手工或首次 Provider 向导 / `ConfigManager.set_global_env`；项目层：手工 | 是（`load_config()` 重跑） |
 
-项目 `.env`、模型/Provider 配置、项目 Hook 和项目 MCP 只有通过 `ProjectTrustGate` 后才加载；项目信任确认被拒绝、取消、失败或运行于非 TTY 时进入受限模式。
+项目 `.env`、Provider/LLM 配置、项目 Hook 和项目 MCP 只有通过 `ProjectTrustGate` 后才加载；项目信任确认被拒绝、取消、失败或运行于非 TTY 时进入受限模式。此时项目层 `llm_provider`、`llm` 会整体剥离；`role.default` 仍可选择已发现的非项目角色，但每个 `role.<角色>.model` 与 `role.<角色>.reasoning_effort` 会剥离，模型与 effort 只能来自内置或全局层。`/models` 因固定写项目层而直接拒绝执行，不写配置也不热切模型。
 
-首次启动无显式 Provider 配置时（判定与流程见 [architecture.md](architecture.md)「首次 LLM Provider 配置向导」），向导自动把 `{PROVIDER}_API_URL` / `{PROVIDER}_API_KEY` 写入全局 `.env`、`llm.default` 写入全局 `config.yaml`；项目层 `.env` 始终手工维护。写入均为单文件原子更新，`.env` 只改目标变量并保留其他原文。
+首次启动无显式 Provider 配置时（判定与流程见 [architecture.md](architecture.md)「首次 LLM Provider 配置向导」），向导自动把 `{PROVIDER}_API_URL` / `{PROVIDER}_API_KEY` 写入全局 `.env`，并把 `role.<有效角色>.model` 的 `default`/`fast` mapping 写入全局 `config.yaml`；配置角色不存在时与 `RoleMgr` 一样回退 `coding`。项目层 `.env` 始终手工维护。写入均为单文件原子更新，`.env` 只改目标变量并保留其他原文。
 
 ---
 
@@ -95,48 +95,36 @@
 
 以 `src/config.yaml` 为权威默认值来源。下列各表标注了消费该键的源码位置。
 
-### 3.1 `llm_provider.<name>` — LLM provider 连接与推理配置
+### 3.1 `llm_provider.<name>` — LLM provider 连接配置
 
-`LLMMgr` 在 `load_models()`（`llm_mgr.py:122`）和 `_create_provider()`（`llm_mgr.py:355-387`）消费。`<name>` 必须是框架已知的 provider（由 `get_provider(name)` 解析，见 [llm.md](llm.md)）。provider 顶层必须是 mapping；名称必须是非空字符串；每项必须是 mapping，且 `base_url` 必须是非空字符串。`models` 必须是 `list[str]`，元素必须非空，加载时按首次出现顺序去重（`llm_mgr.py:414-507`）。
-
-| 键 | 类型 | 默认值 | 可选值 | 效果 |
-|----|------|--------|--------|------|
-| `llm_provider.<name>.base_url` | str | 见下方各 provider | 非空字符串 | provider API 端点；加载模型前严格校验。可被 `{NAME}_API_URL` 覆盖 |
-| `llm_provider.<name>.api_key` | str | 无（通常来自 `.env`） | — | API key；`_create_provider` 读取，默认 `""`。通常经 `{NAME}_API_KEY` 注入 |
-| `llm_provider.<name>.web` | str | `local` | `local` \| `provider` | `web_search` 与 `web_fetch` 共用的路由。`provider` 优先当前模型 provider 的原生能力，仅能力不支持时回退本地；其他错误不回退 |
-| `llm_provider.<name>.reasoning_effort` | str | 见下方 | provider 相关（如 `low`/`medium`/`high`/`max`/`xhigh`） | 推理力度，传给 provider；缺省回退 `"max"`（`llm_mgr.py:376`） |
-| `llm_provider.<name>.context_limit` | int | 见下方 | 正整数 | 上下文窗口 token 上限；缺省 `0`（`llm_mgr.py:383`）。**压缩阈值由此换算**（见 3.4） |
-| `llm_provider.<name>.preserve_thinking` | bool | `ollama` 为 `true`，其余无 | `true`/`false` | 是否在历史中保留 reasoning 内容；缺省 `false`（`llm_mgr.py:377`）。Qwen 类 agent 场景需保留 |
-| `llm_provider.anthropic.max_pause_turn_continuations` | int | `5` | 非 bool 正整数 | Anthropic 单个响应恢复链允许的 `pause_turn` 自动续接次数；其他 provider 强制归一为 `0`，不支持该协议续接（`llm_mgr.py:447-465`） |
-| `llm_provider.<name>.models` | list[str] | `openai` 为 `[gpt-5.5]`，`anthropic` 为 `[k3]` | 模型 ID 列表（可为空） | provider API 拉取失败时的静态回退清单；空列表表示发现失败后不注册该 provider 模型 |
-
-`src/config.yaml` 现有的五个 provider 默认值：
-
-| provider | base_url | reasoning_effort | context_limit | 其他 |
-|----------|----------|------------------|---------------|------|
-| `deepseek` | `https://api.deepseek.com` | `high` | `400000` | Responses API 根地址，不追加 `/v1` 或 `/beta` |
-| `openai` | `https://api.openai.com/v1` | `medium` | `262144` | `models: [gpt-5.5]` |
-| `anthropic` | `https://api.anthropic.com` | `high` | `262144` | `models: [k3]`；`max_pause_turn_continuations: 5` |
-| `ollama` | `http://127.0.0.1:8001/v1` | `high` | `262144` | `preserve_thinking: true` |
-| `moonshot` | `https://api.moonshot.cn/v1` | `max` | `262144` | 恒思考、无 `temperature`（见 [llm.md](llm.md)） |
-
-### 3.2 `llm` — 模型别名与调用参数
-
-`LLMMgr.__post_init__`（`llm_mgr.py:60-120`）、`resolve_model`（`llm_mgr.py:270-306`）、`ensure_default_available`（`llm_mgr.py:308-335`）消费。`llm` 和 `llm.retry` 都必须是 mapping；`max_attempts` 必须是非 bool 的正整数，timeout 和两项延迟必须是非 bool 的有限正数。错误类型、字符串、NaN、Infinity、零、负数，以及小于基础延迟的最大延迟都会在启动时拒绝（`llm_mgr.py:77-118`）；`RetryConfig` 构造时还会执行相同的独立校验（`src/llm/retry.py:15-52`）。
+`LLMMgr.load_models()` 与 `_create_provider()` 消费。`<name>` 必须是框架已知 provider；provider 顶层和每个条目都必须是 mapping，名称与 `base_url` 必须是非空字符串。`models` 必须是 `list[str]`，元素必须非空，加载时按首次出现顺序去重。
 
 | 键 | 类型 | 默认值 | 可选值 | 效果 |
 |----|------|--------|--------|------|
-| `llm.default` | str | `k3`（本仓库） | 任一可用模型名 | **必填**。默认模型别名 `default` 解析目标；子 agent 省略模型时使用它。启动前按精确 ID 校验，不可用则报 `ModelUnavailableError` 退出 |
-| `llm.best` | str | 不填时回退 `default` | 任一可用模型名 | 别名 `best` 的解析目标（Claude Code 别名 `opus` 映射到此，`llm_mgr.py:17`） |
-| `llm.fast` | str | 不填时回退 `default` | 任一可用模型名 | 别名 `fast` 的解析目标（Claude Code 别名 `haiku` 映射到此） |
+| `llm_provider.<name>.base_url` | str | 见 `src/config.yaml` | 非空字符串 | provider API 端点；可被 `{NAME}_API_URL` 覆盖 |
+| `llm_provider.<name>.api_key` | str | 无（通常来自 `.env`） | — | API key；通常经 `{NAME}_API_KEY` 注入 |
+| `llm_provider.<name>.web` | str | `local` | `local` \| `provider` | `web_search` 与 `web_fetch` 的路由；`provider` 只在原生能力不支持时回退本地，其他错误不回退 |
+| `llm_provider.<name>.context_limit` | int | 缺键时 `0` | 正整数 | 上下文窗口 token 上限；压缩阈值由此换算 |
+| `llm_provider.<name>.preserve_thinking` | bool | 缺键时 `false` | `true`/`false` | 是否在历史中保留 reasoning 内容 |
+| `llm_provider.anthropic.max_pause_turn_continuations` | int | `5` | 非 bool 正整数 | Anthropic 单个响应恢复链允许的 `pause_turn` 自动续接次数；其他 provider 归一为 `0` |
+| `llm_provider.<name>.models` | list[str] | 缺键时 `[]` | 模型 ID 列表（可为空） | provider API 拉取失败时的静态回退清单；空列表表示发现失败后不注册模型 |
+
+角色级 `role.<角色名>.reasoning_effort` 是 Agent 调用时的单值覆盖，default/fast 两个槽位共用；它缺失时，主 agent 可使用 `role.md` 的合法 effort，再缺失才使用 Provider 类的内部默认值 `max`。Provider effort 不从配置读取。子 agent 自身 frontmatter effort 与继承规则见 [roles-subagents-skills.md](roles-subagents-skills.md)。
+
+### 3.2 `llm` — 调用参数
+
+`LLMMgr.__post_init__` 消费本段。`llm` 与 `llm.retry` 都必须是 mapping；模型槽位不再位于本段。`max_attempts` 必须是非 bool 正整数，timeout 和两项延迟必须是非 bool 的有限正数，且最大延迟不得小于基础延迟；`RetryConfig` 构造时还会执行同样的独立校验。
+
+| 键 | 类型 | 默认值 | 可选值 | 效果 |
+|----|------|--------|--------|------|
 | `llm.concurrency` | int | `5` | `>= 1` 的整数 | provider 并发上限 |
 | `llm.timeout_seconds` | int \| float | `120` | 有限正数 | 单次 provider LLM 请求的 SDK 超时秒数；不影响模型发现 |
 | `llm.retry.max_attempts` | int | `10` | `>= 1` 的整数 | 最大尝试次数，包含首次调用；`1` 表示不自动重试 |
 | `llm.retry.base_delay_seconds` | int \| float | `2` | 有限正数 | 无有效等待响应头时的指数退避基础秒数 |
-| `llm.retry.max_delay_seconds` | int \| float | `300` | 有限正数，且不小于基础延迟 | 相邻尝试之间的单次退避等待封顶秒数；不影响请求超时 |
-| `llm.user_agent` | str | `claude-cli/2.1.201 (external, cli)` | 任意字符串 | 非空时作为五个 provider 及模型发现请求的自定义 User-Agent；空串沿用 SDK 默认值 |
+| `llm.retry.max_delay_seconds` | int \| float | `300` | 有限正数，且不小于基础延迟 | 相邻尝试之间的单次退避等待封顶秒数 |
+| `llm.user_agent` | str | `claude-cli/2.1.201 (external, cli)` | 任意字符串 | 非空时作为 provider 及模型发现请求的自定义 User-Agent；空串沿用 SDK 默认值 |
 
-**别名体系**：`default`/`best`/`fast` 是框架三个通用别名，子 agent 在其 `*.md` frontmatter 的 `model:` 字段通过这些别名引用（`model: inherit` 表示委派时继承父 agent 已解析的真实模型 ID）。`resolve_model`（`llm_mgr.py:270-306`）解析顺序：`None → "default" → Claude Code 映射（opus/sonnet/haiku → best/default/fast）→ 配置别名 → 精确匹配 → 唯一或最短子串匹配 → 回退默认`。启动期会精确验证配置的 `llm.default`，不会切换到其他可用 provider。
+模型必须配置在 `role.<角色名>.model.default/fast`。模型解析只接受两个槽位别名、Claude Code 兼容别名和完整模型 ID：`opus`/`sonnet` → `default`，`haiku` → `fast`；无法精确解析时直接报 `ModelUnavailableError`。
 
 ### 3.3 `tool` — 工具结果分页
 
@@ -156,19 +144,21 @@
 
 > **换算说明**：`config.yaml` 里存的是**比例**，`Agent` 在构造 `CompactMgr` 时用当前 agent 所用模型的 `context_limit`（`self.llm.context_limit`，`agent.py:203`）乘以比例得到绝对 token 数。不同 agent 若用不同 `context_limit` 的模型，绝对阈值也不同；窗口未知（非正数）时不会自动压缩。`CompactMgr` 细节见 [managers.md](managers.md)。
 
-### 3.5 `role` — 激活角色与主角色覆盖
+### 3.5 `role` — 激活角色、模型槽位与推理力度
 
-`role` 是 mapping。`RoleMgr._resolve()` 只读取 `role.default`，不会兼容旧标量格式。配置合并后先确定实际激活角色，再解析其 `role.md`，最后应用该角色的配置覆盖；因此无效角色回退到 `coding` 时会应用 `role.coding`。
+`role` 必须是 mapping。`role.default` 先确定实际激活角色；缺省、空值或未发现的角色回退 `coding`。角色目录名作为 mapping key 原样使用，允许 Unicode、点号和长名称；`common` 与 `default` 是保留名，不会进入角色发现结果。
 
 | 键 | 类型 | 默认值 | 可选值 | 效果 |
 |----|------|--------|--------|------|
-| `role.default` | str | 缺省或空值回退 `coding` | 已发现的角色名 | 指定激活角色。角色不存在时告警并回退 `coding`；连 `coding` 都不存在则无角色激活 |
-| `role.<角色名>.model` | str | 无 | 非空模型别名或真实模型 ID | 覆盖实际激活主角色 `role.md` 的 `model`。缺失或空值保留 manifest 值；两者都缺失时由 `llm.default` 兜底 |
-| `role.<角色名>.reasoning_effort` | str | 无 | `low` \| `medium` \| `high` \| `xhigh` \| `max` | 覆盖实际激活主角色 `role.md` 的 `reasoning_effort`。值按 `normalize_reasoning_effort` 规整，非法值告警并保留 manifest 值；两者都缺失时由 provider 配置兜底 |
+| `role.default` | str | 缺省或空值回退 `coding` | 合法且已发现的角色名 | 指定激活角色；连 `coding` 都不存在时无角色激活 |
+| `role.<角色名>.model` | mapping | 无 | 必须同时含 `default`、`fast` | 当前角色的模型槽位；非 mapping 值会在启动时报错 |
+| `role.<角色名>.model.default` | str | 无 | 已加载的完整模型 ID | 主 agent 恒用此槽位；省略 `model` 或声明 `default`/`opus`/`sonnet` 的子 agent 也解析到此槽位 |
+| `role.<角色名>.model.fast` | str | 无 | 已加载的完整模型 ID | 声明 `fast`/`haiku` 的子 agent 及智能权限裁决使用此槽位 |
+| `role.<角色名>.reasoning_effort` | str | `role.md` 的合法值，否则 Provider 类默认 `max` | `low` \| `medium` \| `high` \| `xhigh` \| `max` | 角色级单值，default/fast 两个槽位共用；规范化大小写和首尾空白，非法值告警并忽略 |
 
-覆盖只影响主角色 manifest，不影响子 agent 既有的模型或推理力度继承规则。角色决定主 agent 身份提示词、可用子 agent、技能、MCP server 与 feature 集。`/models` 选定模型和推理强度后会原子写入项目层当前角色的这两个覆盖键，并立即原地更新当前主 Agent；后续新会话经正常配置重载继续使用该选择。
+每个被激活角色都必须配置两个模型槽位，且两者必须精确指向已加载模型；内置 `src/config.yaml` 不提供模型兜底，缺任一键、值为空或模型不可用都会阻止启动。`role.md` 不再允许 `model` 字段，残留该键会在角色解析期报 `LLMConfigurationError`；主 agent 恒以 `default` 槽位构造。
 
-角色发现与结构见 [roles-subagents-skills.md](roles-subagents-skills.md) 与 [architecture.md](architecture.md)。
+`/models` 将 `model` mapping 与 `reasoning_effort` 一次写入可信项目层。只改 fast 时当前主 agent 不热切；新建子 agent 和智能权限会立即现读新槽位。default 或 effort 变化时，当前主 agent 原地切换并保留会话历史。角色与子 agent 细节见 [roles-subagents-skills.md](roles-subagents-skills.md)。
 
 ### 3.6 `events` — 事件级别
 
@@ -187,80 +177,77 @@
 ### 3.8 完整注释版 `config.yaml` 示例
 
 ```yaml
-# ── LLM provider 连接与推理配置 ──────────────────────────
+# ── LLM provider 连接配置 ────────────────────────────────
 # <name> 须为框架已知 provider；api_key 通常经 .env 的 {NAME}_API_KEY 注入。
 llm_provider:
   deepseek:
-    web: local                            # local 本地；provider 优先原生能力
-    base_url: https://api.deepseek.com   # Responses API 根地址，可被 DEEPSEEK_API_URL 覆盖
-    reasoning_effort: high               # 推理力度
-    context_limit: 400000                # 上下文窗口 token 上限（压缩阈值据此换算）
-    # api_key: 通常放 .env：DEEPSEEK_API_KEY=sk-...
+    web: provider                         # provider 优先原生能力，不支持时回退本地
+    models:                               # API 拉取失败时的静态回退清单
+      - deepseek-v4-pro
+      - deepseek-v4-flash
+    base_url: https://api.deepseek.com
   openai:
-    web: local
-    models:                              # API 拉取失败时的回退模型清单
-      - gpt-5.5
-    base_url: https://api.openai.com/v1
-    reasoning_effort: medium
-    context_limit: 262144
-  anthropic:
-    web: local
-    base_url: https://api.anthropic.com
-    max_pause_turn_continuations: 5      # pause_turn 协议终态的单轮最大自动续接次数
-    reasoning_effort: high
-    context_limit: 262144
+    web: provider
     models:
-      - k3
+      - gpt-5.6-sol
+      - gpt-5.6-terra
+      - gpt-5.6-luna
+    base_url: https://api.openai.com/v1
+  anthropic:
+    web: provider
+    models:
+      - claude-opus-5
+      - claude-sonnet-5
+    base_url: https://api.anthropic.com
+    max_pause_turn_continuations: 5       # pause_turn 协议终态的单轮最大自动续接次数
   ollama:
     web: local
     base_url: http://127.0.0.1:8001/v1
-    reasoning_effort: high
-    preserve_thinking: true              # 保留历史 reasoning（Qwen 类 agent 场景）
-    context_limit: 262144
+    preserve_thinking: true               # 保留历史 reasoning（Qwen 类 agent 场景）
+    context_limit: 200000
   moonshot:
     web: local
-    base_url: https://api.moonshot.cn/v1 # 可被 MOONSHOT_API_URL 覆盖
-    reasoning_effort: max                # 恒开思考，当前仅支持 max
-    context_limit: 262144
+    models:
+      - k3
+    base_url: https://api.moonshot.cn/v1
 
-# ── 模型别名与调用参数 ──────────────────────────────────
+# ── LLM 调用参数；模型不在此段配置 ───────────────────────
 llm:
-  default: gpt-5.6-luna                  # 必填：默认模型，启动时精确校验
-  # best: ...                            # 可选：最强模型（别名 best / Claude Code opus）
-  # fast: ...                            # 可选：最快/最省模型（别名 fast / Claude Code haiku）
-  concurrency: 5                         # provider 并发上限
-  timeout_seconds: 120                   # 单次 LLM 请求超时秒数
+  concurrency: 5
+  timeout_seconds: 120
   retry:
-    max_attempts: 10                     # 最大尝试次数，包含首次调用
-    base_delay_seconds: 2                # 指数退避基础秒数
-    max_delay_seconds: 300               # 单次等待封顶秒数
+    max_attempts: 10
+    base_delay_seconds: 2
+    max_delay_seconds: 300
   user_agent: "claude-cli/2.1.201 (external, cli)"
 
 # ── 工具结果分页 ────────────────────────────────────────
 tool:
-  page_token_rate: 0.03                  # 单页工具结果最多占上下文窗口比例
+  page_token_rate: 0.03
 
 # ── 上下文压缩（比例，运行时按 context_limit 换算为绝对 token）──
 compact:
-  auto_compact_rate: 0.8                 # 窗口已知且输入估算超过 context_limit×0.8 时自动压缩
-  keep_recent_user_turns: 3              # 优先保留原文的最近 N 个用户轮次范围
-  keep_recent_messages_token_rate: 0.25  # 近期原文硬预算占上下文窗口的比例
+  auto_compact_rate: 0.8
+  keep_recent_user_turns: 3
+  keep_recent_messages_token_rate: 0.25
 
-# ── 激活角色与主角色覆盖 ──────────────────────────────────
+# ── 激活角色、角色模型双槽位与共享推理力度 ───────────────
 role:
-  default: coding                         # 缺省或空值回退 coding
+  default: coding                         # 缺省或角色不存在时回退 coding
   coding:
-    model: best                           # 覆盖 coding/role.md 的 model
-    reasoning_effort: max                 # 覆盖 coding/role.md 的 reasoning_effort
+    model:
+      default: claude-opus-5              # 主 agent；model: default/opus/sonnet 的子 agent
+      fast: deepseek-v4-flash             # model: fast/haiku 的子 agent；智能权限裁决
+    reasoning_effort: max                 # 角色级单值，两个槽位共用
 
-# ── 事件级别 ────────────────────────────────────────────
+# ── 事件与日志级别 ──────────────────────────────────────
 events:
-  level: detail                          # progress | detail | trace
-
-# ── 运行日志级别（agent.log）─────────────────────────────
+  level: detail
 logging:
-  level: info                            # debug | info | warning | error
+  level: info
 ```
+
+内置 `src/config.yaml` 只声明 `role.default` 与角色级 `reasoning_effort`，不提供任何角色模型槽位兜底；上例的 `role.coding.model` 必须写入全局或可信项目配置。
 
 ---
 
@@ -436,8 +423,9 @@ TUI 诊断路径随 `$AGENT_HOME` 改写，不提供独立配置项。`tui.jsonl
 
 | 想要的效果 | 改哪里 | 怎么改 |
 |------------|--------|--------|
-| 换主 agent 默认模型 | `config.yaml` `llm.default` | 设为目标模型名 |
-| 指定「最强 / 最快」别名指向 | `config.yaml` `llm.best` / `llm.fast` | 设为对应模型名（子 agent 通过 `best`/`fast` 引用） |
+| 换主 agent 模型 | `config.yaml` `role.<角色名>.model.default` | 设为已加载的完整模型 ID |
+| 换轻量子 agent / 智能权限模型 | `config.yaml` `role.<角色名>.model.fast` | 设为已加载的完整模型 ID；不会热切当前主 agent |
+| 调整角色推理力度 | `config.yaml` `role.<角色名>.reasoning_effort` | 设为 `low`、`medium`、`high`、`xhigh` 或 `max`；两个槽位共用 |
 | 更早触发上下文压缩 | `config.yaml` `compact.auto_compact_rate` | 调小（如 `0.6`） |
 | 压缩后多保留近期对话 | `config.yaml` `compact.keep_recent_user_turns` / `keep_recent_messages_token_rate` | 调大 |
 | 加大 / 减小模型上下文窗口 | `config.yaml` `llm_provider.<name>.context_limit` | 设为目标 token 数（同时影响压缩绝对阈值） |
@@ -446,8 +434,7 @@ TUI 诊断路径随 `$AGENT_HOME` 改写，不提供独立配置项。`tui.jsonl
 | 调整自动尝试次数 | `config.yaml` `llm.retry.max_attempts` | 设为包含首次的正整数 |
 | 调整重试等待 | `config.yaml` `llm.retry.base_delay_seconds` / `max_delay_seconds` | 设为有限正秒数，且最大值不小于基础值 |
 | 调整 Anthropic 协议续接上限 | `config.yaml` `llm_provider.anthropic.max_pause_turn_continuations` | 设为非 bool 正整数；网络重试次数仍由 `llm.retry.max_attempts` 独立控制 |
-| 换激活角色 | `config.yaml` `role.default` | 设为目标角色名 |
-| 覆盖主角色模型 / 推理力度 | `config.yaml` `role.<角色名>.model` / `reasoning_effort` | 配置非空模型与合法力度档位；仅影响该主角色 |
+| 换激活角色 | `config.yaml` `role.default` | 设为合法且已发现的角色名 |
 | 看模型思考过程 | `config.yaml` `events.level` | 设为 `detail`（或 `trace`） |
 | 看每次授权的完整裁决日志 | `config.yaml` `logging.level` | 设为 `debug`（`info` 已含拒绝与非确定性放行） |
 | 禁用某个 MCP server | `settings.json` `mcp.disabledServers` | 加入该 server 名（连接前剔除） |

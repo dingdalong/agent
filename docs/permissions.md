@@ -28,13 +28,13 @@ MCP 工具固定为 `REVIEW + EXTERNAL`。上游 annotation（包括 `readOnlyHi
 4. 用 `PathResolver` 提取、规范化并分类全部路径；移动操作额外解析最终目标。
 5. 运行 `HardDenyDetector` 和秘密外发检查。
 6. 若 `agent.plan_active`，先执行独立 Plan 约束。
-7. LOCAL_READ 和 INTERNAL 走确定性放行；EXTERNAL_READ 进入 Web 专用隐私预检和安全审查。
+7. LOCAL_READ 和 INTERNAL 走确定性放行。
 8. WORKSPACE_WRITE 仅在全部写目标为普通工作区或计划目录时确定性放行。
-9. 其余调用交通用 LLM 智能权限审查。
-10. 智能权限返回 ask、异常、超时或无效响应时，只进行一次 yes/no 人工确认；无 TTY、取消或拒绝均为 deny。
+9. EXTERNAL_READ 进入 Web 专用本地隐私预检。
+10. 其余调用交通用 LLM 智能权限审查；返回 ask、异常、超时或无效响应时，只进行一次 yes/no 人工确认，无 TTY、取消或拒绝均为 deny。
 11. 工具执行结果立即经 DataGuard 脱敏和限长，再进入 PostToolUse、事件、分页和 Agent 历史。
 
-`AuthorizationResult.source` 标明裁决来源：`hard_rule`、`plan`、`policy`、`judge`、`web_safety`、`user` 或 `failure`。`reason` 和 `safe_detail` 在返回前再次脱敏并限长。允许结果还包含冻结的 `path_grants`，只记录参数名、角色、授权时规范路径和分类；FileMgr 在每次实际 I/O 前复检规范路径与分类，移动操作同时复检 source、destination 与最终目标。
+`AuthorizationResult.source` 标明裁决来源：`hard_rule`、`plan`、`policy`、`judge`、`web_safety`、`user` 或 `failure`。当前 EXTERNAL_READ 本地隐私预检通过时仍使用 `source="web_safety"`，该来源名不表示已调用 LLM Web 审查。`reason` 和 `safe_detail` 在返回前再次脱敏并限长。允许结果还包含冻结的 `path_grants`，只记录参数名、角色、授权时规范路径和分类；FileMgr 在每次实际 I/O 前复检规范路径与分类，移动操作同时复检 source、destination 与最终目标。
 
 ## 路径解析
 
@@ -67,15 +67,17 @@ LOCAL_READ 可以读取工作区外的普通文件或目录，但拒绝设备、
 
 ## LLM 智能权限审查
 
-`LLMJudgeClient` 使用 `llm.fast`，由 `LLMMgr` 在未配置 fast 时回退 default。调用最长 15 秒，并强制通过 `record_verdict` 工具返回 allow、deny 或 ask。结构化裁决通过 `max_attempts_cap=3` 限制为最多三次尝试；若全局 `llm.retry.max_attempts` 更低则采用全局值。
+`LLMJudgeClient` 每次调用 `llm_mgr.get("fast")`，使用激活角色 `role.<角色>.model.fast` 指向的 Provider。fast 是必填槽位：缺失、格式非法或模型不可用会在启动校验时报错，裁决时也不会回退 default。`/models` 只改 fast 后无需热切主 agent，后续权限裁决会现读新槽位。
+
+`StructuredVerdictRunner` 对这次裁决固定传 `reasoning_effort_override="low"`，同时关闭 thinking、温度设为 0，并强制通过唯一的 `record_verdict` 工具返回 allow、deny 或 ask。low 只是本次调用覆盖，不写回角色配置，也不修改按模型缓存的 Provider。调用最长 15 秒，`max_attempts_cap=3` 使结构化裁决最多尝试三次；全局 `llm.retry.max_attempts` 更低时采用更低值。
 
 智能权限请求只包含：工具名和来源、动作类别、数据流、规范化路径分类、网络主机、参数类型与长度、风险标志、最多 2 KiB 的脱敏用户意图。Shell 额外发送最多 8 KiB 的脱敏命令。文件正文、待写内容、完整 body、header、cookie、环境变量和值、完整 URL query 都不会进入请求。参数摘要在系统提示词中明确标记为不可信数据。
 
 智能权限 allow/deny 直接成为本次裁决；ask、异常、超时、缺失或无效输出进入一次性确认。确认只接受 yes/no，不产生任何后续调用权限。
 
-权限裁决会以一行提示展示给用户，格式 `{标记} {来源} · {中文工具名} · {结论}(理由)`（组装见 `src/tools/display.py` 的 `permission_line`）。标记 `✘`/`✔`/`?` 分别对应拒绝/放行/需确认；来源标签由 `AuthorizationResult.source` 决定，映射见 `PERMISSION_SOURCES`（`hard_rule`→硬规则、`plan`→计划模式、`policy`→策略放行、`judge`→智能权限、`web_safety`→网页安全、`user`→用户、`failure`→授权失败）。理由完整展示、由历史区自动折行，不截断。所有拒绝都发 `PermissionNotice`（携带 `decision_source`），放行仅 `source="judge"` 的智能权限裁决提示，本地读取、普通工作区写入等策略放行不打断输出；拒绝亮红、放行亮黄。ask 走 `PermissionMenu`，其理由在确认弹窗之前的输出区提示，标签固定「智能权限」。
+权限裁决会以一行提示展示给用户，格式 `{标记} {来源} · {中文工具名} · {结论}(理由)`（组装见 `src/tools/display.py` 的 `permission_line`）。标记 `✘`/`✔`/`?` 分别对应拒绝/放行/需确认；来源标签由 `AuthorizationResult.source` 决定。所有拒绝都发 `PermissionNotice`，放行仅 `source="judge"` 的智能权限裁决提示；确定性策略放行不打断输出。ask 走 `PermissionMenu`，理由在确认弹窗之前显示。
 
-Web 外部读取另使用 `WebPrivacyGuard` 与 `LLMWebSafetyClient`。本地预检先拒绝秘密、URL userinfo 和认证/签名 query；疑似个人信息、源代码、专有文本或高熵私有标识符不进入 LLM，直接一次性确认。其余请求由当前 Agent 模型审查，不切换到 `llm.fast`；搜索只发送最多 2 KiB 的脱敏查询，抓取只发送 scheme、host、path 和 query key，不发送 query value。两种审查共用最多三次尝试、15 秒超时、结构化 `allow/deny/ask` 和失败后一次性确认逻辑。
+Web 外部读取走另一条路径：`WebPrivacyGuard` 本地预检拒绝秘密、URL userinfo 和认证/签名 query；疑似个人信息、源代码、专有文本或高熵私有标识符直接进入一次性人工确认；其余请求本地放行。`LLMWebSafetyClient` 虽在 `bootstrap.create_app()` 中构造并注入，但当前 `PermissionManager._review_web()` 没有调用它，`review_model` 参数也未被消费；因此不要把 Web LLM 安全审查视为已启用。原生 `web_search`/`web_fetch` 的 Provider 路由仍使用发起调用的 Agent 自己的 Provider，与授权预检是两件事。
 
 ## DataGuard
 
@@ -100,7 +102,7 @@ Plan 是 `Agent.plan_active: bool`，不是授权策略变体。`PlanModeControl
 Plan 激活时只允许：
 
 - LOCAL_READ。
-- EXTERNAL_READ，但仍须通过 Web 隐私预检和安全审查。
+- EXTERNAL_READ，但仍须通过 Web 本地隐私预检；疑似敏感内容转一次性人工确认。
 - `plan_safe=True` 的 INTERNAL 工具。
 - 规范化后位于 `.agent/plans/**` 的 WORKSPACE_WRITE。
 
@@ -111,7 +113,7 @@ Plan 激活时只允许：
 每次授权的最终结论都写入 `{workdir}/.agent/logs/agent.log`（`bootstrap.create_app` 配 `RotatingFileHandler`，2 MiB × 3 个备份，目录 `0700`、文件 `0600`）。三类行：
 
 - `授权 <工具> → allow/deny source=<来源> reason=<理由>` —— 唯一漏斗，在 `PermissionManager._result` 中于脱敏同一语句内产出，覆盖所有来源与来源的全部调用路径。
-- `<来源> 裁决 <工具> → allow/deny/ask（理由）` 与 `<来源> 失败，转一次性人工确认：…` —— 智能权限/web 审查的阶段裁决，先于漏斗行。
+- `judge 裁决 <工具> → allow/deny/ask（理由）` 与 `judge 失败，转一次性人工确认：…` —— 当前启用的智能权限阶段裁决，先于漏斗行。
 - `转人工确认 <工具>（理由）` —— 一次性确认弹窗开启；与紧随的漏斗行的时间差即用户思考时长，进程被杀导致弹窗未结束时只有此行而无结果行。
 
 级别约定：所有拒绝与非确定性放行（judge/plan/web_safety/user/failure）为 info；`source=policy` 的确定性放行（每次本地读取都会命中）为 debug，避免刷屏，调 `config.yaml` 的 `logging.level` 到 `debug` 才记录全量。写入的 reason 已过 `DataGuard.redact`，与展示给用户的同源。

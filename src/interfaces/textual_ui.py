@@ -584,13 +584,14 @@ class TextualInterface(UserInterface):
         prompt: str,
         models: list[tuple[str, str]],
         efforts: list[str],
-        model_index: int,
+        default_model_index: int,
+        fast_model_index: int,
         effort_index: int,
         markdown: bool = False,
     ) -> str:
         del markdown
         return await self._plain.read_model_selection(
-            prompt, models, efforts, model_index, effort_index
+            prompt, models, efforts, default_model_index, fast_model_index, effort_index
         )
 
     async def _read_form(

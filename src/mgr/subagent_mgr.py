@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from src.events.types import SubagentLifecycle
+from src.llm.errors import LLMConfigurationError
+from src.mgr.llm_mgr import MODEL_ALIASES
 from src.mgr.role_mgr import parse_frontmatter, extract_manifest, AgentManifest
 
 if TYPE_CHECKING:
@@ -37,6 +39,9 @@ class SubAgentMgr:
         """扫描四层目录加载子智能体定义，同名后者覆盖前者。
 
         扫描顺序（低→高优先级）：共享 → 角色 → 全局 → 项目。
+
+        Raises:
+            LLMConfigurationError: 任一 manifest 的 model 字段非法。
         """
         project_dir = self.workdir / ".agent" / "agents"
 
@@ -58,13 +63,79 @@ class SubAgentMgr:
             scan_dirs.append((self.global_dir / "agents", "global"))
         scan_dirs.append((project_dir, "project"))
 
+        # 已加载的完整模型 ID 集合；llm_mgr 不可用时为 None（模型集不可知）。
+        llm_mgr = getattr(self.deps, "llm_mgr", None)
+        known_models = set(llm_mgr.list_models()) if llm_mgr is not None else None
+
         for directory, _source in scan_dirs:
             if not directory.exists():
                 continue
             for path in sorted(directory.glob("*.md")):
                 meta, prompt = parse_frontmatter(path.read_text())
+                self._validate_raw_model(meta, path)
                 manifest = extract_manifest(meta, path, prompt=prompt)
+                self._validate_model(manifest, known_models)
                 self._documents[manifest.agent_type] = manifest
+
+    @staticmethod
+    def _validate_raw_model(meta: dict, path: Path) -> None:
+        """校验并规范化子 agent frontmatter 中显式声明的 model。
+
+        Args:
+            meta: ``parse_frontmatter`` 返回的原始映射。
+            path: manifest 文件路径，用于错误定位。
+
+        Returns:
+            None；空值会规范为 None，合法字符串会去除首尾空白后写回 ``meta``。
+
+        Raises:
+            LLMConfigurationError: model 键存在且值不是字符串或 null。
+        """
+        if "model" not in meta:
+            return
+        raw_model = meta["model"]
+        if raw_model is None or isinstance(raw_model, str) and not raw_model.strip():
+            meta["model"] = None
+            return
+        if not isinstance(raw_model, str):
+            raise LLMConfigurationError(
+                f"子 agent 定义 {path} 的 model 非法：{raw_model!r}。"
+                "只允许 default、fast、opus、sonnet、haiku 或完整模型 ID"
+            )
+        meta["model"] = raw_model.strip()
+
+    @staticmethod
+    def _validate_model(
+        manifest: AgentManifest,
+        known_models: set[str] | None,
+    ) -> None:
+        """校验子 agent manifest 的 model 字段，非法值启动即报错不静默回退。
+
+        合法取值：None（委派时走激活角色的 default 槽位）、MODEL_ALIASES 中的别名、
+        已加载的完整模型 ID。known_models 为 None 表示模型集合不可知（deps 未提供
+        llm_mgr），此时放行非别名值，可用性校验留给 llm_mgr.resolve_model。
+
+        Args:
+            manifest: 已解析的子 agent manifest。
+            known_models: 已加载的完整模型 ID 集合；None 表示不可知。
+
+        Returns:
+            None。
+
+        Raises:
+            LLMConfigurationError: model 既不是合法别名也不是已加载的模型 ID。
+        """
+        model = manifest.model
+        if model is None or model in MODEL_ALIASES or known_models is None:
+            return
+        if model in known_models:
+            return
+        available = ", ".join(sorted(known_models)) or "(无)"
+        raise LLMConfigurationError(
+            f"子 agent 定义 {manifest.path} 的 model 非法：{model!r}。"
+            f"只允许 default、fast（兼容 opus、sonnet、haiku）或完整模型 ID；"
+            f"当前可用模型：{available}"
+        )
 
     def describe(self) -> str | None:
         if not self._documents:
@@ -144,10 +215,8 @@ class SubAgentMgr:
             # 解析子 agent 的最终工具集（自动注入 subagent=True、排除 subagent=False）
             tools = self.deps.tools_mgr.resolve_subagent_tools(manifest.tools)
 
-            # 解析模型：inherit 表示继承父 agent 已解析的真实模型 ID
+            # 模型：加载期已校验，None 表示走激活角色的 default 槽位
             model_value = manifest.model
-            if model_value == "inherit" and parent_agent is not None:
-                model_value = parent_agent.llm.model
 
             # 思考模式：显式设置则用设置值，否则继承父 agent
             enable_thinking = manifest.enable_thinking

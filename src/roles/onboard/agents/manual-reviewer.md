@@ -2,7 +2,7 @@
 agent_type: manual-reviewer
 description: 依据证据映射回查实际代码、候选范围和仓库快照，给出干净 Agent 规则与技能的发布判定。
 tools: list_directory, glob, grep, get_file_info, read_file, create_directory, write_file, move_file, shell, mcp__codebase-memory__search_graph, mcp__codebase-memory__query_graph, mcp__codebase-memory__get_code_snippet, mcp__codebase-memory__search_code
-model: best
+model: default
 features: [file]
 ---
 

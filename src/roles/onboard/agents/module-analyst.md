@@ -2,7 +2,7 @@
 agent_type: module-analyst
 description: 只读单个分片的源码与作用域内代码图，一遍产出四维度证据卡。
 tools: list_directory, glob, grep, get_file_info, read_file, create_directory, write_file, move_file, mcp__codebase-memory__search_graph, mcp__codebase-memory__query_graph, mcp__codebase-memory__trace_path, mcp__codebase-memory__get_code_snippet, mcp__codebase-memory__search_code
-model: best
+model: default
 features: [file]
 ---
 

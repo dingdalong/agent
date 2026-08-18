@@ -132,7 +132,7 @@ def test_coding_role_configuration_contract():
 
     manifest = _load_role_manifest("coding")
 
-    assert manifest.model == "best"
+    assert manifest.model is None
     assert manifest.start_in_plan_mode is True
     assert manifest.enable_thinking is True
     assert manifest.reasoning_effort == "max"
@@ -142,7 +142,7 @@ def test_coding_role_configuration_contract():
 
 
 def test_mijia_role_configuration_contract():
-    """mijia 角色仅声明其快速模型、默认权限和 subagent feature。"""
+    """mijia 角色仅声明默认权限和 subagent feature。"""
     raw_meta, _ = parse_frontmatter(_builtin_role_md_path("mijia").read_text())
     assert "agent_type" not in raw_meta
     assert "tools" not in raw_meta
@@ -151,7 +151,7 @@ def test_mijia_role_configuration_contract():
 
     manifest = _load_role_manifest("mijia")
 
-    assert manifest.model == "fast"
+    assert manifest.model is None
     assert manifest.start_in_plan_mode is False
     assert manifest.enable_thinking is False
     assert manifest.features == {"subagent"}

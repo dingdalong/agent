@@ -868,7 +868,7 @@ def _sanitize_message(message: str) -> str:
         (
             r"(?i)(\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|"
             r"password|secret)\b[\"']?\s*[:=]\s*)"
-            r"(?:\[REDACTED\]|\"[^\"]*\"|'[^']*'|[^,;\s&}\]#]+)",
+            r"(?:\[REDACTED\]|\"[^\"]*\"|'[^']*'|[^,;\s&{}\]#]+)",
             r"\1[REDACTED]",
         ),
     )

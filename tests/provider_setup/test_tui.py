@@ -264,7 +264,7 @@ def test_left_right_keys_move_cursor_without_changing_focus() -> None:
 
 
 def test_success_returns_result_and_trims_inputs() -> None:
-    """完整成功流：trim 后透传 verify，模型列表有序，选中后返回 SetupResult。"""
+    """完整成功流：trim 后透传 verify，模型列表有序，两个槽位选完后返回 SetupResult。"""
 
     async def scenario() -> None:
         stub = StubVerify()
@@ -285,12 +285,14 @@ def test_success_returns_result_and_trims_inputs() -> None:
                 for i in range(model_list.option_count)
             ] == ["deepseek-v4-flash", "deepseek-v4-pro"]
             assert app.query_one("#provider-panel", Vertical).display is False
-            await pilot.press("enter")
+            await pilot.press("enter")  # default 槽位
+            await pilot.press("enter")  # fast 槽位
         assert stub.calls == [(_DEEPSEEK, "sk-test-123", "https://custom.test/v1")]
         assert app._return_value is not None
         assert app._return_value.provider == "deepseek"
         assert app._return_value.base_url == "https://custom.test/v1"
         assert app._return_value.default_model == "deepseek-v4-flash"
+        assert app._return_value.fast_model == "deepseek-v4-flash"
         assert getattr(app._return_value, "api" + "_key") == stub.calls[0][1]
 
     asyncio.run(scenario())
@@ -322,10 +324,12 @@ def test_verify_error_sanitized_keeps_inputs_and_retry_succeeds() -> None:
             await _wait_until(
                 lambda: app.query_one("#model-panel", Vertical).display, pilot
             )
-            await pilot.press("enter")
+            await pilot.press("enter")  # default 槽位
+            await pilot.press("enter")  # fast 槽位
         assert app._return_value is not None
         assert app._return_value.provider == "deepseek"
         assert app._return_value.default_model == "deepseek-v4-flash"
+        assert app._return_value.fast_model == "deepseek-v4-flash"
         assert len(stub.calls) == 2
 
     asyncio.run(scenario())
@@ -394,7 +398,9 @@ def test_double_enter_submits_once() -> None:
 # ---------- Esc 后退与快捷键 ----------
 
 
-@pytest.mark.parametrize("state", ["provider", "credentials", "verifying", "model"])
+@pytest.mark.parametrize(
+    "state", ["provider", "credentials", "verifying", "model_default"]
+)
 def test_ctrl_c_exits_none_and_cancels_verify_from_every_state(state: str) -> None:
     """Ctrl+C 在任意态均返回 None；verifying 态还取消后台验证任务。"""
 
@@ -402,15 +408,15 @@ def test_ctrl_c_exits_none_and_cancels_verify_from_every_state(state: str) -> No
         stub = StubVerify()
         app = SetupApp(options=[_DEEPSEEK, _OLLAMA], verify=stub)
         async with app.run_test(size=(80, 24)) as pilot:
-            if state in ("credentials", "verifying", "model"):
+            if state in ("credentials", "verifying", "model_default"):
                 await _choose_provider(app, pilot, 0)
-            if state in ("verifying", "model"):
+            if state in ("verifying", "model_default"):
                 stub.gate()
                 app.query_one("#key-input", Input).value = "sk-test-123"
                 await pilot.press("enter")
             if state == "verifying":
                 await _wait_until(lambda: bool(stub.calls), pilot)
-            if state == "model":
+            if state == "model_default":
                 stub.release()
                 await _wait_until(
                     lambda: app.query_one("#model-panel", Vertical).display, pilot
@@ -514,7 +520,7 @@ def test_escape_from_verifying_cancels_and_returns_to_credentials() -> None:
             await _wait_until(
                 lambda: app.query_one("#model-panel", Vertical).display, pilot
             )
-            assert app._state == "model"
+            assert app._state == "model_default"
             assert app.query_one("#model-panel", Vertical).display is True
 
     asyncio.run(scenario())
@@ -579,7 +585,7 @@ def test_stale_verify_result_is_ignored_after_resubmit() -> None:
             await _wait_until(
                 lambda: app.query_one("#model-panel", Vertical).display, pilot
             )
-            assert app._state == "model"
+            assert app._state == "model_default"
             assert [
                 model_list.get_option_at_index(index).prompt
                 for index in range(model_list.option_count)
@@ -640,8 +646,8 @@ def test_stale_verify_error_is_ignored_after_resubmit() -> None:
     asyncio.run(scenario())
 
 
-def test_escape_from_model_returns_to_credentials() -> None:
-    """model 态 Esc 恢复凭据页，并允许再次验证进入模型页。"""
+def test_escape_from_model_default_returns_to_credentials() -> None:
+    """model_default 态 Esc 恢复凭据页，并允许再次验证进入模型页。"""
 
     async def scenario() -> None:
         app = SetupApp(options=[_DEEPSEEK, _OLLAMA], verify=StubVerify())
@@ -668,13 +674,15 @@ def test_escape_from_model_returns_to_credentials() -> None:
             await _wait_until(
                 lambda: app.query_one("#model-panel", Vertical).display, pilot
             )
-            assert app._state == "model"
+            assert app._state == "model_default"
             assert app.query_one("#model-panel", Vertical).display is True
 
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("state", ["provider", "credentials", "verifying", "model"])
+@pytest.mark.parametrize(
+    "state", ["provider", "credentials", "verifying", "model_default"]
+)
 def test_ctrl_q_does_not_exit(state: str) -> None:
     """Ctrl+Q 在任意态均无效果，界面仍可操作，Ctrl+C 仍可取消。"""
 
@@ -682,14 +690,14 @@ def test_ctrl_q_does_not_exit(state: str) -> None:
         stub = StubVerify()
         app = SetupApp(options=[_DEEPSEEK, _OLLAMA], verify=stub)
         async with app.run_test(size=(80, 24)) as pilot:
-            if state in ("credentials", "verifying", "model"):
+            if state in ("credentials", "verifying", "model_default"):
                 await _choose_provider(app, pilot, 0)
-            if state in ("verifying", "model"):
+            if state in ("verifying", "model_default"):
                 stub.gate()
                 app.query_one("#key-input", Input).value = "sk-test-123"
                 await pilot.press("enter")
                 await _wait_until(lambda: bool(stub.calls), pilot)
-            if state == "model":
+            if state == "model_default":
                 stub.release()
                 await _wait_until(
                     lambda: app.query_one("#model-panel", Vertical).display, pilot
@@ -702,8 +710,12 @@ def test_ctrl_q_does_not_exit(state: str) -> None:
 
             assert app._state == state
             assert app.focused is focused
-            assert app.query_one("#provider-panel", Vertical).display is (state != "model")
-            assert app.query_one("#model-panel", Vertical).display is (state == "model")
+            assert app.query_one("#provider-panel", Vertical).display is (
+                state != "model_default"
+            )
+            assert app.query_one("#model-panel", Vertical).display is (
+                state == "model_default"
+            )
             if state == "verifying":
                 assert verify_task is not None
                 assert app._verify_task is verify_task
@@ -824,8 +836,8 @@ def test_cloud_blank_url_blocks_submit_and_keeps_credentials(blank_url: str) -> 
 
 
 def test_ollama_success_result_none_key_and_repr_hides_key() -> None:
-    """Ollama 完整成功：空 key 提交、返回模型、选中退出；SetupResult.api_key 为 None
-    且 repr 不含 api_key 字段。"""
+    """Ollama 完整成功：空 key 提交、返回模型、两个槽位各选一次后退出；
+    SetupResult 的 key 字段为 None 且 repr 不含该字段名。"""
 
     async def scenario() -> None:
         stub = StubVerify(models=["qwen3.6", "qwen3.5"])
@@ -839,13 +851,157 @@ def test_ollama_success_result_none_key_and_repr_hides_key() -> None:
             assert stub.calls == [(_OLLAMA, None, _OLLAMA.base_url)]
             assert app.query_one("#model-list", KeyboardOptionList).option_count == 2
             await pilot.press("enter")
+            await pilot.press("enter")  # fast 槽位沿用 default 屏所选
         result = app._return_value
         assert result is not None
         assert result.provider == "ollama"
         assert result.base_url == _OLLAMA.base_url
         assert result.api_key is None
         assert result.default_model == "qwen3.6"
+        assert result.fast_model == "qwen3.6"
         assert "api_key" not in repr(result)
         assert "qwen3.6" in repr(result)
+
+    asyncio.run(scenario())
+
+
+# ---------- 双槽位模型选择（default → fast）----------
+
+
+def _model_title(app) -> str:
+    return str(app.query_one("#model-title", SelectionStatic).content)
+
+
+def _model_prompts(app) -> list[str]:
+    model_list = app.query_one("#model-list", KeyboardOptionList)
+    return [
+        model_list.get_option_at_index(index).prompt
+        for index in range(model_list.option_count)
+    ]
+
+
+async def _reach_model_default(app, pilot, provider_index: int = 0) -> None:
+    """走到 model_default 屏：选 Provider、填 key、提交验证。"""
+    await _choose_provider(app, pilot, provider_index)
+    app.query_one("#key-input", Input).value = "sk-test-123"
+    await pilot.press("enter")
+    await _wait_until(lambda: app.query_one("#model-panel", Vertical).display, pilot)
+
+
+def test_model_default_then_fast_reuses_same_model_list() -> None:
+    """选完 default 进入 fast 屏：复用同一份模型列表与控件，不重新拉取。"""
+
+    async def scenario() -> None:
+        stub = StubVerify()
+        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], verify=stub)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await _reach_model_default(app, pilot)
+            assert app._state == "model_default"
+            default_title = _model_title(app)
+            model_list = app.query_one("#model-list", KeyboardOptionList)
+            model_list.highlighted = 1
+            await pilot.press("enter")
+
+            assert app._state == "model_fast"
+            assert app.query_one("#model-panel", Vertical).display is True
+            assert _model_prompts(app) == ["deepseek-v4-flash", "deepseek-v4-pro"]
+            assert len(stub.calls) == 1  # 未重新拉取模型列表
+            assert model_list.has_focus
+            assert model_list.highlighted == 1  # 默认高亮 default 屏所选下标
+            assert _model_title(app) != default_title
+            assert "fast" in _model_title(app)
+            assert "default" in default_title
+
+    asyncio.run(scenario())
+
+
+def test_escape_from_model_fast_returns_to_model_default_then_credentials() -> None:
+    """Esc 逐级后退：model_fast → model_default（恢复所选高亮）→ credentials。"""
+
+    async def scenario() -> None:
+        stub = StubVerify()
+        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], verify=stub)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await _reach_model_default(app, pilot)
+            app.query_one("#model-list", KeyboardOptionList).highlighted = 1
+            await pilot.press("enter")
+            assert app._state == "model_fast"
+
+            await pilot.press("escape")
+
+            model_list = app.query_one("#model-list", KeyboardOptionList)
+            assert app._state == "model_default"
+            assert app.query_one("#model-panel", Vertical).display is True
+            assert model_list.highlighted == 1
+            assert model_list.has_focus
+            assert len(stub.calls) == 1
+
+            await pilot.press("escape")
+
+            assert app._state == "credentials"
+            assert app.query_one("#model-panel", Vertical).display is False
+            assert app.query_one("#provider-panel", Vertical).display is True
+            assert app.query_one("#url-input", Input).has_focus
+            assert app.query_one("#key-input", Input).value == "sk-test-123"
+
+    asyncio.run(scenario())
+
+
+def test_same_model_for_both_slots() -> None:
+    """两个槽位可选同一个模型：fast 屏直接回车沿用 default 屏所选。"""
+
+    async def scenario() -> None:
+        stub = StubVerify()
+        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], verify=stub)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await _reach_model_default(app, pilot)
+            await pilot.press("enter")
+            await pilot.press("enter")
+        result = app._return_value
+        assert result is not None
+        assert result.default_model == "deepseek-v4-flash"
+        assert result.fast_model == "deepseek-v4-flash"
+
+    asyncio.run(scenario())
+
+
+def test_different_model_per_slot() -> None:
+    """两个槽位可选不同模型，最终 SetupResult 同时携带两者。"""
+
+    async def scenario() -> None:
+        stub = StubVerify()
+        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], verify=stub)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await _reach_model_default(app, pilot)
+            model_list = app.query_one("#model-list", KeyboardOptionList)
+            model_list.highlighted = 1
+            await pilot.press("enter")
+            assert model_list.highlighted == 1
+            await pilot.press("up")
+            assert model_list.highlighted == 0
+            await pilot.press("enter")
+        result = app._return_value
+        assert result is not None
+        assert result.provider == "deepseek"
+        assert result.default_model == "deepseek-v4-pro"
+        assert result.fast_model == "deepseek-v4-flash"
+        assert "api_key" not in repr(result)
+
+    asyncio.run(scenario())
+
+
+def test_ctrl_c_in_model_fast_exits_none() -> None:
+    """model_fast 屏 Ctrl+C 返回 None，不产生任何结果。"""
+
+    async def scenario() -> None:
+        stub = StubVerify()
+        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], verify=stub)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await _reach_model_default(app, pilot)
+            await pilot.press("enter")
+            assert app._state == "model_fast"
+            await pilot.press("ctrl+c")
+            await _wait_until(lambda: app._state == "exit", pilot)
+        assert app._return_value is None
 
     asyncio.run(scenario())

@@ -125,12 +125,38 @@ class ChoiceMenu(MenuRequest):
 
 @dataclass
 class ModelMenu(MenuRequest):
-    """模型与推理强度双轴选择器。"""
+    """模型双槽位与推理强度的单屏三轴选择器。
+
+    TUI 由 `tui/dialogs.py` 的 `InlineModelSelectionWidget` 呈现：
+    ↑↓ 移动当前激活槽位的模型选择、←→ 选角色级推理强度、Tab 切换激活槽位
+    （default ⇄ fast，光标随之跳到该槽位已选模型）、Enter 一次提交、Esc 取消：
+
+        槽位  › default   fast
+        模型
+        › stub/model-pro    [default]
+          stub/model-flash  [fast]
+        强度（角色级）  low  medium  › high  xhigh  max
+        ↑↓ 模型 · ←→ 强度 · Tab 槽位 · Enter 应用 · Esc 取消
+
+    模型行的 [default]/[fast] 标注是当前选择状态，随操作实时更新。
+    返回值：JSON {"default": "<模型ID>", "fast": "<模型ID>", "reasoning_effort": "<强度>"}，
+    取消为空串。
+
+    Attributes:
+        prompt: 菜单上文提示。
+        models: 可选模型列表，每项为 (模型ID, 展示标签)。
+        efforts: 可选推理强度列表（角色级单值，两槽位共用）。
+        default_model_index: default 槽位的初始选中下标。
+        fast_model_index: fast 槽位的初始选中下标。
+        effort_index: 推理强度的初始选中下标。
+        markdown: 上文提示是否按 Markdown 渲染。
+    """
 
     prompt: str = ""
     models: list[tuple[str, str]] = field(default_factory=list)
     efforts: list[str] = field(default_factory=list)
-    model_index: int = 0
+    default_model_index: int = 0
+    fast_model_index: int = 0
     effort_index: int = 0
     markdown: bool = False
     level: EventLevel = field(default=EventLevel.PROGRESS, init=False)

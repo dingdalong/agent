@@ -19,6 +19,8 @@ from src.app.bootstrap import create_app
 from src.app.provider_setup import (
     ProviderOption,
     SetupResult,
+    _non_tty_message,
+    _persist_failure_message,
     build_provider_options,
     maybe_run_provider_setup,
     persist_setup,
@@ -29,6 +31,7 @@ from src.llm.deepseek import DeepSeekProvider
 from src.llm.ollama import OllamaProvider
 from src.mgr.config_mgr import ConfigManager
 from src.mgr.paths import builtin_root
+from src.mgr.role_mgr import DEFAULT_ROLE, RoleMgr
 
 
 class _FakeStream:
@@ -39,6 +42,38 @@ class _FakeStream:
 
     def isatty(self) -> bool:
         return self._tty
+
+
+class _MessageConfigStub:
+    """为异常消息测试提供固定长度路径与可配置角色名。"""
+
+    global_dir = Path("/home/test/.agent")
+    workdir = Path("/workspace/project")
+    project_trusted = False
+
+    def __init__(self, role_name: str = DEFAULT_ROLE) -> None:
+        """保存消息中使用的激活角色名。
+
+        Args:
+            role_name: ``role.default`` 返回的角色名。
+        """
+        self.role_name = role_name
+
+    def get_config(self, key: str):
+        """读取消息构造所需的最小配置。
+
+        Args:
+            key: 点分隔配置键。
+
+        Returns:
+            ``role.default`` 的固定值。
+
+        Raises:
+            KeyError: 请求其他配置键时。
+        """
+        if key == "role.default":
+            return self.role_name
+        raise KeyError(key)
 
 
 def _set_tty(monkeypatch: pytest.MonkeyPatch, enabled: bool) -> None:
@@ -77,14 +112,35 @@ def _manager(tmp_path: Path, *, project_trusted: bool = False) -> ConfigManager:
     )
 
 
+def _write_role(roles_dir: Path, name: str) -> Path:
+    """创建可由角色发现与 RoleMgr 解析的最小角色目录。
+
+    Args:
+        roles_dir: ``roles`` 目录。
+        name: 角色名。
+
+    Returns:
+        创建的角色目录路径。
+    """
+    role_dir = roles_dir / name
+    role_dir.mkdir(parents=True)
+    (role_dir / "role.md").write_text("---\nagent_type: main\n---\n测试角色。\n")
+    return role_dir
+
+
 def _deepseek_result() -> SetupResult:
-    """云 Provider 的成功配置结果（含可识别测试 secret）。"""
+    """云 Provider 的成功配置结果（两个槽位取不同模型，含可识别测试 secret）。"""
     return SetupResult(
         provider="deepseek",
         base_url="https://api.deepseek.test/v1",
         api_key="sk-test-123",
-        default_model="deepseek-v4-flash",
+        default_model="deepseek-v4-pro",
+        fast_model="deepseek-v4-flash",
     )
+
+
+# _deepseek_result() 期望落到激活角色 model 父键下的两个槽位值。
+_EXPECTED_SLOTS = {"default": "deepseek-v4-pro", "fast": "deepseek-v4-flash"}
 
 
 # ---------- SetupResult ----------
@@ -235,6 +291,179 @@ def test_verify_provider_propagates_plain_exception(monkeypatch):
         _run(verify_provider(option, "k", option.base_url))
 
 
+# ---------- 异常清洗后的手工指引 ----------
+
+
+def _flow_yaml_from_message(message: str) -> str:
+    """从配置错误消息中提取流式 YAML 样例。
+
+    Args:
+        message: 经 LLMConfigurationError 清洗后的消息。
+
+    Returns:
+        ``YAML 样例：`` 与下一个句号之间的 YAML 文本。
+    """
+    prefix, separator, remainder = message.partition("YAML 样例：")
+    assert separator, prefix
+    flow_yaml, separator, _suffix = remainder.partition("。")
+    assert separator, remainder
+    return flow_yaml
+
+
+def test_non_tty_message_survives_configuration_error_sanitizing():
+    """非 TTY 指引经清洗后仍含完整键名、合法流式 YAML 与尾部路径信息。"""
+    config_mgr = _MessageConfigStub()
+    options = [
+        ProviderOption(name, f"https://{name}.test/v1", name != "ollama")
+        for name in ("deepseek", "openai", "anthropic", "moonshot", "ollama")
+    ]
+    message = LLMConfigurationError(
+        _non_tty_message(config_mgr, options)
+    ).info.message
+    flow_yaml = _flow_yaml_from_message(message)
+    parsed_key = next(iter(yaml.safe_load(flow_yaml)["role"]))
+    print(
+        f"role='coding' yaml={flow_yaml} parsed_key={parsed_key!r} "
+        f"message_length={len(message)}"
+    )
+
+    assert 'role["coding"].model.default' in message
+    assert 'role["coding"].model.fast' in message
+    assert yaml.safe_load(flow_yaml) == {
+        "role": {
+            "coding": {
+                "model": {
+                    "default": "<default-model-id>",
+                    "fast": "<fast-model-id>",
+                }
+            }
+        }
+    }
+    config_path = str(config_mgr.global_dir / "config.yaml")
+    env_path = str(config_mgr.global_dir / ".env")
+    assert message.index('role["coding"].model.default') < message.index(flow_yaml)
+    assert message.index('role["coding"].model.fast') < message.index(flow_yaml)
+    assert message.index(flow_yaml) < message.index(config_path) < message.index(env_path)
+    assert "候选 Provider：deepseek、openai、anthropic、moonshot、ollama" in message
+    assert "配置后重新运行" in message
+    assert len(message) < 500
+    assert not message.endswith(("…", "..."))
+
+
+def test_non_tty_message_supports_long_role_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """长角色名的流式 YAML 应完整可解析，且消息不触发 500 字符截断。"""
+    role_name = "a" * 64
+    config_mgr = _MessageConfigStub(role_name)
+    monkeypatch.setattr(
+        "src.app.provider_setup.discover_roles",
+        lambda workdir, global_dir, project_trusted: {
+            role_name: global_dir / "roles" / role_name
+        },
+    )
+    options = [
+        ProviderOption(name, f"https://{name}.test/v1", name != "ollama")
+        for name in ("deepseek", "openai", "anthropic", "moonshot", "ollama")
+    ]
+    message = LLMConfigurationError(
+        _non_tty_message(config_mgr, options)
+    ).info.message
+    flow_yaml = _flow_yaml_from_message(message)
+    parsed_key = next(iter(yaml.safe_load(flow_yaml)["role"]))
+    print(
+        f"role={role_name!r} yaml={flow_yaml} parsed_key={parsed_key!r} "
+        f"message_length={len(message)}"
+    )
+
+    assert f'role["{role_name}"].model' in message
+    assert yaml.safe_load(flow_yaml) == {
+        "role": {
+            role_name: {
+                "model": {
+                    "default": "<default-model-id>",
+                    "fast": "<fast-model-id>",
+                }
+            }
+        }
+    }
+    assert "候选 Provider：deepseek、openai、anthropic、moonshot、ollama" in message
+    assert "配置后重新运行" in message
+    assert len(message) < 500
+    assert not message.endswith(("…", "..."))
+
+@pytest.mark.parametrize(
+    "role_name", ["true", "null", "123", "研发.角色"],
+)
+def test_non_tty_message_preserves_implicit_scalar_role_names(
+    monkeypatch: pytest.MonkeyPatch,
+    role_name: str,
+) -> None:
+    """隐式 YAML 标量角色名经异常清洗后仍应解析为原字符串 key。
+
+    Args:
+        monkeypatch: pytest 属性替换工具。
+        role_name: 会被裸 YAML key 隐式转型的合法角色名。
+    Returns:
+        None。
+    """
+    config_mgr = _MessageConfigStub(role_name)
+    monkeypatch.setattr(
+        "src.app.provider_setup.discover_roles",
+        lambda workdir, global_dir, project_trusted: {
+            role_name: global_dir / "roles" / role_name
+        },
+    )
+    options = [ProviderOption("ollama", "http://localhost:11434/v1", False)]
+
+    message = LLMConfigurationError(
+        _non_tty_message(config_mgr, options)
+    ).info.message
+    flow_yaml = _flow_yaml_from_message(message)
+    parsed = yaml.safe_load(flow_yaml)
+    parsed_key = next(iter(parsed["role"]))
+    print(
+        f"role={role_name!r} yaml={flow_yaml} parsed_key={parsed_key!r} "
+        f"message_length={len(message)}"
+    )
+
+    assert parsed == {
+        "role": {
+            role_name: {
+                "model": {
+                    "default": "<default-model-id>",
+                    "fast": "<fast-model-id>",
+                }
+            }
+        }
+    }
+    assert f'role["{role_name}"].model.default' in message
+    assert f'role["{role_name}"].model.fast' in message
+    assert len(message) < 500
+    assert not message.endswith(("…", "..."))
+
+
+def test_persist_failure_message_keeps_actions_before_paths_after_sanitizing():
+    """持久化失败提示先保留排查动作，固定路径下清洗后完整未截断。"""
+    config_mgr = _MessageConfigStub()
+
+    message = LLMConfigurationError(
+        _persist_failure_message(config_mgr)
+    ).info.message
+
+    config_path = str(config_mgr.global_dir / "config.yaml")
+    env_path = str(config_mgr.global_dir / ".env")
+    assert "role 与 llm_provider" in message
+    assert "目录权限" in message
+    assert "磁盘空间" in message
+    assert "重新运行配置向导" in message
+    assert message.index("role 与 llm_provider") < message.index(config_path)
+    assert config_path in message
+    assert env_path in message
+    assert len(message) < 500
+    assert not message.endswith(("…", "..."))
+
+
 @pytest.mark.parametrize("exc", [asyncio.CancelledError(), KeyboardInterrupt(), SystemExit()])
 def test_verify_provider_propagates_control_flow(monkeypatch, exc):
     """控制流异常（取消/中断/退出）原样传播。"""
@@ -295,7 +524,9 @@ def test_maybe_run_non_tty_raises_actionable_message(tmp_path, monkeypatch):
     assert str(tmp_path / "global" / "config.yaml") in message
     assert "API_URL" in message
     assert "API_KEY" in message
-    assert "llm.default" in message
+    assert 'role["coding"].model.default' in message
+    assert 'role["coding"].model.fast' in message
+    assert "llm.default" not in message
     assert called == []
 
 
@@ -358,7 +589,7 @@ def test_maybe_run_success_persists_cloud_and_reload_visible(tmp_path, monkeypat
         "DEEPSEEK_API_URL": "https://api.deepseek.test/v1",
         "DEEPSEEK_API_KEY": "sk-test-123",
     }
-    assert manager.get_config("llm")["default"] == "deepseek-v4-flash"
+    assert manager.get_config("role.coding.model") == _EXPECTED_SLOTS
     providers = manager.get_config("llm_provider")
     assert providers["deepseek"]["base_url"] == "https://api.deepseek.test/v1"
     assert providers["deepseek"]["api_key"] == "sk-test-123"
@@ -369,7 +600,7 @@ def test_maybe_run_success_persists_cloud_and_reload_visible(tmp_path, monkeypat
 
 
 def test_persist_ollama_only_writes_url(tmp_path, monkeypatch):
-    """Ollama 持久化只写 OLLAMA_API_URL，不写 key。"""
+    """Ollama 持久化只写 OLLAMA_API_URL，不写 key；两个槽位可取同一模型。"""
     _clear_provider_env(monkeypatch)
     manager = _manager(tmp_path)
     result = SetupResult(
@@ -377,6 +608,7 @@ def test_persist_ollama_only_writes_url(tmp_path, monkeypatch):
         base_url="http://127.0.0.1:8001/v1",
         api_key=None,
         default_model="qwen3.6",
+        fast_model="qwen3.6",
     )
 
     persist_setup(manager, result)
@@ -384,17 +616,42 @@ def test_persist_ollama_only_writes_url(tmp_path, monkeypatch):
     env = dotenv_values(tmp_path / "global" / ".env")
     assert env == {"OLLAMA_API_URL": "http://127.0.0.1:8001/v1"}
     assert "OLLAMA_API_KEY" not in env
-    assert manager.get_config("llm")["default"] == "qwen3.6"
+    assert manager.get_config("role.coding.model") == {
+        "default": "qwen3.6",
+        "fast": "qwen3.6",
+    }
     assert manager.get_config("llm_provider")["ollama"]["base_url"] == "http://127.0.0.1:8001/v1"
 
 
-def test_maybe_run_project_default_override_fails_before_env(tmp_path, monkeypatch):
-    """可信项目 llm.default 覆盖全局选择时，在写 env 前失败且不产生显式 Provider 配置。"""
+def test_persist_setup_writes_dotted_role_as_exact_mapping_key(tmp_path, monkeypatch):
+    """setup 写入含点角色时不得创建 role.review.v2 嵌套结构。"""
+    _clear_provider_env(monkeypatch)
+    role_name = "review.v2"
+    global_dir = tmp_path / "global"
+    global_dir.mkdir()
+    _write_role(global_dir / "roles", role_name)
+    global_dir.joinpath("config.yaml").write_text(
+        f"role:\n  default: {role_name}\n"
+    )
+    manager = _manager(tmp_path)
+
+    persist_setup(manager, _deepseek_result())
+
+    assert manager.get_config_parts(("role", role_name, "model")) == _EXPECTED_SLOTS
+    written = yaml.safe_load(global_dir.joinpath("config.yaml").read_text())
+    assert written["role"][role_name]["model"] == _EXPECTED_SLOTS
+    assert "review" not in written["role"]
+
+
+def test_maybe_run_project_slot_override_fails_before_env(tmp_path, monkeypatch):
+    """可信项目 role.<角色>.model 覆盖全局选择时，在写 env 前失败且不产生显式 Provider 配置。"""
     _clear_provider_env(monkeypatch)
     _set_tty(monkeypatch, True)
     project_dir = tmp_path / "work" / ".agent"
     project_dir.mkdir(parents=True)
-    (project_dir / "config.yaml").write_text("llm:\n  default: project-model\n")
+    (project_dir / "config.yaml").write_text(
+        "role:\n  coding:\n    model:\n      default: project-model\n"
+    )
     manager = _manager(tmp_path, project_trusted=True)
 
     async def fake_setup_app(options, verify):
@@ -406,7 +663,7 @@ def test_maybe_run_project_default_override_fails_before_env(tmp_path, monkeypat
         _run(maybe_run_provider_setup(manager))
 
     message = str(excinfo.value)
-    assert "llm.default" in message
+    assert 'role["coding"].model.default' in message
     assert "sk-test-123" not in message
     assert not (tmp_path / "global" / ".env").exists()
     manager.reload()
@@ -442,20 +699,20 @@ def test_maybe_run_env_write_failure_no_partial_env(tmp_path, monkeypatch):
     assert "disk full" not in message
     assert dotenv_values(env_path) == {"UNRELATED": "keep"}
     assert "DEEPSEEK" not in env_path.read_text()
-    # 默认模型可能已写，但无 Provider 环境，下次仍进入向导
-    assert manager.get_config("llm")["default"] == "deepseek-v4-flash"
+    # 角色模型槽位可能已写，但无 Provider 环境，下次仍进入向导
+    assert manager.get_config("role.coding.model") == _EXPECTED_SLOTS
     manager.reload()
     assert manager.has_explicit_provider_config() is False
 
 
-def test_maybe_run_global_llm_scalar_fails_safe_without_env(tmp_path, monkeypatch):
-    """全局 config.yaml 的 llm 为标量时：持久化 ValueError 转安全 LLMConfigurationError，
+def test_maybe_run_global_role_scalar_fails_safe_without_env(tmp_path, monkeypatch):
+    """全局 config.yaml 的 role 为标量时：持久化 ValueError 转安全 LLMConfigurationError，
     不创建 .env、不改写配置（main.cli 对该错误干净退出，见 cli_exits 测试）。"""
     _clear_provider_env(monkeypatch)
     _set_tty(monkeypatch, True)
     global_dir = tmp_path / "global"
     global_dir.mkdir()
-    (global_dir / "config.yaml").write_text("llm: scalar\n")
+    (global_dir / "config.yaml").write_text("role: scalar\n")
     manager = _manager(tmp_path)
 
     async def fake_setup_app(options, verify):
@@ -473,7 +730,7 @@ def test_maybe_run_global_llm_scalar_fails_safe_without_env(tmp_path, monkeypatc
     assert "config.yaml" in message
     assert ".env" in message
     assert not (global_dir / ".env").exists()
-    assert (global_dir / "config.yaml").read_text() == "llm: scalar\n"
+    assert (global_dir / "config.yaml").read_text() == "role: scalar\n"
 
 
 def test_maybe_run_post_check_failure_safe_error(tmp_path, monkeypatch):
@@ -613,6 +870,7 @@ def test_no_secret_in_logs_on_success_persist(tmp_path, monkeypatch, caplog):
             base_url="https://api.deepseek.test/v1",
             api_key=secret,
             default_model="deepseek-v4-flash",
+            fast_model="deepseek-v4-flash",
         )
 
     monkeypatch.setattr("src.app.provider_setup._run_setup_app", fake_setup_app)
@@ -637,6 +895,7 @@ def test_no_secret_in_logs_on_persist_failure(tmp_path, monkeypatch, caplog):
             base_url="https://api.deepseek.test/v1",
             api_key=secret,
             default_model="deepseek-v4-flash",
+            fast_model="deepseek-v4-flash",
         )
 
     monkeypatch.setattr("src.app.provider_setup._run_setup_app", fake_setup_app)
@@ -652,3 +911,150 @@ def test_no_secret_in_logs_on_persist_failure(tmp_path, monkeypatch, caplog):
 
     assert not any(secret in record.getMessage() for record in caplog.records)
     assert secret not in caplog.text
+
+
+# ---------- 角色模型双槽位持久化 ----------
+
+
+def test_persist_writes_role_model_slots_to_global(tmp_path, monkeypatch):
+    """两个槽位整体写入全局 role.<激活角色>.model，且不再写 llm.default。"""
+    _clear_provider_env(monkeypatch)
+    manager = _manager(tmp_path)
+
+    persist_setup(manager, _deepseek_result())
+
+    written = yaml.safe_load((tmp_path / "global" / "config.yaml").read_text())
+    assert written["role"]["coding"]["model"] == _EXPECTED_SLOTS
+    assert "default" not in written.get("llm", {})
+    assert manager.get_config("role.coding.model") == _EXPECTED_SLOTS
+
+
+def test_persist_missing_configured_role_matches_subsequent_role_mgr(tmp_path, monkeypatch):
+    """缺失的 role.default 应在 setup 与随后 RoleMgr 中一致回退到 coding。"""
+    _clear_provider_env(monkeypatch)
+    global_path = tmp_path / "global" / "config.yaml"
+    global_path.parent.mkdir()
+    global_path.write_text("role:\n  default: research\n")
+    manager = _manager(tmp_path)
+
+    persist_setup(manager, _deepseek_result())
+    role_mgr = RoleMgr(
+        config_mgr=manager,
+        workdir=manager.workdir,
+        global_dir=manager.global_dir,
+    )
+
+    written = yaml.safe_load(global_path.read_text())
+    assert role_mgr.role_name == DEFAULT_ROLE
+    assert written["role"][role_mgr.role_name]["model"] == _EXPECTED_SLOTS
+    assert "model" not in written["role"].get("research", {})
+
+
+@pytest.mark.parametrize(
+    ("role_layer", "project_trusted"),
+    [("global", False), ("project", True)],
+)
+def test_persist_keeps_discovered_custom_role(
+    tmp_path, monkeypatch, role_layer, project_trusted
+):
+    """全局或可信项目层存在自定义角色时，setup 不应误回退。"""
+    _clear_provider_env(monkeypatch)
+    global_path = tmp_path / "global" / "config.yaml"
+    global_path.parent.mkdir()
+    global_path.write_text("role:\n  default: research\n")
+    roles_dir = (
+        tmp_path / "global" / "roles"
+        if role_layer == "global"
+        else tmp_path / "work" / ".agent" / "roles"
+    )
+    _write_role(roles_dir, "research")
+    manager = _manager(tmp_path, project_trusted=project_trusted)
+
+    persist_setup(manager, _deepseek_result())
+    role_mgr = RoleMgr(
+        config_mgr=manager,
+        workdir=manager.workdir,
+        global_dir=manager.global_dir,
+    )
+
+    written = yaml.safe_load(global_path.read_text())
+    assert role_mgr.role_name == "research"
+    assert written["role"][role_mgr.role_name]["model"] == _EXPECTED_SLOTS
+    assert "model" not in written["role"].get(DEFAULT_ROLE, {})
+
+
+@pytest.mark.parametrize("role_default", ['""', "~"])
+def test_persist_blank_role_default_falls_back_to_default_role(
+    tmp_path, monkeypatch, role_default
+):
+    """role.default 为空串/空值时回退到 DEFAULT_ROLE。"""
+    _clear_provider_env(monkeypatch)
+    global_path = tmp_path / "global" / "config.yaml"
+    global_path.parent.mkdir()
+    global_path.write_text(f"role:\n  default: {role_default}\n")
+    manager = _manager(tmp_path)
+
+    persist_setup(manager, _deepseek_result())
+
+    written = yaml.safe_load(global_path.read_text())
+    assert written["role"][DEFAULT_ROLE]["model"] == _EXPECTED_SLOTS
+
+
+def test_persist_overwrites_legacy_scalar_role_model(tmp_path, monkeypatch):
+    """全局层残留旧标量 role.<角色>.model 时整体覆盖为 mapping，不抛 ValueError。"""
+    _clear_provider_env(monkeypatch)
+    global_path = tmp_path / "global" / "config.yaml"
+    global_path.parent.mkdir()
+    global_path.write_text("role:\n  default: coding\n  coding:\n    model: old-model\n")
+    manager = _manager(tmp_path)
+
+    persist_setup(manager, _deepseek_result())
+
+    written = yaml.safe_load(global_path.read_text())
+    assert written["role"]["coding"]["model"] == _EXPECTED_SLOTS
+    assert manager.get_config("role.coding.model") == _EXPECTED_SLOTS
+    assert dotenv_values(tmp_path / "global" / ".env") == {
+        "DEEPSEEK_API_URL": "https://api.deepseek.test/v1",
+        "DEEPSEEK_API_KEY": "sk-test-123",
+    }
+
+
+@pytest.mark.parametrize("slot", ["default", "fast"])
+def test_persist_project_slot_override_fails_before_env(tmp_path, monkeypatch, slot):
+    """可信项目覆盖任一槽位时在写 .env 之前抛错，消息说明被更高优先级层覆盖。"""
+    _clear_provider_env(monkeypatch)
+    project_dir = tmp_path / "work" / ".agent"
+    project_dir.mkdir(parents=True)
+    (project_dir / "config.yaml").write_text(
+        f"role:\n  coding:\n    model:\n      {slot}: project-model\n"
+    )
+    manager = _manager(tmp_path, project_trusted=True)
+
+    with pytest.raises(LLMConfigurationError) as excinfo:
+        persist_setup(manager, _deepseek_result())
+
+    message = str(excinfo.value)
+    assert 'role["coding"].model.default' in message
+    assert 'role["coding"].model.fast' in message
+    assert "覆盖" in message
+    assert "sk-test-123" not in message
+    assert not (tmp_path / "global" / ".env").exists()
+
+
+def test_persist_blank_fast_model_rejected_before_any_write(tmp_path, monkeypatch):
+    """fast_model 为空白时校验失败，且配置与 .env 都不落盘。"""
+    _clear_provider_env(monkeypatch)
+    manager = _manager(tmp_path)
+    result = SetupResult(
+        provider="deepseek",
+        base_url="https://api.deepseek.test/v1",
+        api_key="sk-test-123",
+        default_model="deepseek-v4-pro",
+        fast_model="   ",
+    )
+
+    with pytest.raises(LLMConfigurationError, match="fast_model"):
+        persist_setup(manager, result)
+
+    assert not (tmp_path / "global" / "config.yaml").exists()
+    assert not (tmp_path / "global" / ".env").exists()
