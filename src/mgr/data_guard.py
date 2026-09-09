@@ -203,8 +203,12 @@ class DataGuard:
         if not parsed.scheme or not parsed.hostname:
             return "<url>"
         netloc = parsed.hostname
-        if parsed.port:
-            netloc += f":{parsed.port}"
+        try:
+            port = parsed.port
+        except ValueError:
+            return "<url>"
+        if port:
+            netloc += f":{port}"
         return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
 
     def _redact_url_match(self, match: re.Match[str]) -> str:
@@ -216,12 +220,16 @@ class DataGuard:
         try:
             parsed = urlsplit(raw)
         except ValueError:
-            return match.group(0)
+            return "<url>"
         if not parsed.scheme or not parsed.netloc:
             return match.group(0)
         netloc = parsed.hostname or ""
-        if parsed.port:
-            netloc += f":{parsed.port}"
+        try:
+            port = parsed.port
+        except ValueError:
+            port = None
+        if port:
+            netloc += f":{port}"
         query = []
         for key, value in parse_qsl(parsed.query, keep_blank_values=True):
             query.append((key, REDACTED if _SENSITIVE_KEY.search(key) else self.redact(value)))

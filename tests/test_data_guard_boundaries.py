@@ -7,6 +7,8 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from src.agent import Agent
 from src.mgr.compact_mgr import CompactMgr
 from src.mgr.data_guard import DataGuard, REDACTED
@@ -128,3 +130,42 @@ def test_shell_timeout_reaps_background_process_group(tmp_path):
 
     assert result == "命令超时（1秒）"
     assert time.monotonic() - started < 3
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "http://127.0.0.1:port`",
+        "http://host:-1",
+        "http://host:99999999",
+        "see http://localhost:port`/api?token=abc&a=b",
+    ],
+)
+def test_redact_tolerates_non_numeric_or_out_of_range_ports(text):
+    result = DataGuard().redact(text)
+
+    assert isinstance(result, str)
+    assert "abc" not in result
+
+
+def test_redact_non_numeric_port_keeps_host_and_redacts_query_values():
+    result = DataGuard().redact("see http://localhost:port`/api?token=abc&a=b")
+
+    assert result == "see http://localhost/api?token=%5BREDACTED%5D&a=b"
+
+
+def test_shell_summary_tolerates_non_numeric_port():
+    result = DataGuard().shell_summary("curl -sS http://127.0.0.1:port`/x?token=abc")
+
+    assert result == "curl -sS '<url>'"
+    assert "abc" not in result
+
+
+def test_redact_unparseable_url_falls_back_to_placeholder():
+    assert DataGuard().redact("http://[::1?q=supersecret") == "<url>"
+
+
+def test_redact_valid_url_output_is_unchanged():
+    result = DataGuard().redact("https://user:pass@example.com:8443/path?token=x&a=b#frag")
+
+    assert result == "https://example.com:8443/path?token=%5BREDACTED%5D&a=b#frag"
