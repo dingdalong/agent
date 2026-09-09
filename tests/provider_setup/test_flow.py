@@ -204,6 +204,23 @@ def test_build_provider_options_invalid_base_url_raises(tmp_path, monkeypatch):
         build_provider_options(manager)
 
 
+def test_build_provider_options_prefills_api_key_hint_without_leaking(tmp_path, monkeypatch):
+    """有效环境中的 Provider key 作为预填提示，repr 不含该 secret。"""
+    _clear_provider_env(monkeypatch)
+    global_dir = tmp_path / "global"
+    global_dir.mkdir()
+    (global_dir / ".env").write_text("DEEPSEEK_API_KEY='sk-existing'\n")
+    manager = _manager(tmp_path)
+
+    options = build_provider_options(manager)
+
+    deepseek = next(option for option in options if option.name == "deepseek")
+    assert deepseek.api_key == "sk-existing"
+    assert "sk-existing" not in repr(deepseek)
+    assert next(option for option in options if option.name == "openai").api_key is None
+    assert next(option for option in options if option.name == "ollama").api_key is None
+
+
 # ---------- verify_provider ----------
 
 
@@ -481,11 +498,15 @@ def test_verify_provider_propagates_control_flow(monkeypatch, exc):
 
 
 def test_maybe_run_skips_when_explicit_config(tmp_path, monkeypatch):
-    """已有显式 Provider 配置时立即返回，绝不构造/import UI。"""
+    """已有显式 Provider 配置且双槽位已配置时立即返回，绝不构造/import UI。"""
     _clear_provider_env(monkeypatch)
     global_dir = tmp_path / "global"
     global_dir.mkdir()
     (global_dir / ".env").write_text("DEEPSEEK_API_KEY='sk-existing'\n")
+    (global_dir / "config.yaml").write_text(
+        "role:\n  coding:\n    model:\n      default: deepseek-v4-pro\n"
+        "      fast: deepseek-v4-flash\n"
+    )
     manager = _manager(tmp_path)
     called: list[bool] = []
 
@@ -501,6 +522,109 @@ def test_maybe_run_skips_when_explicit_config(tmp_path, monkeypatch):
     assert called == []
     # 与本次调用无关的既有导入（如同会话先跑了 TUI 测试）不算违反契约
     assert ("src.interfaces.tui.provider_setup" in sys.modules) == ui_imported_before
+
+
+def test_maybe_run_runs_when_provider_explicit_but_slots_missing(tmp_path, monkeypatch):
+    """仅有 Provider 凭据而双槽位缺失时进入向导，并把已有 key 作为预填提示。"""
+    _clear_provider_env(monkeypatch)
+    _set_tty(monkeypatch, True)
+    global_dir = tmp_path / "global"
+    global_dir.mkdir()
+    (global_dir / ".env").write_text("DEEPSEEK_API_KEY='sk-existing'\n")
+    manager = _manager(tmp_path)
+    captured: list[list[ProviderOption]] = []
+
+    async def fake_setup_app(options, verify):
+        captured.append(options)
+        return _deepseek_result()
+
+    monkeypatch.setattr("src.app.provider_setup._run_setup_app", fake_setup_app)
+
+    _run(maybe_run_provider_setup(manager))
+
+    assert captured
+    deepseek = next(option for option in captured[0] if option.name == "deepseek")
+    assert deepseek.api_key == "sk-existing"
+    assert manager.get_config("role.coding.model") == _EXPECTED_SLOTS
+
+
+def test_maybe_run_runs_when_one_slot_missing(tmp_path, monkeypatch):
+    """显式 Provider 配置下只要有一个槽位缺失就进入向导。"""
+    _clear_provider_env(monkeypatch)
+    _set_tty(monkeypatch, True)
+    global_dir = tmp_path / "global"
+    global_dir.mkdir()
+    (global_dir / ".env").write_text("DEEPSEEK_API_KEY='sk-existing'\n")
+    (global_dir / "config.yaml").write_text(
+        "role:\n  coding:\n    model:\n      default: deepseek-v4-pro\n"
+    )
+    manager = _manager(tmp_path)
+    called: list[bool] = []
+
+    async def fake_setup_app(options, verify):
+        called.append(True)
+        return _deepseek_result()
+
+    monkeypatch.setattr("src.app.provider_setup._run_setup_app", fake_setup_app)
+
+    _run(maybe_run_provider_setup(manager))
+
+    assert called == [True]
+    assert manager.get_config("role.coding.model") == _EXPECTED_SLOTS
+
+
+def test_maybe_run_project_env_explicit_missing_slots_persists(tmp_path, monkeypatch):
+    """报错现场：可信项目根 .env 提供 key、无 .agent/config.yaml、无槽位时进入向导。"""
+    _clear_provider_env(monkeypatch)
+    _set_tty(monkeypatch, True)
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    (work_dir / ".env").write_text("DEEPSEEK_API_KEY='sk-project'\n")
+    manager = _manager(tmp_path, project_trusted=True)
+    called: list[bool] = []
+
+    async def fake_setup_app(options, verify):
+        called.append(True)
+        return SetupResult(
+            provider="deepseek",
+            base_url="https://api.deepseek.test/v1",
+            api_key="sk-project",
+            default_model="deepseek-v4-pro",
+            fast_model="deepseek-v4-flash",
+        )
+
+    monkeypatch.setattr("src.app.provider_setup._run_setup_app", fake_setup_app)
+
+    _run(maybe_run_provider_setup(manager))
+
+    assert called == [True]
+    assert manager.get_config("role.coding.model") == _EXPECTED_SLOTS
+
+
+def test_maybe_run_non_tty_explicit_provider_missing_slots_raises(tmp_path, monkeypatch):
+    """非 TTY 且槽位缺失时不静默跳过，抛含槽位键与路径的可操作错误。"""
+    _clear_provider_env(monkeypatch)
+    _set_tty(monkeypatch, False)
+    global_dir = tmp_path / "global"
+    global_dir.mkdir()
+    (global_dir / ".env").write_text("DEEPSEEK_API_KEY='sk-existing'\n")
+    manager = _manager(tmp_path)
+    called: list[bool] = []
+
+    async def fake_setup_app(options, verify):
+        called.append(True)
+        return None
+
+    monkeypatch.setattr("src.app.provider_setup._run_setup_app", fake_setup_app)
+
+    with pytest.raises(LLMConfigurationError) as excinfo:
+        _run(maybe_run_provider_setup(manager))
+
+    message = str(excinfo.value)
+    assert 'role["coding"].model.default' in message
+    assert 'role["coding"].model.fast' in message
+    assert str(global_dir / "config.yaml") in message
+    assert called == []
 
 
 def test_maybe_run_non_tty_raises_actionable_message(tmp_path, monkeypatch):

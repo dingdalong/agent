@@ -194,12 +194,12 @@ class SetupApp(App[SetupResult | None], inherit_bindings=False):
             self.query_one(target).focus()
 
     def _choose_provider(self, index: int) -> None:
-        """进入 credentials 态：URL 预填所选 Provider 的 base_url，清空旧 key。"""
+        """进入 credentials 态：URL 与 Key 预填所选 Provider 的已有值，无则清空。"""
         option = self._options[index]
         self._provider_index = index
         url_input = self.query_one("#url-input", Input)
         url_input.value = option.base_url
-        self.query_one("#key-input", Input).value = ""
+        self.query_one("#key-input", Input).value = option.api_key or ""
         self._state = "credentials"
         self._set_feedback("")
         url_input.focus()

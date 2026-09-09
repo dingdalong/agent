@@ -82,13 +82,13 @@
 
 ### 首次 LLM Provider 配置向导
 
-`bootstrap.create_app()` 在项目信任确认和 `ConfigManager` 构造后调用 `maybe_run_provider_setup(config_mgr)`。只有 `ConfigManager.has_explicit_provider_config()` 判定用户层尚无显式 Provider 配置时才进入向导；任一来源命中即跳过：
+`bootstrap.create_app()` 在项目信任确认和 `ConfigManager` 构造后调用 `maybe_run_provider_setup(config_mgr)`。仅当「`ConfigManager.has_explicit_provider_config()` 判定用户层已有显式 Provider 配置」且「激活角色的 `role.<角色>.model.default` 与 `role.<角色>.model.fast` 双槽位都已配置为非空字符串」时才跳过向导；任一条件不满足即进入向导。显式 Provider 配置的判定来源（任一命中）：
 
 - 有效环境中存在任一内置 Provider 的 `{NAME}_API_KEY` 或 `{NAME}_API_URL` 键；有效环境遵循项目信任边界；
 - 全局 `config.yaml` 存在非空 `llm_provider` mapping，或可信项目层存在同类配置；
 - 用户层 `llm_provider` 非 mapping，或 YAML 无效时保守视为显式，避免覆盖无法解析的内容。
 
-仅内置 `src/config.yaml` 的 provider 段、或用户层只有角色模型槽位，不算显式 Provider 配置。
+仅内置 `src/config.yaml` 的 provider 段、或用户层只有角色模型槽位，不算显式 Provider 配置。反之，只有 Provider 凭据而角色槽位缺失时也不算完成配置：仍进入向导，并用该 Provider 在有效环境中的已有 `base_url`/`api_key` 预填凭据页，避免项目 `.env` 与向导写入的全局 `.env` 取值不一致。
 
 TTY 向导依次完成 Provider、API 地址与凭据、严格 `list_models` 验证，然后在同一 Provider 返回的同一模型列表上显示两个模型选择屏：先选 `default`，再选 `fast`。进入 fast 屏时默认高亮刚选定的 default 模型，直接回车可让两个槽位使用同一模型；返回 default 屏时保留原选择。验证使用 10 秒超时且不采用静态模型列表回退，失败只显示安全化错误，不写配置。
 
@@ -96,7 +96,7 @@ TTY 向导依次完成 Provider、API 地址与凭据、严格 `list_models` 验
 
 - 非 TTY：不读取 stdin，抛 `LLMConfigurationError`，提示手工配置全局 `.env` 与 `role.<有效角色>.model.default/fast`。
 - 取消：不写任何配置并以配置错误退出。
-- 已有显式 Provider 配置：跳过向导，直接进入模型发现与双槽位校验。
+- 已有显式 Provider 配置且双槽位已配置：跳过向导，直接进入模型发现与双槽位校验。
 - 向导只在首次进程启动接线，`/clear` 不重跑；没有 `/setup` 命令。
 
 ### LLM 启动错误链

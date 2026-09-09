@@ -104,6 +104,33 @@ def test_provider_order_default_highlight_and_url_prefill() -> None:
     asyncio.run(scenario())
 
 
+def test_provider_selection_prefills_existing_key_hint_and_clears_on_switch() -> None:
+    """已有 key 提示时凭据页预填并仍掩码；切换到无提示 Provider 时清空。"""
+
+    async def scenario() -> None:
+        with_key = ProviderOption(
+            name="deepseek",
+            base_url="https://api.deepseek.test/v1",
+            requires_key=True,
+            api_key="sk-existing",
+        )
+        app = SetupApp(options=[with_key, _OLLAMA], verify=StubVerify())
+        async with app.run_test(size=(80, 24)) as pilot:
+            await _choose_provider(app, pilot, 0)
+            key_input = app.query_one("#key-input", Input)
+            assert key_input.value == "sk-existing"
+            assert key_input.password is True
+
+            await pilot.press("up")
+            provider_list = app.query_one("#provider-list", KeyboardOptionList)
+            assert provider_list.has_focus
+            provider_list.highlighted = 1
+            await pilot.press("enter")
+            assert app.query_one("#key-input", Input).value == ""
+
+    asyncio.run(scenario())
+
+
 def test_key_input_uses_password_masking() -> None:
     """key 输入框启用 password 掩码，值本身不脱敏。"""
 

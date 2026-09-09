@@ -41,7 +41,7 @@
 
 项目 `.env`、Provider/LLM 配置、项目 Hook 和项目 MCP 只有通过 `ProjectTrustGate` 后才加载；项目信任确认被拒绝、取消、失败或运行于非 TTY 时进入受限模式。此时项目层 `llm_provider`、`llm` 会整体剥离；`role.default` 仍可选择已发现的非项目角色，但每个 `role.<角色>.model` 与 `role.<角色>.reasoning_effort` 会剥离，模型与 effort 只能来自内置或全局层。`/models` 因固定写项目层而直接拒绝执行，不写配置也不热切模型。
 
-首次启动无显式 Provider 配置时（判定与流程见 [architecture.md](architecture.md)「首次 LLM Provider 配置向导」），向导自动把 `{PROVIDER}_API_URL` / `{PROVIDER}_API_KEY` 写入全局 `.env`，并把 `role.<有效角色>.model` 的 `default`/`fast` mapping 写入全局 `config.yaml`；配置角色不存在时与 `RoleMgr` 一样回退 `coding`。项目层 `.env` 始终手工维护。写入均为单文件原子更新，`.env` 只改目标变量并保留其他原文。
+首次启动未完成 LLM 配置时（缺少 Provider 凭据，或激活角色 `role.<有效角色>.model` 的 `default`/`fast` 槽位；判定与流程见 [architecture.md](architecture.md)「首次 LLM Provider 配置向导」），向导自动把 `{PROVIDER}_API_URL` / `{PROVIDER}_API_KEY` 写入全局 `.env`，并把 `role.<有效角色>.model` 的 `default`/`fast` mapping 写入全局 `config.yaml`；配置角色不存在时与 `RoleMgr` 一样回退 `coding`。已有 Provider 凭据时向导预填对应 `base_url`/`api_key`。项目层 `.env` 始终手工维护。写入均为单文件原子更新，`.env` 只改目标变量并保留其他原文。
 
 ---
 

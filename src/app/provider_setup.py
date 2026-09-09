@@ -3,7 +3,7 @@
 调用链（由 bootstrap 在 ConfigManager 构造后 await）::
 
     maybe_run_provider_setup(config_mgr)
-      ├─ 已有显式 Provider 配置 -> 直接返回
+      ├─ 已有显式 Provider 配置且双槽位已配置 -> 直接返回
       ├─ stdin/stdout 非 TTY -> LLMConfigurationError（手工配置指引，不读 stdin）
       └─ TTY -> _run_setup_app(options, verify) -> SetupResult | None
                 ├─ None（取消）-> LLMConfigurationError（未写入配置）
@@ -36,11 +36,15 @@ _VERIFY_TIMEOUT_SECONDS = 10.0
 
 @dataclass(frozen=True, slots=True)
 class ProviderOption:
-    """内置 Provider 候选（顺序即内置 llm_provider mapping 顺序）。"""
+    """内置 Provider 候选（顺序即内置 llm_provider mapping 顺序）。
+
+    api_key 为有效环境中已有的该 Provider 凭据，仅用于向导预填；repr 不含该值。
+    """
 
     name: str
     base_url: str
     requires_key: bool
+    api_key: str | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,8 +95,16 @@ def build_provider_options(config_mgr: ConfigManager) -> list[ProviderOption]:
             get_provider(name)
         except ValueError as exc:
             raise LLMConfigurationError(f"{provider_key} 配置了未知 provider 名") from exc
+        requires_key = name != "ollama"
+        raw_key = provider_cfg.get("api_key")
+        api_key = raw_key if requires_key and isinstance(raw_key, str) and raw_key.strip() else None
         options.append(
-            ProviderOption(name=name, base_url=base_url, requires_key=name != "ollama")
+            ProviderOption(
+                name=name,
+                base_url=base_url,
+                requires_key=requires_key,
+                api_key=api_key,
+            )
         )
     if not options:
         raise LLMConfigurationError("没有可配置的 LLM Provider 候选，请检查 llm_provider 配置")
@@ -222,7 +234,10 @@ def _persist_failure_message(config_mgr: ConfigManager) -> str:
 
 
 async def maybe_run_provider_setup(config_mgr: ConfigManager) -> None:
-    """无显式 Provider 配置时运行首次配置向导并安全持久化。
+    """未完成 LLM 配置时运行首次配置向导并安全持久化。
+
+    仅在「已有显式 Provider 配置且激活角色 default/fast 双槽位均已配置」时跳过；
+    仅有 Provider 凭据而槽位缺失时仍进入向导（凭据用于预填）。
 
     Args:
         config_mgr: 配置管理器。
@@ -235,7 +250,7 @@ async def maybe_run_provider_setup(config_mgr: ConfigManager) -> None:
             或持久化期间出现预期配置/文件异常（ValueError/OSError 已转安全错误）。
         asyncio.CancelledError / KeyboardInterrupt / SystemExit: 原样传播。
     """
-    if config_mgr.has_explicit_provider_config():
+    if config_mgr.has_explicit_provider_config() and _role_slots_configured(config_mgr):
         return
     options = build_provider_options(config_mgr)
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
@@ -338,6 +353,19 @@ def _effective_slots(config_mgr: ConfigManager, role_name: str) -> dict[str, obj
     return {"default": raw.get("default"), "fast": raw.get("fast")}
 
 
+def _role_slots_configured(config_mgr: ConfigManager) -> bool:
+    """激活角色的 default/fast 双槽位是否均为非空字符串。
+
+    Args:
+        config_mgr: 配置管理器。
+
+    Returns:
+        两个槽位都已配置时为 True；父键缺失、旧标量格式、空串或非字符串为 False。
+    """
+    slots = _effective_slots(config_mgr, _setup_role_name(config_mgr))
+    return all(isinstance(value, str) and bool(value.strip()) for value in slots.values())
+
+
 def _validate_result(config_mgr: ConfigManager, result: SetupResult) -> ProviderOption:
     """校验 result 合法性并返回其候选 ProviderOption。
 
@@ -432,7 +460,7 @@ def _non_tty_message(config_mgr: ConfigManager, options: list[ProviderOption]) -
         else f"{model_key} 下的 default 与 fast"
     )
     return (
-        "未检测到 LLM Provider 配置，非 TTY 无法启动向导。必填 "
+        "LLM 配置未完成，非 TTY 无法启动向导。必填 "
         f"{required_keys}。"
         f"YAML 样例：{example}。"
         f"配置：{config_mgr.global_dir / 'config.yaml'}；"
