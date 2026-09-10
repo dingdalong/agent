@@ -39,7 +39,7 @@ class WebAccessMgr:
     ) -> str:
         route = "local"
         try:
-            if self.llm_mgr.web_mode_for_model(provider.model) == "provider":
+            if self.llm_mgr.web_mode_for_provider(provider.provider_name) == "provider":
                 try:
                     response = await provider.native_web_search(query, max_results=max_results)
                     route = "provider"
@@ -54,7 +54,7 @@ class WebAccessMgr:
     async def fetch(self, url: str, *, provider: LLMProvider) -> str:
         route = "local"
         try:
-            if self.llm_mgr.web_mode_for_model(provider.model) == "provider":
+            if self.llm_mgr.web_mode_for_provider(provider.provider_name) == "provider":
                 try:
                     response = await provider.native_web_fetch(url)
                     route = "provider"
@@ -71,7 +71,7 @@ class WebAccessMgr:
             if operation == "search":
                 return "本地 DDGS 后端及其上游搜索服务"
             return "目标网站（本地直连）"
-        return f"{self.llm_mgr.provider_name_for_model(provider.model)} provider"
+        return f"{provider.provider_name} provider"
 
     def _format_search(
         self,

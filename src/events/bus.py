@@ -299,7 +299,7 @@ class EventBus:
 
         Args:
             prompt: 菜单上文提示（打印到 scrollback）。
-            models: 可选模型列表，每项为 (模型ID, 展示标签)。
+            models: 可选模型列表，每项为 (供应商/模型ID, 展示标签)。
             efforts: 可选推理强度列表（角色级单值，两槽位共用）。
             default_model_index: default 槽位的初始选中下标。
             fast_model_index: fast 槽位的初始选中下标。

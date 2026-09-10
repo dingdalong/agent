@@ -8,7 +8,6 @@ from src.commands import command
 from src.commands.context import CommandContext
 from src.llm.base import normalize_reasoning_effort
 from src.llm.errors import LLMConfigurationError
-from src.mgr.llm_mgr import ModelUnavailableError
 from src.mgr.role_mgr import format_role_config_key
 
 _EFFORTS = ["low", "medium", "high", "xhigh", "max"]
@@ -22,14 +21,13 @@ def _alias_labels(llm) -> dict[str, list[str]]:
         llm: LLMMgr 实例。
 
     Returns:
-        {模型ID: [槽位名, ...]}；槽位配置非法或模型不可用时跳过该槽位，
-        保证纯文本列表在无可用模型时仍能降级输出。
+        {模型ID: [槽位名, ...]}；槽位配置非法时跳过该槽位。
     """
     labels: dict[str, list[str]] = {}
     for alias in _SLOTS:
         try:
             model = llm.resolve_model(alias)
-        except (ModelUnavailableError, LLMConfigurationError):
+        except LLMConfigurationError:
             continue
         labels.setdefault(model, []).append(alias)
     return labels
@@ -41,32 +39,32 @@ def _model_listing(llm) -> str:
 
     lines: list[str] = []
     if grouped:
-        lines.append("支持的模型（按 provider 分组）:")
+        lines.append("模型候选（按 provider 分组）:")
         for provider, models in grouped.items():
             lines.append("")
             lines.append(f"{provider}:")
             for model in models:
-                suffix = f" [{', '.join(labels[model])}]" if model in labels else ""
+                suffix = f" [{', '.join(labels[f"{provider}/{model}"])}]" if f"{provider}/{model}" in labels else ""
                 lines.append(f"  - {model}{suffix}")
     else:
-        lines.append("当前没有可用模型。")
+        lines.append("当前没有模型候选。")
     return "\n".join(lines) + "\n"
 
 
 def _slot_index(llm, alias: str, models: list[str]) -> int:
-    """定位某槽位当前模型在可用模型列表中的下标。
+    """定位某槽位当前模型在模型候选列表中的下标。
 
     Args:
         llm: LLMMgr 实例。
         alias: 槽位名（default/fast）。
-        models: 可用模型列表。
+        models: 模型候选列表。
 
     Returns:
         槽位当前模型的下标；槽位不可解析或模型不在列表中时回退 0。
     """
     try:
         model = llm.resolve_model(alias)
-    except (ModelUnavailableError, LLMConfigurationError):
+    except LLMConfigurationError:
         return 0
     return models.index(model) if model in models else 0
 
@@ -92,7 +90,7 @@ def _selection_indexes(agent, llm, models: list[str]) -> tuple[int, int, int]:
     Args:
         agent: 当前 agent（提供推理强度现值）。
         llm: LLMMgr 实例（提供两个槽位现值）。
-        models: 可用模型列表。
+        models: 模型候选列表。
 
     Returns:
         (default 槽位下标, fast 槽位下标, 推理强度下标)。
@@ -110,8 +108,7 @@ def _persist_selection(
 ) -> bool:
     """把两个槽位与推理强度写回项目层角色配置。
 
-    模型槽位整体写父键 ``role.<角色>.model`` 的 mapping（而非点路径子键），
-    项目层残留旧标量 model 值时也能直接抹平。
+    模型槽位与推理强度一起写入项目配置，成功后由调用方应用切换。
 
     Args:
         ctx: 命令上下文。
@@ -166,8 +163,13 @@ async def models(ctx: CommandContext, args: list[str]) -> None:
     """交互选择两个模型槽位与推理强度；无交互入口时输出模型列表。"""
     del args
     llm = ctx.deps.llm_mgr
-    available = llm.list_models()
-    if not available or ctx.agent is None:
+    await llm.refresh_models()
+    for provider, error in llm.provider_errors.items():
+        await ctx.deps.event_bus.request_output(
+            f"{provider} 模型列表获取失败：{error.message}。仍可选择配置中的模型。\n"
+        )
+    candidates = llm.list_models()
+    if not candidates or ctx.agent is None:
         await ctx.deps.event_bus.request_output(_model_listing(llm))
         return
 
@@ -191,8 +193,8 @@ async def models(ctx: CommandContext, args: list[str]) -> None:
         await ctx.deps.event_bus.request_output(_untrusted_notice(ctx))
         return
 
-    default_index, fast_index, effort_index = _selection_indexes(ctx.agent, llm, available)
-    options = [(model, f"{llm.provider_name_for_model(model)}/{model}") for model in available]
+    default_index, fast_index, effort_index = _selection_indexes(ctx.agent, llm, candidates)
+    options = [(model, model) for model in candidates]
     default_model, fast_model, effort = await request_selection(
         "",
         options,
@@ -204,18 +206,23 @@ async def models(ctx: CommandContext, args: list[str]) -> None:
     )
     if not default_model or not fast_model or not effort:
         return
-    if default_model not in available or fast_model not in available or effort not in _EFFORTS:
-        await ctx.deps.event_bus.request_output("模型选择无效，未应用更改。\n")
+    selected = {"default": default_model, "fast": fast_model}
+    for slot, model in selected.items():
+        try:
+            selected[slot] = llm.resolve_model(model)
+        except LLMConfigurationError as exc:
+            await ctx.deps.event_bus.request_output(f"模型选择无效：{exc}\n")
+            return
+    if effort not in _EFFORTS:
+        await ctx.deps.event_bus.request_output("推理强度无效，未应用更改。\n")
         return
+    default_model, fast_model = selected["default"], selected["fast"]
 
-    current_model = getattr(getattr(ctx.agent, "llm", None), "model", None)
+    current_model = ctx.agent.model
     current_effort = _effective_reasoning_effort(ctx.agent)
     switch_agent = default_model != current_model or effort != current_effort
 
-    # 先验证两个槽位都能实例化并持久化，确保任一步失败时整体不生效。
     try:
-        llm.get(default_model)
-        llm.get(fast_model)
         persisted = await asyncio.to_thread(
             _persist_selection, ctx, default_model, fast_model, effort
         )

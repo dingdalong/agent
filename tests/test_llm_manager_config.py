@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from copy import deepcopy
-import logging
 import math
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,7 +12,6 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 import yaml
 
-import main as main_module
 from src.llm import LLMConfigurationError, LLMErrorKind
 from src.llm.anthropic import AnthropicProvider
 from src.llm.base import LLMProvider
@@ -22,7 +19,227 @@ from src.llm.deepseek import DeepSeekProvider
 from src.llm.moonshot import MoonshotProvider
 from src.llm.ollama import OllamaProvider
 from src.llm.openai import OpenAIProvider
-from src.mgr.llm_mgr import MODEL_ALIASES, LLMMgr, ModelUnavailableError
+from src.mgr.llm_mgr import MODEL_ALIASES, LLMMgr
+from src.llm.models import discover_models, normalize_provider_configs, split_model_reference
+
+
+@pytest.mark.parametrize("reference", ["", "model", "/model", "openai/", "openai /model", 1, None])
+def test_model_reference_requires_provider_and_model(reference):
+    with pytest.raises(LLMConfigurationError):
+        split_model_reference(reference)
+
+
+def test_model_reference_preserves_model_namespace():
+    assert split_model_reference("openai/org/model") == ("openai", "org/model")
+
+
+def test_unlisted_model_routes_without_discovery(monkeypatch):
+    discovery = AsyncMock(side_effect=AssertionError("不得发现模型"))
+    monkeypatch.setattr(OpenAIProvider, "list_models", discovery)
+    factory = Mock(side_effect=lambda **kwargs: SimpleNamespace(**kwargs))
+    monkeypatch.setattr("src.mgr.llm_mgr.get_provider", lambda name: factory)
+    manager = _manager()
+    assert manager.get().model == "model-a"
+    assert manager.get("fast").model == "model-f"
+    assert manager.get("openai/org/not-listed").model == "org/not-listed"
+    assert manager.get("openai/org/not-listed").provider_name == "openai"
+    manager.reconfigure()
+    assert manager.get().model == "model-a"
+    discovery.assert_not_called()
+
+
+@pytest.mark.parametrize("is_subagent, requested", [(False, None), (True, "fast"), (True, "openai/custom")])
+def test_agent_construction_does_not_discover_models(tmp_path, monkeypatch, is_subagent, requested):
+    from src.agent import Agent, AgentDeps
+
+    discovery = AsyncMock(side_effect=AssertionError("启动不得发现模型"))
+    monkeypatch.setattr(OpenAIProvider, "list_models", discovery)
+    monkeypatch.setattr("src.mgr.llm_mgr.get_provider", lambda name: lambda **kwargs: SimpleNamespace(**kwargs))
+    config = _base_config()
+    config["compact"] = {"auto_compact_rate": 0.8}
+    manager = _manager(config)
+    deps = AgentDeps(
+        config_mgr=manager.config_mgr, llm_mgr=manager, workdir=tmp_path,
+        tools_mgr=SimpleNamespace(excluded_tool_names=lambda features: set(), get_schemas=lambda names: []),
+    )
+    agent = Agent(
+        agent_type="test", description="test", deps=deps,
+        is_subagent=is_subagent, model=requested, features=set(), tools=set(),
+    )
+    assert agent.model == manager.resolve_model(requested)
+    assert agent.llm.provider_name == "openai"
+    discovery.assert_not_called()
+
+
+def test_refresh_merges_configuration_discovery_and_selected_models(monkeypatch):
+    config = _base_config()
+    config["llm_provider"]["openai"]["models"] = ["local-only", "shared", "shared"]
+    discovery = AsyncMock(return_value=["remote-only", "shared", "remote-only"])
+    monkeypatch.setattr(OpenAIProvider, "list_models", discovery)
+    manager = _manager(config)
+    marker = object()
+    manager._cache["openai/model-a"] = marker
+    asyncio.run(manager.refresh_models())
+    assert manager.list_models() == [
+        "openai/local-only", "openai/model-a", "openai/model-f", "openai/remote-only", "openai/shared",
+    ]
+    assert manager.get() is marker
+    assert manager.provider_errors == {}
+    assert discovery.call_args.kwargs["timeout"] == 3.0
+    assert config["llm_provider"]["openai"]["models"] == ["local-only", "shared", "shared"]
+
+
+@pytest.mark.parametrize("result", [[], ["valid", None], [""], "bad", TimeoutError("offline")])
+def test_failed_or_empty_discovery_keeps_configured_and_selected_models(monkeypatch, result):
+    config = _base_config()
+    config["llm_provider"]["openai"]["models"] = ["configured"]
+    discovery = AsyncMock(side_effect=result) if isinstance(result, Exception) else AsyncMock(return_value=result)
+    monkeypatch.setattr(OpenAIProvider, "list_models", discovery)
+    manager = _manager(config)
+    asyncio.run(manager.refresh_models())
+    assert manager.list_models() == ["openai/configured", "openai/model-a", "openai/model-f"]
+    assert bool(manager.provider_errors) == (result != [])
+    assert manager.resolve_model("openai/absent") == "openai/absent"
+
+
+def test_provider_identity_separates_same_model_and_web_route(monkeypatch):
+    config = _base_config()
+    config["llm_provider"]["openai"].update(models=["shared"], web="provider")
+    config["llm_provider"]["ollama"] = {"base_url": "http://localhost/v1", "models": ["shared"]}
+    factory = Mock(side_effect=lambda **kwargs: SimpleNamespace(**kwargs))
+    monkeypatch.setattr("src.mgr.llm_mgr.get_provider", lambda name: factory)
+    manager = _manager(config)
+    first = manager.get("openai/shared")
+    second = manager.get("ollama/shared")
+    assert first is not second
+    assert first.model == second.model == "shared"
+    assert first.provider_name == "openai"
+    assert second.provider_name == "ollama"
+    assert manager.web_mode_for_provider(first.provider_name) == "provider"
+    assert manager.web_mode_for_provider(second.provider_name) == "local"
+    assert "openai/shared" in manager.list_models()
+    assert "ollama/shared" in manager.list_models()
+
+
+def test_reconfigure_discards_old_endpoint_and_discovery(monkeypatch):
+    config = _base_config()
+    factory = Mock(side_effect=lambda **kwargs: SimpleNamespace(**kwargs))
+    monkeypatch.setattr("src.mgr.llm_mgr.get_provider", lambda name: factory)
+    monkeypatch.setattr(OpenAIProvider, "list_models", AsyncMock(return_value=["remote"]))
+    manager = _manager(config)
+    previous = manager.get()
+    asyncio.run(manager.refresh_models())
+    config["llm_provider"]["openai"]["base_url"] = "https://new.test/v1"
+    manager.reconfigure()
+    assert manager.get() is not previous
+    assert manager.get().base_url == "https://new.test/v1"
+    assert "openai/remote" not in manager.list_models()
+    assert manager.provider_errors == {}
+
+
+def test_invalid_reconfigure_preserves_manager_state():
+    config = _base_config()
+    manager = _manager(config)
+    previous = manager._providers
+    marker = object()
+    manager._cache["openai/model-a"] = marker
+    config["llm_provider"]["openai"]["base_url"] = ""
+    with pytest.raises(LLMConfigurationError):
+        manager.reconfigure()
+    assert manager._providers is previous
+    assert manager.get() is marker
+
+
+def test_refresh_cannot_publish_old_endpoint_results_after_reconfigure(monkeypatch):
+    async def scenario():
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def fetch(**kwargs):
+            started.set()
+            await release.wait()
+            return ["old-endpoint-model"]
+
+        monkeypatch.setattr(OpenAIProvider, "list_models", fetch)
+        manager = _manager()
+        pending = asyncio.create_task(manager.refresh_models())
+        await started.wait()
+        manager.reconfigure()
+        release.set()
+        await pending
+        assert "openai/old-endpoint-model" not in manager.list_models()
+
+    asyncio.run(scenario())
+
+
+def test_discovery_timeout_and_cancellation(monkeypatch):
+    async def scenario():
+        cancelled = asyncio.Event()
+
+        async def fetch(**kwargs):
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        monkeypatch.setattr(OpenAIProvider, "list_models", fetch)
+        config = {"base_url": "https://example.test", "models": ["configured"]}
+        result = await discover_models("openai", config, timeout=0.01)
+        assert result.models == ["configured"]
+        assert result.error.kind is LLMErrorKind.TIMEOUT
+        assert cancelled.is_set()
+        pending = asyncio.create_task(discover_models("openai", config))
+        await asyncio.sleep(0)
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+
+    asyncio.run(scenario())
+
+
+def test_discovery_failure_redacts_credentials(monkeypatch, caplog):
+    monkeypatch.setattr(OpenAIProvider, "list_models", AsyncMock(side_effect=RuntimeError("api_key=sk-secret-value")))
+    result = asyncio.run(discover_models("openai", {"base_url": "https://example.test"}))
+    assert result.error is not None
+    assert "sk-secret-value" not in result.error.message
+    assert "sk-secret-value" not in caplog.text
+
+
+@pytest.mark.parametrize("providers", [None, {"unknown": {"base_url": "https://example.test"}}, {"openai": {"base_url": "https://example.test", "models": "bad"}}])
+def test_invalid_provider_configuration_remains_an_error(providers):
+    with pytest.raises(LLMConfigurationError):
+        normalize_provider_configs(providers)
+
+
+def test_unlisted_model_reaches_supplier_and_preserves_supplier_error(monkeypatch):
+    import httpx
+    from openai import NotFoundError
+    from src.llm.errors import LLMCallError
+
+    async def scenario():
+        discovery = AsyncMock(side_effect=AssertionError("不得发现模型"))
+        monkeypatch.setattr(OpenAIProvider, "list_models", discovery)
+        manager = _manager()
+        provider = manager.get("openai/org/missing")
+        provider.event_bus = SimpleNamespace(emit=AsyncMock())
+        monkeypatch.setattr(provider, "estimate_tokens", lambda *args, **kwargs: 1)
+        response = httpx.Response(404, request=httpx.Request("POST", "https://example.test/v1/responses"))
+        create = AsyncMock(side_effect=NotFoundError(
+            "model not found", response=response,
+            body={"error": {"message": "model not found", "code": "model_not_found"}},
+        ))
+        monkeypatch.setattr(provider._client.responses, "create", create)
+        try:
+            for _attempt in range(2):
+                with pytest.raises(LLMCallError) as failure:
+                    await provider.chat([{"role": "user", "content": "hello"}])
+                assert failure.value.info.status_code == 404
+                assert create.call_args.kwargs["model"] == "org/missing"
+            assert create.await_count == 2
+            discovery.assert_not_called()
+        finally:
+            await provider._client.close()
+
+    asyncio.run(scenario())
 
 
 class ConfigStub:
@@ -81,35 +298,6 @@ class RoleMgrStub:
 
 
 
-class DiscoveryError(Exception):
-    """模拟携带结构化供应商元数据的模型发现异常。"""
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        status_code: int,
-        code: str,
-        request_id: str,
-    ) -> None:
-        """初始化测试异常。
-
-        Args:
-            message: 供应商结构化错误摘要。
-            status_code: HTTP 状态码。
-            code: 供应商错误码。
-            request_id: 请求 ID。
-
-        Returns:
-            None。
-        """
-        super().__init__(f"unsafe raw body: {message}")
-        self.status_code = status_code
-        self.body = {"error": {"message": message, "code": code}}
-        self.request_id = request_id
-        self.response = SimpleNamespace(status_code=status_code, headers={})
-
-
 def _base_config() -> dict[str, Any]:
     """返回包含完整 LLM 默认值的测试配置。
 
@@ -128,7 +316,7 @@ def _base_config() -> dict[str, Any]:
             "user_agent": "agent-test",
         },
         "llm_provider": {
-            "stub": {
+            "openai": {
                 "api_key": "test-key",
                 "base_url": "https://example.test/v1",
             },
@@ -136,7 +324,7 @@ def _base_config() -> dict[str, Any]:
         "role": {
             "default": "coding",
             "coding": {
-                "model": {"default": "model-a", "fast": "model-f"},
+                "model": {"default": "openai/model-a", "fast": "openai/model-f"},
             },
         },
         "tool": {"page_token_rate": 0.03},
@@ -162,25 +350,6 @@ def _manager(
         role_mgr=RoleMgrStub(role_name),
         event_bus=None,
     )
-
-
-def _resolving_manager(
-    config: dict[str, Any] | None = None,
-    *,
-    role_name: str | None = "coding",
-) -> LLMMgr:
-    """构造已注册两个槽位模型的 LLM 管理器。
-
-    Args:
-        config: 可选完整配置；缺省时使用合法默认配置。
-        role_name: 激活角色名。
-
-    Returns:
-        default/fast 槽位模型均可用的管理器。
-    """
-    manager = _manager(config, role_name=role_name)
-    manager._model_to_provider.update({"model-a": "stub", "model-f": "stub"})
-    return manager
 
 
 def _set_path(config: dict[str, Any], path: str, value: Any) -> None:
@@ -304,7 +473,7 @@ def test_manager_uses_interface_defaults_for_missing_optional_keys() -> None:
         None。
     """
     config = _base_config()
-    config["llm"] = {"default": "model-a"}
+    config["llm"] = {"default": "openai/model-a"}
 
     manager = _manager(config)
 
@@ -396,12 +565,8 @@ def test_manager_rejects_invalid_anthropic_pause_turn_limit(
             "max_pause_turn_continuations": value,
         }
     }
-    manager = _manager(config)
-    provider_class = SimpleNamespace(list_models=AsyncMock(return_value=[]))
-    monkeypatch.setattr("src.mgr.llm_mgr.get_provider", lambda name: provider_class)
-
     with pytest.raises(LLMConfigurationError) as exc_info:
-        asyncio.run(manager.load_models())
+        _manager(config)
 
     assert (
         "llm_provider.anthropic.max_pause_turn_continuations"
@@ -452,10 +617,9 @@ def test_anthropic_provider_receives_default_or_explicit_pause_turn_limit(
     config = _base_config()
     config["llm_provider"] = {"anthropic": provider_config}
     manager = _manager(config)
-    manager._model_to_provider["model-a"] = "anthropic"
     monkeypatch.setattr("src.mgr.llm_mgr.get_provider", lambda name: CapturingProvider)
 
-    manager.get("model-a")
+    manager.get("anthropic/model-a")
 
     assert captured["max_pause_turn_continuations"] == expected_limit
 
@@ -493,10 +657,9 @@ def test_provider_creation_receives_validated_runtime_options(monkeypatch: pytes
         "max_delay_seconds": 22,
     }
     manager = _manager(config)
-    manager._model_to_provider["model-a"] = "stub"
     monkeypatch.setattr("src.mgr.llm_mgr.get_provider", lambda name: CapturingProvider)
 
-    manager.get("model-a")
+    manager.get("openai/model-a")
 
     assert captured["concurrency"] == 7
     assert captured["timeout"] == 45.0
@@ -517,12 +680,11 @@ def test_provider_creation_does_not_consume_configured_reasoning_effort(
     provider_factory = Mock()
     config = _base_config()
     if configured_effort is not None:
-        config["llm_provider"]["stub"]["reasoning_effort"] = configured_effort
+        config["llm_provider"]["openai"]["reasoning_effort"] = configured_effort
     manager = _manager(config)
-    manager._model_to_provider["model-a"] = "stub"
     monkeypatch.setattr("src.mgr.llm_mgr.get_provider", lambda name: provider_factory)
 
-    manager.get("model-a")
+    manager.get("openai/model-a")
 
     assert "reasoning_effort" not in provider_factory.call_args.kwargs
 
@@ -558,7 +720,7 @@ def test_provider_sdk_clients_disable_builtin_retries(
     provider_class(
         api_key="test",
         base_url="https://example.test/v1",
-        model="model-a",
+        model="openai/model-a",
         event_bus=None,
         timeout=37,
     )
@@ -598,7 +760,7 @@ def test_five_providers_expose_protocol_continuation_limit(
     provider = provider_class(
         api_key="test",
         base_url="https://example.test/v1",
-        model="model-a",
+        model="openai/model-a",
         event_bus=None,
         max_pause_turn_continuations=7,
     )
@@ -636,7 +798,7 @@ def test_model_discovery_client_uses_requested_timeout(
         captured_wait_timeouts.append(timeout)
         return await awaitable
 
-    page = SimpleNamespace(data=[SimpleNamespace(id="model-a")], has_more=False)
+    page = SimpleNamespace(data=[SimpleNamespace(id="openai/model-a")], has_more=False)
     client = SimpleNamespace(
         models=SimpleNamespace(list=AsyncMock(return_value=page)),
         close=AsyncMock(),
@@ -651,1040 +813,10 @@ def test_model_discovery_client_uses_requested_timeout(
         timeout=19,
     ))
 
-    assert models == ["model-a"]
+    assert models == ["openai/model-a"]
     assert client_factory.call_args.kwargs["timeout"] == 19
     assert client_factory.call_args.kwargs["max_retries"] == 0
     assert captured_wait_timeouts == [19]
-
-
-def test_load_models_uses_fixed_timeout_and_static_fallback_for_failed_provider(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """发现失败时应保存分类错误并仅注册非空静态模型。
-
-    Args:
-        monkeypatch: pytest 属性替换工具。
-
-    Returns:
-        None。
-    """
-    calls: dict[str, dict[str, Any]] = {}
-
-    class AuthProvider:
-        """认证失败且具有静态回退的 provider。"""
-
-        @classmethod
-        async def list_models(cls, **kwargs: Any) -> list[str]:
-            """记录参数后抛认证异常。
-
-            Args:
-                kwargs: 模型发现参数。
-
-            Returns:
-                本方法不会返回。
-
-            Raises:
-                DiscoveryError: 固定认证失败。
-            """
-            calls["auth"] = kwargs
-            raise DiscoveryError(
-                "invalid api_key=super-secret sk-live-secret",
-                status_code=401,
-                code="invalid_api_key",
-                request_id="req-auth",
-            )
-
-    class RateProvider:
-        """限流失败且没有静态回退的 provider。"""
-
-        @classmethod
-        async def list_models(cls, **kwargs: Any) -> list[str]:
-            """记录参数后抛限流异常。
-
-            Args:
-                kwargs: 模型发现参数。
-
-            Returns:
-                本方法不会返回。
-
-            Raises:
-                DiscoveryError: 固定限流失败。
-            """
-            calls["rate"] = kwargs
-            raise DiscoveryError(
-                "too many requests",
-                status_code=429,
-                code="rate_limit_exceeded",
-                request_id="req-rate",
-            )
-
-    config = _base_config()
-    config["role"]["coding"]["model"] = {
-        "default": "static-model",
-        "fast": "static-model",
-    }
-    config["llm"]["timeout_seconds"] = 33
-    config["llm_provider"] = {
-        "auth": {
-            "base_url": "https://auth.example.test/v1",
-            "models": ["static-model"],
-        },
-        "rate": {"base_url": "https://rate.example.test/v1"},
-    }
-    providers = {"auth": AuthProvider, "rate": RateProvider}
-    monkeypatch.setattr("src.mgr.llm_mgr.get_provider", providers.__getitem__)
-    manager = _manager(config)
-
-    asyncio.run(manager.load_models())
-
-    assert manager.list_models() == ["static-model"]
-    manager.ensure_slots_available()
-    assert calls["auth"]["timeout"] == 3.0
-    assert calls["rate"]["timeout"] == 3.0
-    assert manager.provider_errors["auth"].kind is LLMErrorKind.AUTHENTICATION
-    assert manager.provider_errors["auth"].request_id == "req-auth"
-    assert manager.provider_errors["rate"].kind is LLMErrorKind.RATE_LIMIT
-
-
-def test_unknown_provider_is_configuration_error_even_with_static_default() -> None:
-    """未知 provider 名不得被模型发现静态回退掩盖。
-
-    Returns:
-        None。
-    """
-    config = _base_config()
-    config["role"]["coding"]["model"]["default"] = "typo-model"
-    config["llm_provider"] = {
-        "opneai": {
-            "base_url": "https://example.test/v1",
-            "models": ["typo-model"],
-        }
-    }
-    manager = _manager(config)
-
-    with pytest.raises(LLMConfigurationError) as exc_info:
-        asyncio.run(manager.load_models())
-
-    assert "llm_provider.opneai" in exc_info.value.info.message
-    assert manager.list_models() == []
-    assert manager.provider_errors == {}
-
-
-@pytest.mark.parametrize(
-    ("providers_config", "expected_key"),
-    [
-        (None, "llm_provider"),
-        ([], "llm_provider"),
-        ({1: {"base_url": "https://example.test/v1"}}, "llm_provider"),
-        ({"": {"base_url": "https://example.test/v1"}}, "llm_provider"),
-        ({"   ": {"base_url": "https://example.test/v1"}}, "llm_provider"),
-        ({"openai": []}, "llm_provider.openai"),
-        ({"openai": {}}, "llm_provider.openai.base_url"),
-        ({"openai": {"base_url": None}}, "llm_provider.openai.base_url"),
-        ({"openai": {"base_url": ""}}, "llm_provider.openai.base_url"),
-        ({"openai": {"base_url": "   "}}, "llm_provider.openai.base_url"),
-        (
-            {"openai": {"base_url": "https://example.test/v1", "models": "model-a"}},
-            "llm_provider.openai.models",
-        ),
-        (
-            {"openai": {"base_url": "https://example.test/v1", "models": [""]}},
-            "llm_provider.openai.models[0]",
-        ),
-        (
-            {"openai": {"base_url": "https://example.test/v1", "models": ["   "]}},
-            "llm_provider.openai.models[0]",
-        ),
-        (
-            {"openai": {"base_url": "https://example.test/v1", "models": [1]}},
-            "llm_provider.openai.models[0]",
-        ),
-    ],
-)
-def test_load_models_validates_provider_configuration_before_discovery(
-    providers_config: Any,
-    expected_key: str,
-) -> None:
-    """provider 配置结构错误应在任何发现任务前统一失败。
-
-    Args:
-        providers_config: 待验证 llm_provider 配置。
-        expected_key: 配置异常必须包含的精确键名。
-
-    Returns:
-        None。
-    """
-    config = _base_config()
-    config["llm_provider"] = providers_config
-    manager = _manager(config)
-
-    with pytest.raises(LLMConfigurationError) as exc_info:
-        asyncio.run(manager.load_models())
-
-    assert expected_key in exc_info.value.info.message
-    assert manager.list_models() == []
-    assert manager.provider_errors == {}
-
-
-def test_static_models_are_deduplicated_within_provider(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """同一 provider 的重复静态模型应按首次出现顺序去重。
-
-    Args:
-        monkeypatch: pytest 属性替换工具。
-
-    Returns:
-        None。
-    """
-    class FailedProvider:
-        """固定发现失败的 provider。"""
-
-        @classmethod
-        async def list_models(cls, **kwargs: Any) -> list[str]:
-            """抛出网络错误以触发静态回退。
-
-            Args:
-                kwargs: 模型发现参数。
-
-            Returns:
-                本方法不会返回。
-
-            Raises:
-                ConnectionError: 固定网络错误。
-            """
-            raise ConnectionError("connection refused")
-
-    config = _base_config()
-    config["llm_provider"]["stub"]["models"] = ["model-a", "model-a", "model-b"]
-    monkeypatch.setattr("src.mgr.llm_mgr.get_provider", lambda name: FailedProvider)
-    manager = _manager(config)
-
-    asyncio.run(manager.load_models())
-
-    assert manager.list_models() == ["model-a", "model-b"]
-
-
-@pytest.mark.parametrize(
-    "api_models",
-    [None, ("model-a",), "model-a", [""], ["   "], [1]],
-)
-def test_invalid_api_model_list_is_protocol_error_with_static_fallback(
-    monkeypatch: pytest.MonkeyPatch,
-    api_models: Any,
-) -> None:
-    """非法 API 模型列表应分类为协议错误并使用合法静态回退。
-
-    Args:
-        monkeypatch: pytest 属性替换工具。
-        api_models: provider API 返回的非法值。
-
-    Returns:
-        None。
-    """
-    class InvalidProvider:
-        """返回非法模型列表的 provider。"""
-
-        @classmethod
-        async def list_models(cls, **kwargs: Any) -> Any:
-            """返回参数化非法模型列表。
-
-            Args:
-                kwargs: 模型发现参数。
-
-            Returns:
-                参数化 API 返回值。
-            """
-            return api_models
-
-    config = _base_config()
-    config["role"]["coding"]["model"] = {
-        "default": "static-model",
-        "fast": "static-model",
-    }
-    config["llm_provider"]["stub"]["models"] = ["static-model"]
-    monkeypatch.setattr("src.mgr.llm_mgr.get_provider", lambda name: InvalidProvider)
-    manager = _manager(config)
-
-    asyncio.run(manager.load_models())
-
-    assert manager.list_models() == ["static-model"]
-    assert manager.provider_errors["stub"].kind is LLMErrorKind.RESPONSE_PROTOCOL
-    manager.ensure_slots_available()
-
-
-def test_invalid_api_model_list_without_static_models_registers_nothing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """非法 API 模型列表且无静态回退时不得注册模型。
-
-    Args:
-        monkeypatch: pytest 属性替换工具。
-
-    Returns:
-        None。
-    """
-    class InvalidProvider:
-        """返回含空模型 ID 的 provider。"""
-
-        @classmethod
-        async def list_models(cls, **kwargs: Any) -> list[str]:
-            """返回非法空模型 ID。
-
-            Args:
-                kwargs: 模型发现参数。
-
-            Returns:
-                含空字符串的列表。
-            """
-            return [""]
-
-    monkeypatch.setattr("src.mgr.llm_mgr.get_provider", lambda name: InvalidProvider)
-    manager = _manager()
-
-    asyncio.run(manager.load_models())
-
-    assert manager.list_models() == []
-    assert manager.provider_errors["stub"].kind is LLMErrorKind.RESPONSE_PROTOCOL
-
-
-@pytest.mark.parametrize("discovery_mode", ["dynamic", "static"])
-@pytest.mark.parametrize("provider_order", [("zeta", "alpha"), ("alpha", "zeta")])
-def test_cross_provider_model_conflict_is_deterministic_and_atomic(
-    monkeypatch: pytest.MonkeyPatch,
-    discovery_mode: str,
-    provider_order: tuple[str, str],
-) -> None:
-    """跨 provider 模型冲突应稳定报错且不提交部分状态。
-
-    Args:
-        monkeypatch: pytest 属性替换工具。
-        discovery_mode: 使用动态发现或静态回退制造冲突。
-        provider_order: provider 配置插入顺序。
-
-    Returns:
-        None。
-    """
-    class ConflictProvider:
-        """返回冲突模型或触发静态回退的 provider。"""
-
-        @classmethod
-        async def list_models(cls, **kwargs: Any) -> list[str]:
-            """按测试模式返回或抛出。
-
-            Args:
-                kwargs: 模型发现参数。
-
-            Returns:
-                动态模式下返回冲突模型。
-
-            Raises:
-                ConnectionError: 静态模式下固定发现失败。
-            """
-            if discovery_mode == "static":
-                raise ConnectionError("connection refused")
-            return ["shared-model"]
-
-    config = _base_config()
-    config["llm_provider"] = {
-        name: {
-            "base_url": f"https://{name}.example.test/v1",
-            **({"models": ["shared-model"]} if discovery_mode == "static" else {}),
-        }
-        for name in provider_order
-    }
-    monkeypatch.setattr("src.mgr.llm_mgr.get_provider", lambda name: ConflictProvider)
-    manager = _manager(config)
-
-    with pytest.raises(LLMConfigurationError) as exc_info:
-        asyncio.run(manager.load_models())
-
-    message = exc_info.value.info.message
-    assert "shared-model" in message
-    assert "alpha" in message
-    assert "zeta" in message
-    assert message.index("alpha") < message.index("zeta")
-    assert manager.list_models() == []
-    assert manager._cache == {}
-    assert manager.provider_errors == {}
-
-
-def test_failed_reload_preserves_previous_models_errors_and_cache(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """重复加载发生冲突时应保留上一次完整状态。
-
-    Args:
-        monkeypatch: pytest 属性替换工具。
-
-    Returns:
-        None。
-    """
-    scripts = {"alpha": ["alpha-model"], "zeta": ["zeta-model"]}
-
-    def provider_class(provider_name: str) -> type:
-        """为 provider 名构造读取可变脚本的类型。
-
-        Args:
-            provider_name: provider 配置名。
-
-        Returns:
-            返回当前脚本模型列表的 provider 类型。
-        """
-        class ScriptedProvider:
-            """返回当前 provider 脚本模型的 provider。"""
-
-            @classmethod
-            async def list_models(cls, **kwargs: Any) -> list[str]:
-                """返回当前脚本模型列表。
-
-                Args:
-                    kwargs: 模型发现参数。
-
-                Returns:
-                    当前 provider 的模型列表副本。
-                """
-                return list(scripts[provider_name])
-
-        return ScriptedProvider
-
-    config = _base_config()
-    config["llm_provider"] = {
-        name: {"base_url": f"https://{name}.example.test/v1"}
-        for name in scripts
-    }
-    monkeypatch.setattr("src.mgr.llm_mgr.get_provider", provider_class)
-    manager = _manager(config)
-    asyncio.run(manager.load_models())
-    cached = object()
-    manager._cache["alpha-model"] = cached
-    previous_errors = dict(manager.provider_errors)
-    scripts["alpha"] = ["shared-model"]
-    scripts["zeta"] = ["shared-model"]
-
-    with pytest.raises(LLMConfigurationError):
-        asyncio.run(manager.load_models())
-
-    assert manager.list_models() == ["alpha-model", "zeta-model"]
-    assert manager._cache == {"alpha-model": cached}
-    assert manager.provider_errors == previous_errors
-
-
-def test_successful_reload_replaces_models_and_clears_cache(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """重复加载成功时应原子替换模型并清空旧 provider cache。
-
-    Args:
-        monkeypatch: pytest 属性替换工具。
-
-    Returns:
-        None。
-    """
-    api_models = ["old-model"]
-
-    class ReloadProvider:
-        """返回可变模型列表的 provider。"""
-
-        @classmethod
-        async def list_models(cls, **kwargs: Any) -> list[str]:
-            """返回当前模型列表。
-
-            Args:
-                kwargs: 模型发现参数。
-
-            Returns:
-                当前模型列表副本。
-            """
-            return list(api_models)
-
-    monkeypatch.setattr("src.mgr.llm_mgr.get_provider", lambda name: ReloadProvider)
-    manager = _manager()
-    asyncio.run(manager.load_models())
-    manager._cache["old-model"] = object()
-    api_models[:] = ["new-model"]
-
-    asyncio.run(manager.load_models())
-
-    assert manager.list_models() == ["new-model"]
-    assert manager._cache == {}
-
-
-def test_reconfigure_keeps_previous_state_when_discovery_conflicts(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """reconfigure 发现冲突时应保留上一次的模型表与发现错误。
-
-    Args:
-        monkeypatch: pytest 属性替换工具。
-
-    Returns:
-        None。
-    """
-    scripts = {"alpha": ["alpha-model"], "zeta": ["zeta-model"]}
-
-    def provider_class(provider_name: str) -> type:
-        """为 provider 名构造读取可变脚本的类型。
-
-        Args:
-            provider_name: provider 配置名。
-
-        Returns:
-            返回当前脚本模型列表的 provider 类型。
-        """
-        class ScriptedProvider:
-            """返回当前 provider 脚本模型的 provider。"""
-
-            @classmethod
-            async def list_models(cls, **kwargs: Any) -> list[str]:
-                """返回当前脚本模型列表。
-
-                Args:
-                    kwargs: 模型发现参数。
-
-                Returns:
-                    当前 provider 的模型列表副本。
-                """
-                return list(scripts[provider_name])
-
-        return ScriptedProvider
-
-    config = _base_config()
-    config["role"]["coding"]["model"] = {
-        "default": "alpha-model",
-        "fast": "zeta-model",
-    }
-    config["llm_provider"] = {
-        name: {"base_url": f"https://{name}.example.test/v1"}
-        for name in scripts
-    }
-    monkeypatch.setattr("src.mgr.llm_mgr.get_provider", provider_class)
-    manager = _manager(config)
-    asyncio.run(manager.load_models())
-    previous_errors = dict(manager.provider_errors)
-    scripts["alpha"] = ["shared-model"]
-    scripts["zeta"] = ["shared-model"]
-
-    with pytest.raises(LLMConfigurationError):
-        asyncio.run(manager.reconfigure())
-
-    assert manager.list_models() == ["alpha-model", "zeta-model"]
-    assert manager.provider_errors == previous_errors
-
-
-def test_reconfigure_keeps_everything_when_llm_config_invalid(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """llm.* 配置非法时 reconfigure 必须先于任何状态写入失败。
-
-    校验 __post_init__ 排在 _cache.clear() 之前：此时连 provider 实例缓存都不应丢弃。
-
-    Args:
-        monkeypatch: pytest 属性替换工具。
-
-    Returns:
-        None。
-    """
-    class StubProvider:
-        """返回固定模型列表的 provider。"""
-
-        @classmethod
-        async def list_models(cls, **kwargs: Any) -> list[str]:
-            """返回固定模型列表。
-
-            Args:
-                kwargs: 模型发现参数。
-
-            Returns:
-                固定模型列表。
-            """
-            return ["model-a"]
-
-    monkeypatch.setattr("src.mgr.llm_mgr.get_provider", lambda name: StubProvider)
-    config = _base_config()
-    manager = _manager(config)
-    asyncio.run(manager.load_models())
-    cached = object()
-    manager._cache["model-a"] = cached
-    previous_errors = dict(manager.provider_errors)
-    _set_path(config, "llm.concurrency", 0)
-
-    with pytest.raises(LLMConfigurationError):
-        asyncio.run(manager.reconfigure())
-
-    assert manager.list_models() == ["model-a"]
-    assert manager.provider_errors == previous_errors
-    assert manager._cache == {"model-a": cached}
-
-
-def test_reconfigure_replaces_state_and_clears_cache_on_success(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """reconfigure 成功时应替换模型表并清空旧 provider 实例缓存。
-
-    Args:
-        monkeypatch: pytest 属性替换工具。
-
-    Returns:
-        None。
-    """
-    api_models = ["model-a"]
-
-    class ReloadProvider:
-        """返回可变模型列表的 provider。"""
-
-        @classmethod
-        async def list_models(cls, **kwargs: Any) -> list[str]:
-            """返回当前模型列表。
-
-            Args:
-                kwargs: 模型发现参数。
-
-            Returns:
-                当前模型列表副本。
-            """
-            return list(api_models)
-
-    monkeypatch.setattr("src.mgr.llm_mgr.get_provider", lambda name: ReloadProvider)
-    config = _base_config()
-    manager = _manager(config)
-    asyncio.run(manager.load_models())
-    manager._cache["model-a"] = object()
-    api_models[:] = ["model-b"]
-    _set_path(config, "role.coding.model.default", "model-b")
-    _set_path(config, "role.coding.model.fast", "model-b")
-
-    asyncio.run(manager.reconfigure())
-
-    assert manager.list_models() == ["model-b"]
-    assert manager._cache == {}
-
-
-@pytest.mark.parametrize("role_name", ["review.v2", "研发角色", "r" * 64])
-def test_role_slots_use_exact_dynamic_mapping_key(role_name: str) -> None:
-    """动态角色名必须作为单个 mapping key 读取，不能按点拆分。"""
-    config = _base_config()
-    config["role"] = {
-        "default": role_name,
-        role_name: {
-            "model": {"default": "model-a", "fast": "model-f"},
-        },
-    }
-    manager = _manager(config, role_name=role_name)
-    manager._model_to_provider.update({"model-a": "stub", "model-f": "stub"})
-
-    assert manager.resolve_model("default") == "model-a"
-    assert manager.resolve_model("fast") == "model-f"
-
-
-def test_unknown_discovery_error_logging_never_contains_secret(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """未知发现异常的安全化堆栈不得记录原始凭据。
-
-    Args:
-        monkeypatch: pytest 属性替换工具。
-        caplog: pytest 日志捕获器。
-
-    Returns:
-        None。
-    """
-    secret = "arbitrary-unknown-secret"
-
-    class UnknownProvider:
-        """固定抛出未知异常的 provider。"""
-
-        @classmethod
-        async def list_models(cls, **kwargs: Any) -> list[str]:
-            """抛出含秘密的未知异常。
-
-            Args:
-                kwargs: 模型发现参数。
-
-            Returns:
-                本方法不会返回。
-
-            Raises:
-                RuntimeError: 固定未知异常。
-            """
-            raise RuntimeError(f"opaque failure {secret}")
-
-    monkeypatch.setattr("src.mgr.llm_mgr.get_provider", lambda name: UnknownProvider)
-    manager = _manager()
-
-    with caplog.at_level(logging.ERROR, logger="src.mgr.llm_mgr"):
-        asyncio.run(manager.load_models())
-
-    assert manager.provider_errors["stub"].kind is LLMErrorKind.UNKNOWN
-    assert secret not in caplog.text
-    with pytest.raises(ModelUnavailableError) as exc_info:
-        manager.ensure_slots_available()
-    assert secret not in str(exc_info.value)
-    assert "opaque failure" not in str(exc_info.value)
-
-
-def test_model_discovery_logging_cannot_break_static_fallback_when_traceback_getter_raises(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """恶意 traceback getter 不得阻止安全记录发现错误和静态回退。
-
-    Args:
-        monkeypatch: pytest 属性替换工具。
-
-    Returns:
-        None。
-    """
-
-    class MaliciousTracebackError(RuntimeError):
-        """读取 traceback 时抛出另一个异常的测试错误。"""
-
-        @property
-        def __traceback__(self) -> object:
-            """拒绝读取异常堆栈。
-
-            Returns:
-                本属性不会返回。
-
-            Raises:
-                RuntimeError: 每次读取均抛出固定辅助错误。
-            """
-            raise RuntimeError("traceback getter exploded")
-
-    class FailedProvider:
-        """固定抛出带恶意 traceback getter 的未知异常。"""
-
-        @classmethod
-        async def list_models(cls, **kwargs: Any) -> list[str]:
-            """抛出模型发现异常。
-
-            Args:
-                kwargs: 模型发现参数。
-
-            Returns:
-                本方法不会返回。
-
-            Raises:
-                MaliciousTracebackError: 固定未知异常。
-            """
-            del kwargs
-            raise MaliciousTracebackError("opaque provider failure")
-
-    monkeypatch.setattr("src.mgr.llm_mgr.get_provider", lambda name: FailedProvider)
-    config = _base_config()
-    config["role"]["coding"]["model"]["default"] = "static-model"
-    config["llm_provider"]["stub"]["models"] = ["static-model"]
-    manager = _manager(config)
-
-    caught: BaseException | None = None
-    try:
-        asyncio.run(manager.load_models())
-    except BaseException as exc:
-        caught = exc
-
-    assert caught is None
-    assert manager.list_models() == ["static-model"]
-    assert manager.provider_errors["stub"].kind is LLMErrorKind.UNKNOWN
-
-
-@pytest.mark.parametrize(
-    ("unsafe_message", "secret"),
-    [
-        ("token=tok_live_SECRET", "tok_live_SECRET"),
-        ("access_token=access_live_SECRET", "access_live_SECRET"),
-        ("refresh_token=refresh_live_SECRET", "refresh_live_SECRET"),
-        ("password=password_SECRET", "password_SECRET"),
-        ("secret=generic_SECRET", "generic_SECRET"),
-        (
-            "request failed at https://user:password_SECRET@host.test/path",
-            "user:password_SECRET",
-        ),
-        (
-            "request failed at https://host.test/path?token=query_SECRET&other=1",
-            "query_SECRET",
-        ),
-        ("Authorization: Basic dXNlcjpwYXNz", "dXNlcjpwYXNz"),
-        ("Proxy-Authorization: Custom proxy_SECRET", "proxy_SECRET"),
-        ("Token token_scheme_SECRET", "token_scheme_SECRET"),
-    ],
-)
-def test_discovery_logs_and_startup_error_redact_generic_credentials(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-    unsafe_message: str,
-    secret: str,
-) -> None:
-    """已知发现错误的日志和启动错误都不得泄漏通用凭据。
-
-    Args:
-        monkeypatch: pytest 属性替换工具。
-        caplog: pytest 日志捕获器。
-        unsafe_message: 含凭据的供应商结构化消息。
-        secret: 输出中不得出现的秘密值。
-
-    Returns:
-        None。
-    """
-    class FailedProvider:
-        """返回含通用凭据认证错误的 provider。"""
-
-        @classmethod
-        async def list_models(cls, **kwargs: Any) -> list[str]:
-            """抛出参数化认证错误。
-
-            Args:
-                kwargs: 模型发现参数。
-
-            Returns:
-                本方法不会返回。
-
-            Raises:
-                DiscoveryError: 含参数化消息的认证错误。
-            """
-            raise DiscoveryError(
-                unsafe_message,
-                status_code=401,
-                code="invalid_api_key",
-                request_id="req-redaction",
-            )
-
-    monkeypatch.setattr("src.mgr.llm_mgr.get_provider", lambda name: FailedProvider)
-    manager = _manager()
-
-    with caplog.at_level(logging.WARNING, logger="src.mgr.llm_mgr"):
-        asyncio.run(manager.load_models())
-    with pytest.raises(ModelUnavailableError) as exc_info:
-        manager.ensure_slots_available()
-
-    rendered = f"{caplog.text}\n{exc_info.value}"
-    assert secret not in rendered
-    assert "[REDACTED]" in rendered
-
-
-@pytest.mark.parametrize(
-    "control_error",
-    [asyncio.CancelledError(), KeyboardInterrupt(), SystemExit(4)],
-)
-def test_load_models_propagates_control_flow_errors(
-    monkeypatch: pytest.MonkeyPatch,
-    control_error: BaseException,
-) -> None:
-    """模型发现不得吞掉任务取消、键盘中断或进程退出。
-
-    Args:
-        monkeypatch: pytest 属性替换工具。
-        control_error: 待原样传播的控制流异常。
-
-    Returns:
-        None。
-    """
-    class ControlProvider:
-        """抛出指定控制流异常的 provider。"""
-
-        @classmethod
-        async def list_models(cls, **kwargs: Any) -> list[str]:
-            """抛出外层测试指定的控制流异常。
-
-            Args:
-                kwargs: 模型发现参数。
-
-            Returns:
-                本方法不会返回。
-
-            Raises:
-                BaseException: 指定控制流异常。
-            """
-            raise control_error
-
-    monkeypatch.setattr("src.mgr.llm_mgr.get_provider", lambda name: ControlProvider)
-    manager = _manager()
-
-    with pytest.raises(type(control_error)) as exc_info:
-        asyncio.run(manager.load_models())
-
-    assert exc_info.value is control_error
-
-
-def test_ensure_slots_available_requires_exact_model_match(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """槽位模型校验不得接受模糊匹配到的其他模型。
-
-    Args:
-        monkeypatch: pytest 属性替换工具。
-
-    Returns:
-        None。
-    """
-    class SimilarProvider:
-        """只返回相似模型名的 provider。"""
-
-        @classmethod
-        async def list_models(cls, **kwargs: Any) -> list[str]:
-            """返回唯一相似模型。
-
-            Args:
-                kwargs: 模型发现参数。
-
-            Returns:
-                与默认模型不精确相同的模型列表。
-            """
-            return ["model-a-latest"]
-
-    monkeypatch.setattr("src.mgr.llm_mgr.get_provider", lambda name: SimilarProvider)
-    manager = _manager()
-    asyncio.run(manager.load_models())
-
-    with pytest.raises(ModelUnavailableError) as exc_info:
-        manager.ensure_slots_available()
-
-    assert "model-a" in str(exc_info.value)
-    assert "model-a-latest" in str(exc_info.value)
-
-
-def test_unavailable_default_reports_safe_discovery_reason(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """默认模型不可用时应包含安全具体原因且不泄漏底层秘密。
-
-    Args:
-        monkeypatch: pytest 属性替换工具。
-
-    Returns:
-        None。
-    """
-    secret = "sk-startup-super-secret"
-
-    class FailedProvider:
-        """发现阶段认证失败的 provider。"""
-
-        @classmethod
-        async def list_models(cls, **kwargs: Any) -> list[str]:
-            """抛出带请求 ID 的认证错误。
-
-            Args:
-                kwargs: 模型发现参数。
-
-            Returns:
-                本方法不会返回。
-
-            Raises:
-                DiscoveryError: 固定认证错误。
-            """
-            raise DiscoveryError(
-                f"invalid api_key={secret}",
-                status_code=401,
-                code="invalid_api_key",
-                request_id="req-safe",
-            )
-
-    monkeypatch.setattr("src.mgr.llm_mgr.get_provider", lambda name: FailedProvider)
-    manager = _manager()
-    asyncio.run(manager.load_models())
-
-    with pytest.raises(ModelUnavailableError) as exc_info:
-        manager.ensure_slots_available()
-
-    message = str(exc_info.value)
-    assert "authentication" in message
-    assert "req-safe" in message
-    assert "[REDACTED]" in message
-    assert secret not in message
-
-
-@pytest.mark.parametrize(
-    "startup_error",
-    [LLMConfigurationError("llm.retry.max_attempts 非法"), ModelUnavailableError("model-a 不可用")],
-)
-def test_cli_exits_cleanly_for_llm_startup_errors(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    startup_error: Exception,
-) -> None:
-    """CLI 应干净打印 LLM 启动错误并以非零状态退出。
-
-    Args:
-        monkeypatch: pytest 属性替换工具。
-        capsys: pytest 标准流捕获器。
-        startup_error: 待模拟的启动错误。
-
-    Returns:
-        None。
-    """
-    async def fail_startup(args: Any) -> None:
-        """模拟应用启动失败。
-
-        Args:
-            args: CLI 参数命名空间。
-
-        Returns:
-            本方法不会返回。
-
-        Raises:
-            Exception: 参数化的启动错误。
-        """
-        raise startup_error
-
-    monkeypatch.setattr(main_module, "main", fail_startup)
-    monkeypatch.setattr("sys.argv", ["main.py"])
-
-    with pytest.raises(SystemExit) as exc_info:
-        main_module.cli()
-
-    stderr = capsys.readouterr().err
-    assert exc_info.value.code != 0
-    assert "启动失败" in stderr
-    assert "Traceback" not in stderr
-
-
-def test_models_by_provider_groups_and_sorts() -> None:
-    """模型 API 应统一按大小写不敏感的 provider/model 完整名称排序。"""
-    manager = _manager()
-    manager._model_to_provider.update(
-        {
-            "deepseek-v4-pro": "deepseek",
-            "claude-opus-4-8": "anthropic",
-            "deepseek-v4-flash": "deepseek",
-            "claude-sonnet-5": "anthropic",
-            "gpt-5.6-terra": "openai",
-            "gpt-5.2-sol": "openai",
-            "gpt-5.10-sol": "openai",
-            "Alpha-model": "openai",
-        }
-    )
-
-    assert manager.list_models() == [
-        "claude-opus-4-8",
-        "claude-sonnet-5",
-        "deepseek-v4-flash",
-        "deepseek-v4-pro",
-        "Alpha-model",
-        "gpt-5.10-sol",
-        "gpt-5.2-sol",
-        "gpt-5.6-terra",
-    ]
-
-    grouped = manager.models_by_provider()
-
-    assert list(grouped.keys()) == ["anthropic", "deepseek", "openai"]
-    assert grouped["anthropic"] == ["claude-opus-4-8", "claude-sonnet-5"]
-    assert grouped["deepseek"] == ["deepseek-v4-flash", "deepseek-v4-pro"]
-    assert grouped["openai"] == [
-        "Alpha-model",
-        "gpt-5.10-sol",
-        "gpt-5.2-sol",
-        "gpt-5.6-terra",
-    ]
-
-
-def test_models_by_provider_empty() -> None:
-    """空注册表应返回空字典。"""
-    manager = _manager()
-
-    assert manager.models_by_provider() == {}
-
-
-# ── 角色双槽位模型解析 ────────────────────────────────────────────────
 
 
 def test_model_aliases_export_covers_slots_and_claudecode_names() -> None:
@@ -1695,15 +827,15 @@ def test_model_aliases_export_covers_slots_and_claudecode_names() -> None:
 @pytest.mark.parametrize(
     ("requested", "expected"),
     [
-        (None, "model-a"),
-        ("", "model-a"),
-        ("default", "model-a"),
-        ("fast", "model-f"),
-        ("opus", "model-a"),
-        ("sonnet", "model-a"),
-        ("haiku", "model-f"),
-        ("model-a", "model-a"),
-        ("model-f", "model-f"),
+        (None, "openai/model-a"),
+        ("", "openai/model-a"),
+        ("default", "openai/model-a"),
+        ("fast", "openai/model-f"),
+        ("opus", "openai/model-a"),
+        ("sonnet", "openai/model-a"),
+        ("haiku", "openai/model-f"),
+        ("openai/model-a", "openai/model-a"),
+        ("openai/model-f", "openai/model-f"),
     ],
 )
 def test_resolve_model_maps_aliases_to_role_slots(
@@ -1719,17 +851,17 @@ def test_resolve_model_maps_aliases_to_role_slots(
     Returns:
         None。
     """
-    manager = _resolving_manager()
+    manager = _manager()
 
     assert manager.resolve_model(requested) == expected
 
 
 def test_resolve_model_falls_back_to_default_role_without_active_role() -> None:
     """RoleMgr 暂无活动角色名时，槽位解析应回退到 DEFAULT_ROLE。"""
-    manager = _resolving_manager(role_name=None)
+    manager = _manager(role_name=None)
 
-    assert manager.resolve_model("default") == "model-a"
-    assert manager.resolve_model("fast") == "model-f"
+    assert manager.resolve_model("default") == "openai/model-a"
+    assert manager.resolve_model("fast") == "openai/model-f"
 
 
 def test_resolve_model_reads_slots_of_active_role_only() -> None:
@@ -1740,12 +872,12 @@ def test_resolve_model_reads_slots_of_active_role_only() -> None:
     """
     config = _base_config()
     config["role"]["reviewer"] = {
-        "model": {"default": "model-f", "fast": "model-a"},
+        "model": {"default": "openai/model-f", "fast": "openai/model-a"},
     }
-    manager = _resolving_manager(config, role_name="reviewer")
+    manager = _manager(config, role_name="reviewer")
 
-    assert manager.resolve_model("default") == "model-f"
-    assert manager.resolve_model("fast") == "model-a"
+    assert manager.resolve_model("default") == "openai/model-f"
+    assert manager.resolve_model("fast") == "openai/model-a"
 
 
 def test_resolve_model_rereads_slots_on_every_call() -> None:
@@ -1757,12 +889,12 @@ def test_resolve_model_rereads_slots_on_every_call() -> None:
         None。
     """
     config = _base_config()
-    manager = _resolving_manager(config)
-    assert manager.resolve_model("fast") == "model-f"
+    manager = _manager(config)
+    assert manager.resolve_model("fast") == "openai/model-f"
 
-    config["role"]["coding"]["model"]["fast"] = "model-a"
+    config["role"]["coding"]["model"]["fast"] = "openai/model-a"
 
-    assert manager.resolve_model("fast") == "model-a"
+    assert manager.resolve_model("fast") == "openai/model-a"
 
 
 @pytest.mark.parametrize("broken", ["missing", "legacy-scalar"])
@@ -1782,10 +914,10 @@ def test_resolve_model_keeps_exact_model_id_when_slots_are_broken(
         del config["role"]["coding"]["model"]
     else:
         config["role"]["coding"]["model"] = "claude-opus-5"
-    manager = _resolving_manager(config)
+    manager = _manager(config)
 
-    assert manager.resolve_model("model-a") == "model-a"
-    assert manager.resolve_model("model-f") == "model-f"
+    assert manager.resolve_model("openai/model-a") == "openai/model-a"
+    assert manager.resolve_model("openai/model-f") == "openai/model-f"
 
 
 @pytest.mark.parametrize(
@@ -1803,14 +935,13 @@ def test_resolve_model_rejects_unknown_names_without_fuzzy_or_fallback(
     Returns:
         None。
     """
-    manager = _resolving_manager()
+    manager = _manager()
 
-    with pytest.raises(ModelUnavailableError) as exc_info:
+    with pytest.raises(LLMConfigurationError) as exc_info:
         manager.resolve_model(requested)
 
     message = str(exc_info.value)
     assert requested in message
-    assert "model-a" in message
 
 
 @pytest.mark.parametrize(
@@ -1848,8 +979,8 @@ def test_slot_help_preserves_sensitive_role_name_yaml_key(
         "role": {
             role_name: {
                 "model": {
-                    "default": "<模型ID>",
-                    "fast": "<模型ID>",
+                    "default": "<供应商>/<模型ID>",
+                    "fast": "<供应商>/<模型ID>",
                 }
             }
         }
@@ -1870,8 +1001,6 @@ def test_missing_role_model_config_reports_actionable_error() -> None:
     config = _base_config()
     del config["role"]["coding"]["model"]
     manager = _manager(config)
-    manager._model_to_provider.update({"model-a": "stub", "model-f": "stub"})
-    manager._model_discovery_completed = True
 
     with pytest.raises(LLMConfigurationError) as exc_info:
         manager.resolve_model("default")
@@ -1882,14 +1011,11 @@ def test_missing_role_model_config_reports_actionable_error() -> None:
     assert str(ConfigStub.global_config_path) in message
     assert str(ConfigStub.project_config_path) in message
     assert "未信任" in message
-    assert "当前可用模型：共2个" in message
-    assert "model-a" in message
-    assert "model-f" in message
     assert "api_key" not in message
 
 
-def test_legacy_scalar_role_model_reports_migration() -> None:
-    """旧标量格式必须报错并指出废弃与迁移写法。
+def test_scalar_role_model_is_invalid() -> None:
+    """模型槽位必须使用 mapping。
 
     Returns:
         None。
@@ -1902,7 +1028,7 @@ def test_legacy_scalar_role_model_reports_migration() -> None:
         manager.resolve_model("fast")
 
     message = exc_info.value.info.message
-    assert "废弃" in message
+    assert "mapping" in message
     assert 'role["coding"].model.fast' in message
     assert "default:" in message and "fast:" in message
 
@@ -1914,7 +1040,7 @@ def test_role_model_must_be_mapping() -> None:
         None。
     """
     config = _base_config()
-    config["role"]["coding"]["model"] = ["model-a", "model-f"]
+    config["role"]["coding"]["model"] = ["openai/model-a", "openai/model-f"]
     manager = _manager(config)
 
     with pytest.raises(LLMConfigurationError) as exc_info:
@@ -1943,7 +1069,7 @@ def test_missing_single_slot_names_that_slot(missing_slot: str) -> None:
     assert f'role["coding"].model.{missing_slot} 未配置' in exc_info.value.info.message
 
 
-@pytest.mark.parametrize("value", ["", "   ", 1, 1.5, True, False, None, ["model-a"]])
+@pytest.mark.parametrize("value", ["", "   ", 1, 1.5, True, False, None, ["openai/model-a"]])
 def test_slot_value_must_be_non_empty_string(value: Any) -> None:
     """槽位值必须是非空且非 bool 的字符串。
 
@@ -1961,78 +1087,6 @@ def test_slot_value_must_be_non_empty_string(value: Any) -> None:
         manager.resolve_model("fast")
 
     assert 'role["coding"].model.fast' in exc_info.value.info.message
-
-
-def test_ensure_slots_available_rejects_unavailable_fast_slot(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """fast 槽位模型未被发现时应报错并列出可用模型。
-
-    Args:
-        monkeypatch: pytest 属性替换工具。
-
-    Returns:
-        None。
-    """
-    class DefaultOnlyProvider:
-        """只返回 default 槽位模型的 provider。"""
-
-        @classmethod
-        async def list_models(cls, **kwargs: Any) -> list[str]:
-            """返回仅含 default 槽位模型的列表。
-
-            Args:
-                kwargs: 模型发现参数。
-
-            Returns:
-                只含 default 槽位模型的列表。
-            """
-            return ["model-a"]
-
-    monkeypatch.setattr("src.mgr.llm_mgr.get_provider", lambda name: DefaultOnlyProvider)
-    manager = _manager()
-    asyncio.run(manager.load_models())
-
-    with pytest.raises(ModelUnavailableError) as exc_info:
-        manager.ensure_slots_available()
-
-    message = str(exc_info.value)
-    assert "model-f" in message
-    assert "model-a" in message
-    assert 'role["coding"].model.fast' in message
-
-
-def test_ensure_slots_available_passes_when_both_slots_registered(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """两个槽位模型都已发现时校验必须通过。
-
-    Args:
-        monkeypatch: pytest 属性替换工具。
-
-    Returns:
-        None。
-    """
-    class BothSlotsProvider:
-        """返回两个槽位模型的 provider。"""
-
-        @classmethod
-        async def list_models(cls, **kwargs: Any) -> list[str]:
-            """返回两个槽位模型。
-
-            Args:
-                kwargs: 模型发现参数。
-
-            Returns:
-                含 default 与 fast 槽位模型的列表。
-            """
-            return ["model-a", "model-f"]
-
-    monkeypatch.setattr("src.mgr.llm_mgr.get_provider", lambda name: BothSlotsProvider)
-    manager = _manager()
-    asyncio.run(manager.load_models())
-
-    manager.ensure_slots_available()
 
 
 def test_builtin_config_has_no_global_model_aliases_or_role_fallback() -> None:

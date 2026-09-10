@@ -29,8 +29,8 @@ role:
   default: reviewer
   reviewer:
     model:
-      default: claude-opus-5
-      fast: deepseek-v4-flash
+      default: anthropic/claude-opus-5
+      fast: deepseek/deepseek-v4-flash
     reasoning_effort: xhigh
 ```
 
@@ -116,14 +116,14 @@ role:
 | `agent_type` | str | 文件名 `path.stem` | 子 agent 标识（委派时用）；也是 `Agent.agent_type` |
 | `description` | str | `"没有说明内容"` | 出现在主 agent 的可用子智能体提示词段 |
 | `tools` | 逗号分隔 str | 空 → `None`（全部工具） | 工具白名单；再经 `resolve_subagent_tools` 注入 `subagent=True`、排除 `subagent=False` |
-| `model` | str | `None`（解析角色 default 槽位） | 只允许 `default`、`fast`、`opus`、`sonnet`、`haiku` 或已加载的完整模型 ID |
+| `model` | str | `None`（解析角色 default 槽位） | 只允许 `default`、`fast`、`opus`、`sonnet`、`haiku` 或`供应商/模型ID` |
 | `startInPlanMode` | bool | `False` | 独立构造时的初始 Plan 状态；经 `task_delegator` 构造时由父 Agent 当前状态覆盖 |
 | `thinking` | bool | `None`（继承父 agent） | 是否启用思考；仅 bool 有效 |
 | `reasoning_effort` | str | `None`（继承父 agent 已解析值） | 合法值 `low`/`medium`/`high`/`xhigh`/`max`；字符串会去空白并转小写，非法值告警后视为未声明 |
 | `memory` | str | `None` | 记忆范围（如 `project`），控制 `MemoryMgr` 注入 |
 | `features` | YAML 列表 | `None`（继承父 agent 已解析集） | 该子 agent 的 feature 集；空列表 = 全部禁用 |
 
-模型别名固定映射为 `opus`/`sonnet` → `default`，`haiku` → `fast`。`SubAgentMgr` 加载每份 manifest 时会把别名与 `LLMMgr.list_models()` 返回的完整 ID 集合校验；非法值抛 `LLMConfigurationError` 并在消息中包含定义文件路径、合法域和当前可用模型。字段缺失、`null`、空字符串或纯空白均视为未设置，委派时由 `LLMMgr.get(None)` 解析到 default 槽位；其他非字符串类型直接报错。
+模型别名固定映射为 `opus`/`sonnet` → `default`，`haiku` → `fast`。`SubAgentMgr` 加载 manifest 时只校验别名或 `供应商/模型ID` 格式，不查询候选列表；非法格式抛 `LLMConfigurationError`，消息包含定义文件路径和合法格式。字段缺失、`null`、空字符串或纯空白均视为未设置，委派时由 `LLMMgr.get(None)` 解析到 default 槽位；其他非字符串类型直接报错。
 
 ### 委派流程 `task_delegator`
 

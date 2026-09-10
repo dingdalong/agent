@@ -1,7 +1,6 @@
 """子 agent manifest 的 model 字段校验与委派透传测试。
 
-子 agent 的 `model:` 只允许 `default`/`fast`（含 Claude Code 兼容别名）或完整模型
-ID；空值使用 default 槽位，其他非法值在 manifest 加载期直接报错。
+子 agent 的 `model:` 只允许 `default`/`fast`（含 Claude Code 兼容别名）或供应商/模型ID；空值使用 default 槽位，其他非法值在 manifest 加载期直接报错。
 """
 
 from __future__ import annotations
@@ -19,30 +18,14 @@ from src.mgr.llm_mgr import MODEL_ALIASES
 from src.mgr.role_mgr import AgentManifest
 from src.mgr.subagent_mgr import SubAgentMgr
 
-_KNOWN_MODEL = "claude-opus-5"
+_MODEL_REFERENCE = "anthropic/claude-opus-5"
 
 
 class _LLMMgrStub:
-    """只提供已加载模型列表的最小 LLMMgr 替身。"""
-
-    def __init__(self, models: tuple[str, ...] = (_KNOWN_MODEL,)) -> None:
-        """保存已加载模型集合。
-
-        Args:
-            models: 视为已加载的完整模型 ID。
-
-        Returns:
-            None。
-        """
-        self._models = list(models)
+    """候选列表不应被 manifest 加载过程访问。"""
 
     def list_models(self) -> list[str]:
-        """返回已加载的完整模型 ID 列表。
-
-        Returns:
-            模型 ID 列表。
-        """
-        return list(self._models)
+        raise AssertionError("子 agent 加载不得查询模型候选列表")
 
 
 def _write_subagent(workdir: Path, name: str, model: str | None = None) -> Path:
@@ -134,7 +117,7 @@ def test_illegal_manifest_model_reports_file_path(tmp_path: Path, bad_model: str
     assert "opus" in message
     assert "sonnet" in message
     assert "haiku" in message
-    assert "完整模型 ID" in message
+    assert "供应商/模型ID" in message
 
 
 @pytest.mark.parametrize(
@@ -177,7 +160,7 @@ def test_explicit_non_string_raw_model_is_rejected(
     assert "opus" in message
     assert "sonnet" in message
     assert "haiku" in message
-    assert "完整模型 ID" in message
+    assert "供应商/模型ID" in message
 
 
 @pytest.mark.parametrize("alias", sorted(MODEL_ALIASES))
@@ -199,7 +182,7 @@ def test_model_aliases_are_accepted(tmp_path: Path, alias: str) -> None:
 
 
 def test_full_model_id_is_accepted(tmp_path: Path) -> None:
-    """已加载的完整模型 ID 合法。
+    """显式模型引用不依赖候选列表。
 
     Args:
         tmp_path: 测试工作目录。
@@ -207,11 +190,11 @@ def test_full_model_id_is_accepted(tmp_path: Path) -> None:
     Returns:
         None。
     """
-    _write_subagent(tmp_path, "worker", model=_KNOWN_MODEL)
+    _write_subagent(tmp_path, "worker", model=_MODEL_REFERENCE)
 
     mgr = SubAgentMgr(tmp_path, _deps(_LLMMgrStub()))
 
-    assert mgr._documents["worker"].model == _KNOWN_MODEL
+    assert mgr._documents["worker"].model == _MODEL_REFERENCE
 
 
 def test_missing_model_is_accepted(tmp_path: Path) -> None:
@@ -230,8 +213,8 @@ def test_missing_model_is_accepted(tmp_path: Path) -> None:
     assert mgr._documents["worker"].model is None
 
 
-def test_unavailable_llm_mgr_skips_model_id_check(tmp_path: Path) -> None:
-    """deps 无 llm_mgr 时无法获知可用模型集，完整模型 ID 一律放行。
+def test_explicit_reference_does_not_require_llm_manager(tmp_path: Path) -> None:
+    """显式模型引用在加载阶段只校验格式。
 
     Args:
         tmp_path: 测试工作目录。
@@ -239,11 +222,11 @@ def test_unavailable_llm_mgr_skips_model_id_check(tmp_path: Path) -> None:
     Returns:
         None。
     """
-    _write_subagent(tmp_path, "worker", model="some-unknown-model")
+    _write_subagent(tmp_path, "worker", model="openai/some-unknown-model")
 
     mgr = SubAgentMgr(tmp_path, _deps(None))
 
-    assert mgr._documents["worker"].model == "some-unknown-model"
+    assert mgr._documents["worker"].model == "openai/some-unknown-model"
 
 
 def test_delegation_passes_manifest_model_verbatim(

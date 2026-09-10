@@ -7,6 +7,7 @@ handler 是模块级 `async def run(ctx, args)`，CommandContext 用轻量 stub 
 from __future__ import annotations
 
 import asyncio
+from unittest.mock import AsyncMock
 import uuid
 from types import SimpleNamespace
 from typing import Any
@@ -19,7 +20,8 @@ from src.commands.builtin import clear as clear_cmd
 from src.commands.builtin import help as help_cmd
 from src.commands.builtin import models as models_cmd
 from src.commands.builtin import plan as plan_cmd
-from src.mgr.llm_mgr import LLMMgr, ModelUnavailableError
+from src.mgr.llm_mgr import LLMMgr
+from src.llm.models import split_model_reference
 
 
 class ConfigStub:
@@ -80,19 +82,21 @@ def _config(model_slots: dict[str, Any]) -> dict[str, Any]:
             "timeout_seconds": 120,
             "retry": {"max_attempts": 3, "base_delay_seconds": 2, "max_delay_seconds": 60},
         },
-        "llm_provider": {"stub": {"api_key": "test-key", "base_url": "https://example.test/v1"}},
+        "llm_provider": {"openai": {"api_key": "test-key", "base_url": "https://example.test/v1"}},
         "role": {"default": "coding", "coding": {"model": model_slots}},
         "tool": {"page_token_rate": 0.03},
     }
 
 
 def _llm_mgr(model_to_provider: dict[str, str], model_slots: dict[str, Any]) -> LLMMgr:
-    manager = LLMMgr(
-        config_mgr=ConfigStub(_config(model_slots)),
-        role_mgr=SimpleNamespace(role_name="coding"),
-        event_bus=None,
-    )
-    manager._model_to_provider.update(model_to_provider)
+    config = _config({
+        slot: model if "/" in model else f"{model_to_provider.get(model, 'openai')}/{model}"
+        for slot, model in model_slots.items()
+    })
+    for model, provider in model_to_provider.items():
+        config["llm_provider"].setdefault(provider, {"base_url": "https://example.test/v1"}).setdefault("models", []).append(model)
+    manager = LLMMgr(ConfigStub(config), SimpleNamespace(role_name="coding"), None)
+    manager.refresh_models = AsyncMock()
     return manager
 
 
@@ -132,11 +136,11 @@ def test_models_merges_slots_pointing_at_same_model() -> None:
     assert "  - deepseek-v4-flash [default, fast]" in _run_models(llm_mgr)
 
 
-def test_models_empty_registry_degrades_to_plain_listing() -> None:
-    """无可用模型时槽位别名已无法解析，应降级为纯文本提示而非抛错。"""
-    llm_mgr = _llm_mgr({}, {"default": "model-a", "fast": "model-a"})
+def test_models_lists_selected_models_without_discovery() -> None:
+    """没有候选时仍展示所选模型。"""
+    llm_mgr = _llm_mgr({}, {"default": "openai/model-a", "fast": "openai/model-a"})
 
-    assert _run_models(llm_mgr) == "当前没有可用模型。\n"
+    assert "model-a [default, fast]" in _run_models(llm_mgr)
 
 
 class SlotLLM:
@@ -146,25 +150,25 @@ class SlotLLM:
         self.slots = slots
         self.unavailable = unavailable or set()
         self.instantiated: list[str] = []
+        self.refresh_models = AsyncMock()
+        self.provider_errors = {}
         self.providers = {
-            "model-a": SimpleNamespace(model="model-a", reasoning_effort="high"),
-            "model-b": SimpleNamespace(model="model-b", reasoning_effort="max"),
+            "openai/model-a": SimpleNamespace(model="openai/model-a", reasoning_effort="high"),
+            "openai/model-b": SimpleNamespace(model="openai/model-b", reasoning_effort="max"),
         }
 
     def list_models(self) -> list[str]:
         return list(self.providers)
 
-    def provider_name_for_model(self, model: str) -> str:
-        del model
-        return "stub"
-
     def resolve_model(self, alias: str) -> str:
-        return self.slots[alias]
+        reference = self.slots.get(alias, alias)
+        split_model_reference(reference)
+        return reference
 
     def get(self, model: str) -> Any:
         self.instantiated.append(model)
         if model in self.unavailable:
-            raise ModelUnavailableError(f"模型 {model!r} 不可用")
+            raise AssertionError("选择不得预实例化模型")
         return self.providers[model]
 
 
@@ -218,7 +222,7 @@ def _run_selection(
     unavailable: set[str] | None = None,
     trusted: bool = True,
     role_name: str | None = "coding",
-    agent_model: str = "model-a",
+    agent_model: str = "openai/model-a",
     agent_effort: str | None = "high",
 ) -> SimpleNamespace:
     """跑一次带交互的 /models，返回记录了各层副作用的命名空间。
@@ -226,7 +230,7 @@ def _run_selection(
     Args:
         selection: 模型菜单返回的 (default 模型, fast 模型, 推理强度) 三元组。
         slots: 当前角色两槽位指向的模型；默认两槽位都是 model-a。
-        unavailable: llm.get() 应当抛 ModelUnavailableError 的模型集合。
+        unavailable: 不得在保存前调用 llm.get() 的模型集合。
         trusted: 项目信任状态。
         role_name: 活动角色名；None 表示当前无法确定活动角色。
         agent_model: 当前 agent 已绑定的模型。
@@ -235,10 +239,11 @@ def _run_selection(
     Returns:
         SimpleNamespace(bus, config, llm, agent, switches)。
     """
-    llm = SlotLLM(slots or {"default": "model-a", "fast": "model-a"}, unavailable)
+    llm = SlotLLM(slots or {"default": "openai/model-a", "fast": "openai/model-a"}, unavailable)
     switches: list[tuple[str, str]] = []
     agent = SimpleNamespace(
         uuid=uuid.uuid4(),
+        model=agent_model,
         history=[{"role": "user", "content": "保留我"}],
         llm=llm.providers[agent_model],
         reasoning_effort=agent_effort,
@@ -246,7 +251,8 @@ def _run_selection(
 
     def switch_model(model: str, effort: str) -> None:
         switches.append((model, effort))
-        agent.llm = llm.providers[model]
+        agent.llm = llm.providers.get(model, SimpleNamespace(model=model, reasoning_effort=effort))
+        agent.model = model
         agent.reasoning_effort = effort
 
     agent.switch_model = switch_model
@@ -267,52 +273,52 @@ def _run_selection(
 
 def test_models_persists_both_slots_and_switches_agent() -> None:
     """改 default 槽位后应整体写父键 mapping，并原地热切当前 agent。"""
-    run = _run_selection(("model-b", "model-a", "xhigh"))
+    run = _run_selection(("openai/model-b", "openai/model-a", "xhigh"))
 
-    assert run.switches == [("model-b", "xhigh")]
+    assert run.switches == [("openai/model-b", "xhigh")]
     assert run.agent.history == [{"role": "user", "content": "保留我"}]
     assert run.config.values == {
-        ("role", "coding", "model"): {"default": "model-b", "fast": "model-a"},
+        ("role", "coding", "model"): {"default": "openai/model-b", "fast": "openai/model-a"},
         ("role", "coding", "reasoning_effort"): "xhigh",
     }
     assert run.config.scope == "project"
     assert run.config.reloads == 1
-    assert run.llm.instantiated == ["model-b", "model-a"]
+    assert run.llm.instantiated == []
     request = run.bus.choices[0]
     assert request[0] == ""
-    assert [label for _value, label in request[1]] == ["stub/model-a", "stub/model-b"]
+    assert [label for _value, label in request[1]] == ["openai/model-a", "openai/model-b"]
     assert request[2] == ["low", "medium", "high", "xhigh", "max"]
     assert request[3:6] == (0, 0, 2)
     message = run.bus.outputs[-1]
-    assert "default=model-b" in message
-    assert "fast=model-a" in message
+    assert "default=openai/model-b" in message
+    assert "fast=openai/model-a" in message
     assert "xhigh" in message
 
 
 def test_models_fast_only_change_skips_agent_switch() -> None:
     """只改 fast 槽位时写配置但不动主 agent。"""
-    run = _run_selection(("model-a", "model-b", "high"))
+    run = _run_selection(("openai/model-a", "openai/model-b", "high"))
 
     assert run.switches == []
     assert run.config.values == {
-        ("role", "coding", "model"): {"default": "model-a", "fast": "model-b"},
+        ("role", "coding", "model"): {"default": "openai/model-a", "fast": "openai/model-b"},
         ("role", "coding", "reasoning_effort"): "high",
     }
     assert run.config.reloads == 1
-    assert "fast=model-b" in run.bus.outputs[-1]
+    assert "fast=openai/model-b" in run.bus.outputs[-1]
 
 
 def test_models_persists_dotted_role_as_exact_path_segment() -> None:
     """含点角色名在 /models 写回时必须保持为单个 mapping key。"""
     run = _run_selection(
-        ("model-a", "model-b", "high"),
+        ("openai/model-a", "openai/model-b", "high"),
         role_name="review.v2",
     )
 
     assert run.config.values == {
         ("role", "review.v2", "model"): {
-            "default": "model-a",
-            "fast": "model-b",
+            "default": "openai/model-a",
+            "fast": "openai/model-b",
         },
         ("role", "review.v2", "reasoning_effort"): "high",
     }
@@ -321,51 +327,60 @@ def test_models_persists_dotted_role_as_exact_path_segment() -> None:
 def test_models_fast_only_change_uses_provider_effort_without_switching_agent() -> None:
     """agent 未显式设 effort 时，只改 fast 不应因 provider 回退值触发主 agent 切换。"""
     run = _run_selection(
-        ("model-a", "model-b", "high"),
+        ("openai/model-a", "openai/model-b", "high"),
         agent_effort=None,
     )
 
     assert run.bus.choices[0][5] == 2
     assert run.switches == []
     assert run.config.values == {
-        ("role", "coding", "model"): {"default": "model-a", "fast": "model-b"},
+        ("role", "coding", "model"): {"default": "openai/model-a", "fast": "openai/model-b"},
         ("role", "coding", "reasoning_effort"): "high",
     }
 
 
 def test_models_effort_only_change_switches_agent() -> None:
     """只改推理强度也要热切当前 agent。"""
-    run = _run_selection(("model-a", "model-a", "max"))
+    run = _run_selection(("openai/model-a", "openai/model-a", "max"))
 
-    assert run.switches == [("model-a", "max")]
+    assert run.switches == [("openai/model-a", "max")]
     assert run.config.values == {
-        ("role", "coding", "model"): {"default": "model-a", "fast": "model-a"},
+        ("role", "coding", "model"): {"default": "openai/model-a", "fast": "openai/model-a"},
         ("role", "coding", "reasoning_effort"): "max",
     }
 
 
-def test_models_unavailable_slot_model_keeps_everything_unchanged() -> None:
-    """任一槽位模型不可实例化时整体不生效。"""
-    run = _run_selection(("model-a", "model-b", "high"), unavailable={"model-b"})
+def test_models_does_not_preinstantiate_slots() -> None:
+    run = _run_selection(("openai/model-b", "openai/model-a", "high"), unavailable={"openai/model-b"})
+    assert run.config.values is not None
+    assert run.llm.instantiated == []
+    run.llm.refresh_models.assert_awaited_once()
 
-    assert run.switches == []
+
+def test_models_accepts_selection_outside_candidates() -> None:
+    run = _run_selection(("openai/not-listed", "openai/model-a", "high"))
+    assert run.config.values[("role", "coding", "model")]["default"] == "openai/not-listed"
+    assert run.switches == [("openai/not-listed", "high")]
+
+
+def test_models_different_provider_same_id_switches_agent() -> None:
+    run = _run_selection(("ollama/model-a", "openai/model-a", "high"))
+    assert run.switches == [("ollama/model-a", "high")]
+
+
+def test_models_failed_save_does_not_switch_agent(monkeypatch) -> None:
+    def fail(*args):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(WritableConfig, "set_configs_parts", fail)
+    run = _run_selection(("openai/model-b", "openai/model-a", "high"))
     assert run.config.values is None
-    assert run.config.reloads == 0
-    assert run.bus.outputs[-1].startswith("模型切换失败：")
-
-
-def test_models_rejects_selection_outside_available_models() -> None:
-    """返回值不在可用模型表内时不写配置也不切换。"""
-    run = _run_selection(("model-b", "model-z", "high"))
-
     assert run.switches == []
-    assert run.config.values is None
-    assert run.bus.outputs[-1] == "模型选择无效，未应用更改。\n"
 
 
 def test_models_untrusted_project_refuses_before_any_change() -> None:
     """项目未信任时拒绝执行：不弹菜单、不写配置、不切换。"""
-    run = _run_selection(("model-b", "model-b", "max"), trusted=False)
+    run = _run_selection(("openai/model-b", "openai/model-b", "max"), trusted=False)
 
     assert run.bus.choices == []
     assert run.switches == []
@@ -378,7 +393,7 @@ def test_models_untrusted_project_refuses_before_any_change() -> None:
 
 def test_models_missing_active_role_refuses_before_menu_or_change() -> None:
     """活动角色名缺失时提前拒绝，不弹菜单、不写配置也不切换。"""
-    run = _run_selection(("model-b", "model-b", "max"), role_name=None)
+    run = _run_selection(("openai/model-b", "openai/model-b", "max"), role_name=None)
 
     assert run.bus.choices == []
     assert run.switches == []
@@ -402,8 +417,8 @@ def test_models_cancel_keeps_agent_and_config_unchanged() -> None:
 def test_models_bus_without_selection_support_degrades_to_plain_listing() -> None:
     """event_bus 没有 request_model_selection 时降级为带槽位标注的纯文本列表。"""
     llm_mgr = _llm_mgr(
-        {"model-a": "stub", "model-b": "stub"},
-        {"default": "model-a", "fast": "model-b"},
+        {"openai/model-a": "openai", "openai/model-b": "openai"},
+        {"default": "openai/model-a", "fast": "openai/model-b"},
     )
     bus = RecordingEventBus()
     ctx = _ctx(event_bus=bus, llm_mgr=llm_mgr, agent=SimpleNamespace())

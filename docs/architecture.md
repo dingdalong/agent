@@ -76,13 +76,13 @@
 | 5 | `DataGuard` / `RoleMgr` / `EventBus` / UI | 登记秘密；`RoleMgr` 发现角色并把缺省或不存在的配置角色解析为 `coding` |
 | 6 | `ToolsMgr` / feature Managers / Hooks | 注册内置工具；项目 Hook 仅在受信任时加载 |
 | 7 | `McpMgr.start()` | 按信任和连接开关启动 server；动态工具强制 `REVIEW + EXTERNAL` |
-| 8 | `SessionMgr` / `LLMMgr` | 以 `LLMMgr(config_mgr, role_mgr, event_bus)` 构造，发现模型后调用 `ensure_slots_available()` 校验激活角色的两个槽位 |
+| 8 | `SessionMgr` / `LLMMgr` | 以 `LLMMgr(config_mgr, role_mgr, event_bus)` 构造，仅加载本地配置，模型引用明确指定供应商 |
 | 9 | `PermissionManager` / `WebAccessMgr` | 注入 fast 槽位智能权限、一次性确认回调与 Web 路由依赖；Web LLM 安全审查客户端虽被构造，但当前授权路径未调用 |
 | 10 | `AgentDeps` / `AgentApp` | 组装共享依赖并返回应用实例 |
 
 ### 首次 LLM Provider 配置向导
 
-`bootstrap.create_app()` 在项目信任确认和 `ConfigManager` 构造后调用 `maybe_run_provider_setup(config_mgr)`。仅当「`ConfigManager.has_explicit_provider_config()` 判定用户层已有显式 Provider 配置」且「激活角色的 `role.<角色>.model.default` 与 `role.<角色>.model.fast` 双槽位都已配置为非空字符串」时才跳过向导；任一条件不满足即进入向导。显式 Provider 配置的判定来源（任一命中）：
+`bootstrap.create_app()` 在项目信任确认和 `ConfigManager` 构造后调用 `maybe_run_provider_setup(config_mgr)`。仅当「`ConfigManager.has_explicit_provider_config()` 判定用户层已有显式 Provider 配置」且「激活角色的 `role.<角色>.model.default` 与 `role.<角色>.model.fast` 双槽位都已配置为合法的 `供应商/模型ID`」时才跳过向导；缺少配置时进入向导，非空但格式非法的引用报告配置错误。显式 Provider 配置的判定来源（任一命中）：
 
 - 有效环境中存在任一内置 Provider 的 `{NAME}_API_KEY` 或 `{NAME}_API_URL` 键；有效环境遵循项目信任边界；
 - 全局 `config.yaml` 存在非空 `llm_provider` mapping，或可信项目层存在同类配置；
@@ -90,20 +90,18 @@
 
 仅内置 `src/config.yaml` 的 provider 段、或用户层只有角色模型槽位，不算显式 Provider 配置。反之，只有 Provider 凭据而角色槽位缺失时也不算完成配置：仍进入向导，并用该 Provider 在有效环境中的已有 `base_url`/`api_key` 预填凭据页，避免项目 `.env` 与向导写入的全局 `.env` 取值不一致。
 
-TTY 向导依次完成 Provider、API 地址与凭据、严格 `list_models` 验证，然后在同一 Provider 返回的同一模型列表上显示两个模型选择屏：先选 `default`，再选 `fast`。进入 fast 屏时默认高亮刚选定的 default 模型，直接回车可让两个槽位使用同一模型；返回 default 屏时保留原选择。验证使用 10 秒超时且不采用静态模型列表回退，失败只显示安全化错误，不写配置。
+TTY 向导依次完成 Provider、API 地址与凭据、模型列表获取，再选择 default 和 fast。发现逻辑与 `/models` 共用，合并配置和在线候选；失败或空列表也可手动输入模型 ID。两个槽位保存为 `供应商/模型ID`，进入 fast 屏时默认高亮刚选定的 default 模型。
 
 确认后 `persist_setup()` 使用与 `RoleMgr` 相同的角色解析：`role.default` 指向的角色不存在时回退 `coding`。它先把完整 `{"default": ..., "fast": ...}` mapping 写到全局 `role.<有效角色>.model`，reload 并确认没有被更高优先级层覆盖，再把 `{PROVIDER}_API_URL` 与云 Provider 的 `{PROVIDER}_API_KEY` 写入全局 `.env`。两个文件分别原子更新，不提供跨文件事务；后置 reload 会同时核对两个槽位、URL 和凭据。
 
 - 非 TTY：不读取 stdin，抛 `LLMConfigurationError`，提示手工配置全局 `.env` 与 `role.<有效角色>.model.default/fast`。
 - 取消：不写任何配置并以配置错误退出。
-- 已有显式 Provider 配置且双槽位已配置：跳过向导，直接进入模型发现与双槽位校验。
+- 已有显式 Provider 配置且双槽位已配置：跳过向导，直接进入本地配置装配，不执行模型发现。
 - 向导只在首次进程启动接线，`/clear` 不重跑；没有 `/setup` 命令。
 
 ### LLM 启动错误链
 
-`LLMMgr` 先严格校验 `llm` 调用参数与 `llm_provider` 配置，再由 `load_models()` 并发发现模型。单个 Provider 发现失败时记录安全化的 `provider_errors`，仅在该 Provider 配置了非空静态 `models` 时注册静态列表；Provider 配置非法、模型列表非法配置或跨 Provider 模型归属冲突会抛 `LLMConfigurationError`。
-
-`ensure_slots_available()` 随后读取实际激活角色的 `role.<角色>.model`。父键仍是旧字符串格式、缺少 `default`/`fast`、槽位不是非空字符串，均抛 `LLMConfigurationError`；任一槽位未精确命中已加载模型则抛 `ModelUnavailableError`，错误中附可用模型和安全化的 Provider 发现摘要。内置配置没有槽位兜底，也不会选择其他模型或 Provider。两类错误都在 UI 启动前由 `main.cli()` 收口为启动失败。
+`LLMMgr` 校验本地调用参数和供应商配置，`resolve_model()` 将槽位解析为 `供应商/模型ID`。模型列表只在首次配置和 `/models` 中获取，发现错误不会阻止启动或发送消息。配置格式错误仍由 `main.cli()` 收口；模型是否存在或可访问由实际供应商请求决定。
 
 ### 运行时模型数据流
 
@@ -112,13 +110,13 @@ ConfigManager 三层合并
   └─ RoleMgr: role.default → 已发现角色（不存在则 coding）
        └─ LLMMgr: role.<实际角色>.model.{default,fast}
             ├─ 主 Agent: manifest.model=None → get(None) → default
-            ├─ 子 Agent: manifest.model → 固定别名或完整模型 ID
+            ├─ 子 Agent: manifest.model → 固定别名或 `供应商/模型ID`
             ├─ compact / 退出总结: 复用所属 Agent 的 provider
             ├─ 智能权限: get("fast") + 单次 effort=low
             └─ 原生 Web: 工具传入调用方 Agent 自己的 provider
 ```
 
-主角色 `role.md` 出现 `model` 会在 `RoleMgr` 解析期报错；主 Agent 始终以 default 槽位构造。`SubAgentMgr` 在加载 manifest 时验证 model 只能是 `default`、`fast`、`opus`、`sonnet`、`haiku` 或已加载的完整模型 ID，并在错误中包含定义文件路径。`CompactMgr` 构造时接收 `self.llm`，退出总结也直接调用 `self.llm.chat()`，因此都保持所属 Agent 的模型和 Provider。智能权限固定解析 fast 槽位，结构化裁决对该次调用覆盖 `low`，不修改缓存 Provider 的默认 effort。`web_search`/`web_fetch` 则把发起工具调用的 `agent.llm` 传给 `WebAccessMgr`，原生路由不会改用主 Agent 或 fast 槽位。
+主角色 `role.md` 出现 `model` 会在 `RoleMgr` 解析期报错；主 Agent 始终以 default 槽位构造。`SubAgentMgr` 在加载 manifest 时验证 model 只能是 `default`、`fast`、`opus`、`sonnet`、`haiku` 或 `供应商/模型ID`，并在错误中包含定义文件路径。`CompactMgr` 构造时接收 `self.llm`，退出总结也直接调用 `self.llm.chat()`，因此都保持所属 Agent 的模型和 Provider。智能权限固定解析 fast 槽位，结构化裁决对该次调用覆盖 `low`，不修改缓存 Provider 的默认 effort。`web_search`/`web_fetch` 则把发起工具调用的 `agent.llm` 传给 `WebAccessMgr`，原生路由不会改用主 Agent 或 fast 槽位。
 
 ---
 

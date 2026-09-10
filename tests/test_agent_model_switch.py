@@ -22,8 +22,8 @@ class ConfigStub:
 
 
 def test_switch_model_rebinds_model_state_without_replacing_history(tmp_path: Path) -> None:
-    old_llm = SimpleNamespace(model="old-model", reasoning_effort="high", context_limit=1000)
-    new_llm = SimpleNamespace(model="new-model", reasoning_effort="max", context_limit=2000)
+    old_llm = SimpleNamespace(provider_name="openai", model="old-model", reasoning_effort="high", context_limit=1000)
+    new_llm = SimpleNamespace(provider_name="anthropic", model="new-model", reasoning_effort="max", context_limit=2000)
     agent = object.__new__(Agent)
     agent.uuid = uuid.uuid4()
     agent.agent_type = "main"
@@ -57,7 +57,7 @@ def test_switch_model_rebinds_model_state_without_replacing_history(tmp_path: Pa
     assert agent._input_history is input_history
     assert agent.history == [{"role": "user", "content": "保留历史"}]
     assert agent.llm is new_llm
-    assert agent.model == "new-model"
+    assert agent.model == "anthropic/new-model"
     assert agent.reasoning_effort == "xhigh"
     assert agent._compact_mgr.llm is new_llm
     assert agent._compact_mgr.auto_compact_size == 1600

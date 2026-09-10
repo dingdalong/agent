@@ -1,6 +1,6 @@
 """SetupApp 独立配置向导 TUI 的功能集中测试。
 
-headless 运行（app.run_test），verify 全部注入 stub，不访问网络。
+headless 运行（app.run_test），discover 全部注入 stub，不访问网络。
 """
 
 from __future__ import annotations
@@ -13,6 +13,8 @@ from textual.containers import Vertical
 from textual.widgets import Input
 
 from src.app.provider_setup import ProviderOption
+from src.llm.models import ModelDiscovery
+from src.llm.errors import classify_llm_error
 from src.interfaces.tui.provider_setup import SetupApp
 from src.interfaces.tui.widgets import KeyboardOptionList, SelectionStatic
 
@@ -28,8 +30,8 @@ _OLLAMA = ProviderOption(
 )
 
 
-class StubVerify:
-    """可控 verify 桩：记录调用、可阻塞、可抛错、可返回空列表。"""
+class StubDiscover:
+    """可控 discover 桩：记录调用、可阻塞、可抛错、可返回空列表。"""
 
     def __init__(self, models=None, error=None) -> None:
         self.models = (
@@ -48,12 +50,14 @@ class StubVerify:
             except asyncio.CancelledError:
                 self.cancelled.set()
                 raise
+        if isinstance(self.error, Exception):
+            return ModelDiscovery(list(self.models), classify_llm_error(self.error))
         if self.error is not None:
             raise self.error
-        return list(self.models)
+        return ModelDiscovery(list(self.models))
 
     def gate(self) -> asyncio.Event:
-        """返回阻塞事件；release() 后 verify 才继续。"""
+        """返回阻塞事件；release() 后 discover 才继续。"""
         self._gate = asyncio.Event()
         return self._gate
 
@@ -87,7 +91,7 @@ def test_provider_order_default_highlight_and_url_prefill() -> None:
     """候选顺序即展示顺序、默认高亮第一项；选择后 URL 预填并聚焦输入框。"""
 
     async def scenario() -> None:
-        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], verify=StubVerify())
+        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], discover=StubDiscover())
         async with app.run_test(size=(80, 24)) as pilot:
             provider_list = app.query_one("#provider-list", KeyboardOptionList)
             assert provider_list.option_count == 2
@@ -114,7 +118,7 @@ def test_provider_selection_prefills_existing_key_hint_and_clears_on_switch() ->
             requires_key=True,
             api_key="sk-existing",
         )
-        app = SetupApp(options=[with_key, _OLLAMA], verify=StubVerify())
+        app = SetupApp(options=[with_key, _OLLAMA], discover=StubDiscover())
         async with app.run_test(size=(80, 24)) as pilot:
             await _choose_provider(app, pilot, 0)
             key_input = app.query_one("#key-input", Input)
@@ -135,7 +139,7 @@ def test_key_input_uses_password_masking() -> None:
     """key 输入框启用 password 掩码，值本身不脱敏。"""
 
     async def scenario() -> None:
-        app = SetupApp(options=[_DEEPSEEK], verify=StubVerify())
+        app = SetupApp(options=[_DEEPSEEK], discover=StubDiscover())
         async with app.run_test(size=(80, 24)) as pilot:
             key_input = app.query_one("#key-input", Input)
             assert key_input.password is True
@@ -146,11 +150,11 @@ def test_key_input_uses_password_masking() -> None:
 
 
 def test_cloud_empty_key_blocks_submit_and_keeps_credentials() -> None:
-    """云 Provider key 为空：显示错误、不调用 verify、停留在 credentials。"""
+    """云 Provider key 为空：显示错误、不调用 discover、停留在 credentials。"""
 
     async def scenario() -> None:
-        stub = StubVerify()
-        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], verify=stub)
+        stub = StubDiscover()
+        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], discover=stub)
         async with app.run_test(size=(80, 24)) as pilot:
             await _choose_provider(app, pilot, 0)
             await pilot.press("enter")  # url 输入框聚焦，key 为空
@@ -164,11 +168,11 @@ def test_cloud_empty_key_blocks_submit_and_keeps_credentials() -> None:
 
 
 def test_ollama_empty_key_submits_none_and_reaches_model() -> None:
-    """Ollama 空 key 合法：verify 收到 None，进入模型选择。"""
+    """Ollama 空 key 合法：discover 收到 None，进入模型选择。"""
 
     async def scenario() -> None:
-        stub = StubVerify(models=["qwen3.6"])
-        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], verify=stub)
+        stub = StubDiscover(models=["qwen3.6"])
+        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], discover=stub)
         async with app.run_test(size=(80, 24)) as pilot:
             await _choose_provider(app, pilot, 1)
             assert app.query_one("#url-input", Input).value == _OLLAMA.base_url
@@ -188,7 +192,7 @@ def test_arrow_navigation_between_url_key_and_provider_list() -> None:
     """URL Down → key；key Up → URL；URL Up → Provider 列表。"""
 
     async def scenario() -> None:
-        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], verify=StubVerify())
+        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], discover=StubDiscover())
         async with app.run_test(size=(80, 24)) as pilot:
             await _choose_provider(app, pilot, 0)
             url_input = app.query_one("#url-input", Input)
@@ -213,7 +217,7 @@ def test_back_to_provider_list_keeps_arrows_and_enter_reselects() -> None:
             base_url="https://api.openai.test/v1",
             requires_key=True,
         )
-        app = SetupApp(options=[_DEEPSEEK, _OLLAMA, openai], verify=StubVerify())
+        app = SetupApp(options=[_DEEPSEEK, _OLLAMA, openai], discover=StubDiscover())
         async with app.run_test(size=(80, 24)) as pilot:
             await _choose_provider(app, pilot, 0)
             url_input = app.query_one("#url-input", Input)
@@ -242,11 +246,11 @@ def test_back_to_provider_list_keeps_arrows_and_enter_reselects() -> None:
 
 
 def test_key_down_stays_in_place_and_does_not_submit() -> None:
-    """Key 上 Down 停留原地：不循环、不触发 verify。"""
+    """Key 上 Down 停留原地：不循环、不触发 discover。"""
 
     async def scenario() -> None:
-        stub = StubVerify()
-        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], verify=stub)
+        stub = StubDiscover()
+        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], discover=stub)
         async with app.run_test(size=(80, 24)) as pilot:
             await _choose_provider(app, pilot, 0)
             key_input = app.query_one("#key-input", Input)
@@ -264,7 +268,7 @@ def test_left_right_keys_move_cursor_without_changing_focus() -> None:
     """URL/key 中左右键仍移动光标，不改变焦点。"""
 
     async def scenario() -> None:
-        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], verify=StubVerify())
+        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], discover=StubDiscover())
         async with app.run_test(size=(80, 24)) as pilot:
             await _choose_provider(app, pilot, 0)
             url_input = app.query_one("#url-input", Input)
@@ -291,11 +295,11 @@ def test_left_right_keys_move_cursor_without_changing_focus() -> None:
 
 
 def test_success_returns_result_and_trims_inputs() -> None:
-    """完整成功流：trim 后透传 verify，模型列表有序，两个槽位选完后返回 SetupResult。"""
+    """完整成功流：trim 后透传 discover，模型列表有序，两个槽位选完后返回 SetupResult。"""
 
     async def scenario() -> None:
-        stub = StubVerify()
-        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], verify=stub)
+        stub = StubDiscover()
+        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], discover=stub)
         async with app.run_test(size=(80, 24)) as pilot:
             await _choose_provider(app, pilot, 0)
             app.query_one("#url-input", Input).value = "  https://custom.test/v1  "
@@ -325,86 +329,70 @@ def test_success_returns_result_and_trims_inputs() -> None:
     asyncio.run(scenario())
 
 
-def test_verify_error_sanitized_keeps_inputs_and_retry_succeeds() -> None:
-    """失败消息脱敏、输入保留；修复后重试成功。"""
-
+def test_discovery_failure_allows_manual_models() -> None:
     async def scenario() -> None:
-        stub = StubVerify(error=RuntimeError("boom sk-test-secret"))
-        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], verify=stub)
+        stub = StubDiscover(models=[], error=RuntimeError("boom sk-test-secret"))
+        app = SetupApp(options=[_DEEPSEEK], discover=stub)
         async with app.run_test(size=(80, 24)) as pilot:
-            await _choose_provider(app, pilot, 0)
-            app.query_one("#url-input", Input).value = "https://custom.test/v1"
+            await _choose_provider(app, pilot)
             app.query_one("#key-input", Input).value = "sk-test-123"
             await pilot.press("enter")
-            await _wait_until(
-                lambda: bool(_feedback(app)) and "正在验证" not in _feedback(app), pilot
-            )
-            message = _feedback(app)
-            assert message
+            await _wait_until(lambda: app._state == "model_default", pilot)
+            message = str(app.query_one("#model-feedback", SelectionStatic).render())
             assert "sk-test-secret" not in message
-            assert "sk-test-123" not in message
-            assert app.query_one("#url-input", Input).value == "https://custom.test/v1"
-            assert app.query_one("#key-input", Input).value == "sk-test-123"
-            assert app.query_one("#key-input", Input).disabled is False
-            stub.error = None
+            assert "仍可选择或手动填写" in message
+            model_input = app.query_one("#model-input", Input)
+            model_input.value = "org/custom-model"
             await pilot.press("enter")
-            await _wait_until(
-                lambda: app.query_one("#model-panel", Vertical).display, pilot
-            )
-            await pilot.press("enter")  # default 槽位
-            await pilot.press("enter")  # fast 槽位
-        assert app._return_value is not None
-        assert app._return_value.provider == "deepseek"
-        assert app._return_value.default_model == "deepseek-v4-flash"
-        assert app._return_value.fast_model == "deepseek-v4-flash"
-        assert len(stub.calls) == 2
+            await _wait_until(lambda: app._state == "model_fast", pilot)
+            await pilot.press("enter")
+        assert app._return_value.default_model == "org/custom-model"
+        assert app._return_value.fast_model == "org/custom-model"
+        assert len(stub.calls) == 1
 
     asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("exc", [KeyboardInterrupt(), SystemExit()])
-def test_verify_async_propagates_control_flow(exc) -> None:
+def test_discover_async_propagates_control_flow(exc) -> None:
     """KeyboardInterrupt/SystemExit 不进入 UI 脱敏流程，原样抛出。"""
 
     async def scenario() -> None:
-        stub = StubVerify(error=exc)
-        app = SetupApp(options=[_DEEPSEEK], verify=stub)
+        stub = StubDiscover(error=exc)
+        app = SetupApp(options=[_DEEPSEEK], discover=stub)
         with pytest.raises(type(exc)):
-            await app._verify_async(_DEEPSEEK, "sk-test-123", _DEEPSEEK.base_url)
+            await app._discover_async(_DEEPSEEK, "sk-test-123", _DEEPSEEK.base_url)
 
     asyncio.run(scenario())
 
 
-def test_empty_models_are_safe_error_and_stay_in_credentials() -> None:
-    """verify 防御性返回空列表：显示安全错误、不进模型、保留输入。"""
-
+def test_empty_models_allow_manual_entry() -> None:
     async def scenario() -> None:
-        stub = StubVerify(models=[])
-        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], verify=stub)
+        app = SetupApp(options=[_OLLAMA], discover=StubDiscover(models=[]))
         async with app.run_test(size=(80, 24)) as pilot:
-            await _choose_provider(app, pilot, 0)
-            app.query_one("#key-input", Input).value = "sk-test-123"
+            await _choose_provider(app, pilot)
             await pilot.press("enter")
-            await _wait_until(
-                lambda: bool(_feedback(app)) and "正在验证" not in _feedback(app), pilot
-            )
-            assert "未发现可用模型" in _feedback(app)
-            assert app.query_one("#model-panel", Vertical).display is False
-            assert app.query_one("#provider-panel", Vertical).display is True
-            assert app.query_one("#key-input", Input).disabled is False
-            assert app.query_one("#key-input", Input).value == "sk-test-123"
-            assert stub.calls == [(_DEEPSEEK, "sk-test-123", _DEEPSEEK.base_url)]
+            await _wait_until(lambda: app._state == "model_default", pilot)
+            assert app.focused.id == "model-input"
+            app.query_one("#model-input", Input).value = "manual-default"
+            await pilot.press("enter")
+            await _wait_until(lambda: app._state == "model_fast", pilot)
+            app.query_one("#model-input", Input).focus()
+            app.query_one("#model-input", Input).value = "manual-fast"
+            await pilot.press("enter")
+        assert app._return_value.default_model == "manual-default"
+        assert app._return_value.fast_model == "manual-fast"
 
     asyncio.run(scenario())
 
 
 def test_double_enter_submits_once() -> None:
-    """verifying 态防重复提交：连续 Enter 只调用一次 verify。"""
+    """discovering 态防重复提交：连续 Enter 只调用一次 discover。"""
 
     async def scenario() -> None:
-        stub = StubVerify()
+        stub = StubDiscover()
         stub.gate()
-        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], verify=stub)
+        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], discover=stub)
         async with app.run_test(size=(80, 24)) as pilot:
             await _choose_provider(app, pilot, 0)
             app.query_one("#key-input", Input).value = "sk-test-123"
@@ -426,22 +414,22 @@ def test_double_enter_submits_once() -> None:
 
 
 @pytest.mark.parametrize(
-    "state", ["provider", "credentials", "verifying", "model_default"]
+    "state", ["provider", "credentials", "discovering", "model_default"]
 )
-def test_ctrl_c_exits_none_and_cancels_verify_from_every_state(state: str) -> None:
-    """Ctrl+C 在任意态均返回 None；verifying 态还取消后台验证任务。"""
+def test_ctrl_c_exits_none_and_cancels_discover_from_every_state(state: str) -> None:
+    """Ctrl+C 在任意态均返回 None；discovering 态还取消后台验证任务。"""
 
     async def scenario() -> None:
-        stub = StubVerify()
-        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], verify=stub)
+        stub = StubDiscover()
+        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], discover=stub)
         async with app.run_test(size=(80, 24)) as pilot:
-            if state in ("credentials", "verifying", "model_default"):
+            if state in ("credentials", "discovering", "model_default"):
                 await _choose_provider(app, pilot, 0)
-            if state in ("verifying", "model_default"):
+            if state in ("discovering", "model_default"):
                 stub.gate()
                 app.query_one("#key-input", Input).value = "sk-test-123"
                 await pilot.press("enter")
-            if state == "verifying":
+            if state == "discovering":
                 await _wait_until(lambda: bool(stub.calls), pilot)
             if state == "model_default":
                 stub.release()
@@ -449,7 +437,7 @@ def test_ctrl_c_exits_none_and_cancels_verify_from_every_state(state: str) -> No
                     lambda: app.query_one("#model-panel", Vertical).display, pilot
                 )
             await pilot.press("ctrl+c")
-            if state == "verifying":
+            if state == "discovering":
                 await _wait_until(lambda: stub.cancelled.is_set(), pilot)
                 assert stub.cancelled.is_set()
             await _wait_until(lambda: app._state == "exit", pilot)
@@ -462,7 +450,7 @@ def test_escape_in_provider_list_is_noop() -> None:
     """provider 态 Esc 不退出，列表仍可正常选择 Provider。"""
 
     async def scenario() -> None:
-        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], verify=StubVerify())
+        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], discover=StubDiscover())
         async with app.run_test(size=(80, 24)) as pilot:
             provider_list = app.query_one("#provider-list", KeyboardOptionList)
             provider_panel = app.query_one("#provider-panel", Vertical)
@@ -491,7 +479,7 @@ def test_escape_from_credentials_returns_to_provider_list() -> None:
     """credentials 态 Esc 返回 Provider 列表并允许重新选择。"""
 
     async def scenario() -> None:
-        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], verify=StubVerify())
+        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], discover=StubDiscover())
         async with app.run_test(size=(80, 24)) as pilot:
             await _choose_provider(app, pilot, 0)
             url_input = app.query_one("#url-input", Input)
@@ -514,13 +502,13 @@ def test_escape_from_credentials_returns_to_provider_list() -> None:
     asyncio.run(scenario())
 
 
-def test_escape_from_verifying_cancels_and_returns_to_credentials() -> None:
-    """verifying 态 Esc 取消验证、恢复凭据输入，并允许重新提交。"""
+def test_escape_from_discovering_cancels_and_returns_to_credentials() -> None:
+    """discovering 态 Esc 取消验证、恢复凭据输入，并允许重新提交。"""
 
     async def scenario() -> None:
-        stub = StubVerify()
+        stub = StubDiscover()
         stub.gate()
-        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], verify=stub)
+        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], discover=stub)
         async with app.run_test(size=(80, 24)) as pilot:
             await _choose_provider(app, pilot, 0)
             url_input = app.query_one("#url-input", Input)
@@ -539,7 +527,7 @@ def test_escape_from_verifying_cancels_and_returns_to_credentials() -> None:
             assert key_input.disabled is False
             assert url_input.value == "https://custom.test/v1"
             assert key_input.value == "sk-test-123"
-            assert "正在验证" not in _feedback(app)
+            assert "正在获取模型列表" not in _feedback(app)
             assert url_input.has_focus
 
             stub.release()
@@ -553,7 +541,7 @@ def test_escape_from_verifying_cancels_and_returns_to_credentials() -> None:
     asyncio.run(scenario())
 
 
-def test_stale_verify_result_is_ignored_after_resubmit() -> None:
+def test_stale_discover_result_is_ignored_after_resubmit() -> None:
     """旧验证吞掉取消并返回结果时，不得覆盖重新提交的新验证任务。"""
 
     async def scenario() -> None:
@@ -562,7 +550,7 @@ def test_stale_verify_result_is_ignored_after_resubmit() -> None:
         stale_release = asyncio.Event()
         fresh_release = asyncio.Event()
 
-        async def verify(option, api_key, base_url) -> list[str]:
+        async def discover(option, api_key, base_url) -> list[str]:
             calls.append((option, api_key, base_url))
             if len(calls) == 1:
                 try:
@@ -570,11 +558,11 @@ def test_stale_verify_result_is_ignored_after_resubmit() -> None:
                 except asyncio.CancelledError:
                     stale_cancelled.set()
                     await stale_release.wait()
-                return ["stale-model"]
+                return ModelDiscovery(["stale-model"])
             await fresh_release.wait()
-            return ["fresh-model"]
+            return ModelDiscovery(["fresh-model"])
 
-        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], verify=verify)
+        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], discover=discover)
         async with app.run_test(size=(80, 24)) as pilot:
             await _choose_provider(app, pilot, 0)
             url_input = app.query_one("#url-input", Input)
@@ -582,7 +570,7 @@ def test_stale_verify_result_is_ignored_after_resubmit() -> None:
             key_input.value = "sk-old"
             await pilot.press("enter")
             await _wait_until(lambda: len(calls) == 1, pilot)
-            stale_task = app._verify_task
+            stale_task = app._discover_task
             assert stale_task is not None
 
             await pilot.press("escape")
@@ -591,7 +579,7 @@ def test_stale_verify_result_is_ignored_after_resubmit() -> None:
             key_input.value = "sk-fresh"
             await pilot.press("enter")
             await _wait_until(lambda: len(calls) == 2, pilot)
-            fresh_task = app._verify_task
+            fresh_task = app._discover_task
             assert fresh_task is not None
             assert fresh_task is not stale_task
 
@@ -600,8 +588,8 @@ def test_stale_verify_result_is_ignored_after_resubmit() -> None:
             await pilot.pause()
 
             model_list = app.query_one("#model-list", KeyboardOptionList)
-            assert app._state == "verifying"
-            assert app._verify_task is fresh_task
+            assert app._state == "discovering"
+            assert app._discover_task is fresh_task
             assert app.query_one("#model-panel", Vertical).display is False
             assert [
                 model_list.get_option_at_index(index).prompt
@@ -621,7 +609,7 @@ def test_stale_verify_result_is_ignored_after_resubmit() -> None:
     asyncio.run(scenario())
 
 
-def test_stale_verify_error_is_ignored_after_resubmit() -> None:
+def test_stale_discover_error_is_ignored_after_resubmit() -> None:
     """旧验证吞掉取消并晚抛错时，不得污染新验证的空模型反馈。"""
 
     async def scenario() -> None:
@@ -630,7 +618,7 @@ def test_stale_verify_error_is_ignored_after_resubmit() -> None:
         stale_release = asyncio.Event()
         fresh_release = asyncio.Event()
 
-        async def verify(option, api_key, base_url) -> list[str]:
+        async def discover(option, api_key, base_url) -> list[str]:
             calls.append((option, api_key, base_url))
             if len(calls) == 1:
                 try:
@@ -638,37 +626,38 @@ def test_stale_verify_error_is_ignored_after_resubmit() -> None:
                 except asyncio.CancelledError:
                     stale_cancelled.set()
                     await stale_release.wait()
-                raise TimeoutError("stale boom")
+                return ModelDiscovery([], classify_llm_error(TimeoutError("stale boom")))
             await fresh_release.wait()
-            return []
+            return ModelDiscovery([])
 
-        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], verify=verify)
+        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], discover=discover)
         async with app.run_test(size=(80, 24)) as pilot:
             await _choose_provider(app, pilot, 0)
             app.query_one("#key-input", Input).value = "sk-test-123"
             await pilot.press("enter")
             await _wait_until(lambda: len(calls) == 1, pilot)
-            stale_task = app._verify_task
+            stale_task = app._discover_task
             assert stale_task is not None
 
             await pilot.press("escape")
             await _wait_until(stale_cancelled.is_set, pilot)
             await pilot.press("enter")
             await _wait_until(lambda: len(calls) == 2, pilot)
-            fresh_task = app._verify_task
+            fresh_task = app._discover_task
             assert fresh_task is not None
             assert fresh_task is not stale_task
 
             stale_release.set()
             await _wait_until(stale_task.done, pilot)
             await pilot.pause()
-            assert app._state == "verifying"
-            assert app._verify_task is fresh_task
+            assert app._state == "discovering"
+            assert app._discover_task is fresh_task
 
             fresh_release.set()
-            await _wait_until(lambda: app._state == "credentials", pilot)
-            assert _feedback(app) == "未发现可用模型"
-            assert "stale" not in _feedback(app)
+            await _wait_until(lambda: app._state == "model_default", pilot)
+            message = str(app.query_one("#model-feedback", SelectionStatic).render())
+            assert "未获取到模型" in message
+            assert "stale" not in message
 
     asyncio.run(scenario())
 
@@ -677,7 +666,7 @@ def test_escape_from_model_default_returns_to_credentials() -> None:
     """model_default 态 Esc 恢复凭据页，并允许再次验证进入模型页。"""
 
     async def scenario() -> None:
-        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], verify=StubVerify())
+        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], discover=StubDiscover())
         async with app.run_test(size=(80, 24)) as pilot:
             await _choose_provider(app, pilot, 0)
             url_input = app.query_one("#url-input", Input)
@@ -708,18 +697,18 @@ def test_escape_from_model_default_returns_to_credentials() -> None:
 
 
 @pytest.mark.parametrize(
-    "state", ["provider", "credentials", "verifying", "model_default"]
+    "state", ["provider", "credentials", "discovering", "model_default"]
 )
 def test_ctrl_q_does_not_exit(state: str) -> None:
     """Ctrl+Q 在任意态均无效果，界面仍可操作，Ctrl+C 仍可取消。"""
 
     async def scenario() -> None:
-        stub = StubVerify()
-        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], verify=stub)
+        stub = StubDiscover()
+        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], discover=stub)
         async with app.run_test(size=(80, 24)) as pilot:
-            if state in ("credentials", "verifying", "model_default"):
+            if state in ("credentials", "discovering", "model_default"):
                 await _choose_provider(app, pilot, 0)
-            if state in ("verifying", "model_default"):
+            if state in ("discovering", "model_default"):
                 stub.gate()
                 app.query_one("#key-input", Input).value = "sk-test-123"
                 await pilot.press("enter")
@@ -730,7 +719,7 @@ def test_ctrl_q_does_not_exit(state: str) -> None:
                     lambda: app.query_one("#model-panel", Vertical).display, pilot
                 )
 
-            verify_task = app._verify_task
+            discover_task = app._discover_task
             focused = app.focused
             await pilot.press("ctrl+q")
             await pilot.pause()
@@ -743,10 +732,10 @@ def test_ctrl_q_does_not_exit(state: str) -> None:
             assert app.query_one("#model-panel", Vertical).display is (
                 state == "model_default"
             )
-            if state == "verifying":
-                assert verify_task is not None
-                assert app._verify_task is verify_task
-                assert verify_task.done() is False
+            if state == "discovering":
+                assert discover_task is not None
+                assert app._discover_task is discover_task
+                assert discover_task.done() is False
                 assert stub.cancelled.is_set() is False
 
             if state == "provider":
@@ -759,7 +748,7 @@ def test_ctrl_q_does_not_exit(state: str) -> None:
                 await _wait_until(
                     lambda: app.query_one("#model-panel", Vertical).display, pilot
                 )
-            elif state == "verifying":
+            elif state == "discovering":
                 stub.release()
                 await _wait_until(
                     lambda: app.query_one("#model-panel", Vertical).display, pilot
@@ -786,8 +775,8 @@ def test_layout_no_overlap_at_common_sizes(size: tuple[int, int]) -> None:
     """80x24 与 100x30 下关键控件 region 不重叠且不越界。"""
 
     async def scenario() -> None:
-        stub = StubVerify()
-        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], verify=stub)
+        stub = StubDiscover()
+        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], discover=stub)
         async with app.run_test(size=size) as pilot:
             await pilot.pause()
             ids = [
@@ -837,11 +826,11 @@ def test_source_has_no_legacy_names() -> None:
 
 @pytest.mark.parametrize("blank_url", ["", "   "])
 def test_cloud_blank_url_blocks_submit_and_keeps_credentials(blank_url: str) -> None:
-    """云 Provider URL 为空/空白：显示“API 地址不能为空”、不调用 verify、停留 credentials。"""
+    """云 Provider URL 为空/空白：显示“API 地址不能为空”、不调用 discover、停留 credentials。"""
 
     async def scenario() -> None:
-        stub = StubVerify()
-        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], verify=stub)
+        stub = StubDiscover()
+        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], discover=stub)
         async with app.run_test(size=(80, 24)) as pilot:
             await _choose_provider(app, pilot, 0)
             app.query_one("#url-input", Input).value = blank_url
@@ -867,8 +856,8 @@ def test_ollama_success_result_none_key_and_repr_hides_key() -> None:
     SetupResult 的 key 字段为 None 且 repr 不含该字段名。"""
 
     async def scenario() -> None:
-        stub = StubVerify(models=["qwen3.6", "qwen3.5"])
-        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], verify=stub)
+        stub = StubDiscover(models=["qwen3.6", "qwen3.5"])
+        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], discover=stub)
         async with app.run_test(size=(80, 24)) as pilot:
             await _choose_provider(app, pilot, 1)
             await pilot.press("enter")
@@ -919,8 +908,8 @@ def test_model_default_then_fast_reuses_same_model_list() -> None:
     """选完 default 进入 fast 屏：复用同一份模型列表与控件，不重新拉取。"""
 
     async def scenario() -> None:
-        stub = StubVerify()
-        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], verify=stub)
+        stub = StubDiscover()
+        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], discover=stub)
         async with app.run_test(size=(80, 24)) as pilot:
             await _reach_model_default(app, pilot)
             assert app._state == "model_default"
@@ -946,8 +935,8 @@ def test_escape_from_model_fast_returns_to_model_default_then_credentials() -> N
     """Esc 逐级后退：model_fast → model_default（恢复所选高亮）→ credentials。"""
 
     async def scenario() -> None:
-        stub = StubVerify()
-        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], verify=stub)
+        stub = StubDiscover()
+        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], discover=stub)
         async with app.run_test(size=(80, 24)) as pilot:
             await _reach_model_default(app, pilot)
             app.query_one("#model-list", KeyboardOptionList).highlighted = 1
@@ -978,8 +967,8 @@ def test_same_model_for_both_slots() -> None:
     """两个槽位可选同一个模型：fast 屏直接回车沿用 default 屏所选。"""
 
     async def scenario() -> None:
-        stub = StubVerify()
-        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], verify=stub)
+        stub = StubDiscover()
+        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], discover=stub)
         async with app.run_test(size=(80, 24)) as pilot:
             await _reach_model_default(app, pilot)
             await pilot.press("enter")
@@ -996,8 +985,8 @@ def test_different_model_per_slot() -> None:
     """两个槽位可选不同模型，最终 SetupResult 同时携带两者。"""
 
     async def scenario() -> None:
-        stub = StubVerify()
-        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], verify=stub)
+        stub = StubDiscover()
+        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], discover=stub)
         async with app.run_test(size=(80, 24)) as pilot:
             await _reach_model_default(app, pilot)
             model_list = app.query_one("#model-list", KeyboardOptionList)
@@ -1021,8 +1010,8 @@ def test_ctrl_c_in_model_fast_exits_none() -> None:
     """model_fast 屏 Ctrl+C 返回 None，不产生任何结果。"""
 
     async def scenario() -> None:
-        stub = StubVerify()
-        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], verify=stub)
+        stub = StubDiscover()
+        app = SetupApp(options=[_DEEPSEEK, _OLLAMA], discover=stub)
         async with app.run_test(size=(80, 24)) as pilot:
             await _reach_model_default(app, pilot)
             await pilot.press("enter")

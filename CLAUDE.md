@@ -72,7 +72,7 @@ REQUEST_INPUT → CHECK_COMPACT → [COMPACT →] LLM_CALL → PROCESS_RESPONSE
 
 ### 配置系统
 
-3 层合并，后者覆盖前者：内置 `src/config.yaml` → 全局 `~/.agent/config.yaml` → 项目 `.agent/config.yaml`。环境变量通过 `.env` 文件加载（全局 `~/.agent/.env`、项目 `.agent/.env`）。`config.yaml` 的 `role.default` 选定激活角色；主 agent 恒用该角色的 `model.default`，子 agent 可声明 `default`、`fast`、Claude Code 兼容别名或完整模型 ID。两个模型槽位均无内置兜底值。角色目录名作为 YAML mapping key 原样处理，允许 Unicode、点号和长名称；`common` 与 `default` 是不可激活的保留名。
+3 层合并，后者覆盖前者：内置 `src/config.yaml` → 全局 `~/.agent/config.yaml` → 项目 `.agent/config.yaml`。环境变量通过 `.env` 文件加载（全局 `~/.agent/.env`、项目 `.agent/.env`）。`config.yaml` 的 `role.default` 选定激活角色；主 agent 恒用该角色的 `model.default`，子 agent 可声明 `default`、`fast`、Claude Code 兼容别名或 `供应商/模型ID`。两个模型槽位均无内置兜底值。角色目录名作为 YAML mapping key 原样处理，允许 Unicode、点号和长名称；`common` 与 `default` 是不可激活的保留名。
 
 `settings.json`（全局 `~/.agent/` + 项目 `.agent/` 两层深度合并）承载 Hook 与 MCP 连接开关。`mcp.enabledServers` 非空时作白名单，`mcp.disabledServers` 始终剔除；被禁用的 server 不连接、其工具不注册、不进 LLM schema。授权策略不从配置加载。
 

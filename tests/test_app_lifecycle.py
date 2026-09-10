@@ -157,7 +157,7 @@ class _ReloadingLLMMgr:
         self.order = order
         self.model = "old-model"
 
-    async def reconfigure(self) -> None:
+    def reconfigure(self) -> None:
         self.order.append("llm_reconfigure")
         self.model = "reloaded-model"
 

@@ -67,7 +67,7 @@ LOCAL_READ 可以读取工作区外的普通文件或目录，但拒绝设备、
 
 ## LLM 智能权限审查
 
-`LLMJudgeClient` 每次调用 `llm_mgr.get("fast")`，使用激活角色 `role.<角色>.model.fast` 指向的 Provider。fast 是必填槽位：缺失、格式非法或模型不可用会在启动校验时报错，裁决时也不会回退 default。`/models` 只改 fast 后无需热切主 agent，后续权限裁决会现读新槽位。
+`LLMJudgeClient` 每次调用 `llm_mgr.get("fast")`，使用激活角色 `role.<角色>.model.fast` 指向的 Provider。fast 是必填的 `供应商/模型ID` 槽位；格式需合法，候选列表不限制调用，裁决时不回退 default。`/models` 只改 fast 后无需热切主 agent，后续权限裁决会现读新槽位。
 
 `StructuredVerdictRunner` 对这次裁决固定传 `reasoning_effort_override="low"`，同时关闭 thinking、温度设为 0，并强制通过唯一的 `record_verdict` 工具返回 allow、deny 或 ask。low 只是本次调用覆盖，不写回角色配置，也不修改按模型缓存的 Provider。调用最长 15 秒，`max_attempts_cap=3` 使结构化裁决最多尝试三次；全局 `llm.retry.max_attempts` 更低时采用更低值。
 

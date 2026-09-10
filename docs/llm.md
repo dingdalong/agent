@@ -14,11 +14,11 @@
 | `ollama` | `OllamaProvider` | OpenAI 兼容 Chat Completions |
 | `moonshot` | `MoonshotProvider` | OpenAI 兼容 Chat Completions，适配 Kimi K3 |
 
-`get_provider(name)` 按精确名称返回实现类，未知名称抛 `ValueError`（`src/llm/__init__.py:25-29`）。模型到 provider 的归属由 `LLMMgr.load_models()` 建立，本层只接收已经解析的模型 ID。
+`get_provider(name)` 按精确名称返回实现类，未知名称抛 `ValueError`（`src/llm/__init__.py:25-29`）。模型引用明确指定供应商；Provider 的 `provider_name` 保留路由身份，`model` 是向 SDK 发送的原始模型 ID。
 
 ### 模型解析与调用归属
 
-`LLMMgr` 把模型选择隔离在激活角色下。每个角色必须配置 `role.<角色>.model.default` 与 `.fast`，两个值都是已加载的完整模型 ID；内置配置不兜底。`resolve_model()` 只执行以下解析：
+`LLMMgr` 把模型选择隔离在激活角色下。每个角色必须配置 `role.<角色>.model.default` 与 `.fast`，两个值都是 `供应商/模型ID`；内置配置不兜底。`resolve_model()` 只执行以下解析：
 
 | 输入 | 结果 |
 |---|---|
@@ -26,9 +26,9 @@
 | `default` / `fast` | 现读激活角色的对应槽位 |
 | `opus` / `sonnet` | `default` 槽位（Claude Code 兼容） |
 | `haiku` | `fast` 槽位（Claude Code 兼容） |
-| 完整模型 ID | 在已加载模型表中精确匹配 |
+| `供应商/模型ID` | 按第一个 `/` 解析供应商，其余部分原样作为模型 ID |
 
-没有 `best`、`inherit`、子串模糊匹配或静默回退。主 agent 的 `model` 固定为 `None`，因此使用 default；子 agent 使用 manifest 的合法别名或完整 ID。每个 Agent 的 `CompactMgr` 和退出总结直接复用该 Agent 的 Provider。智能权限每次解析 fast 槽位；原生 Web 搜索/抓取则由工具传入调用方 Agent 自己的 Provider。
+没有 `best`、`inherit`、子串模糊匹配或静默回退。主 agent 构造时使用 default；子 agent 使用 manifest 的合法别名或完整引用。初始化与切换后，`Agent.model` 保存解析后的完整引用。每个 Agent 的 `CompactMgr` 和退出总结直接复用该 Agent 的 Provider。智能权限每次解析 fast 槽位；原生 Web 搜索/抓取则由工具传入调用方 Agent 自己的 Provider。
 
 `LLMResponse`（`src/llm/base.py:168-176`）统一五家的返回值：
 
@@ -216,6 +216,8 @@ assistant 的 provider 专属字段在判断“真正为空”之前由 `_normal
 
 ## 8. 模型发现
 
-基类 `list_models()` 用 OpenAI 兼容 Models API，外层 `asyncio.wait_for` 与 SDK 共用调用方传入的超时，并保证关闭临时客户端（`src/llm/base.py:368-394`）。Anthropic 覆写为分页读取全部模型（`src/llm/anthropic.py:107-145`）。`LLMMgr.load_models()` 固定传入 3 秒；该约束写在代码中，不受 `llm.timeout_seconds` 或项目配置覆盖。
+基类 `list_models()` 使用 OpenAI 兼容 Models API，Anthropic 覆写为自身的分页 Models API；临时客户端在结束后关闭。
 
-`LLMMgr.load_models()` 并发发现所有已配置 Provider；响应必须是仅含非空字符串的列表并按首次出现去重。发现失败先进入统一分类与安全日志；该 Provider 配有非空静态 `models` 时使用静态列表，否则不注册模型，并把错误保存到 `provider_errors`。模型在不同 Provider 间重复归属属于配置错误。启动时 `ensure_slots_available()` 会精确验证激活角色的 default 与 fast 两个槽位；任一槽位缺失、仍是旧标量格式或模型不可用都阻止启动，不会改选其他模型或 Provider。
+首次配置向导和 `/models` 调用共享的 `discover_models()`，使用独立于聊天请求的短超时，合并配置与在线模型并去重。发现失败只记录安全化错误，配置候选仍保留。管理器额外补入当前所选模型；不同供应商可以提供相同模型 ID。
+
+启动、`/clear` 和发送消息不请求模型列表。所选模型不在列表也照常发送请求，由供应商返回实际错误。列表不会自动写回配置。

@@ -211,6 +211,7 @@ class Agent:
         # 主、子 agent 均以单实例 UUID 关联生命周期、usage 与转录事件，
         # 供 AgentViewStore 汇聚成一致快照。
         self.llm = self.deps.llm_mgr.get(self.model)
+        self.model = f"{self.llm.provider_name}/{self.llm.model}"
         # 解析本 agent 启用的 feature 集，据此过滤工具、按需创建各可插拔 Manager
         from src.mgr import resolve_features
         self.features = resolve_features(self.features)
@@ -289,7 +290,7 @@ class Agent:
         new_compact_mgr.recent_files = list(self._compact_mgr.recent_files)
         new_compact_mgr.has_compacted = self._compact_mgr.has_compacted
 
-        self.model = new_llm.model
+        self.model = f"{new_llm.provider_name}/{new_llm.model}"
         self.reasoning_effort = effort
         self.llm = new_llm
         self._compact_mgr = new_compact_mgr

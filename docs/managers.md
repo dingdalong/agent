@@ -96,29 +96,20 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 
 `src/mgr/llm_mgr.py`
 
-**单一职责**：把激活角色的 `default`/`fast` 槽位、固定兼容别名或完整模型 ID 解析为可用模型，并返回按完整模型 ID 缓存的 `LLMProvider`。构造依赖为 `ConfigManager`、`RoleMgr`、`EventBus`；`RoleMgr` 是确定槽位配置所属角色的权威。
+**单一职责**：管理模型候选，并把角色槽位或显式的 `供应商/模型ID` 引用解析为 Provider。候选列表仅供选择，请求路由直接来自模型引用。
 
-**消费的配置**：
-- `llm` 只含调用参数：`concurrency`、`timeout_seconds`、`retry`、`user_agent`。顶层和 `retry` 必须是 mapping，各数值执行严格类型与范围校验。
-- `role.<实际角色>.model` 必须是 mapping，且 `default`、`fast` 都是非空字符串。内置配置没有槽位兜底；父键缺失、旧字符串格式、缺槽位或非法值均抛 `LLMConfigurationError`。
-- `llm_provider.*` 提供模型发现与 Provider 构造字段；Provider effort 沿用类默认值 `max`，角色或 manifest 通过每次调用参数覆盖。
-- Claude Code 兼容映射固定为 `opus`/`sonnet`→`default`、`haiku`→`fast`。`MODEL_ALIASES` 只包含这三个名称和 `default`/`fast`。
-
-**公共方法**：
+`ConfigManager` 保存角色选择，`RoleMgr` 确定激活角色。`LLMMgr` 管理配置快照、候选快照和以完整引用为键的客户端缓存；`src/llm/models.py` 提供向导与管理器共用的解析、规范化和发现逻辑。
 
 | 方法 | 作用 |
 |---|---|
-| `load_models()` | 并发发现模型；单个 Provider 失败时记录 `provider_errors`，仅静态 `models` 非空时回退；跨 Provider 同名模型冲突时报配置错误 |
-| `reconfigure()` | 重读调用配置、清空 Provider 实例缓存、重跑模型发现，再调用 `ensure_slots_available()`；用于 `/clear` |
-| `resolve_model(model)` | `None`/空串视为 `default`；固定兼容别名先映射槽位，槽位再查当前角色 mapping，完整 ID 只做精确匹配；失败报错，不做子串匹配或静默回退 |
-| `ensure_slots_available()` | 启动或重配时同时验证 default/fast 槽位配置与模型可用性；错误列出精确键、可用模型和安全化的发现失败摘要 |
-| `get(model)` | 返回解析后完整模型 ID 对应的缓存 Provider 实例 |
-| `provider_name_for_model()` / `web_mode_for_model()` | 查询完整模型或别名所属 Provider 及 Web 路由模式 |
-| `list_models()` / `models_by_provider()` | 返回排序后的模型列表或 Provider 分组 |
+| `refresh_models()` | 显式并发发现模型，与配置候选合并；错误记录在 `provider_errors`，不改变客户端缓存 |
+| `reconfigure()` | 同步重读本地配置并清空旧端点的客户端和发现快照；用于 `/clear` |
+| `resolve_model(model)` | 空值使用 default，兼容别名映射槽位，显式引用按第一个斜杠拆分；验证格式与供应商配置 |
+| `get(model)` | 根据完整引用创建或复用 Provider，向 SDK 传递原始模型 ID |
+| `web_mode_for_provider()` | 按客户端的明确供应商身份查询 Web 路由模式 |
+| `list_models()` / `models_by_provider()` | 返回配置、在线发现和当前所选模型的排序并集；分组接口返回原始模型 ID |
 
-槽位配置在每次 `resolve_model("default"|"fast")` 时现读，因此 `/models` 写入并 reload 后，新建子 agent 与智能权限立即使用新槽位。完整模型 ID 不依赖槽位 mapping，可供子 agent manifest 精确指定。`ensure_slots_available()` 仍要求激活角色的两个槽位都可用。
-
-**feature 门控**：否。**reload**：通过异步 `reconfigure()` 显式完成。**关键状态**：`_model_to_provider`、`_cache`、`_provider_web_mode`、`provider_errors` 以及统一调用参数。
+两个角色槽位都必填且不提供模型兜底。槽位在每次解析时现读，`/models` 保存并 reload 后，新建子 agent 与智能权限使用新值。模型不在候选列表、发现失败或返回空列表均不影响请求发送；实际调用错误由供应商返回并进入统一 LLM 错误处理。启动与 `/clear` 不执行在线发现。
 
 模型别名、effort 和 Provider 调用细节见 [llm.md](llm.md)。
 
@@ -173,7 +164,7 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 |---|---|---|---|
 | `authorize` (async) | `tool_name`, `policy`, `arguments`, `origin`, `plan_active`, `user_intent`, `review_model` | `AuthorizationResult` | 每次调用独立裁决；不缓存、不创建后续放行 |
 
-**关键协作者**：`PathResolver` 统一规范化和分类路径，`HardDenyDetector` 处理不可覆盖的高危动作，`LLMJudgeClient` 每次通过 `llm_mgr.get("fast")` 现读激活角色的 fast 槽位，`StructuredVerdictRunner` 对该次结构化裁决覆盖 `reasoning_effort="low"`（并关闭 thinking、最多尝试三次），不修改缓存 Provider。fast 缺失或不可用是配置错误，不回退 default。`WebPrivacyGuard` 负责 Web 外部读取的本地隐私预检；`LLMWebSafetyClient` 虽在装配时注入，但当前 `_review_web()` 路径未调用，不应视为已启用的 LLM Web 审查。`DataGuard` 保证裁决请求、原因和展示详情不含原始秘密。**feature 门控**：否。**reload**：无。
+**关键协作者**：`PathResolver` 统一规范化和分类路径，`HardDenyDetector` 处理不可覆盖的高危动作，`LLMJudgeClient` 每次通过 `llm_mgr.get("fast")` 现读激活角色的 fast 槽位，`StructuredVerdictRunner` 对该次结构化裁决覆盖 `reasoning_effort="low"`（并关闭 thinking、最多尝试三次），不修改缓存 Provider。fast 缺失或格式非法是配置错误；候选列表不限制调用，实际调用错误不触发 default 回退。`WebPrivacyGuard` 负责 Web 外部读取的本地隐私预检；`LLMWebSafetyClient` 虽在装配时注入，但当前 `_review_web()` 路径未调用，不应视为已启用的 LLM Web 审查。`DataGuard` 保证裁决请求、原因和展示详情不含原始秘密。**feature 门控**：否。**reload**：无。
 
 ---
 
@@ -248,12 +239,12 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 
 **单一职责**：四层扫描子 agent 定义，在加载期验证模型字段，暴露列表提示词段，并通过 `task_delegator` 构造和运行完整子 Agent。
 
-**扫描与模型校验**：共享 `roles/common/agents/` → 激活角色 `agents/` → 全局 `~/.agent/agents/` → 项目 `.agent/agents/`，同名 `agent_type` 后者覆盖。每份文件经 `parse_frontmatter` 与 `extract_manifest` 解析后立即调用 `_validate_model()`：
+**扫描与模型校验**：共享 `roles/common/agents/` → 激活角色 `agents/` → 全局 `~/.agent/agents/` → 项目 `.agent/agents/`，同名 `agent_type` 后者覆盖。每份文件在解析 frontmatter 时校验 model 的格式：
 
 - `None` 合法，委派时由 `LLMMgr.get(None)` 使用角色 default 槽位；
 - 固定别名只允许 `default`、`fast`、`opus`、`sonnet`、`haiku`；
-- 其他字符串必须精确位于 `LLMMgr.list_models()` 的已加载完整模型 ID 集合；
-- 非法值抛 `LLMConfigurationError`，消息包含 manifest 路径、合法域和当前可用模型。没有 `best`、`inherit`、子串匹配或静默回退。
+- 其他字符串必须采用 `供应商/模型ID`，不查询模型候选列表；
+- 非法值抛 `LLMConfigurationError`，消息包含 manifest 路径和合法格式。没有 `best`、`inherit`、子串匹配或静默回退。
 
 **公共方法**：`describe()` 返回按 type 排序的列表，`prompt_section()` 生成可用子智能体段，`task_delegator(agent_type, prompt, parent_agent, task_id, description, shared_context)` 执行委派。
 

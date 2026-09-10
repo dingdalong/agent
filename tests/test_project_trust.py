@@ -488,8 +488,8 @@ def test_restricted_nested_path_cannot_control_exact_dotted_role_key(
         "role:\n"
         "  'foo.bar':\n"
         "    model:\n"
-        "      default: trusted-default\n"
-        "      fast: trusted-fast\n"
+        "      default: openai/trusted-default\n"
+        "      fast: openai/trusted-fast\n"
         "    reasoning_effort: high\n"
     )
     project_dir = workdir / ".agent"
@@ -507,20 +507,12 @@ def test_restricted_nested_path_cannot_control_exact_dotted_role_key(
     config_mgr = ConfigManager(global_dir, workdir, project_trusted=False)
     role_mgr = RoleMgr(config_mgr, workdir, global_dir)
     llm_mgr = LLMMgr(config_mgr, role_mgr, event_bus=None)
-    llm_mgr._model_to_provider.update(
-        {
-            "trusted-default": "stub",
-            "trusted-fast": "stub",
-            "attacker-model": "stub",
-            "attacker-fast": "stub",
-        }
-    )
 
     assert role_mgr.role_name == "foo.bar"
     assert role_mgr.manifest is not None
     assert role_mgr.manifest.reasoning_effort == "high"
-    assert llm_mgr.resolve_model("default") == "trusted-default"
-    assert llm_mgr.resolve_model("fast") == "trusted-fast"
+    assert llm_mgr.resolve_model("default") == "openai/trusted-default"
+    assert llm_mgr.resolve_model("fast") == "openai/trusted-fast"
 
 
 def test_runtime_secret_registration_tracks_trusted_env(tmp_path):

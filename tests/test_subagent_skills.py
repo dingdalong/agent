@@ -53,7 +53,7 @@ def _main(tmp_path: Path, role_name: str) -> Agent:
     role = RoleMgr(config_mgr=config, workdir=tmp_path, global_dir=None)
     guard = DataGuard()
     llm = SimpleNamespace(
-        model="test", context_limit=100000, reasoning_effort="high",
+        provider_name="openai", model="test", context_limit=100000, reasoning_effort="high",
         page_token_budget=100000,
         estimate_tokens=lambda messages: sum(len(message["content"]) for message in messages),
     )

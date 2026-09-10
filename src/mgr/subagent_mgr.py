@@ -9,6 +9,7 @@ from pathlib import Path
 from src.events.types import SubagentLifecycle
 from src.llm.errors import LLMConfigurationError
 from src.mgr.llm_mgr import MODEL_ALIASES
+from src.llm.models import split_model_reference
 from src.mgr.role_mgr import parse_frontmatter, extract_manifest, AgentManifest
 
 if TYPE_CHECKING:
@@ -63,10 +64,6 @@ class SubAgentMgr:
             scan_dirs.append((self.global_dir / "agents", "global"))
         scan_dirs.append((project_dir, "project"))
 
-        # 已加载的完整模型 ID 集合；llm_mgr 不可用时为 None（模型集不可知）。
-        llm_mgr = getattr(self.deps, "llm_mgr", None)
-        known_models = set(llm_mgr.list_models()) if llm_mgr is not None else None
-
         for directory, _source in scan_dirs:
             if not directory.exists():
                 continue
@@ -74,7 +71,6 @@ class SubAgentMgr:
                 meta, prompt = parse_frontmatter(path.read_text())
                 self._validate_raw_model(meta, path)
                 manifest = extract_manifest(meta, path, prompt=prompt)
-                self._validate_model(manifest, known_models)
                 self._documents[manifest.agent_type] = manifest
 
     @staticmethod
@@ -100,42 +96,18 @@ class SubAgentMgr:
         if not isinstance(raw_model, str):
             raise LLMConfigurationError(
                 f"子 agent 定义 {path} 的 model 非法：{raw_model!r}。"
-                "只允许 default、fast、opus、sonnet、haiku 或完整模型 ID"
+                "只允许 default、fast、opus、sonnet、haiku 或 供应商/模型ID"
             )
-        meta["model"] = raw_model.strip()
-
-    @staticmethod
-    def _validate_model(
-        manifest: AgentManifest,
-        known_models: set[str] | None,
-    ) -> None:
-        """校验子 agent manifest 的 model 字段，非法值启动即报错不静默回退。
-
-        合法取值：None（委派时走激活角色的 default 槽位）、MODEL_ALIASES 中的别名、
-        已加载的完整模型 ID。known_models 为 None 表示模型集合不可知（deps 未提供
-        llm_mgr），此时放行非别名值，可用性校验留给 llm_mgr.resolve_model。
-
-        Args:
-            manifest: 已解析的子 agent manifest。
-            known_models: 已加载的完整模型 ID 集合；None 表示不可知。
-
-        Returns:
-            None。
-
-        Raises:
-            LLMConfigurationError: model 既不是合法别名也不是已加载的模型 ID。
-        """
-        model = manifest.model
-        if model is None or model in MODEL_ALIASES or known_models is None:
-            return
-        if model in known_models:
-            return
-        available = ", ".join(sorted(known_models)) or "(无)"
-        raise LLMConfigurationError(
-            f"子 agent 定义 {manifest.path} 的 model 非法：{model!r}。"
-            f"只允许 default、fast（兼容 opus、sonnet、haiku）或完整模型 ID；"
-            f"当前可用模型：{available}"
-        )
+        model = raw_model.strip()
+        if model not in MODEL_ALIASES:
+            try:
+                split_model_reference(model)
+            except LLMConfigurationError as exc:
+                raise LLMConfigurationError(
+                    f"子 agent 定义 {path} 的 model 非法：{model!r}。"
+                    "只允许 default、fast、opus、sonnet、haiku 或 供应商/模型ID"
+                ) from exc
+        meta["model"] = model
 
     def describe(self) -> str | None:
         if not self._documents:

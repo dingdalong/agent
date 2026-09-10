@@ -52,8 +52,8 @@ def format_role_config_key(role_name: str, *suffix: str) -> str:
 
 def role_model_yaml_example(
     role_name: str,
-    default_model: str = "<模型ID>",
-    fast_model: str = "<模型ID>",
+    default_model: str = "<供应商>/<模型ID>",
+    fast_model: str = "<供应商>/<模型ID>",
 ) -> str:
     """生成以真实角色名为 mapping key 的单行可粘贴 YAML。"""
     return yaml.safe_dump(

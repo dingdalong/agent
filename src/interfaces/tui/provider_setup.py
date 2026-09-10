@@ -2,12 +2,12 @@
 
 状态机（Esc 逐级后退，Ctrl+C 任意态取消退出）::
 
-    provider -> credentials -> verifying -> model_default -> model_fast -> exit
+    provider -> credentials -> discovering -> model_default -> model_fast -> exit
 
-Esc 在 provider 态无操作；credentials 回 Provider 列表；verifying 取消验证回凭据页；
+Esc 在 provider 态无操作；credentials 回 Provider 列表；discovering 取消获取模型列表回凭据页；
 model_default 回凭据页；model_fast 回 model_default（保留其所选高亮）。
 
-model_default 与 model_fast 共用 verify 返回的同一份模型列表与 #model-list 控件，
+model_default 与 model_fast 共用 discover 返回的同一份模型列表与 #model-list 控件，
 只切换标题与高亮下标，不重新拉取模型；进入 model_fast 时默认高亮 model_default
 所选下标，直接回车即两个槽位用同一模型。
 
@@ -15,7 +15,7 @@ credentials 态下 URL/Key 输入框用 Up/Down 纵向移动焦点（URL Up 回 
 列表，Key Down 停留原地）；回列表后 Up/Down 恢复为切换高亮，Enter 重新选择。
 
 契约见 src/app/provider_setup.py 的 _run_setup_app：关键字构造
-``SetupApp(options=..., verify=...)``，``await app.run_async()`` 经
+``SetupApp(options=..., discover=...)``，``await app.run_async()`` 经
 ``self.exit(result_or_none)`` 返回 SetupResult 或取消时的 None。
 """
 
@@ -31,11 +31,11 @@ from textual.message import Message
 from textual.widgets import Input
 from textual.widgets.option_list import Option
 
-from src.app.provider_setup import ProviderOption, SetupResult, VerifyFunc
+from src.app.provider_setup import ProviderOption, SetupResult, DiscoverFunc
 from src.interfaces.tui.widgets import KeyboardOptionList, SelectionStatic
-from src.llm.errors import classify_llm_error
 
-_VERIFYING_TEXT = "正在验证…"
+
+_DISCOVERING_TEXT = "正在获取模型列表…"
 
 # 两个模型槽位屏的标题，说明各槽位的实际用途。
 _MODEL_TITLES = {
@@ -74,8 +74,7 @@ class SetupApp(App[SetupResult | None], inherit_bindings=False):
 
     Args:
         options: 候选 Provider，顺序即展示顺序，首项默认高亮。
-        verify: 严格验证回调；成功返回非空模型列表，失败抛异常（消息经
-            classify_llm_error 安全化后展示）或防御性返回空列表。
+        discover: 返回配置与在线模型的并集，以及可选的发现错误。
     """
 
     DEFAULT_CSS = """
@@ -113,7 +112,7 @@ class SetupApp(App[SetupResult | None], inherit_bindings=False):
         height: 2;
         color: $error;
     }
-    #setup-error.verifying {
+    #setup-error.discovering {
         color: $text-muted;
     }
     """
@@ -123,10 +122,10 @@ class SetupApp(App[SetupResult | None], inherit_bindings=False):
         Binding("ctrl+c", "cancel", show=False, priority=True),
     ]
 
-    def __init__(self, *, options: list[ProviderOption], verify: VerifyFunc) -> None:
+    def __init__(self, *, options: list[ProviderOption], discover: DiscoverFunc) -> None:
         super().__init__()
         self._options = options
-        self._verify = verify
+        self._discover = discover
         self._state = "provider"
         self._provider_index = 0
         self._url = ""
@@ -134,7 +133,7 @@ class SetupApp(App[SetupResult | None], inherit_bindings=False):
         self._models: list[str] = []
         self._default_index = 0
         self._default_model = ""
-        self._verify_task: asyncio.Task[tuple[list[str], str]] | None = None
+        self._discover_task: asyncio.Task[tuple[list[str], str]] | None = None
 
     def compose(self) -> ComposeResult:
         with Vertical(id="provider-panel"):
@@ -153,7 +152,9 @@ class SetupApp(App[SetupResult | None], inherit_bindings=False):
             yield SelectionStatic(
                 _MODEL_TITLES["model_default"], id="model-title", markup=False
             )
+            yield SelectionStatic("", id="model-feedback", markup=False)
             yield KeyboardOptionList(id="model-list", markup=False)
+            yield Input("", id="model-input", placeholder="手动填写模型 ID，Enter 确认")
 
     def on_mount(self) -> None:
         provider_list = self.query_one("#provider-list", KeyboardOptionList)
@@ -177,6 +178,15 @@ class SetupApp(App[SetupResult | None], inherit_bindings=False):
             self._choose_model(event.option_index)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "model-input" and self._state in ("model_default", "model_fast"):
+            model = event.value.strip()
+            if not model:
+                return
+            if model not in self._models:
+                self._models.append(model)
+                self.query_one("#model-list", KeyboardOptionList).add_option(Option(model))
+            self._choose_model(self._models.index(model))
+            return
         self._submit_credentials()
 
     def _on_setup_input_navigate(self, event: SetupInput.Navigate) -> None:
@@ -205,7 +215,7 @@ class SetupApp(App[SetupResult | None], inherit_bindings=False):
         url_input.focus()
 
     def _submit_credentials(self) -> None:
-        """校验并提交凭据；合法则进入 verifying 态并后台运行 verify。"""
+        """校验并提交凭据；合法则进入 discovering 态并后台运行 discover。"""
         if self._state != "credentials":
             return
         option = self._options[self._provider_index]
@@ -219,51 +229,39 @@ class SetupApp(App[SetupResult | None], inherit_bindings=False):
             return
         self._url = url
         self._api_key = api_key if api_key else None
-        self._state = "verifying"
+        self._state = "discovering"
         self._set_inputs_enabled(False)
-        self._set_feedback(_VERIFYING_TEXT, verifying=True)
+        self._set_feedback(_DISCOVERING_TEXT, discovering=True)
         task = asyncio.create_task(
-            self._verify_async(option, self._api_key, self._url),
-            name="provider-setup-verify",
+            self._discover_async(option, self._api_key, self._url),
+            name="provider-setup-discover",
         )
-        self._verify_task = task
-        task.add_done_callback(self._on_verify_done)
+        self._discover_task = task
+        task.add_done_callback(self._on_discover_done)
 
-    async def _verify_async(
+    async def _discover_async(
         self,
         option: ProviderOption,
         api_key: str | None,
         url: str,
     ) -> tuple[list[str], str]:
-        """运行 verify，返回模型列表及安全化错误消息。
+        """获取合并候选与安全错误；取消由向导生命周期传播。"""
+        result = await self._discover(option, api_key, url)
+        return result.models, result.error.message if result.error else ""
 
-        Esc 后退或 Ctrl+C 退出时取消验证任务；取消/中断/退出控制流原样传播。
-        任务已取消时 _on_verify_done 不触碰 UI；其余普通异常经 classify_llm_error
-        安全化后随任务结果返回。
-        """
-        try:
-            return await self._verify(option, api_key, url), ""
-        except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
-            raise
-        except Exception as exc:
-            return [], classify_llm_error(exc).message
-
-    def _on_verify_done(self, task: asyncio.Task) -> None:
-        if task is not self._verify_task or task.cancelled():
+    def _on_discover_done(self, task: asyncio.Task) -> None:
+        if task is not self._discover_task or task.cancelled():
             return  # Esc 后退或 Ctrl+C 退出时已取消或替换任务
-        self._finish_verify(*task.result())
+        self._finish_discover(*task.result())
 
-    def _finish_verify(self, models: list[str], error: str) -> None:
-        if self._state != "verifying":
+    def _finish_discover(self, models: list[str], error: str) -> None:
+        if self._state != "discovering":
             return
-        self._verify_task = None
-        if not models:
-            # verify 抛错或防御性返回空列表：安全展示、保留输入、恢复 credentials。
-            self._state = "credentials"
-            self._set_inputs_enabled(True)
-            self._set_feedback(error or "未发现可用模型")
-            self.query_one("#url-input", Input).focus()
-            return
+        self._discover_task = None
+        self.query_one("#model-feedback", SelectionStatic).update(
+            f"模型列表获取失败：{error}。仍可选择或手动填写。" if error
+            else ("" if models else "未获取到模型，请手动填写。")
+        )
         self._models = models
         self.query_one("#provider-panel", Vertical).display = False
         model_list = self.query_one("#model-list", KeyboardOptionList)
@@ -307,8 +305,13 @@ class SetupApp(App[SetupResult | None], inherit_bindings=False):
         self._state = state
         self.query_one("#model-title", SelectionStatic).update(_MODEL_TITLES[state])
         model_list = self.query_one("#model-list", KeyboardOptionList)
-        model_list.highlighted = highlighted
-        model_list.focus()
+        model_list.highlighted = highlighted if self._models else None
+        model_input = self.query_one("#model-input", Input)
+        model_input.value = ""
+        if self._models:
+            model_list.focus()
+        else:
+            model_input.focus()
 
     def action_back(self) -> None:
         """Esc：逐级后退 model_fast → model_default → credentials → provider。"""
@@ -318,23 +321,23 @@ class SetupApp(App[SetupResult | None], inherit_bindings=False):
             # 回到 default 槽位屏并恢复其所选高亮，模型列表与凭据均不重置。
             self._enter_model_slot("model_default", self._default_index)
             return
-        if self._verify_task is not None:
-            self._verify_task.cancel()
-            self._verify_task = None
+        if self._discover_task is not None:
+            self._discover_task.cancel()
+            self._discover_task = None
         if self._state == "model_default":
             self.query_one("#model-panel", Vertical).display = False
             self.query_one("#provider-panel", Vertical).display = True
         self._set_inputs_enabled(True)
         self._set_feedback("")
-        back = self._state in ("verifying", "model_default")
+        back = self._state in ("discovering", "model_default")
         self._state = "credentials" if back else "provider"
         self.query_one("#url-input" if back else "#provider-list").focus()
 
     def action_cancel(self) -> None:
-        """Ctrl+C：取消正在运行的验证任务并以 None 退出。"""
-        if self._verify_task is not None:
-            self._verify_task.cancel()
-            self._verify_task = None
+        """Ctrl+C：取消正在运行的获取模型列表任务并以 None 退出。"""
+        if self._discover_task is not None:
+            self._discover_task.cancel()
+            self._discover_task = None
         self._state = "exit"
         self.exit(None)
 
@@ -342,7 +345,7 @@ class SetupApp(App[SetupResult | None], inherit_bindings=False):
         for widget_id in ("#url-input", "#key-input", "#provider-list"):
             self.query_one(widget_id).disabled = not enabled
 
-    def _set_feedback(self, text: str, *, verifying: bool = False) -> None:
+    def _set_feedback(self, text: str, *, discovering: bool = False) -> None:
         feedback = self.query_one("#setup-error", SelectionStatic)
         feedback.update(text)
-        feedback.set_class(verifying, "verifying")
+        feedback.set_class(discovering, "discovering")

@@ -1,4 +1,4 @@
-"""首次 Provider 配置业务编排、严格验证与安全持久化的功能集中测试。
+"""首次 Provider 配置业务编排、模型发现与安全持久化的功能集中测试。
 
 所有 Provider 调用均注入 stub，不访问网络；不运行真实 SetupApp UI。
 """
@@ -24,7 +24,7 @@ from src.app.provider_setup import (
     build_provider_options,
     maybe_run_provider_setup,
     persist_setup,
-    verify_provider,
+    discover_provider,
 )
 from src.llm import LLMConfigurationError
 from src.llm.deepseek import DeepSeekProvider
@@ -140,7 +140,7 @@ def _deepseek_result() -> SetupResult:
 
 
 # _deepseek_result() 期望落到激活角色 model 父键下的两个槽位值。
-_EXPECTED_SLOTS = {"default": "deepseek-v4-pro", "fast": "deepseek-v4-flash"}
+_EXPECTED_SLOTS = {"default": "deepseek/deepseek-v4-pro", "fast": "deepseek/deepseek-v4-flash"}
 
 
 # ---------- SetupResult ----------
@@ -221,10 +221,10 @@ def test_build_provider_options_prefills_api_key_hint_without_leaking(tmp_path, 
     assert next(option for option in options if option.name == "ollama").api_key is None
 
 
-# ---------- verify_provider ----------
+# ---------- discover_provider ----------
 
 
-def test_verify_provider_passes_params_and_normalizes(monkeypatch):
+def test_discover_provider_passes_params_and_normalizes(monkeypatch):
     """调用所选 Provider 类自己的 list_models 并透传全部参数；去重后稳定排序。"""
     captured: dict = {}
 
@@ -239,7 +239,7 @@ def test_verify_provider_passes_params_and_normalizes(monkeypatch):
     option = ProviderOption(name="deepseek", base_url="https://api.deepseek.test/v1", requires_key=True)
 
     models = _run(
-        verify_provider(
+        discover_provider(
             option,
             "sk-test-123",
             "https://api.deepseek.test/v1",
@@ -254,11 +254,12 @@ def test_verify_provider_passes_params_and_normalizes(monkeypatch):
         "timeout": 10.0,
         "user_agent": "ua-test",
     }
-    assert models == ["a-model", "B-model", "b-model"]
+    assert models.models == ["a-model", "B-model", "b-model"]
+    assert models.error is None
 
 
 @pytest.mark.parametrize("api_key", [None, ""])
-def test_verify_provider_ollama_empty_key_placeholder(monkeypatch, api_key):
+def test_discover_provider_ollama_empty_key_placeholder(monkeypatch, api_key):
     """Ollama 空 key 调用时仅传非秘密占位 "ollama"，返回值正常。"""
     captured: dict = {}
 
@@ -269,9 +270,9 @@ def test_verify_provider_ollama_empty_key_placeholder(monkeypatch, api_key):
     monkeypatch.setattr(OllamaProvider, "list_models", fake_list_models)
     option = ProviderOption(name="ollama", base_url="http://127.0.0.1:8001/v1", requires_key=False)
 
-    models = _run(verify_provider(option, api_key, option.base_url))
+    models = _run(discover_provider(option, api_key, option.base_url))
 
-    assert models == ["qwen3.6"]
+    assert models.models == ["qwen3.6"]
     assert captured["api_key"] == "ollama"
 
 
@@ -284,28 +285,29 @@ def test_verify_provider_ollama_empty_key_placeholder(monkeypatch, api_key):
         "not-a-list",
     ],
 )
-def test_verify_provider_invalid_or_empty_list_raises(monkeypatch, models):
-    """空列表或含非法元素的返回值抛安全配置错误。"""
+def test_discover_provider_invalid_or_empty_list_allows_selection(monkeypatch, models):
+    """空列表正常返回，非法响应记录发现错误。"""
     async def fake_list_models(api_key, base_url, timeout, user_agent):
         return models
 
     monkeypatch.setattr(DeepSeekProvider, "list_models", fake_list_models)
     option = ProviderOption(name="deepseek", base_url="https://x", requires_key=True)
 
-    with pytest.raises(LLMConfigurationError):
-        _run(verify_provider(option, "k", option.base_url))
+    result = _run(discover_provider(option, "k", option.base_url))
+    assert result.models == []
+    assert (result.error is not None) == bool(models)
 
 
-def test_verify_provider_propagates_plain_exception(monkeypatch):
-    """普通 SDK/网络异常原样传播，不在此拼接 secret。"""
+def test_discover_provider_reports_discovery_error(monkeypatch):
+    """普通 SDK/网络异常安全化后作为发现错误返回。"""
     async def fake_list_models(api_key, base_url, timeout, user_agent):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(DeepSeekProvider, "list_models", fake_list_models)
     option = ProviderOption(name="deepseek", base_url="https://x", requires_key=True)
 
-    with pytest.raises(RuntimeError, match="boom"):
-        _run(verify_provider(option, "k", option.base_url))
+    result = _run(discover_provider(option, "k", option.base_url))
+    assert result.error is not None
 
 
 # ---------- 异常清洗后的手工指引 ----------
@@ -330,12 +332,8 @@ def _flow_yaml_from_message(message: str) -> str:
 def test_non_tty_message_survives_configuration_error_sanitizing():
     """非 TTY 指引经清洗后仍含完整键名、合法流式 YAML 与尾部路径信息。"""
     config_mgr = _MessageConfigStub()
-    options = [
-        ProviderOption(name, f"https://{name}.test/v1", name != "ollama")
-        for name in ("deepseek", "openai", "anthropic", "moonshot", "ollama")
-    ]
     message = LLMConfigurationError(
-        _non_tty_message(config_mgr, options)
+        _non_tty_message(config_mgr)
     ).info.message
     flow_yaml = _flow_yaml_from_message(message)
     parsed_key = next(iter(yaml.safe_load(flow_yaml)["role"]))
@@ -350,8 +348,8 @@ def test_non_tty_message_survives_configuration_error_sanitizing():
         "role": {
             "coding": {
                 "model": {
-                    "default": "<default-model-id>",
-                    "fast": "<fast-model-id>",
+                    "default": "<供应商>/<默认>",
+                    "fast": "<供应商>/<快速>",
                 }
             }
         }
@@ -361,7 +359,6 @@ def test_non_tty_message_survives_configuration_error_sanitizing():
     assert message.index('role["coding"].model.default') < message.index(flow_yaml)
     assert message.index('role["coding"].model.fast') < message.index(flow_yaml)
     assert message.index(flow_yaml) < message.index(config_path) < message.index(env_path)
-    assert "候选 Provider：deepseek、openai、anthropic、moonshot、ollama" in message
     assert "配置后重新运行" in message
     assert len(message) < 500
     assert not message.endswith(("…", "..."))
@@ -379,12 +376,8 @@ def test_non_tty_message_supports_long_role_name(
             role_name: global_dir / "roles" / role_name
         },
     )
-    options = [
-        ProviderOption(name, f"https://{name}.test/v1", name != "ollama")
-        for name in ("deepseek", "openai", "anthropic", "moonshot", "ollama")
-    ]
     message = LLMConfigurationError(
-        _non_tty_message(config_mgr, options)
+        _non_tty_message(config_mgr)
     ).info.message
     flow_yaml = _flow_yaml_from_message(message)
     parsed_key = next(iter(yaml.safe_load(flow_yaml)["role"]))
@@ -398,13 +391,12 @@ def test_non_tty_message_supports_long_role_name(
         "role": {
             role_name: {
                 "model": {
-                    "default": "<default-model-id>",
-                    "fast": "<fast-model-id>",
+                    "default": "<供应商>/<默认>",
+                    "fast": "<供应商>/<快速>",
                 }
             }
         }
     }
-    assert "候选 Provider：deepseek、openai、anthropic、moonshot、ollama" in message
     assert "配置后重新运行" in message
     assert len(message) < 500
     assert not message.endswith(("…", "..."))
@@ -431,10 +423,9 @@ def test_non_tty_message_preserves_implicit_scalar_role_names(
             role_name: global_dir / "roles" / role_name
         },
     )
-    options = [ProviderOption("ollama", "http://localhost:11434/v1", False)]
 
     message = LLMConfigurationError(
-        _non_tty_message(config_mgr, options)
+        _non_tty_message(config_mgr)
     ).info.message
     flow_yaml = _flow_yaml_from_message(message)
     parsed = yaml.safe_load(flow_yaml)
@@ -448,8 +439,8 @@ def test_non_tty_message_preserves_implicit_scalar_role_names(
         "role": {
             role_name: {
                 "model": {
-                    "default": "<default-model-id>",
-                    "fast": "<fast-model-id>",
+                    "default": "<供应商>/<默认>",
+                    "fast": "<供应商>/<快速>",
                 }
             }
         }
@@ -482,7 +473,7 @@ def test_persist_failure_message_keeps_actions_before_paths_after_sanitizing():
 
 
 @pytest.mark.parametrize("exc", [asyncio.CancelledError(), KeyboardInterrupt(), SystemExit()])
-def test_verify_provider_propagates_control_flow(monkeypatch, exc):
+def test_discover_provider_propagates_control_flow(monkeypatch, exc):
     """控制流异常（取消/中断/退出）原样传播。"""
     async def fake_list_models(api_key, base_url, timeout, user_agent):
         raise exc
@@ -491,7 +482,7 @@ def test_verify_provider_propagates_control_flow(monkeypatch, exc):
     option = ProviderOption(name="deepseek", base_url="https://x", requires_key=True)
 
     with pytest.raises(type(exc)):
-        _run(verify_provider(option, "k", option.base_url))
+        _run(discover_provider(option, "k", option.base_url))
 
 
 # ---------- maybe_run_provider_setup ----------
@@ -504,13 +495,13 @@ def test_maybe_run_skips_when_explicit_config(tmp_path, monkeypatch):
     global_dir.mkdir()
     (global_dir / ".env").write_text("DEEPSEEK_API_KEY='sk-existing'\n")
     (global_dir / "config.yaml").write_text(
-        "role:\n  coding:\n    model:\n      default: deepseek-v4-pro\n"
-        "      fast: deepseek-v4-flash\n"
+        "role:\n  coding:\n    model:\n      default: deepseek/deepseek-v4-pro\n"
+        "      fast: deepseek/deepseek-v4-flash\n"
     )
     manager = _manager(tmp_path)
     called: list[bool] = []
 
-    async def fake_setup_app(options, verify):
+    async def fake_setup_app(options, discover):
         called.append(True)
         return None
 
@@ -534,7 +525,7 @@ def test_maybe_run_runs_when_provider_explicit_but_slots_missing(tmp_path, monke
     manager = _manager(tmp_path)
     captured: list[list[ProviderOption]] = []
 
-    async def fake_setup_app(options, verify):
+    async def fake_setup_app(options, discover):
         captured.append(options)
         return _deepseek_result()
 
@@ -556,12 +547,12 @@ def test_maybe_run_runs_when_one_slot_missing(tmp_path, monkeypatch):
     global_dir.mkdir()
     (global_dir / ".env").write_text("DEEPSEEK_API_KEY='sk-existing'\n")
     (global_dir / "config.yaml").write_text(
-        "role:\n  coding:\n    model:\n      default: deepseek-v4-pro\n"
+        "role:\n  coding:\n    model:\n      default: deepseek/deepseek-v4-pro\n"
     )
     manager = _manager(tmp_path)
     called: list[bool] = []
 
-    async def fake_setup_app(options, verify):
+    async def fake_setup_app(options, discover):
         called.append(True)
         return _deepseek_result()
 
@@ -583,7 +574,7 @@ def test_maybe_run_project_env_explicit_missing_slots_persists(tmp_path, monkeyp
     manager = _manager(tmp_path, project_trusted=True)
     called: list[bool] = []
 
-    async def fake_setup_app(options, verify):
+    async def fake_setup_app(options, discover):
         called.append(True)
         return SetupResult(
             provider="deepseek",
@@ -611,7 +602,7 @@ def test_maybe_run_non_tty_explicit_provider_missing_slots_raises(tmp_path, monk
     manager = _manager(tmp_path)
     called: list[bool] = []
 
-    async def fake_setup_app(options, verify):
+    async def fake_setup_app(options, discover):
         called.append(True)
         return None
 
@@ -634,7 +625,7 @@ def test_maybe_run_non_tty_raises_actionable_message(tmp_path, monkeypatch):
     manager = _manager(tmp_path)
     called: list[bool] = []
 
-    async def fake_setup_app(options, verify):
+    async def fake_setup_app(options, discover):
         called.append(True)
         return None
 
@@ -660,7 +651,7 @@ def test_maybe_run_cancel_no_persist(tmp_path, monkeypatch):
     _set_tty(monkeypatch, True)
     manager = _manager(tmp_path)
 
-    async def fake_setup_app(options, verify):
+    async def fake_setup_app(options, discover):
         return None
 
     monkeypatch.setattr("src.app.provider_setup._run_setup_app", fake_setup_app)
@@ -673,7 +664,7 @@ def test_maybe_run_cancel_no_persist(tmp_path, monkeypatch):
 
 
 def test_maybe_run_success_persists_cloud_and_reload_visible(tmp_path, monkeypatch):
-    """成功路径：verify 接线（user_agent 来自配置、超时 10 秒），云 Provider 同批写
+    """成功路径：discover 接线（user_agent 来自配置、超时 10 秒），云 Provider 同批写
     URL/key，持久化后 reload 可见。"""
     _clear_provider_env(monkeypatch)
     _set_tty(monkeypatch, True)
@@ -690,10 +681,10 @@ def test_maybe_run_success_persists_cloud_and_reload_visible(tmp_path, monkeypat
         }
         return ["deepseek-v4-flash", "deepseek-v4-pro"]
 
-    async def fake_setup_app(options, verify):
+    async def fake_setup_app(options, discover):
         captured["options"] = options
         deepseek = next(option for option in options if option.name == "deepseek")
-        captured["models"] = await verify(deepseek, "sk-test-123", "https://api.deepseek.test/v1")
+        captured["models"] = await discover(deepseek, "sk-test-123", "https://api.deepseek.test/v1")
         return _deepseek_result()
 
     monkeypatch.setattr("src.app.provider_setup._run_setup_app", fake_setup_app)
@@ -704,10 +695,10 @@ def test_maybe_run_success_persists_cloud_and_reload_visible(tmp_path, monkeypat
     assert captured["list_models"] == {
         "api_key": "sk-test-123",
         "base_url": "https://api.deepseek.test/v1",
-        "timeout": 10.0,
+        "timeout": 3.0,
         "user_agent": builtin["llm"]["user_agent"],
     }
-    assert captured["models"] == ["deepseek-v4-flash", "deepseek-v4-pro"]
+    assert set(captured["models"].models) == set(builtin["llm_provider"]["deepseek"]["models"]) | {"deepseek-v4-flash", "deepseek-v4-pro"}
     assert [option.name for option in captured["options"]] == _builtin_provider_names()
     assert dotenv_values(tmp_path / "global" / ".env") == {
         "DEEPSEEK_API_URL": "https://api.deepseek.test/v1",
@@ -741,8 +732,8 @@ def test_persist_ollama_only_writes_url(tmp_path, monkeypatch):
     assert env == {"OLLAMA_API_URL": "http://127.0.0.1:8001/v1"}
     assert "OLLAMA_API_KEY" not in env
     assert manager.get_config("role.coding.model") == {
-        "default": "qwen3.6",
-        "fast": "qwen3.6",
+        "default": "ollama/qwen3.6",
+        "fast": "ollama/qwen3.6",
     }
     assert manager.get_config("llm_provider")["ollama"]["base_url"] == "http://127.0.0.1:8001/v1"
 
@@ -778,7 +769,7 @@ def test_maybe_run_project_slot_override_fails_before_env(tmp_path, monkeypatch)
     )
     manager = _manager(tmp_path, project_trusted=True)
 
-    async def fake_setup_app(options, verify):
+    async def fake_setup_app(options, discover):
         return _deepseek_result()
 
     monkeypatch.setattr("src.app.provider_setup._run_setup_app", fake_setup_app)
@@ -804,7 +795,7 @@ def test_maybe_run_env_write_failure_no_partial_env(tmp_path, monkeypatch):
     env_path.parent.mkdir()
     env_path.write_text("UNRELATED=keep\n")
 
-    async def fake_setup_app(options, verify):
+    async def fake_setup_app(options, discover):
         return _deepseek_result()
 
     monkeypatch.setattr("src.app.provider_setup._run_setup_app", fake_setup_app)
@@ -839,7 +830,7 @@ def test_maybe_run_global_role_scalar_fails_safe_without_env(tmp_path, monkeypat
     (global_dir / "config.yaml").write_text("role: scalar\n")
     manager = _manager(tmp_path)
 
-    async def fake_setup_app(options, verify):
+    async def fake_setup_app(options, discover):
         return _deepseek_result()
 
     monkeypatch.setattr("src.app.provider_setup._run_setup_app", fake_setup_app)
@@ -863,7 +854,7 @@ def test_maybe_run_post_check_failure_safe_error(tmp_path, monkeypatch):
     _set_tty(monkeypatch, True)
     manager = _manager(tmp_path)
 
-    async def fake_setup_app(options, verify):
+    async def fake_setup_app(options, discover):
         return _deepseek_result()
 
     monkeypatch.setattr("src.app.provider_setup._run_setup_app", fake_setup_app)
@@ -988,7 +979,7 @@ def test_no_secret_in_logs_on_success_persist(tmp_path, monkeypatch, caplog):
     secret = "sk-leak-guard-123"
     manager = _manager(tmp_path)
 
-    async def fake_setup_app(options, verify):
+    async def fake_setup_app(options, discover):
         return SetupResult(
             provider="deepseek",
             base_url="https://api.deepseek.test/v1",
@@ -1013,7 +1004,7 @@ def test_no_secret_in_logs_on_persist_failure(tmp_path, monkeypatch, caplog):
     secret = "sk-leak-guard-123"
     manager = _manager(tmp_path)
 
-    async def fake_setup_app(options, verify):
+    async def fake_setup_app(options, discover):
         return SetupResult(
             provider="deepseek",
             base_url="https://api.deepseek.test/v1",

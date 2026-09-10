@@ -12,7 +12,7 @@ from src.mgr.context_mgr import ContextEntry, ContextMgr
 from src.mgr.env_baseline import collect_env_baseline
 from src.mgr.memory_mgr import MemoryMgr
 from src.mgr.hooks_mgr import HooksMgr
-from src.mgr.llm_mgr import LLMMgr, ModelUnavailableError
+from src.mgr.llm_mgr import LLMMgr
 from src.mgr.plan_mgr import PlanMgr
 from src.mgr.plugin_mgr import PluginMgr, PluginInfo, PluginLayer
 from src.mgr.reminder_mgr import ReminderMgr
@@ -22,4 +22,4 @@ from src.mgr.mcp_mgr import McpMgr
 from src.mgr.role_mgr import RoleMgr
 from src.mgr.features import ALL_FEATURES, resolve_features
 
-__all__ = ["FileMgr", "CompactMgr", "CompactResult", "TaskManager", "ToolsMgr", "PromptMgr", "SkillMgr", "SubAgentMgr", "PermissionManager", "WebAccessMgr", "ConfigManager", "ContextEntry", "ContextMgr", "collect_env_baseline", "MemoryMgr", "HooksMgr", "LLMMgr", "ModelUnavailableError", "PlanMgr", "PluginMgr", "PluginInfo", "PluginLayer", "ReminderMgr", "SessionMgr", "ResumeResult", "SessionRecord", "SessionState", "ViewPayload", "McpMgr", "RoleMgr", "ALL_FEATURES", "resolve_features"]
+__all__ = ["FileMgr", "CompactMgr", "CompactResult", "TaskManager", "ToolsMgr", "PromptMgr", "SkillMgr", "SubAgentMgr", "PermissionManager", "WebAccessMgr", "ConfigManager", "ContextEntry", "ContextMgr", "collect_env_baseline", "MemoryMgr", "HooksMgr", "LLMMgr", "PlanMgr", "PluginMgr", "PluginInfo", "PluginLayer", "ReminderMgr", "SessionMgr", "ResumeResult", "SessionRecord", "SessionState", "ViewPayload", "McpMgr", "RoleMgr", "ALL_FEATURES", "resolve_features"]

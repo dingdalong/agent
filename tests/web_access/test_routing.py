@@ -5,7 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.mgr.llm_mgr import LLMMgr, _normalize_provider_configs
+from src.mgr.llm_mgr import LLMMgr
+from src.llm.models import normalize_provider_configs
 from src.mgr.web_access_mgr import WebAccessMgr
 from src.web.types import (
     NativeWebCapabilityError,
@@ -19,15 +20,13 @@ class FakeLLMMgr:
     def __init__(self, mode: str = "provider") -> None:
         self.mode = mode
 
-    def web_mode_for_model(self, _model: str) -> str:
+    def web_mode_for_provider(self, _model: str) -> str:
         return self.mode
-
-    def provider_name_for_model(self, _model: str) -> str:
-        return "fake"
 
 
 class FakeProvider:
     model = "fake-model"
+    provider_name = "fake"
 
     def __init__(self, error: Exception | None = None) -> None:
         self.error = error
@@ -99,15 +98,15 @@ def test_provider_operational_errors_do_not_fall_back(monkeypatch, error):
 
 def test_provider_web_config_defaults_and_validation():
     base = {"openai": {"base_url": "https://api.example.test", "models": []}}
-    assert _normalize_provider_configs(base)["openai"]["web"] == "local"
+    assert normalize_provider_configs(base)["openai"]["web"] == "local"
     base["openai"]["web"] = "provider"
-    assert _normalize_provider_configs(base)["openai"]["web"] == "provider"
+    assert normalize_provider_configs(base)["openai"]["web"] == "provider"
     base["openai"]["web"] = "search"
     with pytest.raises(Exception, match="web"):
-        _normalize_provider_configs(base)
+        normalize_provider_configs(base)
 
 
-def test_llm_mgr_resolves_web_mode_from_model():
+def test_llm_mgr_resolves_web_mode_from_provider():
     config = {
         "llm": {
             "concurrency": 1,
@@ -131,7 +130,4 @@ def test_llm_mgr_resolves_web_mode_from_model():
             return config[key]
 
     mgr = LLMMgr(Config(), role_mgr=SimpleNamespace(role_name="coding"), event_bus=None)
-    mgr._model_to_provider = {"model-a": "openai"}
-    mgr._provider_web_mode = {"openai": "provider"}
-    assert mgr.provider_name_for_model("model-a") == "openai"
-    assert mgr.web_mode_for_model("model-a") == "provider"
+    assert mgr.web_mode_for_provider("openai") == "provider"

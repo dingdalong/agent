@@ -425,6 +425,7 @@ class LLMProvider(ABC):
     preserve_thinking: bool = False
     user_agent: str = ""
     max_pause_turn_continuations: int = 0
+    provider_name: str = ""
 
     # 推理力度降档阶梯（当前档 → 下一更低档），各 provider 覆写；空表示无阶梯。
     _EFFORT_DOWNGRADE: ClassVar[dict[str, str]] = {}

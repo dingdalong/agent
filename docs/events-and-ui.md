@@ -164,7 +164,7 @@ TTY 的 `InteractionCoordinator` 是交互请求状态权威写入者。普通�
 
 非 TTY 的 `PlainFrontend.read_model_selection()` 不模拟三轴按键，而是按 `default → fast → reasoning_effort` 三次编号选择串行读取；每一步默认高亮各自当前值，任一步取消则整体取消，三步完成后生成相同三键 JSON。
 
-`/models` 只在可信项目执行，提交后把完整模型 mapping 与角色 effort 一次写入项目层。只改变 fast 时不热切当前主 agent，新建子 agent 和智能权限立即现读新槽位；default 或 effort 变化时调用 `Agent.switch_model()` 原地切换，保留会话历史、Agent 身份和 compact 状态。未信任项目直接拒绝，不写配置、不切换模型。
+`/models` 打开时在线拉取并合并配置与当前所选模型，只提供候选选择。自定义模型通过编辑 `config.yaml` 添加，具体步骤见[模型配置指引](configuration-reference.md#手动配置模型)。保存只在可信项目执行，提交后把完整模型 mapping 与角色 effort 一次写入项目层。只改变 fast 时不热切当前主 agent，新建子 agent 和智能权限立即现读新槽位；default 或 effort 变化时调用 `Agent.switch_model()` 原地切换，保留会话历史、Agent 身份和 compact 状态。未信任项目直接拒绝，不写配置、不切换模型。
 
 内嵌交互结束后默认静默：`InteractionCoordinator` 只移除控件并写入 Widget 返回的非空摘要，是否保留成功或取消历史由各 Widget 显式声明。`ModelMenu` 成功和取消都不留控件摘要；`/models` 成功时由命令输出最终应用结果。
 

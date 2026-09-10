@@ -253,7 +253,7 @@ class AgentApp:
                             hooks_mgr.reload()
                         llm_mgr = getattr(self.deps, "llm_mgr", None)
                         if llm_mgr is not None and hasattr(llm_mgr, "reconfigure"):
-                            await llm_mgr.reconfigure()
+                            llm_mgr.reconfigure()
                         if mcp_mgr is not None:
                             mcp_mgr.project_trusted = trusted
                             await mcp_mgr.start()

@@ -1,24 +1,14 @@
 llm_provider:
   deepseek:
     web: provider # local 使用本地后端；provider 优先原生能力，不支持时回退本地
-    models:
-      - deepseek-v4-pro
-      - deepseek-v4-flash
     base_url: https://api.deepseek.com
     context_limit: 1000000 # 上下文限制
   openai:
     web: provider
-    models:
-      - gpt-5.6-sol
-      - gpt-5.6-terra
-      - gpt-5.6-luna
     base_url: https://api.openai.com/v1
     context_limit: 1000000 # 上下文限制
   anthropic:
     web: provider
-    models:
-      - claude-opus-5
-      - claude-sonnet-5
     base_url: https://api.anthropic.com
     max_pause_turn_continuations: 5 # pause_turn 协议终态的单轮最大自动续接次数
     context_limit: 1000000 # 上下文限制
@@ -31,8 +21,6 @@ llm_provider:
     web: local
     base_url: https://api.moonshot.cn/v1 # 可被 MOONSHOT_API_URL 覆盖
     context_limit: 1000000 # 上下文限制
-    models:
-      - k3
 
 llm:
   concurrency: 5 # 最大并发数量
@@ -59,10 +47,10 @@ context:
   max_entry_chars: 8000 # 单条正文的存储上限，超出截尾
   inject_char_budget: 6000 # 单次委派注入的总字符预算（约 2000-2500 token）
   inject_entry_chars: 2000 # 单条注入的字符上限，超出截尾并指向完整记录文件
-  record_types: [explore, plan, debug, review, coder] # 允许自动记账的子 agent 类型白名单
+  record_types: [explore, review, coder] # 允许自动记账的子 agent 类型白名单
 
 # 激活角色（role.default）及各角色的模型与推理力度。缺省角色时回退 coding。
-# 模型按角色隔离为两个槽位，两个都必填且无内置兜底值，由首次配置向导或 /models
+# 模型槽位使用 供应商/模型ID，两个都必填且无内置兜底值，由首次配置向导或 /models
 # 写入全局 ~/.agent/config.yaml 或项目 .agent/config.yaml：
 #   role.<角色>.model.default — 主 Agent 与声明 model: default 的子 agent
 #   role.<角色>.model.fast    — 声明 model: fast 的子 agent 与智能权限裁决
@@ -70,8 +58,8 @@ context:
 #   role:
 #     coding:
 #       model:
-#         default: claude-opus-5
-#         fast: deepseek-v4-flash
+#         default: anthropic/claude-opus-5
+#         fast: deepseek/deepseek-v4-flash
 role:
   default: coding
   coding:

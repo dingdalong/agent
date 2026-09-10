@@ -97,7 +97,7 @@
 
 ### 3.1 `llm_provider.<name>` — LLM provider 连接配置
 
-`LLMMgr.load_models()` 与 `_create_provider()` 消费。`<name>` 必须是框架已知 provider；provider 顶层和每个条目都必须是 mapping，名称与 `base_url` 必须是非空字符串。`models` 必须是 `list[str]`，元素必须非空，加载时按首次出现顺序去重。
+`LLMMgr` 在构造和重配时读取；`refresh_models()` 与 `_create_provider()` 使用该配置。`<name>` 必须是框架已知 provider；provider 顶层和每个条目都必须是 mapping，名称与 `base_url` 必须是非空字符串。`models` 必须是 `list[str]`，元素必须非空，加载时按首次出现顺序去重。
 
 | 键 | 类型 | 默认值 | 可选值 | 效果 |
 |----|------|--------|--------|------|
@@ -107,7 +107,7 @@
 | `llm_provider.<name>.context_limit` | int | 缺键时 `0` | 正整数 | 上下文窗口 token 上限；压缩阈值由此换算 |
 | `llm_provider.<name>.preserve_thinking` | bool | 缺键时 `false` | `true`/`false` | 是否在历史中保留 reasoning 内容 |
 | `llm_provider.anthropic.max_pause_turn_continuations` | int | `5` | 非 bool 正整数 | Anthropic 单个响应恢复链允许的 `pause_turn` 自动续接次数；其他 provider 归一为 `0` |
-| `llm_provider.<name>.models` | list[str] | 缺键时 `[]` | 模型 ID 列表（可为空） | provider API 拉取失败时的静态回退清单；空列表表示发现失败后不注册模型 |
+| `llm_provider.<name>.models` | list[str] | 缺键时 `[]` | 模型 ID 列表（可为空） | 原始模型 ID 候选，与在线列表合并；不作为调用白名单 |
 
 角色级 `role.<角色名>.reasoning_effort` 是 Agent 调用时的单值覆盖，default/fast 两个槽位共用；它缺失时，主 agent 可使用 `role.md` 的合法 effort，再缺失才使用 Provider 类的内部默认值 `max`。Provider effort 不从配置读取。子 agent 自身 frontmatter effort 与继承规则见 [roles-subagents-skills.md](roles-subagents-skills.md)。
 
@@ -124,7 +124,7 @@
 | `llm.retry.max_delay_seconds` | int \| float | `300` | 有限正数，且不小于基础延迟 | 相邻尝试之间的单次退避等待封顶秒数 |
 | `llm.user_agent` | str | `claude-cli/2.1.201 (external, cli)` | 任意字符串 | 非空时作为 provider 及模型发现请求的自定义 User-Agent；空串沿用 SDK 默认值 |
 
-模型必须配置在 `role.<角色名>.model.default/fast`。模型解析只接受两个槽位别名、Claude Code 兼容别名和完整模型 ID：`opus`/`sonnet` → `default`，`haiku` → `fast`；无法精确解析时直接报 `ModelUnavailableError`。
+模型必须配置在 `role.<角色名>.model.default/fast`。模型解析接受两个槽位别名、Claude Code 兼容别名和完整模型引用：`opus`/`sonnet` → `default`，`haiku` → `fast`；显式模型使用 `供应商/模型ID`，格式非法或供应商未配置时报告配置错误。
 
 ### 3.3 `tool` — 工具结果分页
 
@@ -167,13 +167,34 @@
 |----|------|--------|--------|------|
 | `role.default` | str | 缺省或空值回退 `coding` | 合法且已发现的角色名 | 指定激活角色；连 `coding` 都不存在时无角色激活 |
 | `role.<角色名>.model` | mapping | 无 | 必须同时含 `default`、`fast` | 当前角色的模型槽位；非 mapping 值会在启动时报错 |
-| `role.<角色名>.model.default` | str | 无 | 已加载的完整模型 ID | 主 agent 恒用此槽位；省略 `model` 或声明 `default`/`opus`/`sonnet` 的子 agent 也解析到此槽位 |
-| `role.<角色名>.model.fast` | str | 无 | 已加载的完整模型 ID | 声明 `fast`/`haiku` 的子 agent 及智能权限裁决使用此槽位 |
+| `role.<角色名>.model.default` | str | 无 | `供应商/模型ID` | 主 agent 恒用此槽位；省略 `model` 或声明 `default`/`opus`/`sonnet` 的子 agent 也解析到此槽位 |
+| `role.<角色名>.model.fast` | str | 无 | `供应商/模型ID` | 声明 `fast`/`haiku` 的子 agent 及智能权限裁决使用此槽位 |
 | `role.<角色名>.reasoning_effort` | str | `role.md` 的合法值，否则 Provider 类默认 `max` | `low` \| `medium` \| `high` \| `xhigh` \| `max` | 角色级单值，default/fast 两个槽位共用；规范化大小写和首尾空白，非法值告警并忽略 |
 
-每个被激活角色都必须配置两个模型槽位，且两者必须精确指向已加载模型；内置 `src/config.yaml` 不提供模型兜底，缺任一键、值为空或模型不可用都会阻止启动。`role.md` 不再允许 `model` 字段，残留该键会在角色解析期报 `LLMConfigurationError`；主 agent 恒以 `default` 槽位构造。
+每个被激活角色必须配置两个 `供应商/模型ID` 槽位。内置配置不提供模型兜底，缺少槽位时进入首次配置向导；模型未被在线发现不影响启动和请求。`role.md` 不再允许 `model` 字段，残留该键会在角色解析期报 `LLMConfigurationError`；主 agent 恒以 `default` 槽位构造。
 
 `/models` 将 `model` mapping 与 `reasoning_effort` 一次写入可信项目层。只改 fast 时当前主 agent 不热切；新建子 agent 和智能权限会立即现读新槽位。default 或 effort 变化时，当前主 agent 原地切换并保留会话历史。角色与子 agent 细节见 [roles-subagents-skills.md](roles-subagents-skills.md)。
+
+#### 手动配置模型
+
+在全局 `~/.agent/config.yaml` 或可信项目的 `.agent/config.yaml` 中添加模型。`llm_provider.<供应商>.models` 填写原始模型 ID，作为 `/models` 的候选；`role.<角色>.model.default/fast` 填写 `供应商/模型ID`，直接指定所选模型。例如：
+
+```yaml
+llm_provider:
+  openai:
+    models:
+      - org/custom-model
+
+role:
+  coding:
+    model:
+      default: openai/org/custom-model
+      fast: openai/org/custom-model
+```
+
+保留已有的供应商连接配置和凭据。配置层之间的 `models` 列表按覆盖规则生效，编辑时保留需要的其他候选；生效列表会与在线发现结果合并。只想直接指定模型时可仅修改角色槽位，所选模型也会出现在候选中。
+
+保存后重新启动，或执行 `/clear` 清空当前会话并重新加载配置，再打开 `/models` 选择。模型未被在线发现不会阻止启动或请求，实际可用性由供应商响应决定。
 
 ### 3.7 `events` — 事件级别
 
@@ -197,7 +218,7 @@
 llm_provider:
   deepseek:
     web: provider                         # provider 优先原生能力，不支持时回退本地
-    models:                               # API 拉取失败时的静态回退清单
+    models:                               # 与在线模型列表合并的原始 ID 候选
       - deepseek-v4-pro
       - deepseek-v4-flash
     base_url: https://api.deepseek.com
@@ -260,8 +281,8 @@ role:
   default: coding                         # 缺省或角色不存在时回退 coding
   coding:
     model:
-      default: claude-opus-5              # 主 agent；model: default/opus/sonnet 的子 agent
-      fast: deepseek-v4-flash             # model: fast/haiku 的子 agent；智能权限裁决
+      default: anthropic/claude-opus-5              # 主 agent；model: default/opus/sonnet 的子 agent
+      fast: deepseek/deepseek-v4-flash             # model: fast/haiku 的子 agent；智能权限裁决
     reasoning_effort: max                 # 角色级单值，两个槽位共用
 
 # ── 事件与日志级别 ──────────────────────────────────────
@@ -447,8 +468,8 @@ TUI 诊断路径随 `$AGENT_HOME` 改写，不提供独立配置项。`tui.jsonl
 
 | 想要的效果 | 改哪里 | 怎么改 |
 |------------|--------|--------|
-| 换主 agent 模型 | `config.yaml` `role.<角色名>.model.default` | 设为已加载的完整模型 ID |
-| 换轻量子 agent / 智能权限模型 | `config.yaml` `role.<角色名>.model.fast` | 设为已加载的完整模型 ID；不会热切当前主 agent |
+| 换主 agent 模型 | `config.yaml` `role.<角色名>.model.default` | 设为 `供应商/模型ID` |
+| 换轻量子 agent / 智能权限模型 | `config.yaml` `role.<角色名>.model.fast` | 设为 `供应商/模型ID`；不会热切当前主 agent |
 | 调整角色推理力度 | `config.yaml` `role.<角色名>.reasoning_effort` | 设为 `low`、`medium`、`high`、`xhigh` 或 `max`；两个槽位共用 |
 | 更早触发上下文压缩 | `config.yaml` `compact.auto_compact_rate` | 调小（如 `0.6`） |
 | 压缩后多保留近期对话 | `config.yaml` `compact.keep_recent_user_turns` / `keep_recent_messages_token_rate` | 调大 |

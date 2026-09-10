@@ -6,7 +6,6 @@ import sys
 
 from src.app.bootstrap import create_app
 from src.llm import LLMConfigurationError
-from src.mgr import ModelUnavailableError
 from src.mgr.frozen import setup_tiktoken_cache
 
 
@@ -77,8 +76,7 @@ def cli() -> None:
         asyncio.run(main(args), debug=args.debug)
     except KeyboardInterrupt:
         pass
-    except (LLMConfigurationError, ModelUnavailableError) as exc:
-        # LLM 配置或默认模型不可用：打印可操作提示并以非零码退出，不抛堆栈。
+    except LLMConfigurationError as exc:
         print(f"\n启动失败：{exc}", file=sys.stderr)
         sys.exit(1)
 

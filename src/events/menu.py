@@ -139,12 +139,12 @@ class ModelMenu(MenuRequest):
         ↑↓ 模型 · ←→ 强度 · Tab 槽位 · Enter 应用 · Esc 取消
 
     模型行的 [default]/[fast] 标注是当前选择状态，随操作实时更新。
-    返回值：JSON {"default": "<模型ID>", "fast": "<模型ID>", "reasoning_effort": "<强度>"}，
+    返回值：JSON {"default": "<供应商>/<模型ID>", "fast": "<供应商>/<模型ID>", "reasoning_effort": "<强度>"}，
     取消为空串。
 
     Attributes:
         prompt: 菜单上文提示。
-        models: 可选模型列表，每项为 (模型ID, 展示标签)。
+        models: 可选模型列表，每项为 (供应商/模型ID, 展示标签)。
         efforts: 可选推理强度列表（角色级单值，两槽位共用）。
         default_model_index: default 槽位的初始选中下标。
         fast_model_index: fast 槽位的初始选中下标。
