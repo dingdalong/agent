@@ -217,16 +217,17 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 
 `src/mgr/prompt_mgr.py`
 
-**单一职责**：分层拼装系统提示词的静态前缀并缓存，构建时附上当前日期。PromptMgr 负责段顺序，各可插拔段内容由对应 Manager 提供（Manager 缺席则该段自动省略）。
+**职责**：提供所有角色共用的执行原则，分层拼装系统提示词的静态前缀并缓存，构建时附上当前日期。各可插拔段内容由对应 Manager 提供（Manager 缺席则该段自动省略）。
 
-**段顺序**（`_build_static_prefix` `prompt_mgr.py:111-157`）：
-1. **核心身份**（primacy）——`role_prompt` 非空时用之，否则默认身份（`_build_core`）；
+**段顺序**（`_build_static_prefix`）：
+1. **核心身份与执行原则**——`role_prompt` 非空时用之，否则默认身份（`_build_core`）；随后由 `_build_execution_guidance` 按主/子 agent 职责注入统一执行规则；
 2. **行为准则**——`AGENTS.md` 四层叠加：共享 `roles/common/AGENTS.md` → 角色 `AGENTS.md` → 全局 `~/.agent/AGENTS.md` → 项目 `AGENTS.md`（`_build_agent_md`）；激活角色层会注入该角色的主 agent 与所有子 agent；
 3. **运行环境**——平台/模型/工作目录，外加 `deps.env_baseline`（`_build_environment`）。基线由 `collect_env_baseline()`（`src/mgr/env_baseline.py`）在 `AgentApp._reset_session` 中经 `asyncio.to_thread` 采集一次：shell、git 分支与短 HEAD、技术栈入口文件、深度 2 顶层目录树，硬上限 1200 字符。**不能在 PromptMgr 里现算**——`build()` 的调用点在 async 函数里（阻塞契约），且每个子 agent 各有自己的 PromptMgr（会重复采集十几次）。它对所有 agent 必须逐字节相同，否则跨委派的 tools+system 前缀缓存会失效；
-4. **任务管理指导**——`TaskManager.describe(is_subagent)`（仅 task feature）；
+4. **任务管理指导**——`TaskManager.describe()`（仅 task feature），只说明任务进度与依赖，不决定分工；
 5. **项目记忆**——`MemoryMgr.build_prompt()`（仅主 agent 视角，`agent.memory == "project"` 时，`_build_memory_context`）；
 6. **会话上下文**——`deps.session_context`（`_build_session_context`）；
-7. **可用子智能体 / 可用技能**（recency，**仅主 agent**）——`SubAgentMgr.prompt_section()` / `SkillMgr.prompt_section()`。
+7. **协作指引与可用子智能体**（**仅主 agent**）——`SubAgentMgr.prompt_section()`。协作段仅在实际工具 schema 包含 task_delegator 且存在候选子 agent 时注入；委派条件、等待式调用、上下文交接与关联任务认领规则由 SubAgentMgr 统一提供。
+8. **可用技能**——主、子 agent 实际具备 `load_skill` 时均注入 `SkillMgr.prompt_section()`，技能正文只在调用工具后进入调用者历史。
 
 **公共方法**：
 
@@ -276,7 +277,7 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 
 `src/mgr/skill_mgr.py`
 
-**单一职责**：多层扫描 `SKILL.md` 并以 `namespace:name` 注册，暴露技能列表提示词段，按需返回技能全文（含 `<skill-file>` 引用）供 `load_skill` 工具注入。
+**单一职责**：多层扫描 `SKILL.md` 并以 `namespace:name` 注册，暴露技能列表提示词段，按需返回技能全文（含 `<skill-file>` 引用）供主、子 agent 的 `load_skill` 工具加载。
 
 **消费的配置或文件**：多层扫描（低→高优先级，同名后者覆盖，`_load_all` `skill_mgr.py:44-88`）：共享 `roles/common/skills/` → 角色 `skills/`（命名空间为角色名）→ 全局插件 `plugins/*`（命名空间为插件名）→ 全局 `~/.agent/skills`（`user`）→ 项目插件 → 项目 `.agent/skills`（`user`）。每目录递归 `rglob("SKILL.md")`。
 
@@ -464,7 +465,7 @@ Plan 指令按调用方身份分叉：主 agent 版含 `load_skill` 计划工作
 | `list_tasks` | — | `dict` | 任务摘要列表（`blocked_by` 仅列未完成项，过滤 `_internal`） |
 | `get_task` | `task_id` | `dict` | 单任务完整详情（不存在抛 `ValueError`） |
 | `has_open_items` | — | `bool` | 是否有未完成任务 |
-| `describe` | `is_subagent` | `str` | 任务管理提示词（主/子 agent 各返回独立文本） |
+| `describe` | — | `str` | 主/子 agent 共用的任务进度与依赖提示词 |
 | `get_turn_start_reminder` | `mode, is_subagent` | `str` | 未完成且连续 ≥3 轮未用任务工具时注入任务列表；Plan 模式静默 |
 | `notify_tool_round` | `tool_names` | `None` | 含任意 `task_*` 工具则重置计数，否则 +1 |
 | `pop_post_round_reminder` | `mode, is_subagent` | `str \| None` | 同条件下提示“更新你的任务列表”；Plan 模式静默 |

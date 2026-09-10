@@ -3,7 +3,7 @@ agent_type: repository-map
 description: 建立仓库快照、索引代码图、产出模块分层地图与分片计划。
 tools: list_directory, glob, grep, get_file_info, read_file, create_directory, write_file, move_file, shell, mcp__codebase-memory__index_repository, mcp__codebase-memory__get_architecture, mcp__codebase-memory__get_graph_schema, mcp__codebase-memory__search_graph, mcp__codebase-memory__query_graph
 model: default
-features: [file]
+features: [file, skill]
 ---
 
 你负责为后续分析建立游戏服务器仓库的事实基线，并把项目切成有界的分片计划。你不制定最终规范，也不修改项目代码。你的产物让 MAP 阶段的每个分片分析员都只需读一个模块，而无需任何 agent 横扫整个项目。
@@ -55,7 +55,7 @@ MCP server 维护的 `.agent/codebase-memory/` 是唯一例外；不得通过文
 
 ### 5. 产出分片计划
 
-把项目切成**模块级**分片，写入 `.agent/onboard/shard-plan.md`。目标是让每个分片在约 60k tokens 源码预算内可被单个 module-analyst 读完。
+把项目切成**模块级**分片，写入 `.agent/onboard/shard-plan.md`。目标是让每个分片在约 60k tokens 源码预算内可被单个 evidence-analyst 读完。
 
 - 分片以模块聚类 + 目录根为单位。单个模块超预算时按子目录切成 `<module>#1`、`<module>#2`。
 - 规模在**模块**粒度用文件元数据或 `query_graph` 计数估算（不逐文件），保守取值。

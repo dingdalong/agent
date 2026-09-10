@@ -6,6 +6,16 @@
 
 ## 角色系统（Roles）
 
+### 统一执行与协作范式
+
+主 agent 持续负责目标理解、关键决策、执行、验收和交付。PromptMgr 注入统一执行原则，SubAgentMgr 在可委派时注入协作规则；TaskManager 只管理任务进度与依赖。自定义角色同样获得这些指引，无需复制策略。
+
+角色定义领域职责和能力边界，技能定义步骤、产物和验收；只有明确的上下文隔离或独立核验需求才指定委派步骤。子 agent 的 description 说明能力与输入输出，不要求主 agent 优先委派。主 agent 已掌握上下文、步骤紧密关联或下一步被阻塞时直接推进；独立任务、大量中间输出和独立核验按需委派。
+
+task_delegator 等待结果返回，同轮独立调用可以并行，全部结束后主 agent 继续推理。每次创建新子 agent，必要上下文通过任务正文与共享摘要传入；需要用户裁决时返回具体缺口，主 agent 沟通后发起新的完整委派。独立审核传 shared_context="none"，主 agent 按实际产物和证据验收。
+
+coding 的 plan-workflow 在主对话形成方案，execute-plan 接续计划并连续实现与验证；mijia 的设备操作与用户确认由主 agent 连续负责。任务跟踪按可验收结果建立，不按子 agent 数量机械拆分。
+
 **一套角色决定了主 agent 的身份提示词、可用子 agent、技能、MCP server 与启用的 feature 集**——它是框架的顶层组织单位。由 `RoleMgr`（`src/mgr/role_mgr.py`）管理。
 
 ### 三层发现与激活
@@ -50,39 +60,39 @@ role:
 
 ### 内置角色一览
 
-| 角色 | `startInPlanMode` | `thinking` / `reasoning_effort` | `memory` | `features` | 子 agent（`agents/`） | 说明 |
-|---|---|---|---|---|---|---|
-| `coding` | `true` | `true` / `max` | `project` | 未声明（全部启用） | coder、debug、doc、explore、review、shell | 通用编程助手（默认角色） |
-| `mijia` | `false` | `false` / 未声明 | 未声明 | `[subagent]` | device-control、home-diagnostics、home-status、scene-automation | 米家智能家居管家 |
-| `onboard` | `false` | `true` / `high` | 未声明 | `[subagent, file, task]` | repository-map、module-analyst、cross-module、dimension-classifier、verifier、manual-writer、manual-reviewer | 证据驱动的项目开发手册分析与发布角色 |
+| 角色 | 初始 Plan | features | 专属执行器 | 工作方式 |
+|---|---|---|---|---|
+| `coding` | `true` | 未声明（全部启用） | `coder`、`review` | 主 agent 连续规划、实现、调试与验证 |
+| `mijia` | `false` | `[subagent, skill]` | 复用 common | 主 agent 通过技能操作、诊断设备与管理场景 |
+| `onboard` | `false` | `[subagent, file, task, skill]` | `repository-map`、`evidence-analyst`、`evidence-reviewer` | 证据流水线，主 agent 验收并发布 |
 
-`model` 不属于角色定义，因此不列入上表；每个角色实际使用的 default/fast 模型来自运行配置。`coding` 与 `mijia` 省略 `tools`，即不设静态工具白名单；`coding` 也省略 `features`，经 `resolve_features()` 解析为全部 feature。`onboard` 声明固定工具白名单和 `[subagent, file, task]`，限制其只执行证据流水线。
+角色模型来自运行配置的 default/fast 槽位。`coding` 与 `mijia` 不设静态工具白名单；`onboard` 的主 agent 只声明状态、候选文件、Git 查询、技能、任务和委派所需工具，代码图索引由专用执行器承担。
 
-插件目前仅提供 skill 和 hook，不注册工具。插件发现与插件 hook 不受角色 feature 集限制；插件 skill 仍要求 `skill` feature。`mijia` 只启用 `subagent`，因此 `task`、`skill`、`file`、`memory`、`plan` 均关闭。
+插件提供 skill 和 hook；插件 skill 要求启用 `skill` feature。米家使用实际注册的 MCP 工具，无需修改内置资源回填工具名。
 
 ### onboard 证据流水线
 
-`onboard` 只负责分析和发布面向 Agent 的项目规则与任务技能，不承担后续编码工作。它以模块分片的 **MAP-REDUCE** 为骨架，并在两侧加装跨模块消解与分类核实，避免大型项目横扫源码导致的上下文超限与破坏性压缩：
+主 agent 维护范围、快照、状态和验收，默认加载 `builtin:onboard-write-manual` 编写或修订候选，并亲自执行发布。需要隔离大量证据综合时，将完整输入与技能名交给 `general-purpose`。分析与审核执行器每次加载一个阶段技能：
 
-- **阶段 1（索引 + 地图 + 分片）**：委派 `repository-map` 用 `index_repository` 建/更新代码图索引、`get_architecture` 读模块聚类，产出模块分层证据 `.agent/onboard/evidence/repository-map.md` 与分片计划 `.agent/onboard/shard-plan.md`（每片成员目录/glob、估算规模、neighbors 及生成物/第三方排除清单）。验证命令同时记录项目内实际调用位置，不能仅从工具配置推断。
-- **阶段 2（MAP）**：按分片计划一轮发起全部分片的 `module-analyst` 委派，由 `asyncio.gather` + `llm.concurrency` 信号量自动流水线（有空位即补下一片），每个只读一个分片的源码（约 60k token 预算）+ 作用域内代码图，一遍产出小体量证据卡 `.agent/onboard/cards/<shard_id>.md`，并把跨分片才能确认的关系挂进卡的「未知项/需跨模块确认」。
-- **阶段 2.5（跨模块消解）**：委派 `cross-module` 汇总全部卡的待确认跨模块关系，按点名符号做**有界**核对并逐条定级（`confirmed`/`conflict`/`unknown`），产出已核实的跨模块事实账本 `.agent/onboard/evidence/cross-module.md`。四个 REDUCE 维度共享此账本，不再各自 join。
-- **阶段 3（REDUCE）**：同一轮并行发起四次 `dimension-classifier`，每次指派一个维度（`conventions`/`runtime-flow`/`change-patterns`/`guardrails`）。它们只读全部小卡与跨模块账本，做**维度内**归类（跨模块链路与契约直接引用账本），仅在维度内需升级为 `confirmed` 时按 `module::symbol` 打开有限源码，把报告写入 `.agent/onboard/evidence/`。四次调用共享同一份规范化输入却各自独立维护状态与验收，单份报告损坏只重跑它自己。主 agent 只在后续 prompt 中传递路径，不转运报告或卡的全文。
-- **阶段 3.5（分类核实）**：委派 `verifier` 对四份报告里**每个** `dominant`/`conflict`/`unknown` 残留桶发现打开有界真实源码对抗式复核并改判（能判定的改判，只让静态不可判定的留 `unknown`），归一维度间分歧，产出核实侧车 `.agent/onboard/evidence/verification.md`。它不碰 `confirmed`。`unknown` 的定义随之收紧——**分片切割本身不构成 `unknown` 理由**，跨分片确认由 `cross-module` 完成，残留桶等级最终以 `verification.md` 为准。
+| 阶段 | 执行器 / 技能 | 正式产物 |
+|---|---|---|
+| 索引、地图、分片 | `repository-map` | `.agent/onboard/evidence/repository-map.md`、`.agent/onboard/shard-plan.md` |
+| MAP | `evidence-analyst` + `builtin:onboard-analyze-module` | `.agent/onboard/cards/<shard_id>.md` |
+| 跨模块消解 | `evidence-analyst` + `builtin:onboard-resolve-relations` | `.agent/onboard/evidence/cross-module.md` |
+| REDUCE | `evidence-analyst` + `builtin:onboard-classify-evidence`，每次一个维度 | 四份维度证据报告 |
+| 分类核实 | 新的 `evidence-reviewer` + `builtin:onboard-verify-evidence` | `.agent/onboard/evidence/verification.md` |
+| 候选编写 | 主 agent 或通用执行器 + `builtin:onboard-write-manual` | generated-rules、generated-skills、reference、decisions |
+| 候选审核 | 新的 `evidence-reviewer` + `builtin:onboard-review-manual` | `.agent/onboard/quality-report.md` |
 
-onboard 的续跑只适用于同一未发布运行：`cross_module`、四个维度、`verification` 各自维护 `{status}`。流水线阶段严格线性（跨模块消解 → REDUCE 四维度 → 分类核实 → 候选生成 → 审核 → 发布），故某阶段的"下游"即它之后的全部阶段。同一未发布快照下，凡 `completed` 且正式产物存在、固定章节齐全、产物头快照一致的阶段直接复用（消费证据卡的阶段另需产物记录的 shard 集合覆盖当前全部证据卡），其余置 `pending` 重跑；四个维度各自独立走复用与验收，单个损坏只重跑自己。某阶段本轮**实际重跑**，或用户在同一未发布运行内强制重跑某阶段时，把该阶段之后的全部阶段一并置 `pending` 并重跑，避免修正内容被旧下游结论、旧候选或旧质量报告遗漏。每次启动或续跑都在当前会话重建任务图，不复用上一次会话的 task id。
+分片任务同轮独立运行，跨模块关系集中核对后供四维度共享，避免重复探索。分类核实逐项打开源码检查 `dominant/conflict/unknown`；候选审核反查活跃规则及技能的证据映射。两类核验均通过 `shared_context="none"` 隔离先前摘要，不能由分析或编写实例自审替代。详细阶段方法和四维度 references 只在执行时按需读取。
 
-仓库快照、范围或深度变化时不得做局部更新；发布阶段中断或已成功发布的运行也不支持增量更新。三种情况都要求用户手动清理 onboard 产物后全量重跑。
+同一未发布快照下，跨模块、四个维度和分类核实各自维护 `{status}`；只复用状态为 completed、正式产物完整、快照/范围/深度一致且覆盖满足要求的阶段。四个维度单个损坏只重跑自己；任一阶段实际重跑，必须把该阶段之后的全部阶段一并置 `pending` 并重跑。报告通过 `.partial` 完整写入后用 `move_file` 发布；残留 partial 不算完成。每个新会话重建任务图，不复用旧 task id。
 
-`manual-writer` 根据证据生成干净的根规则与独立任务技能，发现的**最终等级以 `verification.md` 的核实结论为准**（被 `verifier` 升级为 `confirmed` 的原残留桶可进活跃规则，进 `decisions.md` 的 `conflict`/`unknown` 每项带核实原因），并把规则/技能到 finding、符号、案例和命令来源的映射写入 `.agent/onboard/reference.md`。`manual-reviewer` 通过该映射按 `module::symbol` 打开实际代码反查候选正文，并强制**残留桶核实闭环**——凡最终仍为 `dominant`/`conflict`/`unknown` 的发现都必须在 `verification.md` 有核实结论且记录了已开符号，缺失即 FAIL，再写质量报告。候选最多修订两轮，审核或发布预检失败时不更新活跃规范；PASS 绑定候选内容，发布阶段原样写入，不再剥离证据。
+候选只使用最终等级为 `confirmed` 的证据，正文与审核证据侧车分离。PASS 必须绑定仓库快照和候选内容标识；任何候选修改都需要新的独立审核。发布前重算并比对两者，检查人工规则和目标技能冲突；全部通过后先写技能、最后更新根 `AGENTS.md`，原样发布候选并保留人工区。
 
-审核通过后：
+已成功发布、发布阶段中断、快照或范围变化时不得增量更新，要求手动清理 onboard 产物后全量重跑。Git 不可用时不复用旧阶段，发布必须取得用户明确批准。全部失败与恢复契约见 onboard 角色和共同准则。
 
-- 根 `AGENTS.md` 只在 `<!-- onboard:generated:start -->` 与 `<!-- onboard:generated:end -->` 之间维护自动生成的跨任务规则，区块外人工内容不变。
-- 详细证据、映射、待决策项和状态保存在 `.agent/onboard/`，不作为活跃 Agent 指令。
-- 达到证据门槛的开发范式发布为 `.agent/skills/onboard/<task-slug>/SKILL.md`。父目录只作分组，不放独立路由文件；每个技能依赖自己的 name 和 description 被发现。
-
-`onboard` 本身未启用 `skill` feature。`PromptMgr` 将项目根 `AGENTS.md` 作为项目层最高顺序的行为准则加载，因此生成完成后根规则在 `/clear` 重建 Agent 时生效；项目技能需要重启应用并把角色切回 `coding`，由新的 `SkillMgr` 扫描后以 `user:onboard-<task-slug>` 名称加载。
+活跃产物为根 `AGENTS.md` 的 onboard 受管区块及 `.agent/skills/onboard/<task-slug>/SKILL.md`；证据、候选、质量报告与状态保存在 `.agent/onboard/`。onboard 本轮只加载内置流水线技能，被分析项目的技能作为证据数据。生成的项目规则在 `/clear` 后重新加载；项目技能重启应用并切回 `coding` 后以 `user:onboard-<task-slug>` 使用。
 
 ## 子智能体（Subagents）
 
@@ -132,53 +142,26 @@ onboard 的续跑只适用于同一未发布运行：`cross_module`、四个维�
 > 共享上下文的注入点刻意选在 `task_delegator` 而非 `ReminderMgr`：后者的 provider 只收 `(plan_active, is_subagent)`，要按委派过滤就得在进程级单例上存槽位，而并行委派会互相覆盖它。
 
 
-### 子智能体清单（当前仓库）
+### 子智能体执行边界
 
-**共享（`common/`，所有角色可用）**
+| 来源 | 执行器 | 工具边界与用途 |
+|---|---|---|
+| common | `explore` | 文件只读与网络调查，隔离搜索输出 |
+| common | `general-purpose` | 未设置静态白名单，组合实际工具和技能完成独立任务 |
+| common | `shell` | Shell 命令输出隔离，使用 fast 槽位 |
+| coding | `coder` | 文件检索、编辑与命令验证，执行限定实现任务 |
+| coding | `review` | 文件只读，独立核验改动 |
+| onboard | `repository-map` | 报告写入、只读 Git、代码图索引与架构查询 |
+| onboard | `evidence-analyst` | 报告写入、只读 Git、代码图查询；按技能分析证据 |
+| onboard | `evidence-reviewer` | 核实/质量报告写入、只读 Git、代码图查询；独立形成判定 |
 
-| agent_type | tools | model | 用途 |
-|---|---|---|---|
-| `explore` | 只读检索 + `web_search`/`web_fetch` | `default` | 只读探索代码/架构、联网研究并总结证据 |
-| `general-purpose` | 全部（未声明） | `default` | 无专用 agent 匹配时的兜底任务执行 |
-| `shell` | `shell` | `fast` | 独立上下文运行命令 / Git 查询 / 测试执行 |
+common 为所有角色的最低优先级层；删除角色同名定义后会使用 common 定义。米家复用通用执行器与领域技能。工具仍经过子 agent 隔离、feature 过滤与权限服务，不因加载 skill 扩大白名单。
 
-**coding 角色**
-
-| agent_type | tools | model | 用途 |
-|---|---|---|---|
-| `coder` | 只读检索 + 写文件三件套 + `shell` | `default` | 实现功能 / 修 bug / 重构 / 写测试 |
-| `debug` | 只读检索 + `shell` | `default` | 复现问题、定位根因、给诊断报告 |
-| `doc` | 只读检索 + 写文件三件套 | `default` | 编写/维护文档 |
-| `review` | 只读检索（无写） | `default` | 只读代码审查 |
-
-**mijia 角色**
-
-| agent_type | tools | model | 用途 |
-|---|---|---|---|
-| `device-control` | 只读检索* | `default` | 执行设备控制并验证状态 |
-| `home-diagnostics` | 只读检索* | `default` | 只读诊断家居问题 |
-| `home-status` | 只读检索* | `default` | 只读查询设备状态/布局/能力 |
-| `scene-automation` | 只读检索* | `default` | 创建/编辑/删除/执行场景与自动化 |
-
-> \* mijia 各 agent frontmatter 声明的 `tools` 均为内置只读检索工具集；实际的米家设备操作能力来自角色的 `mcp_servers.json` 注入的 MCP 工具（见 [mcp-and-hooks.md](mcp-and-hooks.md)），这些工具不在 frontmatter 白名单内时会经 `resolve_subagent_tools` 的 subagent 注入规则处理。"只读检索"指 `list_directory, glob, grep, get_file_info, read_file`。
-
-**onboard 角色**
-
-| agent_type | tools | model | 用途 |
-|---|---|---|---|
-| `repository-map` | 文件检索/报告写入 + `shell` + codebase-memory 索引/架构工具 | `default` | 建立索引、模块地图、生成物边界与分片计划 |
-| `module-analyst` | 文件检索/卡写入 + codebase-memory 查询工具 | `default` | MAP：只读单分片源码+代码图，产出四维度证据卡 |
-| `cross-module` | 文件检索/账本写入 + codebase-memory 查询/调用图工具 | `default` | 跨模块消解，产出事实账本 |
-| `dimension-classifier` | 文件检索/报告写入 + `shell` + codebase-memory 查询/调用图工具 | `default` | REDUCE：按指派维度归类证据 |
-| `verifier` | 文件检索/侧车写入 + `shell` + codebase-memory 查询/调用图工具 | `default` | 对残留桶发现做源码复核 |
-| `manual-writer` | 文件读取与编辑 | `default` | 生成、修订并发布手册 |
-| `manual-reviewer` | 文件检索/报告写入 + `shell` + codebase-memory 查询工具 | `default` | 反查候选规则并给出发布判定 |
-
-这些子 agent 都显式声明 `features: [file]`，不会继承主 agent 的 `task` 或 `subagent` feature。codebase-memory 的 MCP 工具（`mcp__codebase-memory__*`）`feature=None`、不受 feature 门控，但 `subagent=None` 既不自动注入也不排除，故各 agent 必须在 frontmatter `tools:` 逐一列出所需 MCP 工具名。获准使用 `shell` 的代理只执行只读 Git 查询；所有分析报告、证据卡、跨模块账本与核实侧车的写入路径由角色提示词限制在 `.agent/onboard/`。
+onboard 专用执行器声明 `features: [file, skill]`，不继承主 agent 的 task 或 subagent feature。MCP 工具不自动注入，专用执行器显式列出所需工具；分析和审核白名单不包含索引工具。报告写入路径与只读 Git 用途由阶段契约及既有权限机制约束，不能将提示词范围误认为独立文件系统沙箱。
 
 ## 技能系统（Skills）
 
-技能是**按需注入系统提示词的知识包**，由 `SkillMgr`（`src/mgr/skill_mgr.py`）加载，通过 `load_skill` 工具注入。适合"任务匹配时才需要的详细操作指南"，避免长期占用上下文。
+技能是**按需加载到调用者上下文的方法包**，由 `SkillMgr`（`src/mgr/skill_mgr.py`）加载，通过 `load_skill` 工具注入。适合"任务匹配时才需要的详细操作指南"，避免长期占用上下文。
 
 ### 多层扫描
 
@@ -194,6 +177,15 @@ onboard 的续跑只适用于同一未发布运行：`cross_module`、四个维�
 
 - frontmatter：`name`（缺省取父目录名）、`description`（缺省 `"没有说明内容"`）。
 - `load_full_text(name)`（`skill_mgr.py:155`）返回包装文本：`<skill name=... skill_dir=...>` + body + 目录内其他文件的 `<skill-file path=... ref=... />` 清单 + `</skill>`。技能目录内的附属文件被登记为可引用资源（`skill_mgr.py:111-117`）。
-- `prompt_section()`（`skill_mgr.py:140-150`）生成"# 可用技能"段（技能名+描述列表）与使用流程说明："当任务匹配某个技能时，调用 `load_skill` 加载后再执行操作。已加载技能的指令优先于本文的通用规则。"
+- `prompt_section()` 生成技能名、描述与加载指导。主、子 agent 只有实际工具 schema 包含 `load_skill` 时才展示目录；正文由工具结果进入调用者历史，不注入系统提示词。
 
 > 技能系统受 `skill` feature 门控——角色未启用 `skill` 时 `SkillMgr` 与 `load_skill` 工具不生效。`coding` 提供内置工作流技能；用户也可在 `~/.agent/skills/` 或项目 `.agent/skills/` 自建技能。`onboard` 生成的任务范式属于项目用户技能，重启并切回启用 `skill` 的角色后以 `user:onboard-<task-slug>` 名称加载。
+
+
+### 方法复用与委派
+
+主 agent 默认连续推进工作；需要独立上下文、输出隔离或独立核验时才选择执行器。委派正文提供目标、范围、必要输入、完整技能名与验收条件，子 agent 再调用 `load_skill`。不自动继承主 agent 已加载的技能正文。
+
+`load_skill` 使用 `subagent=True` 自动加入子 agent 工具候选，随后仍受 `skill` feature 过滤。加载技能不修改工具集、Plan 状态或委派权限；`plan-workflow`、`execute-plan` 仅供主 agent 使用，子 agent 只处理明确的局部任务。
+
+编码排障加载 `builtin:debugging`，普通文档同步随实现完成；米家控制、诊断和场景管理分别加载 `builtin:control-devices`、`builtin:diagnose-home`、`builtin:manage-scenes`。简单查询与命令无需额外工作流。技能不存在时返回包含可用名称的错误，不回退到其他技能。

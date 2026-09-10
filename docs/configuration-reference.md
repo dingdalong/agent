@@ -253,7 +253,7 @@ context:
   max_entry_chars: 8000
   inject_char_budget: 6000              # 单次委派注入的总字符预算
   inject_entry_chars: 2000
-  record_types: [explore, plan, debug, review, coder]
+  record_types: [explore, review, coder]
 
 # ── 激活角色、角色模型双槽位与共享推理力度 ───────────────
 role:

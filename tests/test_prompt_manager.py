@@ -216,13 +216,13 @@ def test_legacy_global_and_project_agents_files_are_ignored(
     assert "LEGACY_PROJECT_ONLY" not in content
 
 
-def test_coding_coordinator_guidance_only_reaches_main_prompt(
+def test_coding_execution_responsibility_only_reaches_main_prompt(
     tmp_path: Path,
 ) -> None:
-    """编码角色的总控身份只进入主 agent，角色准则进入主/子提示词。"""
+    """主 agent 承担交付责任，子 agent 获得限定任务指引和共享准则。"""
     role_dir = builtin_root() / "roles" / "coding"
     main_identity = _load_manifest_prompt(role_dir / "role.md", "main")
-    child_identity = _load_manifest_prompt(role_dir / "agents" / "explore.md", "explore")
+    child_identity = _load_manifest_prompt(role_dir.parent / "common" / "agents" / "explore.md", "explore")
     global_dir = tmp_path / "global"
     workdir = tmp_path / "project"
     global_dir.mkdir()
@@ -244,8 +244,9 @@ def test_coding_coordinator_guidance_only_reaches_main_prompt(
         role_prompt=child_identity,
     )
 
-    assert "你是总控 agent" in main_content
-    assert "你是总控 agent" not in child_content
+    assert "你持续负责理解用户目标" in main_content
+    assert "你持续负责理解用户目标" not in child_content
+    assert "完成委派范围内的任务" in child_content
     assert "# 编码角色共享行为准则" in main_content
     assert "# 编码角色共享行为准则" in child_content
 

@@ -589,76 +589,18 @@ class TaskManager:
         if not task.metadata:
             task.metadata = None
 
-    def describe(self, is_subagent: bool) -> str:
-        """返回任务管理系统的 prompt 指导文本，供 PromptMgr 注入系统提示词。
-
-        主/子 agent 各返回独立的完整提示词。
-
-        Args:
-            is_subagent: 是否为子智能体。
-
-        Returns:
-            Markdown 格式的任务管理指导文本。
-        """
-        if is_subagent:
-            return (
-                "# 任务管理\n\n"
-                "## 何时使用\n"
-                "- 复杂多步任务（3 步以上）需要追踪进度时\n"
-                "- 一次性收到多个独立子任务时\n\n"
-                "## 何时不使用\n"
-                "- 单个简单任务，直接执行即可\n"
-                "- 3 步以内的简单操作\n\n"
-                "## 字段规范\n"
-                '- subject：祈使句形式的简短标题（如"修复登录认证 bug"）\n'
-                "- description：完整的需求描述\n"
-                '- active_form：进行时描述，用于 spinner 显示（如"修复认证 bug 中"），省略时使用 subject\n\n'
-                "## 状态工作流\n"
-                "状态流转：pending → in_progress → completed\n\n"
-                "- 执行任务前，先用 task_update 标记为 in_progress\n"
-                "- 只有完全完成时才标记 completed\n"
-                "- 遇到错误或阻塞时，保持 in_progress，尝试自行解决\n"
-                "- 任务不再需要（需求取消、被其他任务合并覆盖）或创建有误（重复、描述错误）时，status 设为 deleted 永久删除\n"
-                "- 已完成的任务保留 completed 状态，不要删除；本轮对话正常结束时，若全部任务均已完成，框架会自动清空任务列表"
-            )
+    def describe(self) -> str:
+        """返回与执行分工无关的任务进度及依赖指导。"""
         return (
             "# 任务管理\n\n"
-            "## 何时使用\n"
-            "- 复杂多步任务（3 步以上）需要追踪进度时\n"
-            "- 用户一次性提出多个独立任务时\n"
-            "- 需要将工作委派给子智能体并追踪完成情况时\n\n"
-            "## 何时不使用\n"
-            "- 单个简单任务、不需要委派子智能体时，直接执行即可（无需创建任务）\n"
-            "- 3 步以内的简单操作、不需要委派子智能体时\n"
-            "- 纯对话或信息查询\n\n"
-            "## 字段规范\n"
-            '- subject：祈使句形式的简短标题（如"修复登录认证 bug"）\n'
-            "- description：完整的需求描述\n"
-            '- active_form：进行时描述，用于 spinner 显示（如"修复认证 bug 中"），省略时使用 subject\n\n'
-            "## 状态工作流\n"
-            "状态流转：pending → in_progress → completed\n\n"
-            "- 亲自执行任务（不委派）前，先用 task_update 标记为 in_progress\n"
-            "- 只有完全完成时才标记 completed\n"
-            "- 遇到错误或阻塞时，保持 in_progress，尝试自行解决；无法解决时向用户说明阻塞原因等待指示\n"
-            "- 任务不再需要（需求取消、被其他任务合并覆盖）或创建有误（重复、描述错误）时，status 设为 deleted 永久删除\n"
-            "- 已完成的任务保留 completed 状态，不要删除；本轮对话正常结束时，若全部任务均已完成，框架会自动清空任务列表\n\n"
-            "## 创建与依赖管理\n"
-            "先批量创建所有任务（获得 ID），再通过 task_update 设置依赖关系：\n"
-            "1. 在同一轮中调用多个 task_create 一次性创建所有子任务\n"
-            "2. 在同一轮中调用多个 task_update，用 add_blocked_by 设置依赖关系\n"
-            "3. 按依赖顺序逐个处理：优先通过 task_delegator 委派给合适的子智能体，没有合适子智能体时才亲自执行\n\n"
-            "依赖说明：\n"
-            "- add_blocked_by：指定必须先完成的前置任务 ID\n"
-            "- add_blocks：指定本任务完成后才能开始的任务 ID\n\n"
-            "## 委派工作流\n"
-            "通过 task_delegator 委派子智能体时，传入 task_id 关联任务：\n"
-            "- 框架自动将任务标记为 in_progress 并设置 owner，无需手动更新\n"
-            "- 子智能体对任务系统完全透明，prompt 中只写任务内容，不要提及 task ID 或状态管理\n"
-            "- 子智能体返回后，评估结果并执行对应操作：\n"
-            "  - 结果合格：task_update 标记 completed\n"
-            "  - 结果不合格：保持 in_progress，用 task_delegator 重新委派（可调整 prompt 或换 agent_type），同样传入 task_id\n"
-            "  - 需要补充工作：保持 in_progress，自己直接完成剩余部分，再标记 completed\n"
-            "- 子智能体异常退出时，框架自动将任务回滚为 pending"
+            "复杂工作需要跟踪进度或依赖时使用 task_*，按可验收结果组织任务；简单工作直接执行。\n"
+            "复用已有相关任务，不按计划条目或子 agent 数量机械拆分。\n"
+            "subject 使用简短祈使句；description 写清目标、范围和验证方式；active_form 可提供进行时描述。\n"
+            "先用 task_create 获得任务 ID，再用 task_update 的 add_blocked_by / add_blocks 声明依赖。\n"
+            "优先推进无未完成依赖的任务；实际执行前标记 in_progress，完全完成并验收后标记 completed。\n"
+            "遇到错误或阻碍时不标完成，尝试解决；无法解决时说明未完成项和具体原因。\n"
+            "仅在任务取消、合并或创建有误时设 deleted；已完成任务保持 completed。\n"
+            "本轮正常结束且全部任务完成时，框架自动清空任务列表。"
         )
 
     def has_open_items(self) -> bool:

@@ -52,7 +52,7 @@ logger = logging.getLogger(__name__)
 
 # 记账时的默认 agent_type 白名单。`shell` / `doc` 这类返回"命令执行完毕"的委派
 # 信息量低，进账本只会挤占注入预算。
-DEFAULT_RECORD_TYPES = frozenset({"explore", "plan", "debug", "review", "coder"})
+DEFAULT_RECORD_TYPES = frozenset({"explore", "review", "coder"})
 
 # 短于此长度的返回视为无信息量（"已完成"、"ok"、"没有发现问题"），不记账。
 # 阈值按中文取——一条有效的中文结论常常只有 25-40 个字符，按英文习惯定 40 会把

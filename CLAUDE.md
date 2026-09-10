@@ -45,6 +45,8 @@ REQUEST_INPUT → CHECK_COMPACT → [COMPACT →] LLM_CALL → PROCESS_RESPONSE
 
 ### 角色系统（Roles）
 
+**统一执行与协作** — PromptMgr 为所有角色注入主/子 agent 的执行责任；主 agent 默认直接推进并负责验收交付。SubAgentMgr 的协作段只在主 agent 实际可委派时注入，统一说明独立任务、上下文隔离和独立核验的委派条件。角色/技能只定义领域职责、产物和必要的独立核验，不复制通用分工策略；子 agent 描述只表达能力。TaskManager 只管理进度与依赖。调度仍为等待式，同轮独立调用并行、全部返回后继续主循环。
+
 **角色是框架的顶层组织单位**——一套角色决定了主 agent 的身份提示词、可用子 agent、技能、MCP server 与启用的 feature 集。`RoleMgr`（`src/mgr/role_mgr.py`）三层发现所有角色（低→高优先级）：内置 `src/roles/` → 全局 `~/.agent/roles/` → 项目 `.agent/roles/`，同名后者覆盖。激活角色由 `config.yaml` 的 `role.default` 指定（缺省回退 `coding`）；每个角色在 `role.<角色名>.model.default/fast` 配置两个必填模型槽位，`role.<角色名>.reasoning_effort` 是该角色的调用级推理强度覆盖。
 
 每个角色目录 `src/roles/<role>/` 结构：
@@ -101,7 +103,7 @@ MCP server 连接配置在独立的 `mcp_servers.json`（角色 `src/roles/<role
 
 **统一授权与 Plan** — `PermissionManager.authorize()` 是唯一授权入口；工具声明冻结的 `ToolPolicy`，不从用户配置提升权限。`Agent.plan_active` 是独立状态，Shift+Tab 可双向切换；Plan 激活时只允许本地读取、明确安全的内部工具和 `.agent/plans/**` 写入，其余操作直接拒绝且不调用智能权限。
 
-**技能系统** — `SkillMgr` 四层扫描 `SKILL.md`（共享 → 角色 → 全局 → 项目，插件技能穿插其间），同名后者覆盖；通过 `load_skill` 工具按需注入系统提示词。
+**技能系统** — `SkillMgr` 四层扫描 `SKILL.md`（共享 → 角色 → 全局 → 项目，插件技能穿插其间），同名后者覆盖；主、子 agent 实际具备 `load_skill` 时均展示技能目录，正文通过工具结果按需进入调用者历史。技能提供方法，不扩大授权、模式或工具范围；主控技能仅供主 agent 使用。
 
 **Hooks** — 8 种生命周期钩子事件（`PreToolUse`、`PostToolUse`、`UserPromptSubmit`、`Stop`、`SessionStart`、`SessionEnd`、`SubagentStart`、`SubagentStop`），通过 shell 命令执行，支持 JSON stdin/stdout 协议。
 

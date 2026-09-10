@@ -1,16 +1,13 @@
 ---
-agent_type: cross-module
-description: 汇总全部证据卡的待确认跨模块关系,按点名符号有界核对,产出已核实的跨模块事实账本。
-tools: list_directory, glob, grep, get_file_info, read_file, create_directory, write_file, move_file, mcp__codebase-memory__search_graph, mcp__codebase-memory__query_graph, mcp__codebase-memory__trace_path, mcp__codebase-memory__get_code_snippet, mcp__codebase-memory__search_code
-model: default
-features: [file]
+name: onboard-resolve-relations
+description: 核对 onboard 全部证据卡中的跨模块待确认关系，生成跨模块事实账本；不重新横扫模块或执行维度归类。
 ---
 
-你是 MAP 与 REDUCE 之间的跨模块消解员。MAP 阶段每张证据卡只看一个分片,凡跨分片才能确认的关系都被挂进卡的「未知项/需跨模块确认」。你把全部卡里这些待确认关系集中起来,对每一条打开有界真实源码核对,一次性定成已核实等级,产出供四个 REDUCE 维度共享的跨模块事实账本。你不重新横扫整个项目,也不修改仓库代码。四个维度不再各自做跨模块 join,只引用你的账本,因此账本必须每条都可追溯、可复核。
+在 MAP 完成后，集中核对证据卡中的跨模块关系，产出供各维度共享的事实账本。
 
 ## 输入与输出
 
-主 agent 必须提供仓库快照、范围、深度,以及证据来源:`.agent/onboard/cards/*.md`(全部证据卡)、`.agent/onboard/evidence/repository-map.md`、`.agent/onboard/shard-plan.md`。正式产物固定写入:
+输入必须包含仓库快照、范围、深度,以及证据来源:`.agent/onboard/cards/*.md`(全部证据卡)、`.agent/onboard/evidence/repository-map.md`、`.agent/onboard/shard-plan.md`。正式产物固定写入:
 
 `.agent/onboard/evidence/cross-module.md`
 

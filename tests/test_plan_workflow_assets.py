@@ -6,17 +6,25 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from src.mgr.role_mgr import RoleMgr
 from src.mgr.skill_mgr import SkillMgr
 from src.mgr.subagent_mgr import SubAgentMgr
+from src.mgr.prompt_mgr import PromptMgr
+from src.mgr.task_mgr import TaskManager
+from src.mgr.tools_mgr import ToolsMgr
 
 
 class _ConfigStub:
     """提供 RoleMgr 所需的最小配置读取接口，缺省角色为 coding。"""
 
     project_trusted = False
+    role_name = "coding"
 
     def get_config(self, key: str) -> Any:
+        if key == "role.default":
+            return self.role_name
         raise KeyError(key)
 
     def get_config_parts(self, parts: tuple[str, ...]) -> Any:
@@ -49,7 +57,59 @@ def test_coding_role_plan_workflow_skill_still_loads(tmp_path: Path) -> None:
     text = mgr.load_full_text("builtin:plan-workflow")
     assert "Plan 模式 vs task_* 工具" in text
     assert "enter_plan_mode" not in text
-    # explore 委派只给拆分原则，不设固定数量上限，也不引用运行中不可知的框架参数
     assert "最多 3 个" not in text
     assert "llm.concurrency" not in text
-    assert "每个独立探索方向" in text or "方向重叠就合并" in text
+    assert "方向重叠就合并" in text
+
+
+def test_coding_execute_plan_skill_loads(tmp_path: Path) -> None:
+    """批准后执行使用真实角色技能，支持主 agent 连续推进。"""
+    mgr = SkillMgr(workdir=tmp_path / "work", role_mgr=_role_mgr(tmp_path))
+
+    assert mgr.check_skill("builtin:execute-plan")
+    text = mgr.load_full_text("builtin:execute-plan")
+    assert "接续计划" in text
+    assert "推进实现" in text
+    assert "验证与交付" in text
+
+
+@pytest.mark.parametrize("role_name", ["coding", "mijia", "onboard", "custom"])
+@pytest.mark.parametrize("is_subagent", [False, True])
+@pytest.mark.parametrize("can_delegate", [False, True])
+def test_execution_guidance_follows_role_and_actual_tools(
+    tmp_path: Path, role_name: str, is_subagent: bool, can_delegate: bool,
+) -> None:
+    """真实角色装配统一规则；仅可委派的主 agent 收到协作指引。"""
+    config = _ConfigStub()
+    config.role_name = role_name
+    global_dir = tmp_path / "global"
+    if role_name == "custom":
+        role_dir = global_dir / "roles" / "custom"
+        role_dir.mkdir(parents=True)
+        (role_dir / "role.md").write_text(
+            "---\ndescription: 自定义角色\n---\n处理用户给出的领域任务。\n"
+        )
+    role_mgr = RoleMgr(config_mgr=config, workdir=tmp_path / "work", global_dir=global_dir)
+    assert role_mgr.role_name == role_name
+    deps = SimpleNamespace(role_mgr=role_mgr, llm_mgr=None)
+    subagent_mgr = SubAgentMgr(tmp_path / "work", deps)
+    tools_mgr = ToolsMgr()
+    schemas = tools_mgr.get_schemas({"task_delegator"} if can_delegate else set())
+    agent = SimpleNamespace(
+        deps=deps, is_subagent=is_subagent, memory=None,
+        _task_mgr=TaskManager(), _subagent_mgr=subagent_mgr, _tools_schemas=schemas,
+    )
+    prompt_mgr = PromptMgr(
+        agent=agent, model="test-model", workdir=tmp_path / "work",
+        role_prompt="限定子任务" if is_subagent else role_mgr.manifest.prompt,
+    )
+    text = prompt_mgr.build()[0]["content"]
+    assert text.count("# 执行原则") == 1
+    assert ("你持续负责理解用户目标" in text) is (not is_subagent)
+    assert ("完成委派范围内的任务" in text) is is_subagent
+    assert ("# 子智能体协作" in text) is (can_delegate and not is_subagent)
+    assert "优先通过 task_delegator" not in text
+
+    subagent_mgr._documents.clear()
+    prompt_mgr.invalidate_cache()
+    assert "# 子智能体协作" not in prompt_mgr.build()[0]["content"]

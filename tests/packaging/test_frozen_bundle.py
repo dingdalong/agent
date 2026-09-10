@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from .conftest import BINARY, requires_build
+from .conftest import BINARY, ROOT, requires_build
 
 
 def _self_check(env_overrides: dict[str, str] | None = None, cwd: Path | None = None) -> dict:
@@ -80,6 +80,22 @@ def test_bundled_resources_resolved(report: dict) -> None:
     assert resources["missing"] == []
     assert resources["missing_roles"] == []
     assert "_internal" in resources["builtin_root"]
+
+
+@requires_build
+def test_role_agents_skills_and_references_match_source(report: dict) -> None:
+    """随包资源与源码一致，包含按需参考且不残留已删除的执行器。"""
+    source_root = ROOT / "src" / "roles"
+    bundled_root = Path(report["checks"]["resources"]["builtin_root"]) / "roles"
+    expected = {
+        path.relative_to(source_root): path.read_bytes()
+        for path in source_root.rglob("*.md")
+    }
+    actual = {
+        path.relative_to(bundled_root): path.read_bytes()
+        for path in bundled_root.rglob("*.md")
+    }
+    assert actual == expected
 
 
 @requires_build

@@ -1,12 +1,9 @@
 ---
-agent_type: manual-writer
-description: 根据证据生成干净的 Agent 规则、任务技能和证据映射，并在审核通过后安全发布。
-tools: list_directory, glob, grep, get_file_info, read_file, create_directory, write_file, edit_file_lines, move_file
-model: default
-features: [file]
+name: onboard-write-manual
+description: 根据 onboard 已核实证据生成或修订根规则、技能候选与证据映射；不用于普通文档编辑，也不执行独立审核或发布。
 ---
 
-你负责把已落盘的证据编写为面向 Agent 的项目规则和任务技能。你只能按主 agent 明确指定的 `draft`、`revise` 或 `publish` 模式工作，不能自行切换模式。
+主 agent 默认在当前上下文编写或修订候选；需要隔离大量证据综合时可委派 general-purpose 加载本技能。只执行明确的 draft 或 revise 模式，产物均为待审核候选。
 
 ## 固定输入与产物
 
@@ -28,11 +25,11 @@ features: [file]
 - `.agent/onboard/decisions.md`
 - `.agent/onboard/quality-report.md`
 
-主 agent 还必须提供当前仓库快照、范围、模式和运行状态。缺少必需报告、报告快照不一致或模式非法时立即返回错误。
+输入还必须包含当前仓库快照、范围、模式和运行状态。缺少必需报告、报告快照不一致或模式非法时立即返回错误。
 
 ## 规范化规则
 
-- 根规则和任务技能只使用**最终等级**为 `confirmed` 的发现。最终等级以 `verification.md` 的核实结论为准：被 `verifier` 升级为 `confirmed` 的原 `dominant`/`unknown` 可进活跃规则；未被 `verification.md` 覆盖的发现以维度报告原等级为准。不得把措辞强度提升到证据未覆盖的范围。
+- 根规则和任务技能只使用**最终等级**为 `confirmed` 的发现。最终等级以 `verification.md` 的核实结论为准：被 分类核实执行器 升级为 `confirmed` 的原 `dominant`/`unknown` 可进活跃规则；未被 `verification.md` 覆盖的发现以维度报告原等级为准。不得把措辞强度提升到证据未覆盖的范围。
 - 最终等级为 `dominant` 的发现只进入 `reference.md`，同时列出例外和反例。
 - 最终等级为 `conflict`、`unknown` 的发现和人工规范与代码差异只进入 `decisions.md`，每项须带 `verification.md` 的核实原因（为何经有界核对后仍为该等级）。
 - 合并重复发现时在 `reference.md` 保留全部 finding、函数/字段级引用（`module::symbol` 或 `file::field`）和案例；不同适用范围不得为了简短而合并。
@@ -111,34 +108,6 @@ snapshot: <仓库快照>
 - 证据不足时删除候选规则或移入 decisions，不得补写不存在的证据。
 - 保留质量报告用于下一次复审；不得提前发布活跃产物。
 
-## publish 模式
-
-发布前必须读取质量报告并确认 verdict 为 PASS、且质量报告记录的候选快照与主 agent 提供的当前快照相同。候选内容是否变化（内容标识比对）由有 `shell` 的主 agent 在阶段 6 发布预检中把关；本 agent 无 `shell`，不自行重算内容标识。随后完成所有预检，任何预检失败都中止整次发布，在此之前不得写根文件或项目技能。
-
-### 根 AGENTS.md 预检
-
-受管标记必须各自独占一行：
-
-```markdown
-<!-- onboard:generated:start -->
-<!-- onboard:generated:end -->
-```
-
-- 文件不存在时允许创建仅含一组标记和 `generated-rules.md` 原文的新文件；文件存在且两个标记都不存在时允许在末尾追加一组受管区块。
-- 发布阶段中断后不得续跑发布。下一次启动必须由主 agent 要求用户手动清理活跃 onboard 产物后全量重跑。
-- 任一标记单独存在、出现多组、顺序错误或嵌套：中止整次发布。
-
-区块外内容必须逐字保持不变。无标记时使用追加写入；有合法且已批准的区块时只读取确认，不通过重写整个文件重建人工区。
-
-### 项目技能预检
-
-- 从 `generated-skills.md` 枚举全部目标 `.agent/skills/onboard/<task-slug>/SKILL.md`；父分组目录不得有 `SKILL.md`。
-- 所有目标必须不存在。不得覆盖已有的 onboard 技能来实现增量更新。
-- 发布阶段中断后，任何已存在目标都视为需要人工清理的残留，不得自动恢复或覆盖。
-- 任一目标属于人工维护、frontmatter 无法解析、存在旧布局的 onboard 产物，或同一 name 出现在其他技能中，必须中止整次发布，并把冲突返回主 agent 记录到 decisions。
-
-全部预检通过后先写全部项目技能，逐个读取验证 frontmatter 和正文完整，再最后更新根 `AGENTS.md` 的受管区块。发布时只能复制审核通过的候选文本，不得改写、删除注释或重新组织内容。任一写入失败立即停止并返回已写路径，不得声称整次发布成功。
-
 ## 写入与返回
 
-publish 模式不修改任何证据报告、跨模块账本、核实侧车或质量报告。返回内容只包含模式、写入路径、规则/技能数量、跳过项和错误。
+只写候选文件、证据映射和待决策项，不更新根 AGENTS.md 或项目技能，不修改质量报告。返回模式、写入路径、规则/技能数量和未完成项，由主 agent 安排独立审核并发布。

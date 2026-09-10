@@ -31,6 +31,26 @@ class PromptMgr:
         )
         return f"# 核心身份\n{identity}"
 
+    def _build_execution_guidance(self) -> str:
+        """按调用方职责提供所有角色共用的执行原则。"""
+        if self.agent.is_subagent:
+            return (
+                "# 执行原则\n"
+                "完成委派范围内的任务，基于实际输入和工具结果执行与验证。\n"
+                "按任务加载实际可用的技能；技能提供执行方法，不扩大委派范围、当前模式或工具权限。共享摘要是背景材料，核验任务仍需独立检查证据。\n"
+                "需要用户决策或超出范围时，返回具体缺口，由主 agent 沟通；不要假设返回后仍在等待或保留运行状态。\n"
+                "报告实际改动、证据和未完成项，不把推测、失败或用户未确认的事项当成成功或授权。"
+            )
+        return (
+            "# 执行原则\n"
+            "你持续负责理解用户目标、关键决策、执行、整合、验收和交付。默认直接推进工作，委派不转移这些责任。\n"
+            "已有充分上下文、紧密关联的工作及当前阻塞步骤直接执行；常规实现选择自行处理，只有关键歧义或范围取舍才向用户提问。\n"
+            "复用仍有效的上下文与验证证据；信息缺失、内容变化或新风险出现时按需补充检查。\n"
+            "持续推进直到完成或遇到明确阻碍，报告实际结果与未完成项。\n"
+            "角色和技能规定领域目标、产物与验收；只有明确的上下文隔离或独立核验要求才指定委派步骤。\n"
+            "用户明确指定的分工优先；执行始终遵守当前模式和工具权限。"
+        )
+
     def _build_agent_md(self) -> str:
         """四层加载 AGENTS.md：共享 → 角色 → 用户全局 → 项目级，内容叠加。
 
@@ -124,14 +144,15 @@ class PromptMgr:
     def _build_static_prefix(self) -> str:
         """组装 system prompt 的静态部分。
 
-        段顺序：核心身份（primacy）→ 行为准则（AGENTS.md 四层）→ 运行环境
-        → 任务管理指导 → 记忆上下文 → 会话上下文 → 子智能体/技能列表（recency，仅主 agent）。
+        段顺序：核心身份（primacy）→ 统一执行原则 → 行为准则（AGENTS.md 四层）→ 运行环境
+        → 任务管理指导 → 记忆上下文 → 会话上下文 → 协作指引（仅主 agent）与技能列表。
         各可插拔段仅在对应 Manager 存在（feature 已启用）时加入，内容随 Manager 走：
         PromptMgr 负责顺序，Manager 负责内容。
         """
         sections = []
 
         sections.append(self._build_core())
+        sections.append(self._build_execution_guidance())
 
         agent_md = self._build_agent_md()
         if agent_md:
@@ -146,7 +167,7 @@ class PromptMgr:
         # —— 任务管理指导（task feature）——
         task_mgr = getattr(self.agent, "_task_mgr", None)
         if task_mgr is not None:
-            task_guidance = task_mgr.describe(self.agent.is_subagent)
+            task_guidance = task_mgr.describe()
             if task_guidance:
                 sections.append(task_guidance)
 
@@ -158,18 +179,23 @@ class PromptMgr:
         if session_context:
             sections.append(session_context)
 
-        # 仅主 agent：先列参考数据，最后放最关键的可委派资源（recency）
         if not self.agent.is_subagent:
             subagent_mgr = getattr(self.agent, "_subagent_mgr", None)
-            if subagent_mgr is not None:
+            if subagent_mgr is not None and any(
+                schema.get("function", {}).get("name") == "task_delegator"
+                for schema in getattr(self.agent, "_tools_schemas", [])
+            ):
                 subagents = subagent_mgr.prompt_section()
                 if subagents:
                     sections.append(subagents)
-            skill_mgr = getattr(self.agent, "_skill_mgr", None)
-            if skill_mgr is not None:
-                skills = skill_mgr.prompt_section()
-                if skills:
-                    sections.append(skills)
+        skill_mgr = getattr(self.agent, "_skill_mgr", None)
+        if skill_mgr is not None and any(
+            schema.get("function", {}).get("name") == "load_skill"
+            for schema in getattr(self.agent, "_tools_schemas", [])
+        ):
+            skills = skill_mgr.prompt_section()
+            if skills:
+                sections.append(skills)
 
         return "\n\n".join(s for s in sections if s)
 

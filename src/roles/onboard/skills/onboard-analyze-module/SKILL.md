@@ -1,16 +1,13 @@
 ---
-agent_type: module-analyst
-description: 只读单个分片的源码与作用域内代码图，一遍产出四维度证据卡。
-tools: list_directory, glob, grep, get_file_info, read_file, create_directory, write_file, move_file, mcp__codebase-memory__search_graph, mcp__codebase-memory__query_graph, mcp__codebase-memory__trace_path, mcp__codebase-memory__get_code_snippet, mcp__codebase-memory__search_code
-model: default
-features: [file]
+name: onboard-analyze-module
+description: 分析 onboard 指定单个分片的源码与代码图，生成四维度证据卡；不用于全仓库探索或跨分片归类。
 ---
 
-你是 MAP 阶段的分片分析员。你只分析主 agent 指派的**一个分片**，把该分片的源码与作用域内代码图压缩成一张小体量的证据卡。你不横扫整个项目，也不修改仓库代码。证据卡是 REDUCE 阶段四个维度 agent 的唯一输入，必须在有界上下文内完成。
+按指定分片生成证据卡，只读取本片作用域，遵循 onboard 共同准则的证据与产物契约。
 
 ## 输入契约
 
-主 agent 必须提供：
+输入必须包含：
 
 - 仓库快照（commit + 工作区状态）。
 - `shard_id` 与 `.agent/onboard/shard-plan.md` 路径。
@@ -34,7 +31,7 @@ features: [file]
 2. 用 `read_file` 读代表性文件；用 `search_code`/`grep` 在本片内定位命名、错误处理、日志、跨模块调用（含 Lua `require`/`skynet.call`/`skynet.send` 等文本线索）。
 3. 用 `search_graph`/`query_graph` 取本片符号的结构关系；对本片内的链路用 `trace_path` 补调用图（C 侧尤其有效）；`get_code_snippet` 只在需要确认单个符号定义时按符号取用。
 4. **一遍覆盖四个维度**，函数/字段粒度。每条线索给出所属 `module::symbol` 或 `file::field`（可选附文件路径，不强制行号），并标注同片内的样本数与反例。
-5. 无法在本片内判定、或明显依赖 neighbors 的结论，写入「未知项/需跨模块确认」，引用相关 neighbor id，交给 REDUCE 阶段跨卡归类，不在卡内臆断跨模块结论。
+5. 无法在本片内判定、或明显依赖 neighbors 的结论，写入「未知项/需跨模块确认」，引用相关 neighbor id，交给跨模块消解阶段核对后再由 REDUCE 归类，不在卡内臆断跨模块结论。
 
 ## 证据卡结构
 

@@ -150,7 +150,8 @@ class SkillMgr:
             "# 可用技能\n" + describe +
             "\n\n## 技能使用流程\n"
             "当任务匹配某个技能时，调用 load_skill 加载后再执行操作。"
-            "已加载技能的指令优先于本文的通用规则。"
+            "技能提供专业方法，不改变任务授权、当前模式、工具权限与主/子 agent 职责。"
+            "主控技能仅由主 agent 使用；子 agent 只执行委派范围内适用的技能。"
         )
 
     def check_skill(self, name: str) -> bool:

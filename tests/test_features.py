@@ -145,7 +145,7 @@ def test_coding_role_configuration_contract():
 
 
 def test_mijia_role_configuration_contract():
-    """mijia 角色仅声明默认权限和 subagent feature。"""
+    """mijia 启用委派与技能，设备工具由 MCP 提供。"""
     raw_meta, _ = parse_frontmatter(_builtin_role_md_path("mijia").read_text())
     assert "agent_type" not in raw_meta
     assert "tools" not in raw_meta
@@ -157,22 +157,23 @@ def test_mijia_role_configuration_contract():
     assert manifest.model is None
     assert manifest.start_in_plan_mode is False
     assert manifest.enable_thinking is False
-    assert manifest.features == {"subagent"}
+    assert manifest.features == {"subagent", "skill"}
     assert manifest.tools is None
     assert manifest.reasoning_effort is None
     assert manifest.memory is None
 
 
 def test_mijia_role_features_and_schema():
-    """mijia 声明 features:[subagent]，解析后仅保留 subagent，有效工具集恰好排除其余 feature 工具。"""
+    """mijia 可加载技能，仍不开放文件、任务、记忆或计划工具。"""
     manifest = _load_role_manifest("mijia")
-    assert manifest.features == {"subagent"}
+    assert manifest.features == {"subagent", "skill"}
     feats = resolve_features(manifest.features)
-    assert feats == {"subagent"}
+    assert feats == {"subagent", "skill"}
     mgr = ToolsMgr()
     effective = mgr.all_tool_names() - mgr.excluded_tool_names(feats)
     assert "task_delegator" in effective
-    for absent in ("task_create", "load_skill", "read_file", "write_file",
+    assert "load_skill" in effective
+    for absent in ("task_create", "read_file", "write_file",
                    "save_memory", "set_plan_file", "exit_plan_mode"):
         assert absent not in effective
 

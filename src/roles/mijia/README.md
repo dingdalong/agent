@@ -32,11 +32,12 @@ role:
 角色资产（子 agent、技能、人设、AGENTS.md）位于 `src/roles/mijia/`，
 与 `src/roles/coding/` 平级，均为内置角色。
 
-## MCP 工具名回填
+## 设备工具与技能
 
-子 agent 的 `tools:` 白名单依赖米家 MCP server 暴露的具体工具名。
-连接 MCP server 后运行一次应用，从日志中找到注册的 `mcp__mijia__*` 名称，
-回填到 `src/roles/mijia/agents/*.md` 的 `tools:` 字段。
+连接米家 MCP server 后，主 agent 使用运行时实际注册的工具查询和控制设备。
+控制、诊断、场景管理分别通过 `builtin:control-devices`、`builtin:diagnose-home`、
+`builtin:manage-scenes` 加载方法；独立任务可由通用子 agent 使用同一技能执行。
+工具缺失时报告缺口，不需要修改内置资源回填工具名。
 
 ## 切换回编程角色
 

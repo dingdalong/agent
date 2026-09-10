@@ -19,17 +19,8 @@ from src.mgr.tools_mgr import ToolsMgr
 
 ROLE_DIR = builtin_root() / "roles" / "onboard"
 
-EXPECTED_AGENTS = {
-    "repository-map",
-    "module-analyst",
-    "cross-module",
-    "dimension-classifier",
-    "verifier",
-    "manual-writer",
-    "manual-reviewer",
-}
+EXPECTED_AGENTS = {"repository-map", "evidence-analyst", "evidence-reviewer"}
 
-# 四维度合并进 dimension-classifier 后，四份报告仍各自存在，由主 agent 按维度并行调度
 DIMENSIONS = ("conventions", "runtime-flow", "change-patterns", "guardrails")
 
 MAIN_TOOLS = {
@@ -39,6 +30,7 @@ MAIN_TOOLS = {
     "edit_file_lines",
     "get_file_info",
     "list_directory",
+    "load_skill",
     "move_file",
     "read_file",
     "read_tool_result",
@@ -157,7 +149,7 @@ async def _registered_onboard_tool_names(cache_dir: Path) -> set[str]:
 def test_onboard_role_declares_pipeline_agents_and_isolated_features() -> None:
     """onboard 应只暴露证据流水线代理，且子代理不得继承主代理 feature。"""
     role = _load_manifest(ROLE_DIR / "role.md", main=True)
-    assert role.features == {"subagent", "file", "task"}
+    assert role.features == {"subagent", "file", "task", "skill"}
     assert role.tools == MAIN_TOOLS
 
     manifests = {
@@ -168,7 +160,6 @@ def test_onboard_role_declares_pipeline_agents_and_isolated_features() -> None:
 
     tools_mgr = ToolsMgr()
     forbidden_tools = {
-        "load_skill",
         "task_create",
         "task_delegator",
         "task_get",
@@ -179,13 +170,16 @@ def test_onboard_role_declares_pipeline_agents_and_isolated_features() -> None:
     }
     for manifest in manifests.values():
         assert manifest.agent_type == manifest.path.stem
-        assert manifest.features == {"file"}
+        assert manifest.features == {"file", "skill"}
         assert manifest.start_in_plan_mode is False
         effective_tools = (
             tools_mgr.resolve_subagent_tools(manifest.tools)
             - tools_mgr.excluded_tool_names(resolve_features(manifest.features))
         )
         assert effective_tools.isdisjoint(forbidden_tools)
+        assert "load_skill" in effective_tools
+        if manifest.agent_type != "repository-map":
+            assert "mcp__codebase-memory__index_repository" not in effective_tools
 
 
 def test_onboard_agents_declare_only_registered_tools() -> None:
@@ -253,8 +247,8 @@ def test_onboard_role_orchestrates_file_backed_review_pipeline() -> None:
         assert agent_type in role_text
         assert report_path in role_text
     assert "同一轮" in role_text
-    assert "manual-writer" in role_text
-    assert "manual-reviewer" in role_text
+    assert "builtin:onboard-write-manual" in role_text
+    assert "builtin:onboard-review-manual" in role_text
     assert "最多两轮修订" in role_text
     assert "第三次" in role_text and "不发布" in role_text
     assert "快照" in role_text and "续跑" in role_text
@@ -266,7 +260,7 @@ def test_snapshot_contract_excludes_onboard_generated_outputs() -> None:
     prompt_paths = (
         ROLE_DIR / "role.md",
         ROLE_DIR / "agents" / "repository-map.md",
-        ROLE_DIR / "agents" / "manual-reviewer.md",
+        ROLE_DIR / "skills" / "onboard-review-manual" / "SKILL.md",
     )
 
     for prompt_path in prompt_paths:
@@ -281,19 +275,20 @@ def test_analysis_agents_write_standard_reports_without_fixed_game_systems() -> 
     repo_map = (ROLE_DIR / "agents" / "repository-map.md").read_text()
     assert EVIDENCE_REPORTS["repository-map"] in repo_map
 
-    # 四维度合并进 dimension-classifier：一份定义承载四份报告路径、写入边界与覆盖纪律
-    classifier = (ROLE_DIR / "agents" / "dimension-classifier.md").read_text()
+    classifier = (ROLE_DIR / "skills" / "onboard-classify-evidence" / "SKILL.md").read_text()
     for dimension in DIMENSIONS:
         assert EVIDENCE_REPORTS[dimension] in classifier
     assert "只允许写入" in classifier
     assert "覆盖" in classifier
     assert "证据" in classifier
 
-    # change-patterns 维度不得由预设业务系统驱动，并保留技能候选门槛
+    change_patterns = (
+        ROLE_DIR / "skills" / "onboard-classify-evidence" / "references" / "change-patterns.md"
+    ).read_text()
     for fixed_system in ("背包", "组队", "GVG", "聊天/社交"):
-        assert fixed_system not in classifier
-    assert "两个独立完整案例" in classifier
-    assert "生成器或框架模板" in classifier
+        assert fixed_system not in change_patterns
+    assert "两个独立完整案例" in change_patterns
+    assert "生成器或框架模板" in change_patterns
 
 
 def test_command_guidance_requires_an_authoritative_invocation_source() -> None:
@@ -307,9 +302,10 @@ def test_command_guidance_requires_an_authoritative_invocation_source() -> None:
 
 
 def test_writer_and_reviewer_enforce_managed_publication_contract() -> None:
-    """编写与审核代理应发布干净正文，并用侧车证据完成审核。"""
-    writer = (ROLE_DIR / "agents" / "manual-writer.md").read_text()
-    reviewer = (ROLE_DIR / "agents" / "manual-reviewer.md").read_text()
+    """编写者生成候选、审核者独立核验、主 agent 执行发布。"""
+    writer = (ROLE_DIR / "skills" / "onboard-write-manual" / "SKILL.md").read_text()
+    reviewer = (ROLE_DIR / "skills" / "onboard-review-manual" / "SKILL.md").read_text()
+    publisher = (ROLE_DIR / "role.md").read_text()
 
     for text in (writer, reviewer):
         assert ".agent/onboard/generated-rules.md" in text
@@ -318,17 +314,20 @@ def test_writer_and_reviewer_enforce_managed_publication_contract() -> None:
         assert ".agent/onboard/decisions.md" in text
         assert ".agent/onboard/quality-report.md" in text
 
-    assert MANAGED_START in writer
-    assert MANAGED_END in writer
+    assert MANAGED_START in publisher
+    assert MANAGED_END in publisher
     assert "200 行" in writer
     assert "generated_by: onboard" in writer
     assert ".agent/skills/onboard/<task-slug>/SKILL.md" in writer
     assert ".agent/skills/onboard/SKILL.md" not in writer
     assert "不得在根 `AGENTS.md` 受管区块或技能正文中保留" in writer
     assert "证据映射" in writer
-    assert "区块外" in writer and "保持不变" in writer
-    assert "中止整次发布" in writer
-    assert "draft" in writer and "revise" in writer and "publish" in writer
+    assert "区块外" in publisher and "保持不变" in publisher
+    assert "中止整次发布" in publisher
+    assert "draft" in writer and "revise" in writer
+    assert "publish 模式" not in writer
+    assert "主 agent" in publisher and "亲自发布" in publisher
+    assert 'shared_context="none"' in publisher
 
     assert "confirmed" in reviewer
     assert "PASS" in reviewer and "FAIL" in reviewer
@@ -409,18 +408,18 @@ def test_resume_requires_same_snapshot_and_rejects_published_runs() -> None:
 def test_publish_interruption_requires_manual_cleanup() -> None:
     """活跃文件开始写入后若中断，不能绕过快照校验继续发布。"""
     role_text = (ROLE_DIR / "role.md").read_text()
-    writer = (ROLE_DIR / "agents" / "manual-writer.md").read_text()
-    reviewer = (ROLE_DIR / "agents" / "manual-reviewer.md").read_text()
+    writer = (ROLE_DIR / "skills" / "onboard-write-manual" / "SKILL.md").read_text()
+    reviewer = (ROLE_DIR / "skills" / "onboard-review-manual" / "SKILL.md").read_text()
 
     assert "发布阶段中断" in role_text
     assert "手动清理后全量重跑" in role_text
-    assert "发布阶段中断" in writer
+    assert "不更新根 AGENTS.md 或项目技能" in writer
     assert "发布阶段中断" in reviewer
 
 
 def test_reduce_agents_overwrite_and_verify_before_publish() -> None:
-    """合并后的 dimension-classifier 应校验 shard 覆盖后再发布；全量覆盖纪律由共享准则统一约束。"""
-    classifier = (ROLE_DIR / "agents" / "dimension-classifier.md").read_text()
+    """归类技能应校验 shard 覆盖后再发布；全量覆盖纪律由共享准则统一约束。"""
+    classifier = (ROLE_DIR / "skills" / "onboard-classify-evidence" / "SKILL.md").read_text()
     assert "input_key" not in classifier
     assert "shard" in classifier and "覆盖" in classifier
 
