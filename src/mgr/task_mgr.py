@@ -676,14 +676,17 @@ class TaskManager:
 
         当存在未完成任务且连续多轮未使用任务工具时，
         返回格式化的任务列表帮助模型恢复对任务的感知（特别是 compact 后）。
+        Plan 模式下任务写工具被权限层拒绝，因此不注入任何任务提醒。
 
         Args:
-            mode: 调用方 agent 的权限模式（TaskManager 不使用，遵循统一接口）。
+            mode: 调用方 agent 是否处于 Plan 模式；为真时静默。
             is_subagent: 调用方是否为子智能体（TaskManager 不使用，遵循统一接口）。
 
         Returns:
             任务状态摘要文本，无未完成任务或近期使用过任务工具时返回空串。
         """
+        if mode:
+            return ""
         if not self.has_open_items() or self._rounds_without_update < 3:
             return ""
         lines: list[str] = []
@@ -711,14 +714,17 @@ class TaskManager:
 
         当存在未完成项且连续多轮未调用任务工具时，返回提醒文本。
         标签包装由 ReminderMgr 统一处理。
+        Plan 模式下任务写工具被权限层拒绝，因此不注入任何任务提醒。
 
         Args:
-            mode: 调用方 agent 的权限模式（TaskManager 不使用，遵循统一接口）。
+            mode: 调用方 agent 是否处于 Plan 模式；为真时静默。
             is_subagent: 调用方是否为子智能体（TaskManager 不使用，遵循统一接口）。
 
         Returns:
             提醒纯文本，或 None 表示无需注入。
         """
+        if mode:
+            return None
         if self.has_open_items() and self._rounds_without_update >= 3:
             return "更新你的任务列表。"
         return None

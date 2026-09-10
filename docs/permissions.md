@@ -97,13 +97,13 @@ EXTERNAL 工具在执行前发现秘密即 Hard Deny；DYNAMIC Shell 还会运�
 
 ## Plan
 
-Plan 是 `Agent.plan_active: bool`，不是授权策略变体。`PlanModeController` 只管理入口 Agent 的 Shift+Tab 双向切换和 `PlanStateChanged`；`/plan` 与 `enter_plan_mode` 进入 Plan，`exit_plan_mode` 提供展示与审核工作流，但不是唯一退出方式。活动计划路径在快捷键退出时保留。
+Plan 是 `Agent.plan_active: bool`，不是授权策略变体。`PlanModeController` 只管理入口 Agent 的 Shift+Tab 双向切换和 `PlanStateChanged`；`/plan` 与 Shift+Tab 进入 Plan，`exit_plan_mode` 提供展示与审核工作流。计划模式只能由用户切换，LLM 没有进入工具。活动计划路径在快捷键退出时保留。
 
 Plan 激活时只允许：
 
 - LOCAL_READ。
 - EXTERNAL_READ，但仍须通过 Web 本地隐私预检；疑似敏感内容转一次性人工确认。
-- `plan_safe=True` 的 INTERNAL 工具。
+- `plan_safe=True` 的 INTERNAL 工具；`task_create`/`task_update` 不声明 `plan_safe`，因此在 Plan 模式下被拒绝，只读的 `task_list`/`task_get` 仍放行。
 - 规范化后位于 `.agent/plans/**` 的 WORKSPACE_WRITE。
 
 其他调用直接以 `source="plan"` 拒绝，不调用智能权限。子 Agent 在构造时继承父 Agent 当前 Plan 状态。

@@ -370,7 +370,7 @@ def test_parallel_delegations_are_isolated(
 ) -> None:
     """并行委派各自的注入内容互不串扰，且两条都记了账。
 
-    计划工作流要求最多 3 个 explore 并行委派。若把"本次委派注入什么"存到进程级
+    计划工作流允许同一轮并行委派多个 explore。若把"本次委派注入什么"存到进程级
     单例的槽位上，`asyncio.gather` 会让它们互相覆盖——这正是 PlanMgr 的
     `_pending_injection` / `_reminder_mgr` 已经踩过的坑。注入点放在
     task_delegator 的局部变量里天然免疫。

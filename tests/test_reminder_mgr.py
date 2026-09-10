@@ -94,12 +94,14 @@ def test_real_providers_accept_new_signature(tmp_path: Path) -> None:
     for _ in range(3):
         task_mgr.notify_tool_round(["read_file"])
 
-    turn_start = mgr.build_turn_start_instructions(True, False)
-    post_round = mgr.collect_post_round_messages(True, False)
+    plan_turn_start = mgr.build_turn_start_instructions(True, False)
+    task_turn_start = mgr.build_turn_start_instructions(False, False)
+    task_post_round = mgr.collect_post_round_messages(False, False)
 
-    assert _PLAN_SKILL_KEY in turn_start
-    assert "当前任务列表" in turn_start
-    assert post_round == [
+    assert _PLAN_SKILL_KEY in plan_turn_start
+    assert "当前任务列表" not in plan_turn_start  # Plan 模式静默任务提醒
+    assert "当前任务列表" in task_turn_start
+    assert task_post_round == [
         {"role": "user", "content": "<reminder>更新你的任务列表。</reminder>"},
     ]
 

@@ -172,7 +172,7 @@ class SubAgentMgr:
         prompt 前面，委派后把子智能体的返回报告自动记账供后续委派复用。之所以放在
         这里而不是 ReminderMgr，是因为 ReminderMgr 的 provider 只收
         `(plan_active, is_subagent)`，拿不到本次委派信息，按委派过滤就得在进程级
-        单例上存槽位——而计划工作流要求最多 3 个 explore 并行委派，`asyncio.gather`
+        单例上存槽位——而计划工作流允许同一轮并行委派多个 explore，`asyncio.gather`
         会互相覆盖那个槽位（PlanMgr 的 `_pending_injection` / `_reminder_mgr` 已经
         踩过同一个坑）。本方法的局部变量天然 per-delegation、并发安全。
 

@@ -27,7 +27,7 @@ class TaskCreateModel(BaseModel):
 @tool(
     model=TaskCreateModel,
     description="创建新任务（状态为 pending）。",
-    policy=ToolPolicy(AccessKind.INTERNAL, DataFlow.LOCAL, plan_safe=True),
+    policy=ToolPolicy(AccessKind.INTERNAL, DataFlow.LOCAL),
     subagent=True,
     feature="task",
 )
@@ -76,7 +76,7 @@ class TaskUpdateModel(BaseModel):
 @tool(
     model=TaskUpdateModel,
     description="更新任务字段。",
-    policy=ToolPolicy(AccessKind.INTERNAL, DataFlow.LOCAL, plan_safe=True),
+    policy=ToolPolicy(AccessKind.INTERNAL, DataFlow.LOCAL),
     subagent=True,
     feature="task",
 )

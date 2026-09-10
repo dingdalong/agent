@@ -3,7 +3,7 @@
 ## 为什么需要它
 
 子 agent 的 history 从空开始，唯一输入是 `task_delegator` 的 prompt 字符串
-（`SubAgentMgr.task_delegator`）。这意味着 3 个并行 `explore` 的发现必须由主 agent
+（`SubAgentMgr.task_delegator`）。这意味着并行 `explore` 的发现必须由主 agent
 手抄摘要进下一个委派 prompt，抄漏了下游子 agent 就重新探索一遍。
 
 而框架其实白拿着最有价值的文本：子 agent 的 `run_result.final_text`。`explore` 的
@@ -19,8 +19,8 @@
    8-15k token 的前缀每次委派全部 miss。放消息尾部则只是增量，前缀命中不受影响。
 2. **注入点是 `SubAgentMgr.task_delegator` 而非 `ReminderMgr`。**
    ReminderMgr 的 provider 只收 `(plan_active, is_subagent)`，拿不到本次委派信息；
-   要支持按委派过滤就得在进程级单例上存槽位，而计划工作流要求最多 3 个 explore
-   并行委派，`asyncio.gather` 会互相覆盖——这正是 PlanMgr 已知缺陷
+   要支持按委派过滤就得在进程级单例上存槽位，而计划工作流允许同一轮并行委派多个
+   explore，`asyncio.gather` 会互相覆盖——这正是 PlanMgr 已知缺陷
    （`_pending_injection` 被抢先消费、`_reminder_mgr` 单槽位被覆盖）的同一个坑。
 3. **落盘必须由本 Manager 用 Python 直接写，不能改成 `write_file` 工具。**
    `PathResolver` 把 `.agent` 列为 protected → `.agent/context/**` 是

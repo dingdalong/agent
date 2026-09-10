@@ -38,7 +38,6 @@ def test_tool_title_file_tools():
 
 
 def test_tool_title_plan_tools():
-    assert tool_title("enter_plan_mode") == "进入计划模式"
     assert tool_title("set_plan_file") == "设置计划文件"
     assert tool_title("exit_plan_mode") == "提交计划"
 
@@ -204,7 +203,6 @@ def test_format_params_memory_tools():
 
 
 def test_format_params_plan_tools():
-    assert format_params("enter_plan_mode", {}) == ""
     assert format_params("set_plan_file", {"file_path": "/plans/foo.md"}) == "/plans/foo.md"
     assert format_params("exit_plan_mode", {"file_path": "/plans/foo.md"}) == "/plans/foo.md"
 

@@ -184,7 +184,7 @@ ALL_FEATURES = frozenset({"task", "skill", "subagent", "file", "memory", "plan"}
 | `subagent` | `SubAgentMgr`（`agent.py:145-148`），`task_delegator` 工具 |
 | `file` | `FileMgr`（`agent.py:140`），文件读写工具 |
 | `memory` | `MemoryMgr`（`bootstrap.py:50`），记忆工具与提示词段 |
-| `plan` | `PlanMgr`（`bootstrap.py:53`），4 个 plan 工具，计划模式 |
+| `plan` | `PlanMgr`（`bootstrap.py:53`），2 个 plan 工具（`set_plan_file`、`exit_plan_mode`），计划模式 |
 
 `create_app()` 用 `resolve_features(role_mgr.manifest.features)` 计算有效集（`bootstrap.py:49`），决定 `MemoryMgr`/`PlanMgr` 是否实例化。每个 `Agent` 在 `__post_init__` 中再次调用 `resolve_features(self.features)`（`agent.py:125-126`）解析自身 feature 集，据此过滤工具 schema、按需创建 agent 级 Manager。子 agent 的 feature 集：自身 manifest 声明则用其值，否则继承父 agent。详见 [roles-subagents-skills.md](./roles-subagents-skills.md) 与 [managers.md](./managers.md)。
 

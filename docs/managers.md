@@ -375,7 +375,7 @@ MCP 连接配置和授权边界见 [mcp-and-hooks.md](mcp-and-hooks.md)。
 **三条设计约束**（改这块前必读）：
 
 1. **注入载体只能是子 agent 的首条 user 消息，绝不能进 system prompt。** Anthropic 把整个 system 包成单个 ephemeral 缓存断点（`src/llm/anthropic.py:_system_blocks`），断点覆盖 tools+system 整个前缀；账本是动态的，进 system 会让一个 coder 约 8-15k token 的前缀每次委派全部 miss。
-2. **注入点是 `SubAgentMgr.task_delegator` 而非 `ReminderMgr`。** ReminderMgr 的 provider 只收 `(plan_active, is_subagent)`，拿不到本次委派信息；按委派过滤就得在进程级单例上存槽位，而计划工作流要求最多 3 个 `explore` 并行委派，`asyncio.gather` 会互相覆盖——PlanMgr 的 `_pending_injection` / `_reminder_mgr` 已经踩过同一个坑。
+2. **注入点是 `SubAgentMgr.task_delegator` 而非 `ReminderMgr`。** ReminderMgr 的 provider 只收 `(plan_active, is_subagent)`，拿不到本次委派信息；按委派过滤就得在进程级单例上存槽位，而计划工作流允许同一轮并行委派多个 `explore`，`asyncio.gather` 会互相覆盖——PlanMgr 的 `_pending_injection` / `_reminder_mgr` 已经踩过同一个坑。
 3. **落盘必须由本 Manager 直接写，不能改成 `write_file` 工具。** `.agent` 被 `PathResolver` 归为 protected，`.agent/context/**` 因此是 `PathClass.PROTECTED`；而 plan 模式下 `PermissionManager._authorize_plan()` 只放行 `PathClass.PLAN`，走 `write_file` 必被拒——plan 模式恰是本机制最痛的场景。触发它的工具（`task_delegator`、`note_context`）声明 `INTERNAL + plan_safe=True`，与 `save_memory` 同构。
 
 **生命周期语义**：`/clear` 走 `reload()` 清内存、磁盘旧文件保留供排查，新会话按新 `session_id` 另开文件。**resume 不恢复账本**——恢复的历史里主 agent 已带着全部工具结果，账本只服务后续新委派，这是刻意设计不是遗漏。
@@ -390,7 +390,7 @@ MCP 连接配置和授权边界见 [mcp-and-hooks.md](mcp-and-hooks.md)。
 
 `src/mgr/plan_mgr.py`
 
-**单一职责**：管理计划目录、计划内容与进入/展示/审核/执行工作流，并作为提醒源向 `ReminderMgr` 注入 Plan 指令。`agent.plan_active` 是状态权威；允许哪些工具由 `PermissionManager` 的独立 Plan 约束保证。
+**单一职责**：管理计划目录、计划内容与展示/审核/执行工作流，并作为提醒源向 `ReminderMgr` 注入 Plan 指令。`agent.plan_active` 是状态权威；允许哪些工具由 `PermissionManager` 的独立 Plan 约束保证。
 
 **消费的配置或文件**：计划文件目录 `{workdir}/.agent/plans/`。
 
@@ -400,16 +400,16 @@ MCP 连接配置和授权边界见 [mcp-and-hooks.md](mcp-and-hooks.md)。
 |---|---|---|---|
 | `enter_mode` | `agent`, `reminder_mgr` | `bool` | 设置 `plan_active=True` 并注册提醒源；已激活时返回 False |
 | `exit_mode` | `agent`, `reminder_mgr` | `bool` | 设置 `plan_active=False` 并置退出提醒标志；未激活时返回 False |
-| `set_last_plan_path` | `path: str` | `None` | 记录最后提交的计划文件路径（供重入提示词引用） |
+| `set_active_plan_path` | `path: str` | `None` | 记录当前活跃的计划文件路径（供计划模式指令引用） |
 | `get_turn_start_reminder` | `plan_active, is_subagent` | `str` | turn 开始时注入 plan 指令，或退出后一次性退出提醒 |
 | `pop_post_round_reminder` | `plan_active, is_subagent` | `str \| None` | 轮中进入 plan 时注入指令 |
 | `reload` | — | `None` | 重置会话级状态 |
 
-Plan 指令按调用方身份分叉：主 agent 版含 `load_skill` 计划工作流引导、计划目录与「当前计划」段；子 agent 版只声明只读约束与「返回结论、不写文件」，不含任何计划文件写入引导。
+Plan 指令按调用方身份分叉：主 agent 版含 `load_skill` 计划工作流引导、计划目录与「当前计划」段；子 agent 版只声明只读约束与「返回结论、不写文件」，不含任何计划文件写入引导。计划模式只能由用户通过 `/plan` 或 Shift+Tab 切换；主 agent 指令明确禁止自行进出，并要求完成计划后用 `exit_plan_mode` 提交。
 
 **feature 门控**：`plan`（依赖 `file`；未启用时 `bootstrap` 注入 `None`）。 **reload**：有。
 
-**持有的关键状态**：`_plan_dir`、`_pending_injection`、`_need_exit_reminder`、`_last_plan_path`。
+**持有的关键状态**：`_plan_dir`、`_pending_injection`、`_need_exit_reminder`、`_active_plan_path`。
 
 计划工作流与授权约束见 [permissions.md](permissions.md) 与 [agent-runtime.md](agent-runtime.md)。
 
@@ -465,9 +465,9 @@ Plan 指令按调用方身份分叉：主 agent 版含 `load_skill` 计划工作
 | `get_task` | `task_id` | `dict` | 单任务完整详情（不存在抛 `ValueError`） |
 | `has_open_items` | — | `bool` | 是否有未完成任务 |
 | `describe` | `is_subagent` | `str` | 任务管理提示词（主/子 agent 各返回独立文本） |
-| `get_turn_start_reminder` | `mode, is_subagent` | `str` | 未完成且连续 ≥3 轮未用任务工具时注入任务列表 |
+| `get_turn_start_reminder` | `mode, is_subagent` | `str` | 未完成且连续 ≥3 轮未用任务工具时注入任务列表；Plan 模式静默 |
 | `notify_tool_round` | `tool_names` | `None` | 含任意 `task_*` 工具则重置计数，否则 +1 |
-| `pop_post_round_reminder` | `mode, is_subagent` | `str \| None` | 同条件下提示“更新你的任务列表” |
+| `pop_post_round_reminder` | `mode, is_subagent` | `str \| None` | 同条件下提示“更新你的任务列表”；Plan 模式静默 |
 | `cleanup_if_all_completed` | — | `bool` | 轮末收尾：全部任务 `completed` 时清空内存列表、删除 tasks 目录并发布空快照（隐藏 UI 面板）；否则返回 `False` 不清理 |
 
 **feature 门控**：`task`（未启用时 `Agent` 中为 `None`）。 **reload**：无（`/clear` 由 `Agent` 侧新建实例处理，非实例 `reload()`）。

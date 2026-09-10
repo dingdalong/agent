@@ -1,4 +1,4 @@
-"""计划工作流工具 — 进入/退出计划模式、设置计划文件。"""
+"""计划工作流工具 — 设置计划文件、提交计划审核。"""
 
 from __future__ import annotations
 
@@ -15,54 +15,6 @@ from src.tools.decorator import tool
 
 if TYPE_CHECKING:
     from src.agent import Agent, AgentDeps
-
-
-# ── enter_plan_mode ─────────────────────────────────────────────────
-
-
-class EnterPlanMode(BaseModel):
-    """无参数。"""
-    pass
-
-
-@tool(
-    model=EnterPlanMode,
-    description=(
-        "切换到计划模式，用于在实施前进行结构化规划。计划模式下仅允许只读操作和计划文件的写入。\n\n"
-        "何时使用：\n"
-        "- 用户明确要求制定计划或进入计划模式\n"
-        "- 任务涉及多个文件或模块、需要先理解后实施\n"
-        "- 存在多种可行方案、需要探索和设计（如架构选型、缓存策略）\n"
-        "- 需求不明确，需先探索代码库再确定实现路径\n"
-        "- 用户请求较复杂（超过 3 个步骤）且你不确定最佳路径\n\n"
-        "何时不使用：\n"
-        "- 简单的单文件修改或明确的小任务\n"
-        "- 用户明确要求直接实施、不要计划\n"
-        "- 纯研究或探索任务（用子智能体即可）\n"
-        "- 已在计划模式中"
-    ),
-    policy=ToolPolicy(AccessKind.INTERNAL, DataFlow.LOCAL, plan_safe=True),
-    subagent=False,
-    feature="plan",
-)
-async def enter_plan_mode(agent: Agent, deps: AgentDeps) -> str:
-    """将当前 agent 切换到 PLAN_MODE。
-
-    Args:
-        agent: 当前 Agent 实例。
-        deps: AgentDeps 依赖对象，提供 plan_mgr。
-
-    Returns:
-        操作结果描述。
-    """
-    plan_mgr = deps.plan_mgr
-    if plan_mgr is None:
-        return "错误：计划管理器不可用"
-
-    if not agent.set_plan_active(True):
-        return "已在计划模式中。"
-
-    return "已进入计划模式。"
 
 
 # ── set_plan_file ──────────────────────────────────────────────────
@@ -161,13 +113,11 @@ async def exit_plan_mode(file_path: str, agent: Agent, deps: AgentDeps, authoriz
             _read_validated_plan_file, file_path, deps, authorization
         )
     except (OSError, PathResolutionError):
-        plan_mgr.exit_mode(agent, reminder_mgr)
-        return "计划文件不存在，已退出计划模式。"
+        return "错误：计划文件不存在或不可读，仍处于计划模式。请先写入计划文件再提交。"
 
     plan_content = str(deps.data_guard.redact(plan_content))
     if not plan_content.strip():
-        plan_mgr.exit_mode(agent, reminder_mgr)
-        return "计划为空，已退出计划模式。"
+        return "错误：计划文件为空，仍处于计划模式。请先写入计划内容再提交。"
 
     # 表头（路径/标签）为结构化 chrome 走纯文本；计划正文是 LLM 写的 Markdown，单独按 Markdown 渲染。
     await deps.event_bus.request_output(f"\n计划文件：\n{file_path}\n\n计划内容：\n")

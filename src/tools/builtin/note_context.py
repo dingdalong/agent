@@ -5,7 +5,7 @@
 对话中确认的决策与约束，以及子智能体在长任务中途得出的、不适合等到最终报告才说的
 阶段性结论。
 
-策略取 `AccessKind.INTERNAL + plan_safe=True`，与 `save_memory` / `task_create`
+策略取 `AccessKind.INTERNAL + plan_safe=True`，与 `save_memory` / `task_list`
 同构：落盘由 ContextMgr 内部完成，不经 `write_file`。这一点是刻意的——`.agent`
 被 PathResolver 归为 PROTECTED，而 plan 模式下 `_authorize_plan()` 只放行
 `PathClass.PLAN`，改用 write_file 落盘会让本工具在 plan 模式下必然被拒。

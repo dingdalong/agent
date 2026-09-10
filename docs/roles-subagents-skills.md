@@ -52,7 +52,7 @@ role:
 
 | 角色 | `startInPlanMode` | `thinking` / `reasoning_effort` | `memory` | `features` | 子 agent（`agents/`） | 说明 |
 |---|---|---|---|---|---|---|
-| `coding` | `true` | `true` / `max` | `project` | 未声明（全部启用） | coder、debug、doc、explore、plan、review、shell | 通用编程助手（默认角色） |
+| `coding` | `true` | `true` / `max` | `project` | 未声明（全部启用） | coder、debug、doc、explore、review、shell | 通用编程助手（默认角色） |
 | `mijia` | `false` | `false` / 未声明 | 未声明 | `[subagent]` | device-control、home-diagnostics、home-status、scene-automation | 米家智能家居管家 |
 | `onboard` | `false` | `true` / `high` | 未声明 | `[subagent, file, task]` | repository-map、module-analyst、cross-module、dimension-classifier、verifier、manual-writer、manual-reviewer | 证据驱动的项目开发手册分析与发布角色 |
 
@@ -140,7 +140,6 @@ onboard 的续跑只适用于同一未发布运行：`cross_module`、四个维�
 |---|---|---|---|
 | `explore` | 只读检索 + `web_search`/`web_fetch` | `default` | 只读探索代码/架构、联网研究并总结证据 |
 | `general-purpose` | 全部（未声明） | `default` | 无专用 agent 匹配时的兜底任务执行 |
-| `plan` | 只读检索（无写） | `default` | 架构设计与实现方案规划 |
 | `shell` | `shell` | `fast` | 独立上下文运行命令 / Git 查询 / 测试执行 |
 
 **coding 角色**

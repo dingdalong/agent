@@ -54,7 +54,7 @@ class PlanMgr:
     def enter_mode(self, agent: Agent, reminder_mgr: ReminderMgr) -> bool:
         """进入计划模式并注册提醒。
 
-        enter_plan_mode 工具、/plan 命令和 Shift+Tab 均调用此方法。
+        /plan 命令、Shift+Tab 和 startInPlanMode 初始化均调用此方法。
 
         Args:
             agent: 目标 Agent。
@@ -129,7 +129,7 @@ class PlanMgr:
                 "此指令覆盖其他指令中与之冲突的部分。\n\n"
                 "## 限制\n"
                 "- 禁止编辑、创建或删除任何项目文件\n"
-                "- 禁止执行会修改系统状态的 shell 命令\n"
+                "- 禁止执行任何 shell 命令、测试或构建（计划模式严格只读）\n"
                 "- 允许使用只读工具（读取文件、搜索、浏览等）进行探索\n\n"
                 "## 产出\n"
                 "完成委派任务并返回结论，不要尝试写入任何文件。\n"
@@ -140,12 +140,14 @@ class PlanMgr:
             "当前处于计划模式。此指令覆盖其他指令中与之冲突的部分。\n\n"
             "## 限制\n"
             "- 禁止编辑、创建或删除计划文件以外的任何项目文件\n"
-            "- 禁止执行会修改系统状态的 shell 命令\n"
+            "- 禁止执行任何 shell 命令、测试或构建（计划模式严格只读）\n"
             "- 允许使用只读工具（读取文件、搜索、浏览等）进行探索\n"
+            "- 计划模式只能由用户通过 /plan 或 Shift+Tab 切换；不要自行进入或退出\n"
             f"- 计划文件目录：{plan_dir}\n"
             "- 使用 write_file / edit_file_lines 操作计划文件（路径以上述目录为前缀）\n\n"
             "## 下一步\n"
             f"调用 load_skill('{_PLAN_SKILL_KEY}') 加载计划工作流，然后严格按照其指令执行。\n"
+            "完成计划后调用 exit_plan_mode 提交审核，不要自行退出计划模式。\n"
         )
 
         if self._active_plan_path:

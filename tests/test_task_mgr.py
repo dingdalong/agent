@@ -186,3 +186,16 @@ def test_task_notifier_delivers_from_loop_and_worker_thread() -> None:
         ]
 
     asyncio.run(run())
+
+
+def test_plan_mode_suppresses_task_reminders(tmp_path: Path) -> None:
+    """Plan 模式下不注入任务提醒：写工具被权限层拒绝，提示无法执行。"""
+    mgr = TaskManager(tasks_dir=tmp_path / "tasks")
+    mgr.create("task 1", "desc 1")
+    for _ in range(3):
+        mgr.notify_tool_round([])
+
+    assert mgr.get_turn_start_reminder(True, False) == ""
+    assert mgr.pop_post_round_reminder(True, False) is None
+    assert mgr.get_turn_start_reminder(False, False) != ""
+    assert mgr.pop_post_round_reminder(False, False) == "更新你的任务列表。"

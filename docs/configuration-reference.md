@@ -153,7 +153,7 @@
 | `context.enabled` | bool | `true` | `true`/`false` | 总开关。`false` 时不记账、不注入、不落盘，行为与无此机制完全一致——用于 A/B 对比与一键回滚 |
 | `context.max_entries` | int | `60` | 正整数 | 内存中保留的条目上限，超限丢最旧并记 log。覆盖一次完整 plan+execute 流程（经验 10-25 次委派）仍有余量 |
 | `context.max_entry_chars` | int | `8000` | 正整数 | 单条正文的**存储**上限，超出截尾 |
-| `context.inject_char_budget` | int | `6000` | 正整数 | 单次委派**注入**的总字符预算（约 2000-2500 token）。恰好容纳计划工作流规定的最多 3 个并行 `explore` 的完整报告 |
+| `context.inject_char_budget` | int | `6000` | 正整数 | 单次委派**注入**的总字符预算（约 2000-2500 token）。约容纳 3 份完整 `explore` 报告；更多时较早条目不进注入，完整账本仍在记录文件 |
 | `context.inject_entry_chars` | int | `2000` | 正整数 | 单条注入的字符上限，超出截尾并在注入文本中指向完整记录文件 |
 | `context.record_types` | list[str] | `[explore, plan, debug, review, coder]` | 子 agent 类型名 | 允许**自动记账**的 agent_type 白名单。`shell`/`doc` 这类返回"命令执行完毕"的委派不进账本，避免挤占注入预算 |
 

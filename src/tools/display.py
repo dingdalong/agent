@@ -55,7 +55,6 @@ TOOL_TITLES: dict[str, str] = {
     "load_skill": "加载技能",
     "ask_user": "询问用户",
     # 计划工具
-    "enter_plan_mode": "进入计划模式",
     "set_plan_file": "设置计划文件",
     "exit_plan_mode": "提交计划",
     # 记忆工具
@@ -201,9 +200,6 @@ def format_params(tool_name: str, args: dict[str, Any],
         return args.get("title", "")
 
     # 计划工具
-    if tool_name == "enter_plan_mode":
-        return ""
-
     if tool_name in ("set_plan_file", "exit_plan_mode"):
         return args.get("file_path", "")
 

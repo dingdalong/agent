@@ -28,6 +28,9 @@ def test_turn_start_main_agent_keeps_plan_file_guidance(tmp_path: Path) -> None:
     assert str(tmp_path / ".agent" / "plans") in text
     assert "write_file / edit_file_lines" in text
     assert "禁止编辑、创建或删除计划文件以外的任何项目文件" in text
+    assert "禁止执行任何 shell 命令" in text
+    assert "计划模式只能由用户通过 /plan 或 Shift+Tab 切换" in text
+    assert "exit_plan_mode" in text
     assert "你在为规划阶段收集信息" not in text
 
 
@@ -43,6 +46,7 @@ def test_turn_start_subagent_drops_plan_file_guidance(tmp_path: Path) -> None:
     assert "edit_file_lines" not in text
     assert "你在为规划阶段收集信息" in text
     assert "禁止编辑、创建或删除任何项目文件" in text
+    assert "禁止执行任何 shell 命令" in text
     assert "## 产出" in text
     assert "不要尝试写入任何文件" in text
 

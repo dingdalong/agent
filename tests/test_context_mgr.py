@@ -1,8 +1,8 @@
 """跨 agent 共享上下文账本测试。
 
 三条性质必须锁死：落盘是**追加**而非全量重写（否则写入成本随条目数平方增长）、
-注入文本**有界**（它每次委派都要付一遍）、以及**并发写不交错**（计划工作流要求
-最多 3 个 explore 并行委派）。
+注入文本**有界**（它每次委派都要付一遍）、以及**并发写不交错**（计划工作流允许
+同一轮并行委派多个 explore）。
 """
 
 from __future__ import annotations
@@ -312,7 +312,7 @@ def test_record_writes_parsable_headers(tmp_path: Path) -> None:
 def test_concurrent_records_do_not_interleave(tmp_path: Path) -> None:
     """并行委派同时落盘时各块完整，不互相插入。
 
-    计划工作流要求最多 3 个 explore 并行委派，落盘必须串行化。
+    计划工作流允许同一轮并行委派多个 explore，落盘必须串行化。
 
     Args:
         tmp_path: 测试工作目录。

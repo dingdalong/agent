@@ -120,7 +120,7 @@ MCP 工具通过 `_PassThroughArgs(extra="allow")` 接收上游 schema 所描述
 `ToolsMgr.get_schemas()` 按 access 类别和工具名稳定排序。Agent 的 `tools` 白名单、`subagent` 元数据和 feature 门控共同决定 schema：
 
 - 主 Agent 使用角色工具白名单，未声明表示全量注册工具。
-- 子 Agent 在自身白名单基础上自动加入 `subagent=True`（如 `read_tool_result`、`note_context`），强制移除 `subagent=False`（如 `task_delegator` 与四个 plan 工具）。
+- 子 Agent 在自身白名单基础上自动加入 `subagent=True`（如 `read_tool_result`、`note_context`），强制移除 `subagent=False`（如 `task_delegator` 与两个 plan 工具）。
 - 未启用 feature 的工具始终排除，即使白名单显式列出。
 
 Plan 不通过隐藏 schema 表达安全边界；调用时由 `PermissionManager` 独立执行 Plan 约束，避免动态工具或缓存 schema 绕过。
