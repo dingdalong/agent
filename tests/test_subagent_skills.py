@@ -176,7 +176,7 @@ def test_skill_does_not_allow_coder_writes_in_plan(tmp_path: Path) -> None:
     _call(child, "load_skill", {"name": "builtin:debugging"})
     target = tmp_path / "must-not-exist.txt"
     result = _call(child, "apply_patch", {"patch": "*** Begin Patch\n*** Add File: must-not-exist.txt\n+mutation\n*** End Patch"})
-    assert "permission_denied" in result
+    assert "tool_unavailable" in result
     assert not target.exists()
 
 

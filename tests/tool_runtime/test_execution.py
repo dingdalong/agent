@@ -10,11 +10,12 @@ from src.mgr.readonly_command import compile_readonly, UnsupportedCommand
 from src.mgr.path_resolver import PathResolver
 
 
+@pytest.mark.integration
 def test_readonly_pipeline_and_eof(runtime, tmp_path):
     (tmp_path / 'a file.txt').write_text('alpha\nbeta\n')
     deps, agent = runtime
     async def scenario():
-        result = await deps.tools_mgr.execute('exec_command', {'command': "rg alpha 'a file.txt' | rg alpha", 'yield_time_ms': 1000}, deps=deps, agent=agent)
+        result = await deps.tools_mgr.execute('exec_command', {'cmd': "rg alpha 'a file.txt' | rg alpha", 'yield_time_ms': 1000}, deps=deps, agent=agent)
         assert result.status == 'success', str(result)
         assert result.text == 'alpha\n'
         result = await deps.tools_mgr.execute('read_file', {'path': 'a file.txt', 'offset': 2, 'limit': 2000}, deps=deps, agent=agent)
@@ -34,7 +35,7 @@ def test_readonly_pipeline_and_eof(runtime, tmp_path):
 ])
 def test_plan_rejects_unproven_commands(runtime, tmp_path, command):
     deps, agent = runtime
-    result = asyncio.run(deps.tools_mgr.execute('exec_command', {'command': command}, deps=deps, agent=agent))
+    result = asyncio.run(deps.tools_mgr.execute('exec_command', {'cmd': command}, deps=deps, agent=agent))
     assert result.status == 'error'
     assert not (tmp_path / 'file').exists()
     assert not deps.process_mgr.sessions
@@ -46,15 +47,19 @@ def test_missing_json_fields_are_not_executed(runtime):
     assert result.error_code == 'invalid_arguments'
 
 
-def test_rg_no_match_is_success(runtime, tmp_path):
+@pytest.mark.integration
+def test_rg_no_match_preserves_exit_code(runtime, tmp_path):
     (tmp_path / 'a').write_text('hello')
     deps, agent = runtime
     async def scenario():
-        result = await deps.tools_mgr.execute('exec_command', {'command': 'rg missing a'}, deps=deps, agent=agent)
-        assert result.status == 'success', str(result)
+        result = await deps.tools_mgr.execute('exec_command', {'cmd': 'rg missing a'}, deps=deps, agent=agent)
+        assert result.status == 'error', str(result)
+        assert result.exit_code == 1
+        assert result.recovery is None
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_session_incremental_timeout_and_owner(runtime, tmp_path):
     deps, agent = runtime
     async def scenario():
@@ -70,6 +75,7 @@ def test_session_incremental_timeout_and_owner(runtime, tmp_path):
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_stdin_and_terminate(runtime, tmp_path):
     deps, _ = runtime
     async def scenario():
@@ -83,6 +89,7 @@ def test_stdin_and_terminate(runtime, tmp_path):
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_readonly_stdin_is_rejected(runtime, tmp_path):
     deps, _ = runtime
     async def scenario():
@@ -94,24 +101,26 @@ def test_readonly_stdin_is_rejected(runtime, tmp_path):
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_hidden_search_uses_rg_flags(runtime, tmp_path):
     (tmp_path / '.hidden').write_text('needle')
     (tmp_path / 'plain').write_text('needle')
     deps, agent = runtime
     async def scenario():
-        first = await deps.tools_mgr.execute('exec_command', {'command': 'rg --files'}, deps=deps, agent=agent)
-        second = await deps.tools_mgr.execute('exec_command', {'command': 'rg --files --hidden'}, deps=deps, agent=agent)
+        first = await deps.tools_mgr.execute('exec_command', {'cmd': 'rg --files'}, deps=deps, agent=agent)
+        second = await deps.tools_mgr.execute('exec_command', {'cmd': 'rg --files --hidden'}, deps=deps, agent=agent)
         assert '.hidden' not in first.text
         assert '.hidden' in second.text
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_pipeline_preserves_earlier_failure(runtime):
     deps, agent = runtime
     async def scenario():
-        result = await deps.tools_mgr.execute('exec_command', {'command': 'rg pattern missing-file | rg pattern'}, deps=deps, agent=agent)
+        result = await deps.tools_mgr.execute('exec_command', {'cmd': 'rg pattern missing-file | rg pattern'}, deps=deps, agent=agent)
         assert result.status == 'error'
-        assert result.exit_code != 0
+        assert result.stage_results[0]['exit_code'] == 2
     asyncio.run(scenario())
 
 
@@ -132,12 +141,13 @@ def test_utf8_split_between_polls():
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_rg_without_path_searches_workdir_but_pipeline_reads_stdin(runtime):
     deps, agent = runtime
     (deps.workdir / 'sample.txt').write_text('needle\n')
     async def scenario():
         for command in ['rg -n needle', 'rg needle sample.txt | rg needle']:
-            result = await deps.tools_mgr.execute('exec_command', {'command': command}, deps=deps, agent=agent)
+            result = await deps.tools_mgr.execute('exec_command', {'cmd': command}, deps=deps, agent=agent)
             assert result.status == 'success'
             assert 'needle' in result.text
     asyncio.run(scenario())

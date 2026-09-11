@@ -43,12 +43,7 @@ def test_tool_title_task_tools():
 
 
 def test_tool_title_utility_tools():
-    assert tool_title("calculator") == "计算"
     assert tool_title("compact") == "压缩上下文"
-    assert tool_title("random") == "随机生成"
-    assert tool_title("datetime") == "日期时间"
-    assert tool_title("encode") == "编码转换"
-    assert tool_title("text_stats") == "文本统计"
 
 
 def test_tool_title_unknown_fallback():
@@ -111,13 +106,13 @@ def test_permission_line_unknown_tool_falls_back():
 # ---------------------------------------------------------------------------
 
 def test_format_params_shell():
-    result = format_params("exec_command", {"command": "ls -la"})
+    result = format_params("exec_command", {"cmd": "ls -la"})
     assert "ls -la" in result
 
 
 def test_format_params_shell_multiline():
     cmd = "\n".join(f"echo line{i}" for i in range(10))
-    result = format_params("exec_command", {"command": cmd})
+    result = format_params("exec_command", {"cmd": cmd})
     assert "共 10 行" in result
 
 
@@ -176,9 +171,6 @@ def test_format_params_memory_tools():
 
 
 
-def test_format_params_calculator():
-    assert format_params("calculator", {"expression": "2 + 3"}) == "2 + 3"
-
 
 def test_format_params_compact():
     assert format_params("compact", {"focus": "保留测试用例"}) == "保留测试用例"
@@ -189,12 +181,6 @@ def test_format_params_compact_truncate():
     result = format_params("compact", {"focus": long_focus})
     assert result.endswith("…")
 
-
-def test_format_params_utility_tools():
-    assert format_params("random", {"operation": "uuid"}) == "uuid"
-    assert format_params("datetime", {"operation": "now"}) == "now"
-    assert format_params("encode", {"operation": "base64_encode"}) == "base64_encode"
-    assert format_params("text_stats", {"operation": "char_count"}) == "char_count"
 
 
 def test_format_params_task_tools():

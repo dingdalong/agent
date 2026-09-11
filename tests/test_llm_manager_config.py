@@ -60,7 +60,7 @@ def test_agent_construction_does_not_discover_models(tmp_path, monkeypatch, is_s
     manager = _manager(config)
     deps = AgentDeps(
         config_mgr=manager.config_mgr, llm_mgr=manager, workdir=tmp_path,
-        tools_mgr=SimpleNamespace(excluded_tool_names=lambda features: set(), get_schemas=lambda names: []),
+        tools_mgr=SimpleNamespace(excluded_tool_names=lambda features: set(), get_schemas=lambda names, **kwargs: []),
     )
     agent = Agent(
         agent_type="test", description="test", deps=deps,

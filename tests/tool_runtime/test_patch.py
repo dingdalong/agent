@@ -40,5 +40,5 @@ def test_patch_preserves_line_endings_and_mode(runtime, tmp_path):
 def test_plan_cannot_patch(runtime, tmp_path):
     deps, agent = runtime
     result = asyncio.run(deps.tools_mgr.execute('apply_patch', {'patch': '*** Begin Patch\n*** Add File: .agent/plans/a\n+forbidden\n*** End Patch'}, deps=deps, agent=agent))
-    assert result.error_code == 'permission_denied'
+    assert result.error_code == 'tool_unavailable'
     assert not (tmp_path / '.agent').exists()

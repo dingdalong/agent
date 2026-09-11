@@ -100,7 +100,7 @@ LLM_CALL → PROCESS_RESPONSE ──length────→ LENGTH_RETRY ──可
 4. 仍发出本次状态变更事件；
 5. 到 `DONE` 后把结构化错误放进 `RunResult.llm_error`。
 
-控制流取消不走 LLM 失败状态：`CancelledError` / `KeyboardInterrupt` 先回滚响应恢复链，再用 `turn_start_messages` 原地恢复本轮开始前的历史，把用户输入存入 `_pending_input` 后原样抛出；仅没有快照的兼容上下文才回退到 `round_start_idx`（`agent.py:413-420`）。因此即使 auto compact 已改写列表长度，取消也不会遗留当前 user 或协议载体。
+控制流取消不走 LLM 失败状态：CancelledError / KeyboardInterrupt 先回滚未完成的响应恢复链；已有轮次快照时保留已完成历史，补齐悬空工具结果并追加中断标记，没有快照时裁到 round_start_idx。当前输入通过 _pending_input 回填后原样抛出。流式未完成正文是否进入模型历史由响应提交边界决定，不能将 UI 显示等同于已持久化消息。
 
 ### 分类到状态与操作建议
 

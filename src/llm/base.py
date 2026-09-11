@@ -483,9 +483,11 @@ class LLMProvider(ABC):
                 try:
                     return await operation()
                 except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
+                    self._record_attempt(call, started_at, {}, "cancelled")
                     raise
                 except Exception as exc:
                     info = classify_llm_error(exc)
+                    self._record_attempt(call, started_at, {}, info.kind)
                     diagnostic_id = f"llm_{uuid.uuid4().hex[:12]}"
                     self._log_llm_failure(
                         info=info,
@@ -879,6 +881,7 @@ class LLMProvider(ABC):
                     caller_agent_type=caller_agent_type,
                     caller_uuid=caller_uuid,
                 )
+                started_at = None
                 try:
                     started_at = await self._emit_llm_call_started(
                         effective_messages,
@@ -923,9 +926,11 @@ class LLMProvider(ABC):
                     )
                     return response
                 except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
+                    self._record_attempt(call, started_at, {}, "cancelled")
                     raise
                 except Exception as exc:
                     info = classify_llm_error(exc)
+                    self._record_attempt(call, started_at, {}, info.kind)
                     diagnostic_id = f"llm_{uuid.uuid4().hex[:12]}"
                     self._log_llm_failure(
                         info=info,
@@ -1183,6 +1188,17 @@ class LLMProvider(ABC):
         ))
         return started_at
 
+    def _record_attempt(self, call, started_at, usage, outcome):
+        """只记录计费与时序，不记录请求正文、工具参数或凭据。"""
+        logger.info("llm_usage_record %s", json.dumps({
+            "call_id": call.call_id if call else "", "attempt": call.attempt if call else 1,
+            "model": self.model, "caller_uuid": call.caller_uuid if call else None,
+            "caller_type": call.caller_agent_type if call else None,
+            "started_at": started_at, "completed_at": time.time(), "outcome": outcome,
+            "usage_known": usage.get("input_tokens") is not None and usage.get("output_tokens") is not None,
+            "usage": usage,
+        }, ensure_ascii=False))
+
     async def _emit_llm_call_completed(
         self,
         started_at: float | None,
@@ -1207,11 +1223,13 @@ class LLMProvider(ABC):
         output_tokens = usage.get("output_tokens")
         total_tokens = usage.get("total_tokens")
 
+        self._record_attempt(call, started_at, usage, "completed")
         await emit_telemetry_safely(self.event_bus, LLMCallCompleted(
             timestamp=completed_at,
             source=self.model,
             model=self.model,
             call_id=call.call_id if call is not None else "",
+            attempt=call.attempt if call is not None else 1,
             input_tokens=usage.get("input_tokens"),
             output_tokens=output_tokens,
             reasoning_output_tokens=usage.get("reasoning_output_tokens"),

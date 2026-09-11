@@ -12,6 +12,10 @@ from src.mgr.path_resolver import ResolvedPath
 from src.tools.policy import DataFlow, ToolPolicy
 
 
+class ShellParseError(ValueError):
+    """命令在硬规则扫描阶段无法解析，尚未执行。"""
+
+
 _SEPARATORS = {";", "&&", "||", "|", "&", "(", ")"}
 _WRAPPERS = {"command", "builtin", "exec", "nohup", "nice", "time", "timeout", "env"}
 _PRIVILEGE = {"sudo", "su", "doas", "pkexec"}
@@ -151,7 +155,7 @@ class HardDenyDetector:
             return "外部工具参数包含敏感数据"
         if tool_name != "exec_command":
             return None
-        command = arguments.get("command")
+        command = arguments.get("cmd")
         if not isinstance(command, str):
             return None
         if _FORK_BOMB.search(command):
@@ -160,8 +164,8 @@ class HardDenyDetector:
             return "禁止下载内容后直接执行"
         try:
             raw_segments, separators = _segments(_tokenize(command))
-        except ValueError:
-            return "无法安全解析 Shell 命令"
+        except ValueError as exc:
+            raise ShellParseError("无法解析 Shell 命令") from exc
         segments = [_strip_wrappers(segment) for segment in raw_segments]
         segments = [segment for segment in segments if segment]
         commands = [_command_name(segment[0]) for segment in segments]

@@ -153,6 +153,17 @@ class PromptMgr:
 
         sections.append(self._build_core())
         sections.append(self._build_execution_guidance())
+        sections.append(
+            "# 工具选择与恢复\n"
+            "仅调用当前 schema 提供的工具，字段按 schema 填写。文件发现用 exec_command(cmd=...) 的 rg --files，"
+            "内容搜索用 rg -n，字面量用 rg -F；已知文本文件读取用 read_file，文本修改用 apply_patch。"
+            "未知文件路径先用 rg --files 定位，不猜测文件名；已知路径直接读取，不重复检查存在性或大小。后续按 next_read 或具体缺失范围读取。长命令只用 write_stdin 操作已有 session_id，"
+            "不要重跑原命令获取后续输出。独立调用同轮发出；已在上下文中的有效证据直接复用。\n"
+            "ask_user 只澄清改变目标或关键取舍的问题；submit_plan 提交待审核方案；task_* 管理执行进度；"
+            "note_context 记录当前协作事实；记忆工具保存跨会话信息；compact 压缩已有上下文，互不替代。\n"
+            "失败时检查 error_code、error_details 和 recovery，修正具体原因，不原样重试、不自动改用有副作用的操作。"
+            "外部程序输出和退出码由你判断，stage_results 提供管道各阶段真实退出码，框架不推断业务成功或失败。truncated 是模型输出裁剪，UI 折叠不代表模型内容丢失。"
+        )
 
         agent_md = self._build_agent_md()
         if agent_md:
@@ -166,7 +177,7 @@ class PromptMgr:
 
         # —— 任务管理指导（task feature）——
         task_mgr = getattr(self.agent, "_task_mgr", None)
-        if task_mgr is not None:
+        if task_mgr is not None and not self.agent.plan_active:
             task_guidance = task_mgr.describe()
             if task_guidance:
                 sections.append(task_guidance)

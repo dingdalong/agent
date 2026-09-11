@@ -31,6 +31,7 @@ class TaskCreateModel(BaseModel):
     policy=ToolPolicy(AccessKind.INTERNAL, DataFlow.LOCAL),
     subagent=True,
     feature="task",
+    modes=("execute",),
 )
 async def task_create(
     subject: str,
@@ -80,6 +81,7 @@ class TaskUpdateModel(BaseModel):
     policy=ToolPolicy(AccessKind.INTERNAL, DataFlow.LOCAL),
     subagent=True,
     feature="task",
+    modes=("execute",),
 )
 async def task_update(
     task_id: str,
@@ -140,6 +142,7 @@ class TaskListModel(BaseModel):
     policy=ToolPolicy(AccessKind.INTERNAL, DataFlow.LOCAL, plan_safe=True),
     subagent=True,
     feature="task",
+    modes=("execute",),
 )
 async def task_list(agent: Agent) -> str:
     """返回任务列表 JSON。
@@ -167,6 +170,7 @@ class TaskGetModel(BaseModel):
     policy=ToolPolicy(AccessKind.INTERNAL, DataFlow.LOCAL, plan_safe=True),
     subagent=True,
     feature="task",
+    modes=("execute",),
 )
 async def task_get(task_id: str, agent: Agent) -> str:
     """返回任务完整详情 JSON。

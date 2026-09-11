@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio, inspect
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, TypedDict
+from typing import Any, Callable, Dict, TypedDict, Literal
 from pydantic import BaseModel, ValidationError
 
 from src.tools.policy import BUILTIN_ORIGIN, DEFAULT_POLICY, ToolOrigin, ToolPolicy
@@ -33,6 +33,7 @@ class ToolEntry:
                   False=强制排除（即使 agent 定义为全量）；None=按 agent 的 tools 集合决定。
         feature: 所属可插拔 feature 名（如 "task"、"file"）。None 表示无归属、恒可用；
                  非 None 时，仅当该 feature 被角色启用才注入，否则从 schema 排除并在调用时拒绝。
+        modes: 可用阶段，同时控制 schema 暴露与实际调用。
         counts_as_work: 工具执行期间是否代表实际计算（占用本地 CPU/IO），用于状态栏耗时的人工等待暂停判定。
                         委派型（task，实际计算在子 agent）与纯人工等待型（ask_user，只等用户输入无计算）设 False，
                         其执行不计入回合活跃计算；其余工具默认 True。
@@ -48,6 +49,7 @@ class ToolEntry:
     subagent: bool | None = None
     feature: str | None = None
     counts_as_work: bool = True
+    modes: tuple[Literal["plan", "execute"], ...] = ("plan", "execute")
 
     def validate_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """应用 Pydantic 默认值并返回授权和执行共用的参数。"""
@@ -64,6 +66,12 @@ class ToolEntry:
         unknown = set(arguments) - set(self.model.model_fields)
         if unknown:
             raise ValueError("未知参数：" + ", ".join(sorted(unknown)))
+        import jsonschema
+        try:
+            jsonschema.Draft202012Validator(self.parameters_schema).validate(arguments)
+        except jsonschema.ValidationError as exc:
+            field = ".".join(str(x) for x in exc.absolute_path) or "参数"
+            raise ValueError(f"{field}: {exc.validator} 校验失败，请按 schema 修正") from exc
         return self.model(**arguments).model_dump()
 
     @staticmethod
@@ -117,6 +125,12 @@ class ToolEntry:
             error_msg = f"{type(e).__name__}: {str(e)}"
             if len(error_msg) > 200:
                 error_msg = error_msg[:200] + "..."
+            if isinstance(e, (FileNotFoundError, NotADirectoryError)):
+                return ToolResult.failure("invalid_path", error_msg)
+            if isinstance(e, PermissionError):
+                return ToolResult.failure("permission_denied", error_msg, recovery="核对操作范围和路径权限，不要换工具绕过拒绝。")
+            if isinstance(e, TimeoutError):
+                return ToolResult.failure("timeout", error_msg, recovery="检查执行状态后再决定下一步；不要自动重试可能有副作用的操作。")
             return ToolResult.failure("execution_error", error_msg)
 
 _registry: list[ToolEntry] = []
@@ -130,6 +144,7 @@ def tool(
     subagent: bool | None = None,
     feature: str | None = None,
     counts_as_work: bool = True,
+    modes: tuple[Literal["plan", "execute"], ...] = ("plan", "execute"),
 ) -> Callable:
     """工具注册装饰器。
 
@@ -141,12 +156,15 @@ def tool(
         parallel: 只读工具的并发声明。
         subagent: 子 agent 可见性。True=自动注入；False=强制排除；None=按 agent 定义决定。
         feature: 所属可插拔 feature 名。None 表示无归属、恒可用；非 None 时随该 feature 的启用与否注入或排除。
+        modes: 可用阶段，同时控制 schema 暴露与实际调用。
         counts_as_work: 工具执行期间是否代表实际计算。委派型与纯人工等待型设 False，不计入回合活跃计算；默认 True。
 
     Returns:
         装饰后的原函数。
     """
     def decorator(func: Callable) -> Callable:
+        if not modes or set(modes) - {"plan", "execute"}:
+            raise ValueError("工具 modes 必须由 plan/execute 组成")
         tool_name = name or func.__name__
 
         model_schema = model.model_json_schema()
@@ -159,7 +177,16 @@ def tool(
                 "required": ["input"],
             }
         parameters_schema.pop("description", None)
-        parameters_schema["additionalProperties"] = False
+        def close_objects(schema):
+            if isinstance(schema, dict):
+                if schema.get("type") == "object" and "properties" in schema:
+                    schema["additionalProperties"] = False
+                for value in schema.values():
+                    close_objects(value)
+            elif isinstance(schema, list):
+                for value in schema:
+                    close_objects(value)
+        close_objects(parameters_schema)
 
         entry = ToolEntry(
             name=tool_name,
@@ -173,6 +200,7 @@ def tool(
             subagent=subagent,
             feature=feature,
             counts_as_work=counts_as_work,
+            modes=modes,
         )
         _registry.append(entry)
         return func

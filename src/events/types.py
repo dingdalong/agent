@@ -93,6 +93,7 @@ class ToolCallCompleted(Event):
     tool_name: str = ""
     tool_call_id: str = ""
     status: Literal["success", "error", "running", "cancelled"] = "success"
+    error_code: str | None = None
     duration_seconds: float = 0.0
     original_bytes: int = 0
     returned_bytes: int = 0
@@ -132,6 +133,7 @@ class LLMCallCompleted(Event):
     """
     model: str = ""
     call_id: str = ""
+    attempt: int = 1
     # 统一约定：提交给模型的全部输入 token（含缓存读取与写入）。各 provider 在 _extract_token_usage 中归一化到此口径。
     input_tokens: int | None = None
     output_tokens: int | None = None

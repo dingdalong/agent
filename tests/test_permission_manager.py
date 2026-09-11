@@ -139,7 +139,7 @@ def test_plan_rejects_review_without_calling_judge_and_allows_plan_file(tmp_path
     manager = make_manager(tmp_path, judge)
     shell = ToolPolicy(AccessKind.REVIEW, DataFlow.DYNAMIC)
     denied = run(manager.authorize(
-        "exec_command", shell, {"command": "pytest"}, origin=ToolOrigin("builtin"),
+        "exec_command", shell, {"cmd": "pytest"}, origin=ToolOrigin("builtin"),
         plan_active=True, user_intent="test",
     ))
     plan_write = ToolPolicy(
@@ -218,7 +218,7 @@ def test_shell_hard_denies(command, tmp_path):
     judge = RecordingJudge()
     manager = make_manager(tmp_path, judge)
     result = run(manager.authorize(
-        "exec_command", ToolPolicy(AccessKind.REVIEW, DataFlow.DYNAMIC), {"command": command},
+        "exec_command", ToolPolicy(AccessKind.REVIEW, DataFlow.DYNAMIC), {"cmd": command},
         origin=ToolOrigin("builtin"), plan_active=False, user_intent="run",
     ))
     assert result.allowed is False and result.source == "hard_rule"
@@ -243,7 +243,7 @@ def test_judge_failure_uses_one_time_confirmation(tmp_path):
     judge = RecordingJudge(RuntimeError("offline"))
     manager = make_manager(tmp_path, judge, answer=True)
     result = run(manager.authorize(
-        "exec_command", ToolPolicy(AccessKind.REVIEW, DataFlow.DYNAMIC), {"command": "pytest"},
+        "exec_command", ToolPolicy(AccessKind.REVIEW, DataFlow.DYNAMIC), {"cmd": "pytest"},
         origin=ToolOrigin("builtin"), plan_active=False, user_intent="test",
     ))
     assert result.allowed is True and result.source == "user"
@@ -254,7 +254,7 @@ def test_judge_ask_or_unavailable_without_confirmation_denies(tmp_path, verdict)
     judge = RecordingJudge(verdict) if verdict is not None else None
     manager = PermissionManager(str(tmp_path), judge, None, DataGuard())
     result = run(manager.authorize(
-        "exec_command", ToolPolicy(AccessKind.REVIEW, DataFlow.DYNAMIC), {"command": "pytest"},
+        "exec_command", ToolPolicy(AccessKind.REVIEW, DataFlow.DYNAMIC), {"cmd": "pytest"},
         origin=ToolOrigin("builtin"), plan_active=False, user_intent="test",
     ))
     assert result.allowed is False and result.source == "failure"
@@ -613,7 +613,7 @@ def test_authorized_path_rejects_symlink_replacement(tmp_path):
 def test_shell_hard_deny_recognizes_wrapped_and_absolute_sudo(tmp_path, command):
     manager = make_manager(tmp_path)
     result = run(manager.authorize(
-        "exec_command", ToolPolicy(AccessKind.REVIEW, DataFlow.DYNAMIC), {"command": command},
+        "exec_command", ToolPolicy(AccessKind.REVIEW, DataFlow.DYNAMIC), {"cmd": command},
         origin=ToolOrigin("builtin"), plan_active=False, user_intent="run",
     ))
     assert result.allowed is False and result.source == "hard_rule"
@@ -627,7 +627,7 @@ def test_hard_deny_does_not_block_scoped_or_readonly_text_commands(tmp_path, com
     judge = RecordingJudge(JudgeVerdict("allow", "reviewed"))
     manager = make_manager(tmp_path, judge)
     result = run(manager.authorize(
-        "exec_command", ToolPolicy(AccessKind.REVIEW, DataFlow.DYNAMIC), {"command": command},
+        "exec_command", ToolPolicy(AccessKind.REVIEW, DataFlow.DYNAMIC), {"cmd": command},
         origin=ToolOrigin("builtin"), plan_active=False, user_intent="run",
     ))
     assert result.allowed is True
@@ -643,7 +643,7 @@ def test_shell_judge_and_confirmation_share_body_free_summary(tmp_path):
     result = run(manager.authorize(
         "exec_command", ToolPolicy(
             AccessKind.REVIEW, DataFlow.DYNAMIC, detail_template="{command}"
-        ), {"command": command}, origin=ToolOrigin("builtin"),
+        ), {"cmd": command}, origin=ToolOrigin("builtin"),
         plan_active=False, user_intent="request",
     ))
     request_summary = judge.requests[0]["redacted_command"]
@@ -708,7 +708,7 @@ def test_authorization_log_carries_source_and_redacted_reason(tmp_path, caplog):
     policy = ToolPolicy(AccessKind.REVIEW, DataFlow.DYNAMIC)
     with caplog.at_level(logging.INFO, logger="src.mgr.permission_mgr"):
         result = run(manager.authorize(
-            "exec_command", policy, {"command": "echo hi"}, origin=ToolOrigin("builtin"),
+            "exec_command", policy, {"cmd": "python -c pass"}, origin=ToolOrigin("builtin"),
             plan_active=False, user_intent="do it",
         ))
     assert result.allowed is False
@@ -771,7 +771,7 @@ def test_confirmation_dialog_logs_open_and_outcome(tmp_path, caplog):
     policy = ToolPolicy(AccessKind.REVIEW, DataFlow.DYNAMIC)
     with caplog.at_level(logging.INFO, logger="src.mgr.permission_mgr"):
         result = run(manager.authorize(
-            "exec_command", policy, {"command": "echo hi"}, origin=ToolOrigin("builtin"),
+            "exec_command", policy, {"cmd": "python -c pass"}, origin=ToolOrigin("builtin"),
             plan_active=False, user_intent="do it",
         ))
     assert result.allowed is False

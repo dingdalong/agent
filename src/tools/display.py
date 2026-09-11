@@ -39,6 +39,9 @@ class ToolResult:
     display: ToolDisplay | None = None
     status: Literal["success", "error", "running", "cancelled"] = "success"
     error_code: str | None = None
+    error_details: dict | None = None
+    recovery: str | None = None
+    stage_results: list[dict] | None = None
     exit_code: int | None = None
     session_id: str | None = None
     artifact_path: str | None = None
@@ -56,6 +59,8 @@ class ToolResult:
         metadata = {
             key: value for key, value in {
                 "status": self.status, "error_code": self.error_code,
+                "error_details": self.error_details, "recovery": self.recovery,
+                "stage_results": self.stage_results,
                 "exit_code": self.exit_code, "session_id": self.session_id,
                 "artifact_path": self.artifact_path, "artifact_complete": self.artifact_complete,
                 "artifact_error": self.artifact_error,
@@ -67,8 +72,8 @@ class ToolResult:
         return json.dumps(metadata, ensure_ascii=False) + "\n" + body
 
     @classmethod
-    def failure(cls, code: str, text: str) -> "ToolResult":
-        return cls(text=text, status="error", error_code=code)
+    def failure(cls, code: str, text: str, *, error_details: dict | None = None, recovery: str | None = None) -> "ToolResult":
+        return cls(text=text, status="error", error_code=code, error_details=error_details, recovery=recovery)
 
 
 # ---------------------------------------------------------------------------
@@ -97,13 +102,8 @@ TOOL_TITLES: dict[str, str] = {
     "task_get": "获取任务",
     "task_list": "任务列表",
     # 工具类
-    "calculator": "计算",
     "compact": "压缩上下文",
     # 实用工具
-    "random": "随机生成",
-    "datetime": "日期时间",
-    "encode": "编码转换",
-    "text_stats": "文本统计",
 }
 
 
@@ -159,7 +159,7 @@ def permission_line(
 # 命令参数摘要
 def _shell_summary(args: dict[str, Any]) -> str:
     """提取 shell 工具的命令摘要。"""
-    cmd = args.get("command", "")
+    cmd = args.get("cmd", "")
     lines = cmd.strip().splitlines()
     if len(lines) <= 3:
         return cmd.strip()
@@ -210,20 +210,12 @@ def format_params(tool_name: str, args: dict[str, Any],
     if tool_name == "read_memory":
         return args.get("title", "")
 
-    # 工具类
-    if tool_name == "calculator":
-        return args.get("expression", "")
-
     if tool_name == "compact":
         focus = args.get("focus", "")
         if len(focus) > 80:
             focus = focus[:80] + "…"
         return focus
 
-
-    # 实用工具
-    if tool_name in ("random", "datetime", "encode", "text_stats"):
-        return args.get("operation", "")
 
     # 任务工具
     if tool_name == "task_create":

@@ -13,7 +13,7 @@ class SubmitPlan(BaseModel):
     content: str = Field(..., min_length=1, description='完整自包含计划正文；修订时提交完整替换内容')
 
 
-@tool(model=SubmitPlan, description='一次提交完整计划。框架保存、展示、审核；不要另写文件、登记路径或重复输出计划。', policy=ToolPolicy(AccessKind.INTERNAL, DataFlow.LOCAL, plan_safe=True), subagent=False, feature='plan', counts_as_work=False)
+@tool(model=SubmitPlan, description='一次提交完整计划。框架保存、展示、审核；不要另写文件、登记路径或重复输出计划。', policy=ToolPolicy(AccessKind.INTERNAL, DataFlow.LOCAL, plan_safe=True), subagent=False, feature='plan', counts_as_work=False, modes=("plan",))
 async def submit_plan(title, content, agent, deps, authorization):
     if not authorization.allowed or not agent.plan_active or deps.plan_mgr is None:
         return ToolResult.failure('invalid_plan_state', '仅计划模式下可提交计划')

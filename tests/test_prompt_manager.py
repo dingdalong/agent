@@ -64,7 +64,7 @@ def _build_prompt(
     Returns:
         生成的 system prompt 正文。
     """
-    agent = SimpleNamespace(
+    agent = SimpleNamespace(plan_active=False,
         deps=SimpleNamespace(
             role_mgr=role_mgr,
             memory_mgr=None,
@@ -261,7 +261,7 @@ def _build_env_section(deps: SimpleNamespace, workdir: Path) -> str:
     Returns:
         运行环境段正文。
     """
-    agent = SimpleNamespace(deps=deps, is_subagent=False, memory=None)
+    agent = SimpleNamespace(plan_active=False, deps=deps, is_subagent=False, memory=None)
     prompt_mgr = PromptMgr(
         agent=agent,
         model="test-model",
@@ -329,8 +329,8 @@ def test_env_baseline_is_identical_across_agents(tmp_path: Path) -> None:
         env_baseline="git：分支 `main`\n顶层结构（深度 2，仅目录）：\n  src/{mgr}",
     )
 
-    main_agent = SimpleNamespace(deps=deps, is_subagent=False, memory=None)
-    child_agent = SimpleNamespace(deps=deps, is_subagent=True, memory=None)
+    main_agent = SimpleNamespace(plan_active=False, deps=deps, is_subagent=False, memory=None)
+    child_agent = SimpleNamespace(plan_active=False, deps=deps, is_subagent=True, memory=None)
     sections = [
         PromptMgr(
             agent=agent, model="test-model", workdir=tmp_path,
@@ -368,7 +368,7 @@ def test_shared_context_never_enters_system_prompt(tmp_path: Path) -> None:
         role_mgr=None, memory_mgr=None, session_context=[],
         context_mgr=ledger, env_baseline="git：分支 `main`",
     )
-    agent = SimpleNamespace(deps=deps, is_subagent=True, memory=None)
+    agent = SimpleNamespace(plan_active=False, deps=deps, is_subagent=True, memory=None)
 
     content = PromptMgr(
         agent=agent, model="test-model", workdir=tmp_path,

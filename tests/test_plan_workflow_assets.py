@@ -55,7 +55,7 @@ def test_coding_role_plan_workflow_skill_still_loads(tmp_path: Path) -> None:
 
     assert mgr.check_skill("builtin:plan-workflow")
     text = mgr.load_full_text("builtin:plan-workflow")
-    assert "不使用 task_* 进度工具" in text
+    assert "不创建执行进度任务" in text
     assert "enter_plan_mode" not in text
     assert "最多 3 个" not in text
     assert "llm.concurrency" not in text
@@ -95,7 +95,7 @@ def test_execution_guidance_follows_role_and_actual_tools(
     subagent_mgr = SubAgentMgr(tmp_path / "work", deps)
     tools_mgr = ToolsMgr()
     schemas = tools_mgr.get_schemas({"task_delegator"} if can_delegate else set())
-    agent = SimpleNamespace(
+    agent = SimpleNamespace(plan_active=False,
         deps=deps, is_subagent=is_subagent, memory=None,
         _task_mgr=TaskManager(), _subagent_mgr=subagent_mgr, _tools_schemas=schemas,
     )
@@ -105,6 +105,8 @@ def test_execution_guidance_follows_role_and_actual_tools(
     )
     text = prompt_mgr.build()[0]["content"]
     assert text.count("# 执行原则") == 1
+    assert text.count("# 工具选择与恢复") == 1
+    assert "决定提交后不再" not in text  # 规划流程只由按需加载的技能注入。
     assert ("你持续负责理解用户目标" in text) is (not is_subagent)
     assert ("完成委派范围内的任务" in text) is is_subagent
     assert ("# 子智能体协作" in text) is (can_delegate and not is_subagent)

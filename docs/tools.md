@@ -1,19 +1,23 @@
 # 工具层参考
 
-工具在 `src/tools/builtin/` 用 `@tool` + Pydantic 声明，由 `ToolsMgr` 注册和执行。装饰器保留 `policy`、`subagent`、`feature`、`counts_as_work`；`parallel=True` 仅用于可并发的独立读取。同步工具卸载到线程，取消时等待实际 I/O 结束后才释放工作区租约。
+工具在 `src/tools/builtin/` 用 `@tool` + Pydantic 声明，由 `ToolsMgr` 注册和执行。装饰器保留 `policy`、`subagent`、`feature`、`counts_as_work`、`modes`；`parallel=True` 仅用于可并发的独立读取。同步工具卸载到线程，取消时等待实际 I/O 结束后才释放工作区租约。
 
 ## 调用与结果
 
-调用链：参数对象/未知字段校验 → PreToolUse → 重验参数 → PermissionManager.authorize → 工具执行 → DataGuard 脱敏 → PostToolUse → 脱敏与单次预算 → ToolCallCompleted → 历史消息。MCP 参数按上游 schema 校验。未知工具、非法 JSON、授权失败、执行错误均返回明确状态；调用方不能从正文前缀推断失败。
+调用链：阶段与 agent 可用性校验 → 参数对象/未知字段校验 → PreToolUse → 重验参数 → PermissionManager.authorize → 工具执行 → DataGuard 脱敏 → PostToolUse → 脱敏与单次预算 → ToolCallCompleted → 历史消息。MCP 参数按上游 schema 校验。未知工具、非法 JSON、授权失败、执行错误均返回明确状态；调用方不能从正文前缀推断失败。
 
-`ToolResult` 的模型表示为 JSON 元数据行加正文，字段为 `status`（success/error/running/cancelled）、`error_code`、`exit_code`、`session_id`、`artifact_path`、`artifact_complete`、`artifact_error`、`file_range`、`next_read`、`truncated`。`display` 只供 UI 消费；`end_turn` 控制调度器结束回合。取消补齐未完成调用结果，并保留已完成的证据。执行错误不自动重试有副作用的工具。
+`ToolResult` 的模型表示为 JSON 元数据行加正文，字段为 `status`（success/error/running/cancelled）、`error_code`、`exit_code`、`session_id`、`artifact_path`、`artifact_complete`、`artifact_error`、`file_range`、`next_read`、`truncated`、`error_details`、`recovery`、`stage_results`。`display` 只供 UI 消费；`end_turn` 控制调度器结束回合。取消补齐未完成调用结果，并保留已完成的证据。执行错误不自动重试有副作用的工具。
+
+工具 schema 与执行使用同一 modes 定义。Plan 隐藏 apply_patch、全部 task_* 和 save_memory；执行模式隐藏 submit_plan。切换时刷新 schema 与提示词缓存，子 agent 继承阶段并叠加自身工具和 feature 限制。注册名称冲突直接报错。Pydantic schema 同时用于 JSON 参数验证，嵌套参数拒绝未声明字段，显式字典保留其键空间。
+
+工具分工：exec_command 做发现、搜索和命令执行，read_file 读取已知文本，apply_patch 修改文本，write_stdin 操作已有进程；web_search 发现网页，web_fetch 获取已知 URL；submit_plan 提交审核方案，task_* 管理执行进度，note_context 记录当前协作事实，记忆工具保存跨会话信息，compact 压缩上下文。通用计算通过执行阶段命令完成。
 
 ## 工具接口
 
 | 工具 | 参数及契约 |
 |---|---|
-| `exec_command` | command、workdir、yield_time_ms、timeout_ms、max_output_tokens。等待上限 30 秒，执行超时上限 600 秒；尚未结束返回 session_id。 |
-| `write_stdin` | session_id、chars、yield_time_ms、max_output_tokens、terminate。消费增量输出；只读命令和 Plan 不接收 stdin。 |
+| `exec_command` | cmd、workdir、yield_time_ms、timeout_ms、max_output_tokens。等待上限 30 秒，执行超时上限 600 秒；尚未结束返回 session_id。 |
+| `write_stdin` | session_id、chars、yield_time_ms、max_output_tokens、terminate。消费增量输出；只读命令和 Plan 不接收 stdin，terminate 与非空 chars 互斥。session_id 仅在运行时返回，结束后再次轮询返回 unknown_session。 |
 | `read_file` | path、offset（1 起始）、column（行内字符位置，0 起始）、limit（可选源行数上限）、max_output_tokens。省略范围时从开头读到预算或 EOF；普通文本单文件上限 8 MiB。 |
 | `apply_patch` | patch。Begin/End Patch 包裹 Add/Update/Delete File，可选 Move to 与 EOF 锚点；上下文必须唯一。先计算全部文本变更、复验授权，再原子替换每个文件。多文件 I/O 失败返回已完成清单，不声称全局事务回滚。 |
 | `submit_plan` | title、content。一次保存完整计划、展示和审核；auto 批准后续执行，manual/取消结束当前回合，修改意见返回模型。保存位置受 PlanMgr 控制。 |
@@ -22,7 +26,9 @@
 
 ## 命令授权与生命周期
 
-只读命令由 bashlex 解析 AST，再编译为 argv，实际通过 create_subprocess_exec 执行；支持简单命令、管道、&&。白名单集中在 `readonly_command.py`：pwd/ls/rg/cat/head/tail/wc/sed 的有限选项，以及 git status/diff/log/show/ls-files。拒绝重定向、赋值、替换、后台和未登记参数；git 禁用 pager、fsmonitor、hooks、外部 diff/textconv。解析不能证明只读时，Plan 拒绝，执行模式交现有智能权限。此解析器不是操作系统沙箱。
+只读命令先完整编译 AST，再执行 argv。支持普通命令、管道、&&、分号与换行、开头 cd、Git 子命令前的 -C 目录参数、未引用路径通配符，以及 2>/dev/null、2>&1、1>&2。词法解码保留双引号内正则反斜杠；路径展开前后均校验。重定向保留从左到右的描述符复制语义，禁止文件写入、变量与命令替换、后台执行以及未登记命令。白名单集中在 readonly_command.py，Git 禁用外部 diff/textconv、配置和分页器。无法证明只读时 Plan 返回 invalid_syntax（解析失败）或 policy_unsupported（只读策略不支持），并明确命令未执行；执行模式走既有一般授权。此解析器不是操作系统沙箱。
+
+命令链 exit_code 保留最终执行管道末阶段的真实退出码，status 按该退出码判断；stage_results 只记录阶段序号、程序名称和真实退出码。上游非零退出、rg 无匹配、SIGPIPE 等不做语义解释，不覆盖最终状态。分号继续执行，&& 依据上一管道末阶段退出码决定是否执行。外部程序原始正文不添加诊断或恢复建议；脱敏、预算、artifact 与 Hook 附加内容仍分开标识。内置工具可显式说明自身参数、授权与生命周期契约，不按错误码自动注入模板。
 
 ProcessMgr 是进程会话与工作区租约的唯一所有者，bootstrap 创建、AgentApp 在中断/clear/resume/关闭时回收，子 agent 结束时只回收自身进程。会话按应用会话 ID 与 agent UUID 隔离；最多 32 个进程会话，单会话未消费缓冲上限 1 MiB。进程不跨重启恢复，不分配 PTY。子进程使用 clean_env 与脱敏环境，超时/取消终止整个进程组。
 
@@ -81,7 +87,7 @@ sequenceDiagram
     Note over O,F: 会话切换或关闭时清理，普通中断保留
 ```
 
-观测记录原始/返回字节、`returned_tokens_estimate`、截断状态与耗时。实际费用分析使用 provider 的 input/output/cache/reasoning usage；reasoning 是 output 子集，不重复累加。`scripts/benchmark_tool_output.py` 用固定输出比较本次机制与指定 Git 快照的旧输出策略，不能替代真实任务的 API A/B。
+观测记录原始/返回字节、`returned_tokens_estimate`、模型输出截断状态与耗时。UI 的 display.truncated 与模型 truncated 分开，文件 eof/next_read 只说明源范围是否读完。实际费用分析使用 provider 的 input/output/cache/reasoning usage；reasoning 是 output 子集，不重复累加。`scripts/benchmark_tool_output.py` 用固定输出比较本次机制与指定 Git 快照的旧输出策略，不能替代真实任务的 API A/B。
 
 ## Web 与 MCP
 
@@ -103,3 +109,11 @@ MCP 工具通过 `_PassThroughArgs(extra="allow")` 接收上游 schema 所描述
 策略取 `INTERNAL + LOCAL + plan_safe=True`，与 `save_memory`、`task_create` 同构：**落盘由 `ContextMgr` 内部完成，不经 `apply_patch`**。这一点是刻意的——`.agent` 被 `PathResolver` 归为 protected，`.agent/context/**` 因此是 `PathClass.PROTECTED`，而 Plan 模式下 `_authorize_plan()` 拒绝通用文件写入，改用 `apply_patch` 落盘会让本工具在 Plan 模式下必然被拒。
 
 `task_delegator` 相应增加 `shared_context: "auto" | "none"` 字段：默认注入账本摘要，`"none"` 完全隔离供独立复核（如代码审查）使用。
+
+离线核账用 `python scripts/analyze_session_usage.py SESSION --log LOG`，多个轮转日志重复传 --log；Codex rollout JSONL 可直接作为 SESSION。按首次提交计划截止，计入计划生成 usage，排除提交后的审核等待。llm_usage_record 按唯一 attempt call_id 记录实际 usage 与 API 时间，缺失 usage 标未知；历史日志不能恢复的耗时提供覆盖数，不能当作零耗时。`--prices INPUT CACHE OUTPUT` 接受每百万 token 单价，输出已知用量费用与是否完整，不估算未知请求账单。
+
+Git 的重复 `-C` 按前一个目录解析相对路径，空目录参数保持当前目录，每一步均校验；目录变化不传播到后续命令，子命令和选项仍受白名单约束。未登记选项及 Shell 函数定义只返回框架策略限制，不判断外部程序用法是否正确。未知文件先用 `rg --files` 定位，已知文件直接读，不要求额外存在性检查。
+
+费用报告的 `calls` 按请求时间排列，包含调用 ID、记录位置、工具数、输入/输出/推理 token 及累计已知用量；提供价格时增加累计已知费用。`top_reasoning_calls` 给出推理输出最多的五次调用位置，不输出用户内容、工具参数或原始推理正文。未知 usage 不计入已知累计金额，但保留未知计数；累计费用不是完整账单。
+
+离线费用报告分别统计 framework_errors（框架失败）、external_nonzero_exits（命令最终非零退出）、stage_exit_codes（全部阶段退出码）及 service_errors（MCP 声明错误）。这些计数不代表可避免的模型调用错误，不能仅依据下降判断优化收益。

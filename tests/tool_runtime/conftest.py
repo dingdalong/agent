@@ -15,7 +15,7 @@ def runtime(tmp_path):
         config_mgr=SimpleNamespace(environment={}), hooks_mgr=None, event_bus=None,
         turn_clock=None, context_mgr=None, process_mgr=ProcessMgr(), tools_mgr=ToolsMgr(),
         permission_mgr=PermissionManager(str(tmp_path), None, None, guard))
-    agent = SimpleNamespace(uuid='main', agent_type='main', plan_active=True, history=[], deps=deps,
+    agent = SimpleNamespace(uuid='main', agent_type='main', refresh_tools_schemas=lambda: None, plan_active=True, history=[], deps=deps,
         llm=SimpleNamespace(estimate_tokens=lambda messages: sum(len(m.get('content','').encode()) for m in messages)))
     agent._file_mgr = FileMgr(tmp_path, deps)
     yield deps, agent

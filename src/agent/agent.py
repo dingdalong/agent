@@ -356,7 +356,9 @@ class Agent:
         """刷新工具 schema 列表（减去被禁用 feature 的工具）。"""
         names = self.tools if self.tools is not None else self.deps.tools_mgr.all_tool_names()
         names = names - self._excluded_tools
-        self._tools_schemas = self.deps.tools_mgr.get_schemas(names)
+        self._tools_schemas = self.deps.tools_mgr.get_schemas(names, plan_active=self.plan_active)
+        if hasattr(self, "_prompt_mgr"):
+            self._prompt_mgr.invalidate_cache()
 
     def set_plan_active(self, active: bool) -> bool:
         """切换 Plan 状态并同步 PlanMgr 提醒生命周期。"""
@@ -368,6 +370,7 @@ class Agent:
         if not active and plan_mgr is not None:
             return plan_mgr.exit_mode(self, self._reminder_mgr)
         self.plan_active = active
+        self.refresh_tools_schemas()
         return True
 
     async def run(self, input: str | None = None) -> RunResult:

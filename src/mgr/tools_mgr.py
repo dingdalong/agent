@@ -52,8 +52,7 @@ class ToolsMgr:
             tool: 工具元数据。
         """
         if tool.name in self._tools:
-            logger.warning(f"工具 '{tool.name}' 已注册，跳过")
-            return
+            raise ValueError(f"工具名称冲突：{tool.name}；请修改注册名称")
         if tool.origin.kind != "builtin" and tool.policy.access is not AccessKind.REVIEW:
             tool = replace(tool, policy=ToolPolicy(
                 AccessKind.REVIEW,
@@ -130,6 +129,7 @@ class ToolsMgr:
     def get_schemas(
         self,
         tool_names: set[str] | list[str] | None = None,
+        *, plan_active: bool | None = None,
     ) -> list[ToolDict]:
         """返回 OpenAI function-calling 格式的工具 schema 列表。
 
@@ -146,6 +146,9 @@ class ToolsMgr:
             if missing:
                 logger.warning("工具声明包含未注册名称，请更新角色工具列表：%s", ", ".join(sorted(missing)))
             tools = [self._tools[name] for name in tool_names if name in self._tools]
+        if plan_active is not None:
+            mode = "plan" if plan_active else "execute"
+            tools = [tool for tool in tools if mode in tool.modes]
         tools = sorted(tools, key=_tool_sort_key)
         return [
             {
@@ -220,6 +223,7 @@ class ToolsMgr:
         tool_display: object | None = None,
         original_bytes: int = 0,
         truncated: bool = False,
+        error_code: str | None = None,
     ) -> None:
         """发出工具调用完成事件。"""
         event_bus = getattr(deps, "event_bus", None) if deps is not None else None
@@ -246,8 +250,8 @@ class ToolsMgr:
                 title = tool_title(tool.name)
                 if status in {"error", "cancelled"}:
                     title = f"✘ {title}"
-                content, truncated = format_result(str(safe_result))
-                display = ToolDisplay(title=title, content=content, truncated=truncated)
+                content, display_truncated = format_result(str(safe_result))
+                display = ToolDisplay(title=title, content=content, truncated=display_truncated)
         caller_agent_type, caller_uuid = caller_identity(agent)
         await event_bus.emit(ToolCallCompleted(
             timestamp=time.time(),
@@ -257,12 +261,21 @@ class ToolsMgr:
             status=status,
             duration_seconds=duration_seconds,
             original_bytes=original_bytes, returned_bytes=len(result.encode()),
-            returned_tokens_estimate=self.output.estimate_tokens(result), truncated=truncated,
+            returned_tokens_estimate=self.output.estimate_tokens(result), truncated=truncated, error_code=error_code,
             result_preview=result_preview,
             display=display,
             caller_agent_type=caller_agent_type,
             caller_uuid=caller_uuid,
         ))
+
+    @staticmethod
+    def _argument_failure(tool, error):
+        fields = list(tool.parameters_schema.get("properties", {}))
+        details = {"allowed_fields": fields}
+        if isinstance(error, ValidationError):
+            details["fields"] = [list(item["loc"]) for item in error.errors()[:3]]
+        return ToolResult.failure("invalid_arguments", tool.format_validation_error(error) if isinstance(error, ValidationError) else str(error),
+                                  error_details=details, recovery="按当前工具 schema 修正参数；不会自动映射旧字段或执行替代命令。")
 
     async def _execute(
         self,
@@ -291,6 +304,15 @@ class ToolsMgr:
             return ToolResult.failure("unknown_tool", f"未知工具 {tool_name}")
 
         tool = self._tools[tool_name]
+        if agent is not None:
+            mode = "plan" if getattr(agent, "plan_active", False) else "execute"
+            declared = getattr(agent, "tools", None)
+            excluded = getattr(agent, "_excluded_tools", set())
+            if (mode not in tool.modes or tool_name in excluded
+                    or (declared is not None and tool_name not in declared)
+                    or (getattr(agent, "is_subagent", False) and tool.subagent is False)):
+                return ToolResult.failure("tool_unavailable", f"当前模式或 agent 不提供 {tool_name}",
+                                          recovery="使用当前请求提供的工具列表；不要重试不可用工具。")
         data_guard = getattr(deps, "data_guard", None) if deps is not None else None
         if data_guard is None:
             from src.mgr.data_guard import DataGuard
@@ -299,7 +321,7 @@ class ToolsMgr:
         try:
             arguments = tool.validate_arguments(arguments)
         except (ValidationError, ValueError) as error:
-            return ToolResult.failure("invalid_arguments", tool.format_validation_error(error) if isinstance(error, ValidationError) else str(error))
+            return self._argument_failure(tool, error)
 
         hooks_mgr = getattr(deps, "hooks_mgr", None) if deps is not None else None
         hook_kwargs = {}
@@ -330,7 +352,7 @@ class ToolsMgr:
                 try:
                     arguments = tool.validate_arguments(pre_hook_result.updated_input)
                 except (ValidationError, ValueError) as error:
-                    return ToolResult.failure("invalid_arguments", tool.format_validation_error(error) if isinstance(error, ValidationError) else str(error))
+                    return self._argument_failure(tool, error)
 
         try:
             effective_budget = self.output.budget(arguments.get("max_output_tokens"))
@@ -364,7 +386,8 @@ class ToolsMgr:
                     caller_agent_type=caller_agent_type,
                     caller_uuid=caller_uuid,
                 )
-            return ToolResult.failure("permission_denied", authorization.reason)
+            return ToolResult.failure(authorization.error_code or "permission_denied", authorization.reason,
+                                      error_details=authorization.error_details, recovery=authorization.recovery)
         elif authorization.source == "judge":
             # 智能权限放行：把放行理由提示给用户（纯展示，不影响执行）
             event_bus = getattr(deps, "event_bus", None) if deps is not None else None
@@ -426,14 +449,18 @@ class ToolsMgr:
     async def execute(self, tool_name, arguments, *, current_tool_call_id="", deps=None, agent=None):
         started = time.time()
         requested = arguments.get("max_output_tokens") if isinstance(arguments, dict) else None
+        budget_error = None
         try:
             budget = self.output.budget(requested)
         except ValueError as exc:
-            return ToolResult.failure('invalid_arguments', str(exc))
+            budget = self.output.budget(None)
+            budget_error = ToolResult.failure('invalid_arguments', str(exc), recovery='省略 max_output_tokens 使用默认预算，或传入配置范围内的整数。')
         processes = getattr(deps, "process_mgr", None)
         tool = self._tools.get(tool_name)
         try:
-            if processes and tool_name not in {"exec_command", "write_stdin"} and tool and tool.policy.access in {AccessKind.LOCAL_READ, AccessKind.WORKSPACE_WRITE}:
+            if budget_error is not None:
+                result = budget_error
+            elif processes and tool_name not in {"exec_command", "write_stdin"} and tool and tool.policy.access in {AccessKind.LOCAL_READ, AccessKind.WORKSPACE_WRITE}:
                 lease = processes.workspace_lock.read() if tool.policy.access is AccessKind.LOCAL_READ else processes.workspace_lock
                 async with lease:
                     result = await self._execute(tool_name, arguments, current_tool_call_id=current_tool_call_id, deps=deps, agent=agent)
@@ -451,6 +478,10 @@ class ToolsMgr:
             if result.file_content is None:
                 result.text = str(guard.redact(result.text))
             result.annotations = str(guard.redact(result.annotations))
+            if result.error_details:
+                result.error_details = guard.redact(result.error_details)
+            if result.recovery:
+                result.recovery = str(guard.redact(result.recovery))
         original_bytes = len(str(result).encode("utf-8"))
         control = tool_name in {"load_skill", "ask_user", "submit_plan"}
         worker = asyncio.create_task(asyncio.to_thread(self.output.finalize, result, agent, result.output_budget or budget, control=control))
@@ -463,9 +494,9 @@ class ToolsMgr:
         tool = self._tools.get(tool_name)
         if tool:
             await self._emit_tool_completed(deps, agent, tool, current_tool_call_id, result.status,
-                                            time.time() - started, str(result), tool_display=result.display, original_bytes=original_bytes, truncated=result.truncated)
-        logger.info("tool_result tool=%s call_id=%s status=%s original_bytes=%d returned_bytes=%d returned_tokens_estimate=%d truncated=%s elapsed=%.3f",
-                    tool_name, current_tool_call_id, result.status, original_bytes, len(str(result).encode()),
+                                            time.time() - started, str(result), tool_display=result.display, original_bytes=original_bytes, truncated=result.truncated, error_code=result.error_code)
+        logger.info("tool_result tool=%s call_id=%s status=%s error_code=%s original_bytes=%d returned_bytes=%d returned_tokens_estimate=%d truncated=%s elapsed=%.3f",
+                    tool_name, current_tool_call_id, result.status, result.error_code, original_bytes, len(str(result).encode()),
                     self.output.estimate_tokens(str(result)), result.truncated, time.time() - started)
         return result
 

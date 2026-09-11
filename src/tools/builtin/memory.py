@@ -37,6 +37,7 @@ def _memory_mgr(deps: Any) -> Any:
     ),
     policy=ToolPolicy(AccessKind.INTERNAL, DataFlow.LOCAL, plan_safe=True),
     feature="memory",
+    modes=("execute",),
 )
 def save_memory(
     title: str,

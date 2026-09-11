@@ -6,12 +6,12 @@ import asyncio
 import logging
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal, Protocol
 from urllib.parse import urlsplit
 
 from src.mgr.data_guard import DataGuard
-from src.mgr.hard_deny import HardDenyDetector
+from src.mgr.hard_deny import HardDenyDetector, ShellParseError
 from src.mgr.path_resolver import PathClass, PathGrant, PathResolutionError, PathResolver, ResolvedPath
 from src.mgr.review import ReviewVerdict, StructuredVerdictRunner
 from src.tools import AccessKind, DataFlow, PathRole, ToolOrigin, ToolPolicy
@@ -32,6 +32,9 @@ class AuthorizationResult:
     safe_detail: str
     path_grants: tuple[PathGrant, ...] = ()
     command_plan: Any = None
+    error_code: str | None = None
+    error_details: dict | None = None
+    recovery: str | None = None
 
 
 JudgeVerdict = ReviewVerdict
@@ -119,19 +122,24 @@ class PermissionManager:
 
         grants = tuple(self.path_resolver.grant(item) for item in paths)
 
-        hard_reason = self.hard_deny.check(tool_name, policy, arguments, paths)
+        try:
+            hard_reason = self.hard_deny.check(tool_name, policy, arguments, paths)
+        except ShellParseError as exc:
+            return replace(self._result(tool_name, False, "hard_rule", f"命令未执行：{exc}", safe_detail, grants),
+                           error_code="invalid_syntax")
         if hard_reason:
             return self._result(tool_name, False, "hard_rule", hard_reason, safe_detail, grants)
 
         if origin.kind == "builtin" and tool_name == "exec_command":
-            from dataclasses import replace
             from src.mgr.readonly_command import compile_readonly, UnsupportedCommand
             cwd = self.path_resolver.resolve(arguments.get("workdir"))
             try:
-                compiled = await asyncio.to_thread(compile_readonly, str(arguments.get("command", "")), cwd, self.path_resolver)
+                compiled = await asyncio.to_thread(compile_readonly, str(arguments.get("cmd", "")), cwd, self.path_resolver)
             except (UnsupportedCommand, PathResolutionError) as exc:
                 if plan_active:
-                    return self._result(tool_name, False, "plan", str(exc), safe_detail, grants)
+                    return replace(self._result(tool_name, False, "plan", f"命令未执行：{exc}", safe_detail, grants),
+                                   error_code=exc.kind if isinstance(exc, UnsupportedCommand) else "invalid_path",
+                                   error_details={"position": getattr(exc, "position", None)})
             else:
                 command_grants = tuple(PathGrant(f"command_path_{i}", PathRole.READ, p, self.path_resolver.classify(p)) for i, p in enumerate(compiled.paths))
                 return replace(self._result(tool_name, True, "policy", "已验证的只读命令", safe_detail, command_grants), command_plan=compiled)
@@ -329,7 +337,7 @@ class PermissionManager:
             tool_name, policy, arguments, origin, paths, user_intent
         )
         if tool_name == "exec_command":
-            command = arguments.get("command", "")
+            command = arguments.get("cmd", "")
             request["redacted_command"] = self.data_guard.shell_summary(str(command))
         return request
 
@@ -449,7 +457,7 @@ class PermissionManager:
         arguments: Mapping[str, Any],
     ) -> str:
         if tool_name == "exec_command":
-            return self.data_guard.shell_summary(str(arguments.get("command", "")))
+            return self.data_guard.shell_summary(str(arguments.get("cmd", "")))
         if tool_name == "web_search":
             return self.data_guard.web_search_summary(str(arguments.get("query", "")))
         if tool_name == "web_fetch":

@@ -82,7 +82,7 @@ def test_config_budget_is_used_and_invalid_override_never_executes(runtime):
         expanded = await deps.tools_mgr.execute('read_file', {'path': 'large.txt', 'max_output_tokens': 2000}, deps=deps, agent=agent)
         assert len(str(default).encode()) <= 4000
         assert len(expanded.text) > len(default.text)
-        invalid = await deps.tools_mgr.execute('exec_command', {'command': 'rg --files', 'max_output_tokens': 2001}, deps=deps, agent=agent)
+        invalid = await deps.tools_mgr.execute('exec_command', {'cmd': 'rg --files', 'max_output_tokens': 2001}, deps=deps, agent=agent)
         assert invalid.error_code == 'invalid_arguments'
         assert not deps.process_mgr.sessions
     asyncio.run(scenario())

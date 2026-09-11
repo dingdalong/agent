@@ -17,7 +17,7 @@ def test_main_and_child_instructions(tmp_path):
 
 def test_post_round_instruction_consumed_once(tmp_path):
     mgr = PlanMgr(tmp_path)
-    mgr.enter_mode(SimpleNamespace(plan_active=False), ReminderMgr())
+    mgr.enter_mode(SimpleNamespace(plan_active=False, refresh_tools_schemas=lambda: None), ReminderMgr())
     assert mgr.pop_post_round_reminder(True, False)
     assert mgr.pop_post_round_reminder(True, False) is None
 

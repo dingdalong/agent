@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 # 与 src/tools/builtin 下 @tool 装饰器的实际数量对齐；新增内置工具时同步更新。
-EXPECTED_TOOL_COUNT = 23
+EXPECTED_TOOL_COUNT = 18
 EXPECTED_COMMANDS = {"plan", "clear", "resume", "agents", "models", "help"}
 EXPECTED_ROLES = {"coding", "mijia", "onboard"}
 # anthropic provider 固定用 cl100k_base，openai provider 未收录模型名回退 o200k_base

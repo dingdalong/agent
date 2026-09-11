@@ -63,6 +63,7 @@ class PlanMgr:
         if agent.plan_active:
             return False
         agent.plan_active = True
+        agent.refresh_tools_schemas()
 
         self._pending_injection = True
         self._need_exit_reminder = False
@@ -86,6 +87,7 @@ class PlanMgr:
         if not agent.plan_active:
             return False
         agent.plan_active = False
+        agent.refresh_tools_schemas()
 
         self._pending_injection = False
         self._need_exit_reminder = True
