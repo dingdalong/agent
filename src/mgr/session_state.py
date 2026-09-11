@@ -117,6 +117,7 @@ class SessionState:
 
     records: list[SessionRecord] = field(default_factory=list)
     context_ids: list[str] = field(default_factory=list)
+    plan: dict[str, Any] = field(default_factory=dict)
     _view_streams: dict[tuple[str, str], _TextChunks] = field(
         default_factory=dict,
         init=False,
@@ -151,12 +152,13 @@ class SessionState:
         by_id = {record.id: record for record in records}
         if any(by_id[item].model_message is None for item in context_ids):
             return None
-        return cls(records=records, context_ids=list(context_ids))
+        return cls(records=records, context_ids=list(context_ids), plan=copy.deepcopy(value.get("plan")) if isinstance(value.get("plan"), dict) else {})
 
     def to_dict(self) -> dict[str, Any]:
         self._materialize_all_view_streams()
         return {
             "version": 1,
+            "plan": copy.deepcopy(self.plan),
             "records": [record.to_dict() for record in self.records],
             "context_ids": list(self.context_ids),
         }

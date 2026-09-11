@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 from pydantic import BaseModel, Field
 
 from src.tools.policy import AccessKind, DataFlow, ToolPolicy
+from src.tools.display import ToolResult
 from src.tools.decorator import tool
 
 # 星期索引（datetime.weekday() 返回 0=周一）对应的中英文名，避免 strftime 的 locale 依赖。
@@ -130,7 +131,7 @@ def random_value(
             return f"抛硬币: {_random.choice(['heads', 'tails'])}"
         raise ValueError(f"不支持的 operation: {operation}")
     except Exception as e:
-        return f"随机生成错误：{e}"
+        return ToolResult.failure("execution_error", f"随机生成错误：{e}")
 
 
 # ---------------------------------------------------------------------------
@@ -229,7 +230,7 @@ def datetime_tool(
             return f"时间戳 {timestamp} = {d.isoformat()} ({_weekday_name(d)})"
         raise ValueError(f"不支持的 operation: {operation}")
     except Exception as e:
-        return f"时间运算错误：{e}"
+        return ToolResult.failure("execution_error", f"时间运算错误：{e}")
 
 
 # ---------------------------------------------------------------------------
@@ -278,7 +279,7 @@ def encode(operation: str, text: str) -> str:
             return f"{operation}: {digest}"
         raise ValueError(f"不支持的 operation: {operation}")
     except Exception as e:
-        return f"编解码错误：{e}"
+        return ToolResult.failure("execution_error", f"编解码错误：{e}")
 
 
 # ---------------------------------------------------------------------------
@@ -335,4 +336,4 @@ def text_stats(operation: str, text: str, substring: Optional[str] = None) -> st
             return f"反转: {text[::-1]}"
         raise ValueError(f"不支持的 operation: {operation}")
     except Exception as e:
-        return f"文本统计错误：{e}"
+        return ToolResult.failure("execution_error", f"文本统计错误：{e}")

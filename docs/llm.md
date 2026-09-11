@@ -59,12 +59,11 @@ token 用量统一为 `input_tokens`、`output_tokens`、`total_tokens`、`cache
 | `max_delay_seconds` | `300.0` | 单次等待封顶秒数 |
 | `timeout` | `120.0` | SDK 请求超时秒数 |
 | `context_limit` | `0` | 模型上下文窗口；非正值表示未知 |
-| `page_token_rate` | `0.03` | 单页工具结果占上下文窗口的比例 |
 | `reasoning_effort` | `"max"` | Provider 类内部的共享默认推理力度，不从配置读取；per-agent 覆盖与按调用降档只经 `reasoning_effort_override` 传递，不修改缓存实例 |
 | `preserve_thinking` | `False` | Ollama 历史思考保留开关 |
 | `max_pause_turn_continuations` | `0` | 协议续接上限；仅 Anthropic 从配置读取正整数，内置默认值为 `5` |
 
-`__post_init__` 创建信号量、计算 `page_token_budget = max(1, floor(context_limit × page_token_rate))`，并构造 `RetryPolicy`（`src/llm/base.py:328-340`）。`protocol_continuation_limit(finish_reason)` 是 Agent 查询协议续接预算的统一接口：基类及非 Anthropic provider 返回 `0`，Anthropic 对 `pause_turn` 返回实例配置值（`src/llm/base.py:342-351`、`src/llm/anthropic.py:158-169`）。协议续接会产生新的完整 LLM 调用，与同一次调用内部的网络重试次数相互独立。
+`__post_init__` 创建信号量，并构造 `RetryPolicy`（`src/llm/base.py:328-340`）。`protocol_continuation_limit(finish_reason)` 是 Agent 查询协议续接预算的统一接口：基类及非 Anthropic provider 返回 `0`，Anthropic 对 `pause_turn` 返回实例配置值（`src/llm/base.py:342-351`、`src/llm/anthropic.py:158-169`）。协议续接会产生新的完整 LLM 调用，与同一次调用内部的网络重试次数相互独立。
 
 **推理力度降档阶梯**是单一真源：基类类属性 `_EFFORT_DOWNGRADE: ClassVar[dict[str, str]] = {}` 与方法 `next_lower_effort(current) -> str | None`（返回 `_EFFORT_DOWNGRADE.get(current)`）。各 provider 只覆写字典（pre-map 词表，Anthropic 的档位另经 `_map_effort` 二次映射）：
 
@@ -189,7 +188,7 @@ Chat Completions 风格的通用校验（`base.py:179-283`）要求：
 
 assistant 的 provider 专属字段在判断“真正为空”之前由 `_normalize_assistant_extra()` 保存。因此 OpenAI 与 DeepSeek 的 `_response_output`、Anthropic `_anthropic_content`，以及 Ollama、Moonshot 的 reasoning-only carrier 即使正文为空也会保留；没有正文、工具调用或任何专属载体的空 assistant 才会删除。
 
-工具结果分页由 `split_page()` / `_split_page_once()`（`src/llm/base.py:415-440`）提供：先按 provider token 估算判断整段是否可用，超预算时二分查找最大可容纳前缀，直至无损切完。实际分页缓存和读取由 `ToolsMgr` 完成。
+工具输出预算由 ToolOutput 独立管理，不随 provider 上下文窗口放大，见 [tools.md](tools.md)。
 
 ## 7. 五个 provider 的差异
 

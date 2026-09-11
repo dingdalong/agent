@@ -59,7 +59,6 @@ class LLMMgr:
     _default_concurrency: int = field(init=False)
     _request_timeout_seconds: float = field(init=False)
     _retry_config: RetryConfig = field(init=False)
-    _page_token_rate: float = field(init=False)
     _user_agent: str = field(init=False)
 
     def __post_init__(self) -> None:
@@ -122,7 +121,6 @@ class LLMMgr:
             base_delay_seconds=base_delay_seconds,
             max_delay_seconds=max_delay_seconds,
         )
-        self._page_token_rate = self.config_mgr.get_config("tool.page_token_rate")
         self._user_agent = llm_cfg.get("user_agent", "")
         self._providers = providers
 
@@ -281,7 +279,6 @@ class LLMMgr:
             base_delay_seconds=self._retry_config.base_delay_seconds,
             max_delay_seconds=self._retry_config.max_delay_seconds,
             context_limit=provider_cfg.get("context_limit", 0),
-            page_token_rate=self._page_token_rate,
             event_bus=self.event_bus,
             user_agent=self._user_agent,
         )

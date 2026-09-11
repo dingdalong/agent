@@ -111,6 +111,7 @@ async def _wait_for_transcript_render(app: AgentTuiApp, pilot) -> None:
     raise AssertionError("transcript render did not become idle")
 
 
+@pytest.mark.integration
 def test_malformed_completed_transcript_is_safe_and_switchable() -> None:
     async def scenario() -> None:
         store = AgentViewStore()
@@ -141,6 +142,7 @@ def test_malformed_completed_transcript_is_safe_and_switchable() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_rapid_transcript_switches_coalesce_without_cancelling_render() -> None:
     async def scenario() -> None:
         store = AgentViewStore()
@@ -183,6 +185,7 @@ def test_rapid_transcript_switches_coalesce_without_cancelling_render() -> None:
     ]
 
 
+@pytest.mark.integration
 def test_transcript_tick_does_not_overwrite_position_during_render(monkeypatch) -> None:
     async def scenario() -> None:
         store = AgentViewStore()
@@ -240,6 +243,7 @@ def test_transcript_tick_does_not_overwrite_position_during_render(monkeypatch) 
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_large_transcript_switching_stays_responsive_during_response_stream() -> None:
     async def scenario() -> None:
         store = AgentViewStore()
@@ -299,6 +303,7 @@ def test_large_transcript_switching_stays_responsive_during_response_stream() ->
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_mouse_down_ignores_detached_markdown_hit(monkeypatch) -> None:
     async def scenario() -> None:
         app = _app()
@@ -338,6 +343,7 @@ def test_mouse_down_ignores_detached_markdown_hit(monkeypatch) -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_completed_agents_do_not_steal_focus_from_open_transcript() -> None:
     async def scenario() -> None:
         store = AgentViewStore()
@@ -369,6 +375,7 @@ def test_completed_agents_do_not_steal_focus_from_open_transcript() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_stale_transcript_ids_are_safe() -> None:
     async def scenario() -> None:
         store = AgentViewStore()
@@ -392,6 +399,7 @@ def test_stale_transcript_ids_are_safe() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_responsive_input_history_and_ctrl_c() -> None:
     async def scenario() -> None:
         app = _app(platform="win32")
@@ -486,6 +494,7 @@ def test_responsive_input_history_and_ctrl_c() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_render_policy_controls_history_tick_and_focus_pause() -> None:
     async def scenario() -> None:
         policy = TuiRenderPolicy(activity_interval=0.25)
@@ -508,6 +517,7 @@ def test_render_policy_controls_history_tick_and_focus_pause() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_keyboard_text_areas_keep_cursor_visible_without_blinking(monkeypatch) -> None:
     async def scenario() -> None:
         app = _app()
@@ -564,6 +574,7 @@ def test_keyboard_text_areas_keep_cursor_visible_without_blinking(monkeypatch) -
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_repeated_chrome_render_skips_unchanged_content(monkeypatch) -> None:
     async def scenario() -> None:
         app = _app()
@@ -609,6 +620,7 @@ def test_repeated_chrome_render_skips_unchanged_content(monkeypatch) -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_ask_user_ticks_do_not_repeat_static_updates(monkeypatch) -> None:
     async def scenario() -> None:
         app = _app()
@@ -658,6 +670,7 @@ def test_rich_text_signature_includes_base_style() -> None:
     assert _rich_text_signature(red) != _rich_text_signature(blue)
 
 
+@pytest.mark.integration
 def test_failed_history_append_is_not_committed(monkeypatch) -> None:
     async def scenario() -> None:
         app = _app()
@@ -674,6 +687,7 @@ def test_failed_history_append_is_not_committed(monkeypatch) -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize(
     "text",
     [
@@ -699,6 +713,7 @@ def test_models_command_input_is_recorded(text: str) -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("cancelled", [False, True])
 def test_models_flow_only_keeps_success_output(cancelled: bool) -> None:
     async def scenario() -> None:
@@ -738,6 +753,7 @@ def test_models_flow_only_keeps_success_output(cancelled: bool) -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_inline_widgets_define_their_own_completion_history() -> None:
     async def scenario() -> None:
         app = _app()
@@ -893,6 +909,7 @@ def test_inline_widgets_define_their_own_completion_history() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_permission_notice_renders_full_reason_and_wraps() -> None:
     async def scenario() -> None:
         app = _app()
@@ -919,6 +936,7 @@ def test_permission_notice_renders_full_reason_and_wraps() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_keyboard_focus_moves_between_composer_agent_list_and_transcript() -> None:
     async def scenario() -> None:
         store = AgentViewStore()
@@ -1036,6 +1054,7 @@ def test_keyboard_focus_moves_between_composer_agent_list_and_transcript() -> No
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_visible_agent_list_animates_only_running_row_without_worker(
     monkeypatch,
 ) -> None:
@@ -1113,6 +1132,7 @@ def test_visible_agent_list_animates_only_running_row_without_worker(
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_modal_controls_are_keyboard_only() -> None:
     async def scenario() -> None:
         app = _app()
@@ -1213,6 +1233,7 @@ def test_modal_controls_are_keyboard_only() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_form_custom_row_is_inline_and_focus_shows_cursor() -> None:
     """自定义回答行常驻选项末尾：导航到该行即聚焦输入框，无底部独立输入框。"""
     async def scenario() -> None:
@@ -1241,6 +1262,7 @@ def test_form_custom_row_is_inline_and_focus_shows_cursor() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_form_free_text_question_focuses_custom_input_on_mount() -> None:
     """无选项自由题挂载后直接聚焦其它输入行。"""
     async def scenario() -> None:
@@ -1257,6 +1279,7 @@ def test_form_free_text_question_focuses_custom_input_on_mount() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_form_custom_input_autogrows_to_four_lines_then_scrolls() -> None:
     """其它输入默认 1 行，随内容增高到 4 行后内部滚动，清空后回到 1 行。"""
     async def scenario() -> None:
@@ -1282,6 +1305,7 @@ def test_form_custom_input_autogrows_to_four_lines_then_scrolls() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_form_discussion_row_swaps_with_custom_row_and_persists() -> None:
     """讨论行与其它行在同一位置互换；文本在切换间保持。"""
     async def scenario() -> None:
@@ -1320,6 +1344,7 @@ def test_form_discussion_row_swaps_with_custom_row_and_persists() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_form_custom_texts_are_independent_per_question() -> None:
     """每题的其它输入独立保存，切换标签不丢失。"""
     async def scenario() -> None:
@@ -1356,6 +1381,7 @@ def test_form_custom_texts_are_independent_per_question() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_form_recommended_option_shows_suffix_component() -> None:
     """推荐项在 label 后紧跟独立 (推荐) 后缀组件。"""
     async def scenario() -> None:
@@ -1386,6 +1412,7 @@ def test_form_recommended_option_shows_suffix_component() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_form_question_label_and_description_follow_markdown_flag() -> None:
     """题干、选项标签与说明统一按 markdown 开关渲染。"""
     async def scenario() -> None:
@@ -1440,6 +1467,7 @@ def test_form_question_label_and_description_follow_markdown_flag() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_form_multiline_label_keeps_logical_row_navigation() -> None:
     """多行选项标签不改变逻辑导航：Down 一次移动一个选项。"""
     async def scenario() -> None:
@@ -1469,6 +1497,7 @@ def test_form_multiline_label_keeps_logical_row_navigation() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_form_preview_updates_and_hides_descriptions() -> None:
     """有 preview 时不渲染说明组件；预览随当前选项更新。"""
     async def scenario() -> None:
@@ -1503,6 +1532,7 @@ def test_form_preview_updates_and_hides_descriptions() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_form_preview_stacks_and_body_scrolls_in_compact_viewport() -> None:
     """紧凑视口下 preview 分栏上下堆叠不重叠；内容超高时正文内部滚动。"""
     async def scenario() -> None:
@@ -1536,6 +1566,7 @@ def test_form_preview_stacks_and_body_scrolls_in_compact_viewport() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_form_drag_select_copies_on_mac() -> None:
     """题干/选项文本支持鼠标拖选；macOS 选中即复制。"""
     async def scenario() -> None:
@@ -1581,6 +1612,7 @@ def test_form_drag_select_copies_on_mac() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_form_preview_code_block_and_trailing_newline_drag_no_crash() -> None:
     """preview 代码块与尾随换行内容拖选不崩溃。"""
     async def scenario() -> None:
@@ -1627,6 +1659,7 @@ def test_form_preview_code_block_and_trailing_newline_drag_no_crash() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_form_inputs_stay_keyboard_only_under_mouse() -> None:
     """其它/讨论输入框不响应鼠标聚焦与拖选。"""
     async def scenario() -> None:
@@ -1651,6 +1684,7 @@ def test_form_inputs_stay_keyboard_only_under_mouse() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_form_multi_select_toggles_and_combines_custom_text() -> None:
     """多选题：空格/数字勾选与反选，自定义文本按选项序追加在勾选值之后。"""
     async def scenario() -> None:
@@ -1679,6 +1713,7 @@ def test_form_multi_select_toggles_and_combines_custom_text() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_form_single_select_custom_text_and_option_are_exclusive() -> None:
     """单选互斥：输入清空已选项；选中选项清空已输入文本。"""
     async def scenario() -> None:
@@ -1713,6 +1748,7 @@ def test_form_single_select_custom_text_and_option_are_exclusive() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_form_restores_focus_after_app_focus() -> None:
     """终端重新激活后，焦点恢复到当前状态对应组件且文本保留。"""
     async def scenario() -> None:
@@ -1756,6 +1792,7 @@ def test_form_restores_focus_after_app_focus() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_form_preview_pane_hides_on_empty_and_restores() -> None:
     """预览随当前选项切换：空 preview 隐藏面板，返回时恢复内容。"""
     async def scenario() -> None:
@@ -1789,6 +1826,7 @@ def test_form_preview_pane_hides_on_empty_and_restores() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_modal_fifo_and_permission_over_transcript() -> None:
     async def scenario() -> None:
         store = AgentViewStore()
@@ -1896,6 +1934,7 @@ def test_modal_fifo_and_permission_over_transcript() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_input_status_shows_model_and_effort() -> None:
     async def scenario() -> None:
         app = _app(get_model_info=lambda: ("deepseek-v4-pro", "max"))
@@ -1909,6 +1948,7 @@ def test_input_status_shows_model_and_effort() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_input_status_keeps_blank_row_without_provider() -> None:
     """无 provider 时保留空行占位，避免输入区随状态有无而上下跳动。"""
 
@@ -1924,6 +1964,7 @@ def test_input_status_keeps_blank_row_without_provider() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_input_status_hidden_while_viewing_transcript() -> None:
     async def scenario() -> None:
         store = AgentViewStore()
@@ -1949,6 +1990,7 @@ def test_input_status_hidden_while_viewing_transcript() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_selection_stays_stable_across_scroll_and_platform_copy_rules() -> None:
     async def scenario() -> None:
         app = _app(platform="win32")
@@ -2056,6 +2098,7 @@ def test_selection_stays_stable_across_scroll_and_platform_copy_rules() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_history_entries_have_uniform_spacing() -> None:
     """条目间距由逻辑行区间统一给出，不依赖内容里的尾随换行。"""
 
@@ -2097,6 +2140,7 @@ def test_history_entries_have_uniform_spacing() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_history_entry_trailing_newline_row_is_selectable_without_crash() -> None:
     async def scenario() -> None:
         # win32：ctrl+c 走 _selected_text() 复制路径，覆盖真实取词入口。
@@ -2133,6 +2177,7 @@ def test_history_entry_trailing_newline_row_is_selectable_without_crash() -> Non
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_dialog_prompt_trailing_newline_row_is_selectable_without_crash() -> None:
     async def scenario() -> None:
         app = _app()
@@ -2162,6 +2207,7 @@ def test_dialog_prompt_trailing_newline_row_is_selectable_without_crash() -> Non
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_reverse_selection_tracks_tool_result_without_crossing_its_end() -> None:
     async def scenario() -> None:
         app = _app(platform="linux")
@@ -2192,6 +2238,7 @@ def test_reverse_selection_tracks_tool_result_without_crossing_its_end() -> None
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_native_clipboard_is_serial_latest_wins_and_osc52_is_fallback() -> None:
     class SlowClipboard:
         supported = True
@@ -2277,6 +2324,7 @@ def test_native_clipboard_is_serial_latest_wins_and_osc52_is_fallback() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_external_cancellation_cleans_modal_before_future_completion() -> None:
     async def scenario() -> None:
         clock = TurnClock()
@@ -2342,6 +2390,7 @@ def test_external_cancellation_cleans_modal_before_future_completion() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_permission_menu_settles_turn_elapsed_only_when_input_resumes(
     monkeypatch,
 ) -> None:
@@ -2381,6 +2430,7 @@ def test_permission_menu_settles_turn_elapsed_only_when_input_resumes(
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_close_cancels_active_model_menu_and_waits_for_removal() -> None:
     """关闭 UI 应能等待活动模型菜单卸载，不接受 coroutine 的限制不得泄漏。"""
     async def scenario() -> None:
@@ -2426,6 +2476,7 @@ def test_close_cancels_active_model_menu_and_waits_for_removal() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_stream_follow_and_dialog_text_inputs() -> None:
     async def scenario() -> None:
         app = _app()
@@ -2510,6 +2561,7 @@ def test_stream_follow_and_dialog_text_inputs() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_session_history_is_bulk_hydrated_into_rich_lines() -> None:
     async def scenario() -> None:
         state = SessionState()
@@ -2551,6 +2603,7 @@ def test_session_history_is_bulk_hydrated_into_rich_lines() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_up_key_recalls_history_after_submit_without_refresh() -> None:
     """回归：历史快照不在 refresh 之外缓存——提交后按上键应立刻回溯到新条目。
 
@@ -2611,6 +2664,7 @@ def test_up_key_recalls_history_after_submit_without_refresh() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_up_key_on_first_line_moves_to_line_start_before_history() -> None:
     """光标在首行非行首按上先跳到行首；行首再按上才进历史；多行非首行按上正常上移。"""
 
@@ -2665,6 +2719,7 @@ def test_up_key_on_first_line_moves_to_line_start_before_history() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_up_key_on_soft_wrapped_line_moves_one_visual_line_before_history() -> None:
     """软折行草稿按上键应逐视觉行上移，到文首后才回溯历史。"""
 
@@ -2733,6 +2788,7 @@ def test_up_key_on_soft_wrapped_line_moves_one_visual_line_before_history() -> N
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_composer_mouse_drag_selects_for_copy() -> None:
     """回归：Composer 放开鼠标拖选后，可拖选文本并经 _selected_text 取到（复制数据源）。
 
@@ -2768,6 +2824,7 @@ def test_composer_mouse_drag_selects_for_copy() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_model_menu_moves_active_slot_effort_and_submits_three_axis_payload() -> None:
     """单屏三轴：↑↓ 只移动激活槽位、Tab 切槽位跳到该槽位已选模型、←→ 改角色级强度。"""
     app = _app()
@@ -2859,6 +2916,7 @@ def test_model_menu_moves_active_slot_effort_and_submits_three_axis_payload() ->
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_model_menu_scrolls_models_while_effort_and_hint_stay_visible() -> None:
     """短窗口中模型独立滚动，强度和操作提示保持可见。"""
     app = _app()

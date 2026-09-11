@@ -20,26 +20,14 @@ from src.tools.display import (
 # ---------------------------------------------------------------------------
 
 def test_tool_title_known():
-    assert tool_title("shell") == "执行命令"
+    assert tool_title("exec_command") == "执行命令"
     assert tool_title("read_file") == "读取文件"
-    assert tool_title("write_file") == "写入文件"
-    assert tool_title("edit_file_lines") == "编辑文件"
-    assert tool_title("replace_all_in_file") == "全局替换"
-    assert tool_title("grep") == "搜索内容"
-    assert tool_title("glob") == "查找文件"
     assert tool_title("web_fetch") == "获取网页"
     assert tool_title("web_search") == "搜索网页"
 
 
-def test_tool_title_file_tools():
-    assert tool_title("get_file_info") == "文件信息"
-    assert tool_title("create_directory") == "创建目录"
-    assert tool_title("move_file") == "移动文件"
-
-
 def test_tool_title_plan_tools():
-    assert tool_title("set_plan_file") == "设置计划文件"
-    assert tool_title("exit_plan_mode") == "提交计划"
+    assert tool_title("submit_plan") == "提交计划"
 
 
 def test_tool_title_memory_tools():
@@ -57,7 +45,6 @@ def test_tool_title_task_tools():
 def test_tool_title_utility_tools():
     assert tool_title("calculator") == "计算"
     assert tool_title("compact") == "压缩上下文"
-    assert tool_title("read_tool_result") == "读取分页结果"
     assert tool_title("random") == "随机生成"
     assert tool_title("datetime") == "日期时间"
     assert tool_title("encode") == "编码转换"
@@ -91,8 +78,8 @@ def test_permission_line_maps_all_sources():
 
 def test_permission_line_full_format():
     assert (
-        permission_line("deny", "get_file_info", "不允许读取", "hard_rule")
-        == "✘ 硬规则 · 文件信息 · 已拒绝(不允许读取)"
+        permission_line("deny", "read_file", "不允许读取", "hard_rule")
+        == "✘ 硬规则 · 读取文件 · 已拒绝(不允许读取)"
     )
 
 
@@ -112,7 +99,7 @@ def test_permission_line_empty_source_defaults_to_judge():
 
 
 def test_permission_line_empty_reason_omits_parens():
-    assert permission_line("deny", "shell", "", "hard_rule") == "✘ 硬规则 · 执行命令 · 已拒绝"
+    assert permission_line("deny", "exec_command", "", "hard_rule") == "✘ 硬规则 · 执行命令 · 已拒绝"
 
 
 def test_permission_line_unknown_tool_falls_back():
@@ -124,13 +111,13 @@ def test_permission_line_unknown_tool_falls_back():
 # ---------------------------------------------------------------------------
 
 def test_format_params_shell():
-    result = format_params("shell", {"command": "ls -la"})
+    result = format_params("exec_command", {"command": "ls -la"})
     assert "ls -la" in result
 
 
 def test_format_params_shell_multiline():
     cmd = "\n".join(f"echo line{i}" for i in range(10))
-    result = format_params("shell", {"command": cmd})
+    result = format_params("exec_command", {"command": cmd})
     assert "共 10 行" in result
 
 
@@ -138,18 +125,10 @@ def test_format_params_read_file():
     assert format_params("read_file", {"path": "/foo/bar.py"}) == "/foo/bar.py"
 
 
-def test_format_params_write_file():
-    assert format_params("write_file", {"path": "/foo/bar.py"}) == "/foo/bar.py"
 
 
-def test_format_params_grep():
-    result = format_params("grep", {"pattern": "TODO", "path": "src/"})
-    assert "TODO" in result
-    assert "src/" in result
 
 
-def test_format_params_glob():
-    assert format_params("glob", {"pattern": "*.py"}) == "*.py"
 
 
 def test_format_params_web_search():
@@ -188,13 +167,6 @@ def test_format_params_load_skill():
     assert format_params("load_skill", {"name": "godot-ui"}) == "godot-ui"
 
 
-def test_format_params_file_extra_tools():
-    assert format_params("get_file_info", {"path": "/foo.py"}) == "/foo.py"
-    assert format_params("create_directory", {"path": "/new_dir"}) == "/new_dir"
-    result = format_params("move_file", {"source": "a.py", "destination": "b.py"})
-    assert "a.py" in result
-    assert "b.py" in result
-    assert "→" in result
 
 
 def test_format_params_memory_tools():
@@ -202,9 +174,6 @@ def test_format_params_memory_tools():
     assert format_params("read_memory", {"title": "编码风格"}) == "编码风格"
 
 
-def test_format_params_plan_tools():
-    assert format_params("set_plan_file", {"file_path": "/plans/foo.md"}) == "/plans/foo.md"
-    assert format_params("exit_plan_mode", {"file_path": "/plans/foo.md"}) == "/plans/foo.md"
 
 
 def test_format_params_calculator():
@@ -219,10 +188,6 @@ def test_format_params_compact_truncate():
     long_focus = "保留" * 100
     result = format_params("compact", {"focus": long_focus})
     assert result.endswith("…")
-
-
-def test_format_params_read_tool_result():
-    assert format_params("read_tool_result", {"page": 3}) == "第 3 页"
 
 
 def test_format_params_utility_tools():
@@ -414,7 +379,7 @@ def test_tool_entry_str_for_normal_return():
     result = asyncio.run(
         entry({"deps": None, "agent": None}, validated=True)
     )
-    assert result == "42"
+    assert result.text == "42"
 
 
 # ---------------------------------------------------------------------------

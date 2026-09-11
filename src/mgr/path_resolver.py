@@ -91,13 +91,6 @@ class PathResolver:
             ))
         return tuple(resolved)
 
-    def resolve_move_target(self, source: str, destination: str) -> Path:
-        source_path = self.resolve(source)
-        destination_path = self.resolve(destination)
-        if destination_path.is_dir():
-            destination_path = self.resolve(destination_path / source_path.name)
-        return destination_path
-
     def grant(self, resolved: ResolvedPath) -> PathGrant:
         return PathGrant(
             argument=resolved.argument,

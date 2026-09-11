@@ -6,9 +6,9 @@
 阶段性结论。
 
 策略取 `AccessKind.INTERNAL + plan_safe=True`，与 `save_memory` / `task_list`
-同构：落盘由 ContextMgr 内部完成，不经 `write_file`。这一点是刻意的——`.agent`
+同构：落盘由 ContextMgr 内部完成，不经 `apply_patch`。这一点是刻意的——`.agent`
 被 PathResolver 归为 PROTECTED，而 plan 模式下 `_authorize_plan()` 只放行
-`PathClass.PLAN`，改用 write_file 落盘会让本工具在 plan 模式下必然被拒。
+`PathClass.PLAN`，改用 apply_patch 落盘会让本工具在 plan 模式下必然被拒。
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from src.tools.policy import AccessKind, DataFlow, ToolPolicy
+from src.tools.display import ToolResult
 from src.tools.decorator import tool
 
 
@@ -71,7 +72,7 @@ async def note_context(
     """
     context_mgr = getattr(deps, "context_mgr", None) if deps is not None else None
     if context_mgr is None:
-        return "错误：context_mgr 未配置，无法使用共享上下文工具。"
+        return ToolResult.failure("unavailable", '错误：context_mgr 未配置，无法使用共享上下文工具。')
 
     entry = await context_mgr.record(
         kind="note",

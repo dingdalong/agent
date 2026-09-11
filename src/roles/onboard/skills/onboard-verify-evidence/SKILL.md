@@ -24,7 +24,7 @@ description: 独立核实 onboard 四维度报告中的 dominant/conflict/unknow
 
 ## 上下文预算(硬约束)
 
-- 只对残留桶发现、按其已给出的 `module::symbol`/`file::field` 打开**定向**源码核对(`get_code_snippet`/`trace_path`/`search_code`/`search_graph`,Git 可用时 `shell` 只跑只读 `git log`/`show`/`diff`),**绝不重新通读整个模块或重跑 REDUCE**。
+- 只对残留桶发现、按其已给出的 `module::symbol`/`file::field` 打开**定向**源码核对(`get_code_snippet`/`trace_path`/`search_code`/`search_graph`,Git 可用时 `exec_command` 只跑只读 `git log`/`show`/`diff`),**绝不重新通读整个模块或重跑 REDUCE**。
 - `confirmed` 发现不复核(其活跃规则线由 候选审核执行器 逐条验),除非它与某 `conflict` 直接对立、需一并判定。
 
 ## 核实方法

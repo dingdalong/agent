@@ -1,181 +1,49 @@
-"""计划工作流工具 — 设置计划文件、提交计划审核。"""
-
-from __future__ import annotations
-
+"""一次提交计划正文，由框架保存和审核。"""
 import asyncio
-from pathlib import Path
-from typing import TYPE_CHECKING
-
 from pydantic import BaseModel, Field
 
 from src.events.types import caller_identity
-from src.mgr.path_resolver import PathClass, PathResolutionError
-from src.tools.policy import AccessKind, DataFlow, PathArgument, PathRole, ToolPolicy
 from src.tools.decorator import tool
-
-if TYPE_CHECKING:
-    from src.agent import Agent, AgentDeps
-
-
-# ── set_plan_file ──────────────────────────────────────────────────
+from src.tools.display import ToolResult
+from src.tools.policy import AccessKind, DataFlow, ToolPolicy
 
 
-class SetPlanFile(BaseModel):
-    """设置计划文件的参数。"""
-    file_path: str = Field(..., description="计划文件的绝对路径。")
+class SubmitPlan(BaseModel):
+    title: str = Field(..., min_length=1, max_length=200)
+    content: str = Field(..., min_length=1, description='完整自包含计划正文；修订时提交完整替换内容')
 
 
-@tool(
-    model=SetPlanFile,
-    description=(
-        "设置当前正在编辑的计划文件路径。在写入计划文件后调用此工具，"
-        "使后续提示词能引用当前计划。"
-    ),
-    policy=ToolPolicy(
-        AccessKind.LOCAL_READ,
-        DataFlow.LOCAL,
-        (PathArgument("file_path", PathRole.READ),),
-        plan_safe=True,
-    ),
-    subagent=False,
-    feature="plan",
-)
-def set_plan_file(file_path: str, deps: AgentDeps, authorization) -> str:
-    """记录当前活跃的计划文件路径。
-
-    Args:
-        file_path: 计划文件的绝对路径。
-        deps: AgentDeps 依赖对象，提供 plan_mgr。
-
-    Returns:
-        操作结果描述。
-    """
-    plan_mgr = deps.plan_mgr
-    if plan_mgr is None:
-        return "错误：计划管理器不可用"
-
+@tool(model=SubmitPlan, description='一次提交完整计划。框架保存、展示、审核；不要另写文件、登记路径或重复输出计划。', policy=ToolPolicy(AccessKind.INTERNAL, DataFlow.LOCAL, plan_safe=True), subagent=False, feature='plan', counts_as_work=False)
+async def submit_plan(title, content, agent, deps, authorization):
+    if not authorization.allowed or not agent.plan_active or deps.plan_mgr is None:
+        return ToolResult.failure('invalid_plan_state', '仅计划模式下可提交计划')
+    if not title.strip() or not content.strip():
+        return ToolResult.failure('invalid_arguments', '计划标题和正文不能为空')
+    title = str(deps.data_guard.redact(title))
+    content = str(deps.data_guard.redact(content))
     try:
-        plan_file = _validated_plan_file(file_path, deps, authorization)
-    except PathResolutionError as exc:
-        return f"错误：{exc}"
-    plan_mgr.set_active_plan_path(str(plan_file))
-    return f"已设置当前计划文件：{plan_file}"
-
-
-# ── exit_plan_mode ──────────────────────────────────────────────────
-
-
-class ExitPlanMode(BaseModel):
-    """退出计划模式的参数。"""
-    file_path: str = Field(..., description="计划文件的绝对路径。")
-
-
-@tool(
-    model=ExitPlanMode,
-    description=(
-        "退出计划模式并提交计划供用户审核。传入计划文件路径，展示计划内容，用户可选择自动执行、手动执行或返回修改意见。\n\n"
-        "使用要求：\n"
-        "- 必须先通过 write_file 写入计划文件，再调用此工具\n"
-        "- 不要用 ask_user 询问\"计划可以吗\"——提交审核必须用此工具\n"
-        "- 如果用户返回修改意见，根据意见修改计划后再次提交"
-    ),
-    policy=ToolPolicy(
-        AccessKind.LOCAL_READ,
-        DataFlow.LOCAL,
-        (PathArgument("file_path", PathRole.READ),),
-        plan_safe=True,
-    ),
-    subagent=False,
-    feature="plan",
-)
-async def exit_plan_mode(file_path: str, agent: Agent, deps: AgentDeps, authorization) -> str:
-    """校验当前处于 plan 模式、读取计划内容、让用户选择后续操作。
-
-    Args:
-        file_path: 计划文件的绝对路径，由 LLM 提供。
-        agent: 当前 Agent 实例。
-        deps: AgentDeps 依赖对象，提供 plan_mgr。
-
-    Returns:
-        用户选择的操作结果和后续指引。
-    """
-    if not agent.plan_active:
-        return "错误：当前不在计划模式中。"
-
-    plan_mgr = deps.plan_mgr
-    if plan_mgr is None:
-        return "错误：计划管理器不可用"
-
-    reminder_mgr = agent._reminder_mgr
-
-    try:
-        plan_file, plan_content = await asyncio.to_thread(
-            _read_validated_plan_file, file_path, deps, authorization
-        )
-    except (OSError, PathResolutionError):
-        return "错误：计划文件不存在或不可读，仍处于计划模式。请先写入计划文件再提交。"
-
-    plan_content = str(deps.data_guard.redact(plan_content))
-    if not plan_content.strip():
-        return "错误：计划文件为空，仍处于计划模式。请先写入计划内容再提交。"
-
-    # 表头（路径/标签）为结构化 chrome 走纯文本；计划正文是 LLM 写的 Markdown，单独按 Markdown 渲染。
-    await deps.event_bus.request_output(f"\n计划文件：\n{file_path}\n\n计划内容：\n")
-    await deps.event_bus.request_output(plan_content, markdown=True)
-
-    # choice_input 语义：选项行提交→choice=该项 value（auto/manual）、feedback 为空；
-    # 输入行提交→choice 为空、feedback=修改意见；Esc 取消→两者皆空。三者互斥、以光标所在行为准。
-    caller_agent_type, caller_uuid = caller_identity(agent)
+        path = await asyncio.to_thread(deps.plan_mgr.save, content, deps.session_state.plan if deps.session_state else {})
+    except (OSError, ValueError) as exc:
+        return ToolResult.failure('plan_save_failed', str(exc))
+    state = {'path': str(path), 'title': title, 'approved': False}
+    if deps.session_state is not None:
+        deps.session_state.plan = state
+    await deps.event_bus.request_output(f'计划：{title}\n{path}\n')
+    await deps.event_bus.request_output(content, markdown=True)
+    caller_type, caller_uuid = caller_identity(agent)
     choice, feedback = await deps.event_bus.request_choice_input(
-        prompt="计划审核",
-        options=[("auto", "自动执行"), ("manual", "手动执行")],
-        descriptions=["在当前上下文中自动实施计划", "退出计划模式，自行实施"],
-        input_placeholder="输入修改意见…",
-        default_index=0,
-        markdown=False,
-        caller_agent_type=caller_agent_type,
-        caller_uuid=caller_uuid,
+        prompt='计划审核', options=[('auto', '自动执行'), ('manual', '手动执行')],
+        descriptions=['在当前会话实施计划', '保存计划并结束当前回合'],
+        input_placeholder='输入修改意见…', default_index=0, markdown=False,
+        caller_agent_type=caller_type, caller_uuid=caller_uuid,
     )
-    feedback = feedback.strip()
-
-    if choice == "auto":
-        plan_mgr.exit_mode(agent, reminder_mgr)
-        return (
-            f"用户已批准计划，选择自动执行。已退出计划模式。\n\n"
-            f"计划文件路径：{file_path}\n\n"
-            f"## 已批准的计划：\n{plan_content}"
-        )
-
-    if choice == "manual":
-        plan_mgr.exit_mode(agent, reminder_mgr)
-        return (
-            f"用户已批准计划，选择手动执行。已退出计划模式。\n\n"
-            f"计划文件路径：{file_path}\n\n"
-            f"## 已批准的计划：\n{plan_content}"
-        )
-
-    if feedback:  # 输入行提交修改意见：计划模式保持不变
-        return f"用户对计划的修改意见：{feedback}\n请根据以上意见与用户进一步沟通需求。"
-
-    # choice 与 feedback 皆空：用户按 Esc 取消，不退出计划模式
-    return "用户取消了操作，仍处于计划模式。可继续完善计划或再次提交。"
-
-
-def _validated_plan_file(file_path: str, deps: AgentDeps, authorization) -> Path:
-    resolver = deps.permission_mgr.path_resolver
-    grant = next(
-        (item for item in authorization.path_grants if item.argument == "file_path"),
-        None,
-    )
-    if grant is None:
-        raise PathResolutionError("缺少计划文件授权")
-    path = resolver.revalidate(grant, file_path)
-    if grant.classification is not PathClass.PLAN or not path.is_file():
-        raise PathResolutionError("只接受 .agent/plans 目录下的普通计划文件")
-    resolver.validate_local_read(path)
-    return path
-
-
-def _read_validated_plan_file(file_path: str, deps: AgentDeps, authorization) -> tuple[Path, str]:
-    path = _validated_plan_file(file_path, deps, authorization)
-    return path, path.read_text(encoding="utf-8")
+    if choice in {'auto', 'manual'} and not feedback.strip():
+        state['approved'] = True
+        deps.plan_mgr.exit_mode(agent, agent._reminder_mgr)
+    if deps.session_mgr is not None and deps.session_state is not None:
+        await asyncio.to_thread(deps.session_mgr.save_state, deps.session_id, deps.session_state)
+    if feedback.strip():
+        return ToolResult(f'修改意见：{feedback.strip()}\n请修订后再次 submit_plan；路径：{path}')
+    if choice == 'auto':
+        return ToolResult(f'已批准计划：{path}。已退出计划模式，加载 builtin:execute-plan 并实施；正文已在当前对话中，不要重复读取。')
+    return ToolResult(f'计划已保存：{path}。' + ('用户选择手动执行。' if choice == 'manual' else '审核已取消，保持计划模式。'), end_turn=True)

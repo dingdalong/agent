@@ -1,5 +1,6 @@
 """工具管理器 — 注册、执行工具，协调权限检查和 hook。"""
 
+import asyncio
 import logging
 import time
 from dataclasses import replace
@@ -10,6 +11,8 @@ from pydantic import ValidationError
 from src.events.types import ToolCallCompleted, ToolCallStarted, caller_identity
 from src.mgr.permission_mgr import tool_sort_order
 from src.tools import ToolDict, ToolEntry
+from src.tools.display import ToolResult
+from src.mgr.tool_output import ToolOutput
 from src.tools import AccessKind, PathRole, ToolPolicy
 
 if TYPE_CHECKING:
@@ -33,9 +36,9 @@ def _tool_sort_key(tool: ToolEntry) -> tuple[int, str]:
 class ToolsMgr:
     """工具注册表与执行引擎。"""
 
-    def __init__(self, load_registered: bool = True):
+    def __init__(self, load_registered: bool = True, output_config=None):
         self._tools: dict[str, ToolEntry] = {}
-        self._result_store: dict[str, list[str]] = {}
+        self.output = ToolOutput(output_config)
         if not load_registered:
             return
         from src.tools.decorator import _registry
@@ -72,7 +75,7 @@ class ToolsMgr:
         }
 
     def reload(self) -> None:
-        self._result_store.clear()
+        self.output.clear()
 
     def has(self, name: str) -> bool:
         """检查工具是否已注册。"""
@@ -139,6 +142,9 @@ class ToolsMgr:
         if tool_names is None:
             tools = list(self._tools.values())
         else:
+            missing = set(tool_names) - self._tools.keys()
+            if missing:
+                logger.warning("工具声明包含未注册名称，请更新角色工具列表：%s", ", ".join(sorted(missing)))
             tools = [self._tools[name] for name in tool_names if name in self._tools]
         tools = sorted(tools, key=_tool_sort_key)
         return [
@@ -152,49 +158,6 @@ class ToolsMgr:
             }
             for tool in tools
         ]
-
-    def get_page(self, tool_call_id: str, page: int) -> str:
-        """返回格式化后的分页工具结果。
-
-        Args:
-            tool_call_id: 工具调用 ID。
-            page: 页码（从 1 开始）。
-
-        Returns:
-            格式化的分页内容。
-        """
-        pages = self._result_store.get(tool_call_id)
-        if pages is None:
-            raise KeyError(f"未找到 tool_call_id={tool_call_id} 的缓存结果")
-        total_pages = len(pages)
-        if page < 1 or page > total_pages:
-            raise ValueError(f"页码超出范围：page={page}，总页数为 {total_pages}")
-        content = pages[page - 1]
-        parts = [
-            f"tool_call_id: {tool_call_id} | 总页数: {total_pages} | 当前第 {page} 页：",
-            content,
-        ]
-        if page < total_pages:
-            parts.append(f"传入 tool_call_id={tool_call_id}, page={page + 1} 继续读取")
-        return "\n".join(parts)
-
-    def _truncate(self, result: str, tool_call_id: str, llm: LLMProvider) -> str:
-        """超长结果自动分页。"""
-        if llm.estimate_tokens([{"role": "tool", "content": result}]) <= llm.page_token_budget:
-            return result
-        pages = llm.split_page(result)
-        self._result_store[tool_call_id] = pages
-        return "工具调用结果过长，已被自动分页。可调用read_tool_result读取后续内容。\n" + self.get_page(tool_call_id, 1)
-
-    def _result_status(self, result: str) -> str:
-        """根据结果内容判断状态。"""
-        error_prefixes = (
-            "错误：",
-            "参数验证失败:",
-            "工具执行出错:",
-            "权限拒绝：",
-        )
-        return "error" if result.startswith(error_prefixes) else "success"
 
     def _result_preview(self, result: str, limit: int = 160) -> str:
         """生成结果预览文本。"""
@@ -255,6 +218,8 @@ class ToolsMgr:
         duration_seconds: float,
         result: str,
         tool_display: object | None = None,
+        original_bytes: int = 0,
+        truncated: bool = False,
     ) -> None:
         """发出工具调用完成事件。"""
         event_bus = getattr(deps, "event_bus", None) if deps is not None else None
@@ -265,11 +230,11 @@ class ToolsMgr:
             result_preview = self._external_read_preview(result, status)
             from src.tools.display import ToolDisplay, tool_title
             title = tool_title(tool.name)
-            if status != "success":
+            if status in {"error", "cancelled"}:
                 title = f"✘ {title}"
             display = ToolDisplay(title=title, content=result_preview)
         else:
-            safe_result = data_guard.redact(result) if data_guard is not None else result
+            safe_result = result  # 已在统一输出整理前脱敏，不再改写文件源位置表示
             result_preview = self._result_preview(str(safe_result))
             if tool_display is not None:
                 # 来自 ToolResult 的展示数据，内容须经 DataGuard 脱敏
@@ -279,7 +244,7 @@ class ToolsMgr:
             else:
                 from src.tools.display import ToolDisplay, tool_title, format_result
                 title = tool_title(tool.name)
-                if status != "success":
+                if status in {"error", "cancelled"}:
                     title = f"✘ {title}"
                 content, truncated = format_result(str(safe_result))
                 display = ToolDisplay(title=title, content=content, truncated=truncated)
@@ -291,13 +256,15 @@ class ToolsMgr:
             tool_call_id=current_tool_call_id,
             status=status,
             duration_seconds=duration_seconds,
+            original_bytes=original_bytes, returned_bytes=len(result.encode()),
+            returned_tokens_estimate=self.output.estimate_tokens(result), truncated=truncated,
             result_preview=result_preview,
             display=display,
             caller_agent_type=caller_agent_type,
             caller_uuid=caller_uuid,
         ))
 
-    async def execute(
+    async def _execute(
         self,
         tool_name: str,
         arguments: Dict[str, Any],
@@ -305,10 +272,10 @@ class ToolsMgr:
         current_tool_call_id: str = "",
         deps: Any = None,
         agent: Any = None,
-    ) -> str:
-        """执行工具调用，返回结果字符串。
+    ) -> ToolResult:
+        """执行工具调用，返回明确的结果状态。
 
-        完整流程：参数校验 → PreToolUse hook → 再校验 → authorize → 执行 → 脱敏 → PostToolUse → 事件/分页。
+        完整流程：参数校验 → PreToolUse hook → 再校验 → authorize → 执行 → 脱敏 → PostToolUse → 输出预算。
 
         Args:
             tool_name: 工具名称。
@@ -318,10 +285,10 @@ class ToolsMgr:
             agent: 当前 Agent 实例。
 
         Returns:
-            工具执行结果字符串（错误信息也以字符串返回）。
+            ToolResult，失败通过 status/error_code 表达。
         """
         if tool_name not in self._tools:
-            return f"错误：未知工具 '{tool_name}'"
+            return ToolResult.failure("unknown_tool", f"未知工具 {tool_name}")
 
         tool = self._tools[tool_name]
         data_guard = getattr(deps, "data_guard", None) if deps is not None else None
@@ -331,8 +298,8 @@ class ToolsMgr:
 
         try:
             arguments = tool.validate_arguments(arguments)
-        except ValidationError as error:
-            return tool.format_validation_error(error)
+        except (ValidationError, ValueError) as error:
+            return ToolResult.failure("invalid_arguments", tool.format_validation_error(error) if isinstance(error, ValidationError) else str(error))
 
         hooks_mgr = getattr(deps, "hooks_mgr", None) if deps is not None else None
         hook_kwargs = {}
@@ -355,20 +322,25 @@ class ToolsMgr:
             )
             if pre_hook_result.blocked:
                 reason = data_guard.redact(pre_hook_result.block_reason or "hook blocked")
-                return f"权限拒绝：{reason}"
+                return ToolResult.failure("permission_denied", str(reason))
             for decision, reason in pre_hook_result.permission_decisions:
                 if decision == "deny":
-                    return f"权限拒绝：{data_guard.redact(reason)}"
+                    return ToolResult.failure("permission_denied", str(data_guard.redact(reason)))
             if pre_hook_result.updated_input is not None:
                 try:
                     arguments = tool.validate_arguments(pre_hook_result.updated_input)
-                except ValidationError as error:
-                    return tool.format_validation_error(error)
+                except (ValidationError, ValueError) as error:
+                    return ToolResult.failure("invalid_arguments", tool.format_validation_error(error) if isinstance(error, ValidationError) else str(error))
+
+        try:
+            effective_budget = self.output.budget(arguments.get("max_output_tokens"))
+        except ValueError as exc:
+            return ToolResult.failure("invalid_arguments", str(exc))
 
         # 2. 唯一授权入口
         permission_mgr = getattr(deps, "permission_mgr", None) if deps is not None else None
         if permission_mgr is None:
-            return "权限拒绝：授权服务不可用"
+            return ToolResult.failure("permission_denied", "授权服务不可用")
 
         user_intent = self._latest_user_intent(agent)
         authorization = await permission_mgr.authorize(
@@ -392,7 +364,7 @@ class ToolsMgr:
                     caller_agent_type=caller_agent_type,
                     caller_uuid=caller_uuid,
                 )
-            return f"权限拒绝：{authorization.reason}"
+            return ToolResult.failure("permission_denied", authorization.reason)
         elif authorization.source == "judge":
             # 智能权限放行：把放行理由提示给用户（纯展示，不影响执行）
             event_bus = getattr(deps, "event_bus", None) if deps is not None else None
@@ -411,7 +383,6 @@ class ToolsMgr:
             deps, agent, tool, authorization.safe_detail, current_tool_call_id,
             arguments=arguments,
         )
-        started_at = time.time()
         context = {
             "current_tool_call_id": current_tool_call_id,
             "deps": deps,
@@ -435,50 +406,68 @@ class ToolsMgr:
         # 写路径解析好放在 authorization.grants 里，这里白拿即可。
         self._mark_context_stale(deps, authorization)
 
-        # 提取 ToolResult：工具可返回 ToolResult 携带展示侧数据
-        tool_display_result = None
-        from src.tools.display import ToolResult as _ToolResult
-        if isinstance(result, _ToolResult):
-            tool_display_result = result.display
-            result = result.text
-
-        result = self._limit_result(str(data_guard.redact(result)))
+        if result.file_content is None:
+            result.text = str(data_guard.redact(result.text))
         safe_arguments = data_guard.redact(arguments)
         if hooks_mgr is not None:
             post_hook_result = await hooks_mgr.run_event(
-                "PostToolUse",
-                tool.name,
-                {"tool_name": tool.name, "tool_input": safe_arguments, "tool_response": result, "tool_use_id": current_tool_call_id},
+                "PostToolUse", tool.name,
+                {"tool_name": tool.name, "tool_input": safe_arguments,
+                 "tool_response": str(result), "tool_use_id": current_tool_call_id},
                 **hook_kwargs,
             )
             if post_hook_result.blocked:
-                result = f"权限拒绝：{post_hook_result.block_reason or 'hook blocked'}"
+                result = ToolResult.failure("hook_blocked", str(data_guard.redact(post_hook_result.block_reason or "hook blocked")))
             elif post_hook_result.additional_context:
-                result = result + "\n\n" + "\n\n".join(
-                    str(data_guard.redact(item)) for item in post_hook_result.additional_context
-                )
-        result = self._limit_result(str(data_guard.redact(result)))
-        status = self._result_status(result)
-        await self._emit_tool_completed(
-            deps,
-            agent,
-            tool,
-            current_tool_call_id,
-            status,
-            time.time() - started_at,
-            result,
-            tool_display=tool_display_result,
-        )
-        if tool.raw_output:
-            return result
+                result.annotations += "\n\n".join(str(data_guard.redact(item)) for item in post_hook_result.additional_context)
+        result.output_budget = effective_budget
+        return result
 
-        if not current_tool_call_id:
-            return result
-        llm = getattr(agent, "llm", None) if agent is not None else None
-        if llm is None:
-            return result
-
-        return self._truncate(result, current_tool_call_id, llm)
+    async def execute(self, tool_name, arguments, *, current_tool_call_id="", deps=None, agent=None):
+        started = time.time()
+        requested = arguments.get("max_output_tokens") if isinstance(arguments, dict) else None
+        try:
+            budget = self.output.budget(requested)
+        except ValueError as exc:
+            return ToolResult.failure('invalid_arguments', str(exc))
+        processes = getattr(deps, "process_mgr", None)
+        tool = self._tools.get(tool_name)
+        try:
+            if processes and tool_name not in {"exec_command", "write_stdin"} and tool and tool.policy.access in {AccessKind.LOCAL_READ, AccessKind.WORKSPACE_WRITE}:
+                lease = processes.workspace_lock.read() if tool.policy.access is AccessKind.LOCAL_READ else processes.workspace_lock
+                async with lease:
+                    result = await self._execute(tool_name, arguments, current_tool_call_id=current_tool_call_id, deps=deps, agent=agent)
+            else:
+                result = await self._execute(tool_name, arguments, current_tool_call_id=current_tool_call_id, deps=deps, agent=agent)
+        except asyncio.CancelledError:
+            result = ToolResult('工具调用已取消', status='cancelled', error_code='cancelled')
+            if tool:
+                await self._emit_tool_completed(deps, agent, tool, current_tool_call_id, result.status, time.time() - started, str(result))
+            raise
+        except Exception as exc:
+            result = ToolResult.failure('tool_execution_error', str(exc))
+        guard = getattr(deps, "data_guard", None)
+        if guard:
+            if result.file_content is None:
+                result.text = str(guard.redact(result.text))
+            result.annotations = str(guard.redact(result.annotations))
+        original_bytes = len(str(result).encode("utf-8"))
+        control = tool_name in {"load_skill", "ask_user", "submit_plan"}
+        worker = asyncio.create_task(asyncio.to_thread(self.output.finalize, result, agent, result.output_budget or budget, control=control))
+        try:
+            result = await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            # 临时日志不能在会话清理结束后又由后台线程写回来。
+            await asyncio.gather(worker, return_exceptions=True)
+            raise
+        tool = self._tools.get(tool_name)
+        if tool:
+            await self._emit_tool_completed(deps, agent, tool, current_tool_call_id, result.status,
+                                            time.time() - started, str(result), tool_display=result.display, original_bytes=original_bytes, truncated=result.truncated)
+        logger.info("tool_result tool=%s call_id=%s status=%s original_bytes=%d returned_bytes=%d returned_tokens_estimate=%d truncated=%s elapsed=%.3f",
+                    tool_name, current_tool_call_id, result.status, original_bytes, len(str(result).encode()),
+                    self.output.estimate_tokens(str(result)), result.truncated, time.time() - started)
+        return result
 
     @staticmethod
     def _latest_user_intent(agent: Any) -> str:
@@ -518,13 +507,3 @@ class ToolsMgr:
         ]
         if written:
             context_mgr.mark_stale(written)
-
-    @staticmethod
-    def _limit_result(result: str) -> str:
-        lines = result.splitlines(keepends=True)
-        if len(lines) > 20_000:
-            result = "".join(lines[:20_000]) + "\n[结果已截断]"
-        encoded = result.encode()
-        if len(encoded) > 1024 * 1024:
-            result = encoded[:1024 * 1024].decode(errors="replace") + "\n[结果已截断]"
-        return result

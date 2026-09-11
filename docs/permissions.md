@@ -32,7 +32,7 @@ MCP 工具固定为 `REVIEW + EXTERNAL`。上游 annotation（包括 `readOnlyHi
 8. WORKSPACE_WRITE 仅在全部写目标为普通工作区或计划目录时确定性放行。
 9. EXTERNAL_READ 进入 Web 专用本地隐私预检。
 10. 其余调用交通用 LLM 智能权限审查；返回 ask、异常、超时或无效响应时，只进行一次 yes/no 人工确认，无 TTY、取消或拒绝均为 deny。
-11. 工具执行结果立即经 DataGuard 脱敏和限长，再进入 PostToolUse、事件、分页和 Agent 历史。
+11. 工具执行结果立即经 DataGuard 脱敏和限长，再进入 PostToolUse、事件、输出预算和 Agent 历史。
 
 `AuthorizationResult.source` 标明裁决来源：`hard_rule`、`plan`、`policy`、`judge`、`web_safety`、`user` 或 `failure`。当前 EXTERNAL_READ 本地隐私预检通过时仍使用 `source="web_safety"`，该来源名不表示已调用 LLM Web 审查。`reason` 和 `safe_detail` 在返回前再次脱敏并限长。允许结果还包含冻结的 `path_grants`，只记录参数名、角色、授权时规范路径和分类；FileMgr 在每次实际 I/O 前复检规范路径与分类，移动操作同时复检 source、destination 与最终目标。
 
@@ -48,7 +48,7 @@ MCP 工具固定为 `REVIEW + EXTERNAL`。上游 annotation（包括 `readOnlyHi
 
 普通工作区快速写入排除 `.git/**`、`.agent/**`、`.vscode/**`、`.idea/**`、`.env*`、私钥和常见凭证路径；`.agent/plans/**` 单独分类为 PLAN。受保护路径、工作区外写入和移动操作进入 REVIEW。
 
-LOCAL_READ 可以读取工作区外的普通文件或目录，但拒绝设备、FIFO、socket、`/dev`、`/proc`、`/sys` 等伪文件。单文件上限 8 MiB；单次工具结果上限 1 MiB 或 20,000 行。目录展开不跟随目录符号链接，深度最多 8、累计最多 10,000 项、最长 10 秒；grep/glob 子进程同样限制为 10 秒。
+LOCAL_READ 可以读取工作区外的普通文件或目录，但拒绝设备、FIFO、socket、`/dev`、`/proc`、`/sys` 等伪文件。read_file 单文件上限 8 MiB；命令执行与临时结果日志分别有界，具体预算和只读参数白名单见 [tools.md](tools.md)。
 
 ## Hard Deny
 
@@ -85,7 +85,7 @@ Web 外部读取走另一条路径：`WebPrivacyGuard` 本地预检拒绝秘密�
 
 EXTERNAL 工具在执行前发现秘密即 Hard Deny；DYNAMIC Shell 还会运行结构性外传检测。读取层允许读取凭证文件，但正文在离开读取层前脱敏。Shell、Hook 和 stdio MCP 子进程使用 `safe_environment()`，模型 key、token、cookie 和密码不会从父进程环境继承；MCP 只额外获得可信配置显式声明的 env。
 
-工具开始/完成事件、权限通知、授权日志、UI 预览、PostToolUse、分页缓存、Agent history、子 Agent transcript、session、compact 和工作区 transcript 只能接收已经脱敏的数据。Session、transcript 和信任库使用原子写入和 owner-only 权限。
+工具开始/完成事件、权限通知、授权日志、UI 预览、PostToolUse、临时结果日志、Agent history、子 Agent transcript、session、compact 和工作区 transcript 只能接收已经脱敏的数据。Session、transcript 和信任库使用原子写入和 owner-only 权限。
 
 ## 项目启动信任
 
@@ -97,14 +97,14 @@ EXTERNAL 工具在执行前发现秘密即 Hard Deny；DYNAMIC Shell 还会运�
 
 ## Plan
 
-Plan 是 `Agent.plan_active: bool`，不是授权策略变体。`PlanModeController` 只管理入口 Agent 的 Shift+Tab 双向切换和 `PlanStateChanged`；`/plan` 与 Shift+Tab 进入 Plan，`exit_plan_mode` 提供展示与审核工作流。计划模式只能由用户切换，LLM 没有进入工具。活动计划路径在快捷键退出时保留。
+Plan 是 `Agent.plan_active: bool`，不是授权策略变体。`PlanModeController` 只管理入口 Agent 的 Shift+Tab 双向切换和 `PlanStateChanged`；`/plan` 与 Shift+Tab 进入 Plan，`submit_plan` 提供展示与审核工作流。进入计划模式只能由用户触发；submit_plan 审核批准后由框架退出。活动计划路径在快捷键退出时保留。
 
 Plan 激活时只允许：
 
 - LOCAL_READ。
 - EXTERNAL_READ，但仍须通过 Web 本地隐私预检；疑似敏感内容转一次性人工确认。
 - `plan_safe=True` 的 INTERNAL 工具；`task_create`/`task_update` 不声明 `plan_safe`，因此在 Plan 模式下被拒绝，只读的 `task_list`/`task_get` 仍放行。
-- 规范化后位于 `.agent/plans/**` 的 WORKSPACE_WRITE。
+- 经只读 AST/argv 验证的 exec_command；计划文件仅由 submit_plan 内部保存。
 
 其他调用直接以 `source="plan"` 拒绝，不调用智能权限。子 Agent 在构造时继承父 Agent 当前 Plan 状态。
 

@@ -11,7 +11,7 @@ rebuild:
 
 # 对当前平台的构建产物跑冻结态自检
 check:
-	uv run pytest tests/packaging -q
+	uv run pytest tests/packaging -m packaging -q
 
 # 构建并用产物内的安装脚本装到 ~/.local/bin，等价于用户解压后执行包内 install.sh
 install:
@@ -21,3 +21,15 @@ clean:
 	rm -rf dist/ build/ src/*.egg-info
 
 .PHONY: build rebuild check install clean
+
+# 默认测试不启动真实 UI 或安装构建产物。
+test:
+	uv run pytest
+
+test-integration:
+	uv run pytest -m integration
+
+test-all:
+	uv run pytest -m ""
+
+.PHONY: test test-integration test-all

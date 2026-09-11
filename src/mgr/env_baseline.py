@@ -1,7 +1,7 @@
 """静态环境基线采集 — 一次算好、全 agent 共用的仓库客观事实。
 
 主 agent 与子 agent 的 system prompt「# 运行环境」段此前只有平台/模型/工作目录三行，
-于是每个子 agent 开局都要先 `list_directory .` 摸一遍仓库长什么样。本模块把这些
+于是每个子 agent 开局都要先 `ls -la` 摸一遍仓库长什么样。本模块把这些
 **整个会话不变**的客观事实一次性算好，由 `AgentApp._reset_session()` 存进
 `AgentDeps.env_baseline`，`PromptMgr._build_environment()` 只做字符串拼接。
 

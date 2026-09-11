@@ -1,11 +1,13 @@
 """计划文件管理器 — 计划模式切换、计划文件路径生成及 plan 模式指令注入。
 
-通过提示词约束 LLM 行为（只用只读工具、只写计划文件）。
+提示词说明流程，PermissionManager 强制 Plan 权限边界。
 """
 
 from __future__ import annotations
 
-import logging
+import os
+import tempfile
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -13,8 +15,6 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from src.agent import Agent
     from src.mgr.reminder_mgr import ReminderMgr
-
-logger = logging.getLogger(__name__)
 
 # 计划工作流技能键（builtin 命名空间；角色可用同名技能覆盖共享层实现）
 _PLAN_SKILL_KEY = "builtin:plan-workflow"
@@ -24,7 +24,7 @@ _PLAN_SKILL_KEY = "builtin:plan-workflow"
 class PlanMgr:
     """管理计划模式切换、计划文件路径和 plan 模式指令注入。
 
-    通过提示词约束 LLM 在 plan 模式下只使用只读工具和计划文件操作。
+    计划正文经 submit_plan 保存；权限边界由 PermissionManager 强制执行。
 
     指令注入通过 ReminderMgr 统一调度：
     - get_turn_start_reminder()：每次 turn 开始时调用。
@@ -35,15 +35,12 @@ class PlanMgr:
         _plan_dir: 计划文件目录（workdir / ".agent" / "plans"），内部使用。
         _pending_injection: 轮中进入 plan 模式后置 True，下次 pop_post_round_reminder() 消费。
         _need_exit_reminder: 退出 plan 模式后置 True，下次 turn start 输出一次性退出提醒后清除。
-        _active_plan_path: 当前会话正在处理的计划文件路径，在 plan 模式指令中引用。
-            写入计划目录时由 FileMgr 自动设置，仅 reload() 时重置。
     """
 
     workdir: Path
     _plan_dir: Path = field(init=False)
     _pending_injection: bool = field(init=False, default=False)
     _need_exit_reminder: bool = field(init=False, default=False)
-    _active_plan_path: str | None = field(init=False, default=None)
     _reminder_mgr: ReminderMgr | None = field(init=False, default=None)
 
     def __post_init__(self) -> None:
@@ -98,67 +95,40 @@ class PlanMgr:
 
     # ── 计划文件路径 ──────────────────────────────────────────────────
 
-    def set_active_plan_path(self, path: str) -> None:
-        """设置当前活跃计划文件路径。
-
-        由 set_plan_file 工具调用，LLM 在写入计划文件时主动设置。
-
-        Args:
-            path: 计划文件的绝对路径。
-        """
-        self._active_plan_path = path
-
-    # ── 指令注入 ──────────────────────────────────────────────────────
+    def save(self, content: str, previous: dict) -> Path:
+        """只保存到受控目录；模型不提供目标路径。"""
+        from src.mgr.path_resolver import PathResolver, PathClass
+        resolver = PathResolver(self.workdir)
+        directory = resolver.resolve(self._plan_dir)
+        if directory != self.workdir.resolve() / ".agent" / "plans":
+            raise ValueError("计划目录不能重定向到其他位置")
+        directory.mkdir(parents=True, exist_ok=True)
+        target = directory / (Path(previous["path"]).name if previous.get("path") else f"{uuid.uuid4().hex}.md")
+        if resolver.classify(resolver.resolve(target)) is not PathClass.PLAN or target.is_symlink():
+            raise ValueError("计划目标不是受控普通文件")
+        fd, temporary = tempfile.mkstemp(dir=directory)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                stream.write(content.rstrip() + "\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, target)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+        return target
 
     def _generate_instructions(self, is_subagent: bool) -> str:
-        """生成 plan 模式指令文本。
-
-        不区分首次/后续；主/子 agent 各返回独立的完整文本：
-        子 agent 只为规划阶段收集信息，不引导加载计划技能、不写计划文件。
-
-        Args:
-            is_subagent: 是否为子智能体。
-
-        Returns:
-            plan 模式指令字符串。
-        """
-        if is_subagent:
-            return (
-                "# 计划模式\n"
-                "当前处于计划模式，你在为规划阶段收集信息。\n"
-                "此指令覆盖其他指令中与之冲突的部分。\n\n"
-                "## 限制\n"
-                "- 禁止编辑、创建或删除任何项目文件\n"
-                "- 禁止执行任何 shell 命令、测试或构建（计划模式严格只读）\n"
-                "- 允许使用只读工具（读取文件、搜索、浏览等）进行探索\n\n"
-                "## 产出\n"
-                "完成委派任务并返回结论，不要尝试写入任何文件。\n"
-            )
-        plan_dir = str(self._plan_dir)
         text = (
-            "# 计划模式\n"
-            "当前处于计划模式。此指令覆盖其他指令中与之冲突的部分。\n\n"
-            "## 限制\n"
-            "- 禁止编辑、创建或删除计划文件以外的任何项目文件\n"
-            "- 禁止执行任何 shell 命令、测试或构建（计划模式严格只读）\n"
-            "- 允许使用只读工具（读取文件、搜索、浏览等）进行探索\n"
-            "- 计划模式只能由用户通过 /plan 或 Shift+Tab 切换；不要自行进入或退出\n"
-            f"- 计划文件目录：{plan_dir}\n"
-            "- 使用 write_file / edit_file_lines 操作计划文件（路径以上述目录为前缀）\n\n"
-            "## 下一步\n"
-            f"调用 load_skill('{_PLAN_SKILL_KEY}') 加载计划工作流，然后严格按照其指令执行。\n"
-            "完成计划后调用 exit_plan_mode 提交审核，不要自行退出计划模式。\n"
+            "# 计划模式\n禁止实施项目改动。探索使用 exec_command 的受限只读命令或 read_file；"
+            "不要运行测试、构建或任意脚本。仅用户或计划审核可切换模式。\n"
         )
-
-        if self._active_plan_path:
-            text += (
-                "\n## 当前计划\n"
-                f"当前正在处理的计划文件：{self._active_plan_path}\n"
-                "继续在此文件上修改和完善计划。"
-                "若用户的新请求与当前计划内容差异较大，应创建新的计划文件（路径自动更新）。\n"
-            )
-
-        return text
+        if is_subagent:
+            return text + "只回答委派的具体问题，不提交计划。"
+        return text + (
+            f"加载 {_PLAN_SKILL_KEY}。行为、关键边界和验收已明确即可用 submit_plan(title, content) "
+            "一次提交完整计划；框架负责保存与审核，不另写文件或登记路径。"
+        )
 
     def get_turn_start_reminder(self, plan_active: bool, is_subagent: bool) -> str:
         """在 agent.run() 开始时由 ReminderMgr 调用，返回 prepend 到用户输入的提醒。
@@ -213,4 +183,3 @@ class PlanMgr:
         """重置会话级状态（/clear 时调用）。"""
         self._pending_injection = False
         self._need_exit_reminder = False
-        self._active_plan_path = None

@@ -35,7 +35,7 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 |---|---|---|---|
 | `RoleMgr` (`role_mgr.py`) | 按信任状态发现并激活角色，暴露角色资产路径 | 否 | 有 |
 | `LLMMgr` (`llm_mgr.py`) | 按模型名/别名返回可用的 LLMProvider | 否 | 无 |
-| `ToolsMgr` (`tools_mgr.py`) | 工具注册、执行、分页结果存储 | 否 | 无 |
+| `ToolsMgr` (`tools_mgr.py`) | 工具注册、执行、有界临时日志 | 否 | 无 |
 | `PermissionManager` (`permission_mgr.py`) | 路径解析、代码硬拒绝、Plan 约束、智能权限和一次性确认 | 否 | 无 |
 | `WebAccessMgr` (`web_access_mgr.py`) | 按当前模型和统一配置路由本地或 provider 原生 Web 能力 | 否 | 无 |
 | `CompactMgr` (`compact_mgr.py`) | 上下文压缩与 transcript 落盘 | 否 | 无 |
@@ -119,7 +119,7 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 
 `src/mgr/tools_mgr.py`
 
-**单一职责**：工具注册表与执行引擎——注册工具、按 feature/权限过滤 schema、执行工具（串联 hook 与权限检查）、存储超长结果分页。
+**单一职责**：工具注册表与执行引擎——注册工具、按 feature/权限过滤 schema、执行工具（串联 hook 与权限检查）、保存有界脱敏临时日志。
 
 **消费的配置或文件**：构造时（`load_registered=True`）从 `src/tools/decorator.py` 的全局 `_registry` 载入所有 `@tool` 注册的工具（`tools_mgr.py:40-42`）；MCP 工具由 `McpMgr` 额外 `register()`。
 
@@ -135,18 +135,17 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 | `excluded_tool_names` | `enabled: set[str]` | `set[str]` | 因所属 feature 未启用而应排除的工具名 |
 | `resolve_subagent_tools` | `tool_names: set[str] \| None` | `set[str]` | 在声明集上注入 `subagent=True`、排除 `subagent=False` |
 | `get_schemas` | `tool_names` | `list[ToolDict]` | OpenAI function-calling schema |
-| `get_page` | `tool_call_id: str`, `page: int` | `str` | 返回缓存分页结果的指定页 |
-| `execute` (async) | `tool_name`, `arguments`, `current_tool_call_id`, `deps`, `agent` | `str` | 执行工具全流程（见下） |
+| `execute` (async) | `tool_name`, `arguments`, `current_tool_call_id`, `deps`, `agent` | `ToolResult` | 执行工具全流程（见下） |
 
-**`execute()` 完整流程**：Pydantic 校验 → PreToolUse Hook → 修改后重校验 → `authorize()` → 脱敏的 `ToolCallStarted`（含 `ToolDisplay`） → 调用工具 → 提取 `ToolResult` → 立即脱敏和限长 → PostToolUse → 再次脱敏 → `ToolCallCompleted`（含 `ToolDisplay`） → 分页。分页缓存、Hook payload 和事件预览都只接收脱敏数据。
+**`execute()` 完整流程**：Pydantic 校验 → PreToolUse Hook → 修改后重校验 → `authorize()` → 脱敏的 `ToolCallStarted`（含 `ToolDisplay`） → 调用工具 → 提取 `ToolResult` → 立即脱敏和限长 → PostToolUse → 再次脱敏 → 一次输出整理 → `ToolCallCompleted`（含 `ToolDisplay`） → 历史。临时日志、Hook payload 和事件预览都只接收脱敏数据。
 
 **展示数据生成逻辑**：
-- `_emit_tool_started()`：接收 `arguments`，使用 `tool_title()` 生成中文标题（`src/tools/display.py` 的 `TOOL_TITLES` 映射），使用 `format_params()` 按工具类型格式化参数摘要（shell 提取命令、文件工具提取路径、grep 提取 pattern+path 等）。`EXTERNAL_READ` 工具不生成参数展示。参数经 `DataGuard.redact()` 脱敏后传入 `ToolDisplay`。
+- `_emit_tool_started()`：接收 `arguments`，使用 `tool_title()` 生成中文标题（`src/tools/display.py` 的 `TOOL_TITLES` 映射），使用 `format_params()` 按工具类型格式化参数摘要（exec_command 提取命令、read_file 提取路径等）。`EXTERNAL_READ` 工具不生成参数展示。参数经 `DataGuard.redact()` 脱敏后传入 `ToolDisplay`。
 - `_emit_tool_completed()`：接收 `tool_display`（来自 `ToolResult`，如文件差异）。若存在则直接使用并对 `content` 脱敏；否则使用 `format_result()` 截断结果内容生成通用 `ToolDisplay`。`EXTERNAL_READ` 工具不生成结果展示（`display=None`）。
 
-**feature 门控**：否（但 `excluded_tool_names`/`resolve_subagent_tools` 是 feature 门控的执行点）。 **reload**：有，仅清空分页结果缓存。
+**feature 门控**：否（但 `excluded_tool_names`/`resolve_subagent_tools` 是 feature 门控的执行点）。 **reload**：有，回收工具临时日志。
 
-**持有的关键状态**：`_tools`（工具名→`ToolEntry`）、`_result_store`（`tool_call_id`→分页列表）。
+**持有的关键状态**：`_tools`（工具名→`ToolEntry`）、`output`（ToolOutput 预算和临时日志）。
 
 工具体系与内置工具见 [tools.md](tools.md)。
 
@@ -368,7 +367,7 @@ MCP 连接配置和授权边界见 [mcp-and-hooks.md](mcp-and-hooks.md)。
 
 1. **注入载体只能是子 agent 的首条 user 消息，绝不能进 system prompt。** Anthropic 把整个 system 包成单个 ephemeral 缓存断点（`src/llm/anthropic.py:_system_blocks`），断点覆盖 tools+system 整个前缀；账本是动态的，进 system 会让一个 coder 约 8-15k token 的前缀每次委派全部 miss。
 2. **注入点是 `SubAgentMgr.task_delegator` 而非 `ReminderMgr`。** ReminderMgr 的 provider 只收 `(plan_active, is_subagent)`，拿不到本次委派信息；按委派过滤就得在进程级单例上存槽位，而计划工作流允许同一轮并行委派多个 `explore`，`asyncio.gather` 会互相覆盖——PlanMgr 的 `_pending_injection` / `_reminder_mgr` 已经踩过同一个坑。
-3. **落盘必须由本 Manager 直接写，不能改成 `write_file` 工具。** `.agent` 被 `PathResolver` 归为 protected，`.agent/context/**` 因此是 `PathClass.PROTECTED`；而 plan 模式下 `PermissionManager._authorize_plan()` 只放行 `PathClass.PLAN`，走 `write_file` 必被拒——plan 模式恰是本机制最痛的场景。触发它的工具（`task_delegator`、`note_context`）声明 `INTERNAL + plan_safe=True`，与 `save_memory` 同构。
+3. **落盘必须由本 Manager 直接写，不能改成 `apply_patch` 工具。** `.agent` 被 `PathResolver` 归为 protected，`.agent/context/**` 因此是 `PathClass.PROTECTED`；而 plan 模式下 `PermissionManager._authorize_plan()` 拒绝通用文件写入，走 `apply_patch` 必被拒——plan 模式恰是本机制最痛的场景。触发它的工具（`task_delegator`、`note_context`）声明 `INTERNAL + plan_safe=True`，与 `save_memory` 同构。
 
 **生命周期语义**：`/clear` 走 `reload()` 清内存、磁盘旧文件保留供排查，新会话按新 `session_id` 另开文件。**resume 不恢复账本**——恢复的历史里主 agent 已带着全部工具结果，账本只服务后续新委派，这是刻意设计不是遗漏。
 
@@ -378,62 +377,11 @@ MCP 连接配置和授权边界见 [mcp-and-hooks.md](mcp-and-hooks.md)。
 
 ---
 
-## PlanMgr — 计划模式与指令注入
+## PlanMgr、FileMgr 与工具运行时
 
-`src/mgr/plan_mgr.py`
+`PlanMgr` 管理模式提醒与受控计划保存。`save(content, previous)` 原子写入 `.agent/plans/`，审核状态和路径保存在 `SessionState.plan`。`agent.plan_active` 是模式状态权威，授权由 PermissionManager 执行。
 
-**单一职责**：管理计划目录、计划内容与展示/审核/执行工作流，并作为提醒源向 `ReminderMgr` 注入 Plan 指令。`agent.plan_active` 是状态权威；允许哪些工具由 `PermissionManager` 的独立 Plan 约束保证。
-
-**消费的配置或文件**：计划文件目录 `{workdir}/.agent/plans/`。
-
-**公共方法**：
-
-| 方法 | 关键参数 | 返回 | 作用 |
-|---|---|---|---|
-| `enter_mode` | `agent`, `reminder_mgr` | `bool` | 设置 `plan_active=True` 并注册提醒源；已激活时返回 False |
-| `exit_mode` | `agent`, `reminder_mgr` | `bool` | 设置 `plan_active=False` 并置退出提醒标志；未激活时返回 False |
-| `set_active_plan_path` | `path: str` | `None` | 记录当前活跃的计划文件路径（供计划模式指令引用） |
-| `get_turn_start_reminder` | `plan_active, is_subagent` | `str` | turn 开始时注入 plan 指令，或退出后一次性退出提醒 |
-| `pop_post_round_reminder` | `plan_active, is_subagent` | `str \| None` | 轮中进入 plan 时注入指令 |
-| `reload` | — | `None` | 重置会话级状态 |
-
-Plan 指令按调用方身份分叉：主 agent 版含 `load_skill` 计划工作流引导、计划目录与「当前计划」段；子 agent 版只声明只读约束与「返回结论、不写文件」，不含任何计划文件写入引导。计划模式只能由用户通过 `/plan` 或 Shift+Tab 切换；主 agent 指令明确禁止自行进出，并要求完成计划后用 `exit_plan_mode` 提交。
-
-**feature 门控**：`plan`（依赖 `file`；未启用时 `bootstrap` 注入 `None`）。 **reload**：有。
-
-**持有的关键状态**：`_plan_dir`、`_pending_injection`、`_need_exit_reminder`、`_active_plan_path`。
-
-计划工作流与授权约束见 [permissions.md](permissions.md) 与 [agent-runtime.md](agent-runtime.md)。
-
----
-
-## FileMgr — 工作区文件操作
-
-`src/mgr/file_mgr.py`
-
-**单一职责**：工作区文件/目录的读写、编辑、查找与搜索。**全部公共方法为普通 `def`（阻塞型）**——内部做同步文件 I/O，卸载到线程由 `@tool` 装饰器统一处理（见 CLAUDE.md 异步/阻塞契约）。仅做路径解析，不做访问控制（访问控制在权限层）。
-
-**消费的配置或文件**：`workdir` 下的文件；`grep`/`glob` 通过 `rg`（ripgrep）子进程实现，二进制随 `ripgrep` 包（wheel）安装到环境 `bin` 目录、无需主机预装（缺失时回退 PATH 中的 `rg`），原生遵守 `.gitignore`、排除隐藏文件，`grep` 输出超过 200 行截断。
-
-**公共方法**：
-
-| 方法 | 关键参数 | 返回 | 作用 |
-|---|---|---|---|
-| `safe_path` | `path_str` | `Path` | 解析为绝对路径 |
-| `read_file` | `path`, `start_line`, `end_line` | `str` | 带行号读取（可指定行范围） |
-| `write_file` | `path`, `content`, `append`, `chunk_index`, `total_chunks` | `str \| ToolResult` | 写入/追加/分块写入；非分块时返回 `ToolResult` 携带文件差异 |
-| `edit_file_lines` | `path`, `start_line`, `new_text`, `end_line` | `str \| ToolResult` | 按行号替换/插入/删除；返回 `ToolResult` 携带文件差异 |
-| `replace_all_in_file` | `path`, `old_text`, `new_text` | `str \| ToolResult` | 全文替换所有匹配；返回 `ToolResult` 携带文件差异 |
-| `get_file_info` | `path` | `str` | 文件/目录元信息 |
-| `list_directory` | `path`, `max_depth` | `str` | 树状列目录 |
-| `create_directory` | `path` | `str` | 创建目录（含父级） |
-| `move_file` | `source`, `destination` | `str` | 移动/重命名 |
-| `glob` | `pattern`, `path` | `str` | rg 按 glob 查找文件（遵守 .gitignore，不含目录） |
-| `grep` | `pattern`, `path` | `str` | rg 正则搜索文件内容，返回文件、行号、匹配行 |
-
-**feature 门控**：`file`（未启用时 `Agent` 中为 `None`）。 **reload**：无（无状态）。
-
-**持有的关键状态**：`workdir`、`deps`（无可变会话状态）。
+`FileMgr.read_file(path, authorization, offset, column, limit)` 负责经复验的有界读取。补丁文本计算与提交在 `patch.py`；进程生命周期与工作区读写租约在 `ProcessMgr`；一次输出整理及临时日志归 `ToolOutput`。管理器均在 bootstrap 组装，流程与接口见 [tools.md](tools.md)。
 
 ---
 

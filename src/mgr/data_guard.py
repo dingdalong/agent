@@ -109,14 +109,27 @@ class DataGuard:
             return f"{type(value).__name__}: {self.redact(str(value))}"
         if not isinstance(value, str):
             return value
-        text = value
+        return self._redact_text(value)
+
+    def redact_source(self, text: str) -> str:
+        """以等长星号遮盖秘密并保留换行，使文件游标仍对应源文件。"""
+        return self._redact_text(text, preserve_positions=True)
+
+    def _redact_text(self, text: str, preserve_positions: bool = False) -> str:
+        def replacement(value):
+            return ''.join(c if c in '\r\n' else '*' for c in value) if preserve_positions else REDACTED
+
         for secret in sorted(self._secrets, key=len, reverse=True):
-            text = text.replace(secret, REDACTED)
-        text = _PRIVATE_KEY.sub(REDACTED, text)
-        text = _ASSIGNMENT.sub(lambda match: match.group(1) + REDACTED, text)
-        text = _BEARER.sub(lambda match: match.group(1) + REDACTED, text)
-        text = _JWT.sub(REDACTED, text)
-        text = _PLATFORM_TOKEN.sub(REDACTED, text)
+            text = text.replace(secret, replacement(secret))
+        text = _PRIVATE_KEY.sub(lambda m: replacement(m.group()), text)
+        for pattern in (_ASSIGNMENT, _BEARER):
+            text = pattern.sub(lambda m: m.group(1) + replacement(m.group()[len(m.group(1)):]), text)
+        for pattern in (_JWT, _PLATFORM_TOKEN):
+            text = pattern.sub(lambda m: replacement(m.group()), text)
+        if preserve_positions:
+            if "://" not in text:
+                return text
+            return _URL.sub(lambda m: replacement(m.group()) if self._redact_url_match(m) != m.group() else m.group(), text)
         return self.redact_url(text)
 
     def redact_url(self, text: str) -> str:

@@ -24,23 +24,8 @@ EXPECTED_AGENTS = {"repository-map", "evidence-analyst", "evidence-reviewer"}
 DIMENSIONS = ("conventions", "runtime-flow", "change-patterns", "guardrails")
 
 MAIN_TOOLS = {
-    "ask_user",
-    "compact",
-    "create_directory",
-    "edit_file_lines",
-    "get_file_info",
-    "list_directory",
-    "load_skill",
-    "move_file",
-    "read_file",
-    "read_tool_result",
-    "shell",
-    "task_create",
-    "task_delegator",
-    "task_get",
-    "task_list",
-    "task_update",
-    "write_file",
+    "ask_user", "compact", "exec_command", "write_stdin", "apply_patch", "read_file",
+    "load_skill", "task_create", "task_delegator", "task_get", "task_list", "task_update",
 }
 
 CODEBASE_MEMORY_MCP_TOOLS = {
@@ -429,7 +414,7 @@ def test_reduce_agents_overwrite_and_verify_before_publish() -> None:
     assert "残留 `.partial`" in guidance
     assert "增量输入" in guidance
     assert "从头覆盖" in guidance
-    assert "move_file" in guidance
+    assert "`exec_command` 执行 `mv`" in guidance
 
 
 def test_docs_describe_resume_idempotency() -> None:

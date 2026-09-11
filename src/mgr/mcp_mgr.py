@@ -99,7 +99,7 @@ def _format_result(result: Any) -> str:
     """将 MCP CallToolResult 转为字符串结果。
 
     拼接 content 中的文本块；非文本块（图片/嵌入资源）以占位说明替代（当前框架纯文本）。
-    isError 为真时以 "错误：" 前缀，命中 ToolsMgr 的错误状态判定。
+    isError 直接映射到 ToolResult 的错误状态。
 
     Args:
         result: ClientSession.call_tool 返回的 CallToolResult。
@@ -117,9 +117,8 @@ def _format_result(result: Any) -> str:
     if not parts and getattr(result, "structuredContent", None):
         parts.append(str(result.structuredContent))
     text = "\n".join(parts)
-    if getattr(result, "isError", False):
-        return f"错误：MCP 工具返回错误：{text}"
-    return text
+    from src.tools.display import ToolResult
+    return ToolResult.failure("mcp_error", text) if getattr(result, "isError", False) else ToolResult(text)
 
 
 class McpMgr:

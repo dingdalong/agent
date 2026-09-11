@@ -133,6 +133,7 @@ class AgentDeps:
     ui: UserInterface = None
     event_bus: EventBus = None
     tools_mgr: ToolsMgr = None
+    process_mgr: Any = None
     permission_mgr: PermissionManager | None = None
     web_access_mgr: WebAccessMgr | None = None
     config_mgr: ConfigManager = None
@@ -455,7 +456,7 @@ class Agent:
             if ctx.turn_start_messages is not None:
                 # 不回滚本轮，保留已生成内容，仅裁掉悬空的
                 # tool_use 尾部，再补一条中断标记 assistant 消息，保证历史连续合法。
-                self._truncate_to_clean_interrupt_tail()
+                self._complete_interrupted_tool_results()
                 self._append_message(self.history, {
                     "role": "assistant",
                     "content": "⏸ 本轮已被用户中断。",
@@ -477,23 +478,20 @@ class Agent:
             return
         await asyncio.to_thread(self._task_mgr.cleanup_if_all_completed)
 
-    def _truncate_to_clean_interrupt_tail(self) -> None:
-        """中断后把历史裁到最近的合法尾部。
-
-        规则：从末尾向前，丢弃尾部的 tool 消息和带 tool_calls 的 assistant 消息
-        （它们的 tool_use 没有配对 tool_result，是悬空调用），直到历史以
-        user 消息或不含 tool_calls 的 assistant 消息结尾。
-        """
-        msgs = self.history
-        while msgs:
-            last = msgs[-1]
-            if last.get("role") == "tool":
-                self._truncate_messages(msgs, len(msgs) - 1)
-                continue
-            if last.get("role") == "assistant" and last.get("tool_calls"):
-                self._truncate_messages(msgs, len(msgs) - 1)
-                continue
-            break
+    def _complete_interrupted_tool_results(self) -> None:
+        """保留已完成工具轮；只为悬空调用补中断结果。"""
+        messages = self.history
+        pending = {}
+        for message in messages:
+            if message.get("role") == "assistant":
+                pending = {tc["id"]: tc for tc in message.get("tool_calls", [])}
+            elif message.get("role") == "tool":
+                pending.pop(message.get("tool_call_id"), None)
+            else:
+                pending = {}
+        for ident in pending:
+            self._append_message(messages, {"role": "tool", "tool_call_id": ident,
+                                           "content": "用户中断；工具可能已经产生部分副作用。"}, correlation_id=ident, kind="tool")
 
     def _rollback_response_recovery(self, ctx: RunContext) -> None:
         """移除当前响应恢复链写入的临时消息并清空恢复状态。
@@ -1059,66 +1057,76 @@ class Agent:
         return AgentState.LLM_CALL
 
     async def _on_execute_tools(self, ctx: RunContext) -> AgentState:
-        """并行执行当前轮次的所有工具调用。
-
-        同一轮 LLM 回复中的多个工具调用通过 asyncio.gather 并发执行，
-        结果按原始顺序追加到 ctx.messages。
-        """
+        """并发独立读取；修改和交互形成屏障。取消保留已完成调用结果。"""
+        from src.tools.display import ToolResult
+        from src.mgr.readonly_command import compile_readonly
         ctx.has_tool_calls = True
         ctx.manual_compact = False
         ctx.compact_focus = None
+        calls = list(ctx.response.tool_calls.values())
+        completed = {}
+        end_turn = False
 
-        tool_calls = list(ctx.response.tool_calls.values())
-
-        async def _run_one(tc: dict) -> tuple[str, str, str | None]:
-            """执行单个工具调用。
-
-            Args:
-                tc: 包含 id、name、arguments 的工具调用字典。
-
-            Returns:
-                (tool_call_id, result_text, tool_name)；
-                未知工具时 tool_name 为 None。
-            """
-            tool_name = tc["name"]
-            tool_call_id = tc["id"]
-
-            if tool_name in self._excluded_tools:
-                return tool_call_id, f"错误：工具 '{tool_name}' 在当前角色下不可用", None
-
-            if self.tools is not None and tool_name not in self.tools:
-                return tool_call_id, f"错误：未知工具 '{tool_name}'", None
-
+        async def run_one(tc):
+            name, ident = tc["name"], tc["id"]
+            if name in self._excluded_tools or (self.tools is not None and name not in self.tools):
+                completed[ident] = ToolResult.failure("unknown_tool", f"当前角色不可用：{name}")
+                return
             try:
                 args = json.loads(tc["arguments"])
-                if tool_name == "compact":
-                    ctx.manual_compact = True
-                    ctx.compact_focus = args.get("focus")
-            except json.JSONDecodeError:
-                args = {}
+                if not isinstance(args, dict):
+                    raise ValueError("工具参数必须为 JSON 对象")
+            except (ValueError, TypeError):
+                completed[ident] = await self.deps.tools_mgr.execute(name, tc["arguments"], current_tool_call_id=ident, deps=self.deps, agent=self)
+                return
+            if name == "compact":
+                ctx.manual_compact = True
+                ctx.compact_focus = args.get("focus")
+            completed[ident] = await self.deps.tools_mgr.execute(name, args, current_tool_call_id=ident, deps=self.deps, agent=self)
 
+        async def parallel(tc):
+            tool = self.deps.tools_mgr.get(tc["name"])
+            if tool is None:
+                return False
+            if tc["name"] != "exec_command":
+                return tool.parallel
             try:
-                result_text = str(await self.deps.tools_mgr.execute(
-                    tool_name, args,
-                    current_tool_call_id=tool_call_id, deps=self.deps, agent=self,
-                ))
-            except Exception as exc:
-                result_text = f"错误：工具 '{tool_name}' 执行失败: {type(exc).__name__}: {exc}"
+                args = json.loads(tc["arguments"])
+                resolver = self.deps.permission_mgr.path_resolver
+                await asyncio.to_thread(compile_readonly, args["command"], resolver.resolve(args.get("workdir")), resolver)
+                return True
+            except (ValueError, TypeError, KeyError, AttributeError):
+                return False
 
-            return tool_call_id, result_text, tool_name
+        async def flush(batch):
+            tasks = [asyncio.create_task(run_one(tc)) for tc in batch]
+            try:
+                await asyncio.gather(*tasks)
+            except BaseException:
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                raise
 
-        results = await asyncio.gather(*(_run_one(tc) for tc in tool_calls))
-
-        called_tools = [name for _, _, name in results if name is not None]
-        for tool_call_id, result_text, _ in results:
-            self._append_message(ctx.messages, {
-                "role": "tool",
-                "tool_call_id": tool_call_id,
-                "content": result_text,
-            }, correlation_id=tool_call_id, kind="tool")
-
-        self._reminder_mgr.notify_tool_round(called_tools)
-        return AgentState.POST_ROUND
+        try:
+            batch = []
+            for tc in calls:
+                if await parallel(tc):
+                    batch.append(tc)
+                else:
+                    await flush(batch)
+                    batch = []
+                    await run_one(tc)
+                    if completed[tc["id"]].end_turn:
+                        break
+            await flush(batch)
+        finally:
+            for tc in calls:
+                result = completed.get(tc["id"], ToolResult('工具调用未完成或未执行', status='cancelled', error_code='cancelled'))
+                end_turn = end_turn or result.end_turn
+                self._append_message(ctx.messages, {"role": "tool", "tool_call_id": tc["id"], "content": str(result)}, correlation_id=tc["id"], kind="tool")
+        self._reminder_mgr.notify_tool_round([tc["name"] for tc in calls if tc["id"] in completed])
+        return AgentState.DONE if end_turn else AgentState.POST_ROUND
 
     async def _on_check_stop(self, ctx: RunContext) -> AgentState:
         if self.deps.hooks_mgr is not None and not ctx.stop_hook_used:

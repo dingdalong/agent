@@ -1592,7 +1592,7 @@ class AgentTuiApp(App[None]):
     async def on_tool_call_completed(self, event: ToolCallCompleted) -> None:
         for entry in self._round_entries:
             if entry.tool_call_id == event.tool_call_id:
-                entry.status = "success" if event.status == "success" else "error"
+                entry.status = event.status
                 entry.preview = (event.result_preview or "").strip()
                 entry.duration = event.duration_seconds
                 entry.result_display = event.display
@@ -1611,7 +1611,7 @@ class AgentTuiApp(App[None]):
         text = Text()
         if entry.status == "running":
             title = self._entry_title(entry)
-            text.append(f"⋯ {title}  已中断", style="bright_black")
+            text.append(f"⋯ {title}  进程运行中", style="bright_black")
             return text
         ok = entry.status == "success"
         mark = "✔" if ok else "✘"

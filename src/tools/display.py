@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import difflib
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any, Literal
 
@@ -23,10 +23,52 @@ class ToolDisplay:
 
 
 @dataclass
+class FileContent:
+    """已按源位置脱敏的文件片段；仅在最终输出整理前保留。"""
+    path: str
+    lines: list[str]
+    total_lines: int
+    offset: int
+    column: int
+
+
+@dataclass
 class ToolResult:
-    """工具函数返回值包装 — 携带展示侧信息，不改变 LLM 侧结果。"""
-    text: str                           # 原始字符串结果，交给 LLM
-    display: ToolDisplay | None = None  # 仅 UI 消费
+    """工具函数返回值包装 — 同时携带模型状态、续读位置和展示信息。"""
+    text: str
+    display: ToolDisplay | None = None
+    status: Literal["success", "error", "running", "cancelled"] = "success"
+    error_code: str | None = None
+    exit_code: int | None = None
+    session_id: str | None = None
+    artifact_path: str | None = None
+    artifact_complete: bool | None = None
+    artifact_error: str | None = None
+    file_content: FileContent | None = None
+    file_range: dict | None = None
+    next_read: dict | None = None
+    annotations: str = ""
+    output_budget: int | None = None  # Hook 重验后的有效预算，不进入模型元数据
+    truncated: bool = False
+    end_turn: bool = False
+
+    def __str__(self) -> str:
+        metadata = {
+            key: value for key, value in {
+                "status": self.status, "error_code": self.error_code,
+                "exit_code": self.exit_code, "session_id": self.session_id,
+                "artifact_path": self.artifact_path, "artifact_complete": self.artifact_complete,
+                "artifact_error": self.artifact_error,
+                "file_range": self.file_range, "next_read": self.next_read,
+                "truncated": self.truncated or None,
+            }.items() if value is not None
+        }
+        body = self.text + ("\n\n[工具附加说明]\n" + self.annotations if self.annotations else "")
+        return json.dumps(metadata, ensure_ascii=False) + "\n" + body
+
+    @classmethod
+    def failure(cls, code: str, text: str) -> "ToolResult":
+        return cls(text=text, status="error", error_code=code)
 
 
 # ---------------------------------------------------------------------------
@@ -35,18 +77,12 @@ class ToolResult:
 
 TOOL_TITLES: dict[str, str] = {
     # shell
-    "shell": "执行命令",
+    "exec_command": "执行命令",
+    "write_stdin": "进程输入输出",
+    "apply_patch": "应用补丁",
+    "submit_plan": "提交计划",
     # 文件工具
     "read_file": "读取文件",
-    "write_file": "写入文件",
-    "edit_file_lines": "编辑文件",
-    "replace_all_in_file": "全局替换",
-    "list_directory": "列出目录",
-    "glob": "查找文件",
-    "grep": "搜索内容",
-    "get_file_info": "文件信息",
-    "create_directory": "创建目录",
-    "move_file": "移动文件",
     # 网络工具
     "web_fetch": "获取网页",
     "web_search": "搜索网页",
@@ -54,21 +90,15 @@ TOOL_TITLES: dict[str, str] = {
     "task_delegator": "委派任务",
     "load_skill": "加载技能",
     "ask_user": "询问用户",
-    # 计划工具
-    "set_plan_file": "设置计划文件",
-    "exit_plan_mode": "提交计划",
-    # 记忆工具
     "save_memory": "保存记忆",
     "read_memory": "读取记忆",
-    # 任务工具
     "task_create": "创建任务",
     "task_update": "更新任务",
-    "task_list": "任务列表",
     "task_get": "获取任务",
+    "task_list": "任务列表",
     # 工具类
     "calculator": "计算",
     "compact": "压缩上下文",
-    "read_tool_result": "读取分页结果",
     # 实用工具
     "random": "随机生成",
     "datetime": "日期时间",
@@ -126,7 +156,7 @@ def permission_line(
 # 参数格式化
 # ---------------------------------------------------------------------------
 
-# shell 工具的摘要提取（与 ToolsMgr 现有 shell_summary 兼容）
+# 命令参数摘要
 def _shell_summary(args: dict[str, Any]) -> str:
     """提取 shell 工具的命令摘要。"""
     cmd = args.get("command", "")
@@ -142,25 +172,18 @@ def format_params(tool_name: str, args: dict[str, Any],
 
     已知内置工具按自然语言摘要，未知/MCP 工具输出格式化 JSON。
     """
-    if tool_name == "shell":
+    if tool_name == "exec_command":
         return _shell_summary(args)
 
     if tool_name == "read_file":
         return args.get("path", "")
 
-    if tool_name in ("write_file", "edit_file_lines", "replace_all_in_file"):
-        return args.get("path", args.get("file_path", ""))
-
-    if tool_name == "grep":
-        pattern = args.get("pattern", "")
-        path = args.get("path", ".")
-        return f"{pattern}  in {path}"
-
-    if tool_name == "glob":
-        return args.get("pattern", "")
-
-    if tool_name == "list_directory":
-        return args.get("path", ".")
+    if tool_name == "apply_patch":
+        return _truncate_text(args.get("patch", ""), budget_lines, budget_bytes)
+    if tool_name == "write_stdin":
+        return args.get("session_id", "")
+    if tool_name == "submit_plan":
+        return args.get("title", "")
 
     if tool_name == "web_search":
         query = args.get("query", "")
@@ -180,28 +203,12 @@ def format_params(tool_name: str, args: dict[str, Any],
     if tool_name == "load_skill":
         return args.get("name", "")
 
-    # 文件工具（已有路径的补充）
-    if tool_name == "get_file_info":
-        return args.get("path", "")
-
-    if tool_name == "create_directory":
-        return args.get("path", "")
-
-    if tool_name == "move_file":
-        src = args.get("source", "")
-        dst = args.get("destination", "")
-        return f"{src} → {dst}"
-
     # 记忆工具
     if tool_name == "save_memory":
         return args.get("title", "")
 
     if tool_name == "read_memory":
         return args.get("title", "")
-
-    # 计划工具
-    if tool_name in ("set_plan_file", "exit_plan_mode"):
-        return args.get("file_path", "")
 
     # 工具类
     if tool_name == "calculator":
@@ -213,8 +220,6 @@ def format_params(tool_name: str, args: dict[str, Any],
             focus = focus[:80] + "…"
         return focus
 
-    if tool_name == "read_tool_result":
-        return f"第 {args.get('page', 2)} 页"
 
     # 实用工具
     if tool_name in ("random", "datetime", "encode", "text_stats"):

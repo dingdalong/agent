@@ -188,6 +188,7 @@ def test_dead_app_rejects_new_request_without_hanging(monkeypatch) -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_wait_interactions_idle_drains_scheduled_cancel(monkeypatch) -> None:
     async def scenario() -> None:
         interface = _interface(monkeypatch, _RecordingStream())

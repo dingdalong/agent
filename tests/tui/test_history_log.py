@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 import asyncio
 
 from textual import events
@@ -24,6 +26,7 @@ class _HistoryApp(App[None]):
         yield HistoryLog(id="history", policy=self.render_policy)
 
 
+@pytest.mark.integration
 def test_bulk_markdown_and_plain_replay_keeps_constant_dom() -> None:
     async def scenario() -> None:
         app = _HistoryApp()
@@ -75,6 +78,7 @@ def test_bulk_markdown_and_plain_replay_keeps_constant_dom() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_empty_hydration_does_not_strand_eager_reflow_task() -> None:
     async def scenario() -> None:
         loop = asyncio.get_running_loop()
@@ -106,6 +110,7 @@ def test_empty_hydration_does_not_strand_eager_reflow_task() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_fifty_thousand_deltas_use_one_coalesced_tail() -> None:
     async def scenario() -> None:
         app = _HistoryApp()
@@ -133,6 +138,7 @@ def test_fifty_thousand_deltas_use_one_coalesced_tail() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_stream_tail_refresh_does_not_render_stable_path_line(monkeypatch) -> None:
     async def scenario() -> None:
         app = _HistoryApp()
@@ -170,6 +176,7 @@ def test_stream_tail_refresh_does_not_render_stable_path_line(monkeypatch) -> No
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_offscreen_stream_tail_update_does_not_render_visible_history(
     monkeypatch,
 ) -> None:
@@ -213,6 +220,7 @@ def test_offscreen_stream_tail_update_does_not_render_visible_history(
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_selection_reads_only_selected_rich_lines() -> None:
     class CountingLines(list):
         def __init__(self, values) -> None:
@@ -247,6 +255,7 @@ def test_selection_reads_only_selected_rich_lines() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_mouse_drag_selects_only_requested_history_text() -> None:
     async def scenario() -> None:
         app = _HistoryApp()
@@ -292,6 +301,7 @@ def test_mouse_drag_selects_only_requested_history_text() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_follow_tail_upscroll_and_resize_restore_entry_anchor() -> None:
     async def scenario() -> None:
         app = _HistoryApp()
@@ -330,6 +340,7 @@ def test_follow_tail_upscroll_and_resize_restore_entry_anchor() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_scroll_edges_page_history_and_new_messages_do_not_move_old_page() -> None:
     async def scenario() -> None:
         policy = TuiRenderPolicy(
@@ -384,6 +395,7 @@ def test_scroll_edges_page_history_and_new_messages_do_not_move_old_page() -> No
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_history_budgets_limit_window_and_project_oversized_entry() -> None:
     async def scenario() -> None:
         policy = TuiRenderPolicy(
@@ -428,6 +440,7 @@ def test_history_budgets_limit_window_and_project_oversized_entry() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_resize_burst_runs_one_final_window_reflow(monkeypatch) -> None:
     async def scenario() -> None:
         policy = TuiRenderPolicy(
@@ -469,6 +482,7 @@ def test_resize_burst_runs_one_final_window_reflow(monkeypatch) -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_unmount_cancels_resize_and_stream_work() -> None:
     async def scenario() -> None:
         policy = TuiRenderPolicy(

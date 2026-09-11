@@ -71,13 +71,18 @@ class OllamaProvider(LLMProvider):
                 "cache_creation_input_tokens",
                 None,
             )
-        return {
+        result = {
             "input_tokens": getattr(usage, "prompt_tokens", None),
             "output_tokens": getattr(usage, "completion_tokens", None),
             "total_tokens": getattr(usage, "total_tokens", None),
             "cache_read_input_tokens": getattr(prompt_tokens_details, "cached_tokens", None),
             "cache_creation_input_tokens": cache_creation_input_tokens,
         }
+        details = getattr(usage, "output_tokens_details", None) or getattr(usage, "completion_tokens_details", None)
+        reasoning = getattr(details, "reasoning_tokens", None)
+        if isinstance(reasoning, int):
+            result["reasoning_output_tokens"] = reasoning
+        return result
 
     def _normalize_role(self, role: str) -> str:
         if role == "developer":

@@ -122,7 +122,7 @@ def test_usage_log_preserves_raw_none_and_records_applied_totals(
     assert messages == [
         "LLM token核账 call_id=call-log model=model-log caller_type=None "
         "caller_uuid=None raw_input_tokens=12 raw_output_tokens=None "
-        "raw_total_tokens=None raw_cache_read_input_tokens=None "
+        "raw_total_tokens=None raw_reasoning_output_tokens=None raw_cache_read_input_tokens=None "
         "raw_cache_creation_input_tokens=4 delta_input_tokens=12 "
         "delta_output_tokens=0 delta_total_tokens=12 "
         "delta_cache_read_input_tokens=0 session_input_tokens=12 "

@@ -325,6 +325,7 @@ def test_deepseek_stream_parses_function_call_and_response_usage() -> None:
     assert response.token_usage == {
         "input_tokens": 12,
         "output_tokens": 8,
+        "reasoning_output_tokens": 3,
         "total_tokens": 20,
         "cache_read_input_tokens": 5,
         "cache_creation_input_tokens": None,

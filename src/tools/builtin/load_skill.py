@@ -14,4 +14,7 @@ class LoadSkill(BaseModel):
 @tool(model=LoadSkill, description="将指定技能的完整内容加载到当前上下文中。",
       policy=ToolPolicy(AccessKind.INTERNAL, DataFlow.LOCAL, plan_safe=True), subagent=True, feature="skill")
 async def load_skill(name: str, agent: Agent) -> str:
+    from src.tools.display import ToolResult
+    if not agent._skill_mgr.check_skill(name):
+        return ToolResult.failure("skill_not_found", f"不存在的技能：{name}")
     return agent._skill_mgr.load_full_text(name)

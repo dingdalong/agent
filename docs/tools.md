@@ -1,109 +1,87 @@
 # 工具层参考
 
-工具层由 `@tool`、`ToolEntry`、`ToolPolicy` 和 `ToolsMgr` 组成。内置工具位于 `src/tools/builtin/`，动态 MCP 工具由 `McpMgr` 注册。
+工具在 `src/tools/builtin/` 用 `@tool` + Pydantic 声明，由 `ToolsMgr` 注册和执行。装饰器保留 `policy`、`subagent`、`feature`、`counts_as_work`；`parallel=True` 仅用于可并发的独立读取。同步工具卸载到线程，取消时等待实际 I/O 结束后才释放工作区租约。
 
-## 注册契约
+## 调用与结果
 
-`@tool` 接受 Pydantic 参数模型和以下元数据：
+调用链：参数对象/未知字段校验 → PreToolUse → 重验参数 → PermissionManager.authorize → 工具执行 → DataGuard 脱敏 → PostToolUse → 脱敏与单次预算 → ToolCallCompleted → 历史消息。MCP 参数按上游 schema 校验。未知工具、非法 JSON、授权失败、执行错误均返回明确状态；调用方不能从正文前缀推断失败。
 
-| 参数 | 用途 |
+`ToolResult` 的模型表示为 JSON 元数据行加正文，字段为 `status`（success/error/running/cancelled）、`error_code`、`exit_code`、`session_id`、`artifact_path`、`artifact_complete`、`artifact_error`、`file_range`、`next_read`、`truncated`。`display` 只供 UI 消费；`end_turn` 控制调度器结束回合。取消补齐未完成调用结果，并保留已完成的证据。执行错误不自动重试有副作用的工具。
+
+## 工具接口
+
+| 工具 | 参数及契约 |
 |---|---|
-| `name` | 覆盖函数名作为工具名 |
-| `policy` | 冻结的声明式授权策略；缺省为 `REVIEW + DYNAMIC` |
-| `raw_output` | 跳过 LLM 分页，但仍执行结果脱敏与总量限制 |
-| `subagent` | True 自动注入子 Agent，False 强制排除，None 按工具白名单决定 |
-| `feature` | 所属 feature；未启用时从 schema 和执行入口排除 |
-| `counts_as_work` | 是否计入回合活跃计算时间 |
+| `exec_command` | command、workdir、yield_time_ms、timeout_ms、max_output_tokens。等待上限 30 秒，执行超时上限 600 秒；尚未结束返回 session_id。 |
+| `write_stdin` | session_id、chars、yield_time_ms、max_output_tokens、terminate。消费增量输出；只读命令和 Plan 不接收 stdin。 |
+| `read_file` | path、offset（1 起始）、column（行内字符位置，0 起始）、limit（可选源行数上限）、max_output_tokens。省略范围时从开头读到预算或 EOF；普通文本单文件上限 8 MiB。 |
+| `apply_patch` | patch。Begin/End Patch 包裹 Add/Update/Delete File，可选 Move to 与 EOF 锚点；上下文必须唯一。先计算全部文本变更、复验授权，再原子替换每个文件。多文件 I/O 失败返回已完成清单，不声称全局事务回滚。 |
+| `submit_plan` | title、content。一次保存完整计划、展示和审核；auto 批准后续执行，manual/取消结束当前回合，修改意见返回模型。保存位置受 PlanMgr 控制。 |
 
-装饰器读取 `model.model_json_schema()` 生成 function-calling schema，并把 `ToolEntry` 放入全局注册表。同步函数由 `ToolEntry.__call__()` 统一通过 `asyncio.to_thread()` 卸载；真正异步的工具保留 async 实现。
+搜索用 `exec_command` 执行 `rg --files`、`rg -n`；范围读取可用 `sed -n '起始行,结束行p'`。工具集直接使用上述接口，不提供旧文件/分页工具别名。
 
-`ToolEntry.validate_arguments()` 使用 Pydantic 校验并 `model_dump()`，因此默认值和 `None` 都会成为授权与执行共用的规范输入。`ToolEntry.origin` 独立记录 builtin、mcp 或 dynamic 来源。
+## 命令授权与生命周期
 
-## ToolPolicy
+只读命令由 bashlex 解析 AST，再编译为 argv，实际通过 create_subprocess_exec 执行；支持简单命令、管道、&&。白名单集中在 `readonly_command.py`：pwd/ls/rg/cat/head/tail/wc/sed 的有限选项，以及 git status/diff/log/show/ls-files。拒绝重定向、赋值、替换、后台和未登记参数；git 禁用 pager、fsmonitor、hooks、外部 diff/textconv。解析不能证明只读时，Plan 拒绝，执行模式交现有智能权限。此解析器不是操作系统沙箱。
 
-策略类型定义在 `src/tools/policy.py`：
+ProcessMgr 是进程会话与工作区租约的唯一所有者，bootstrap 创建、AgentApp 在中断/clear/resume/关闭时回收，子 agent 结束时只回收自身进程。会话按应用会话 ID 与 agent UUID 隔离；最多 32 个进程会话，单会话未消费缓冲上限 1 MiB。进程不跨重启恢复，不分配 PTY。子进程使用 clean_env 与脱敏环境，超时/取消终止整个进程组。
 
-```python
-ToolPolicy(
-    access=AccessKind.REVIEW,
-    data_flow=DataFlow.DYNAMIC,
-    path_args=(),
-    plan_safe=False,
-    detail_template=None,
-)
+```mermaid
+sequenceDiagram
+    participant A as Agent 调度器
+    participant T as ToolsMgr
+    participant W as WorkspaceAccess
+    participant P as ProcessMgr
+    A->>T: 同轮独立读调用
+    T->>W: 获取读租约（允许并发）
+    T->>P: 启动只读命令
+    P-->>A: running + session_id
+    Note over P,W: 命令执行期间保留租约
+    A->>T: 文件修改（调度屏障）
+    T->>W: 排队获取写租约
+    P->>W: 完成/取消并回收进程后释放
+    W-->>T: 获得独占写租约
+    T->>T: 授权、复检路径、执行补丁
+    T->>W: 实际 I/O 完成后释放
+    T-->>A: 明确结果状态
 ```
 
-`path_args` 支持多个 `PathArgument`，用于同时声明读、写、源和目标路径。`detail_template` 在授权阶段生成一次脱敏后的展示文本，权限通知与工具事件复用该结果。策略是冻结数据，构造时拒绝 callable。
+独立读取同轮并行，修改/交互形成屏障。运行中的命令租约延续到进程结束；等待写入的存在会阻止后续新读租约，避免写入饥饿。进程轮询不获取租约，因此可继续消费正在阻塞文件操作的命令输出。
 
-内置注册代码按工具真实语义选择策略：
+## 输出、文件定位与临时日志
 
-| 类别 | 策略 |
-|---|---|
-| read/list/glob/grep/file info | `LOCAL_READ + LOCAL`，`plan_safe=True` |
-| create/write/edit/replace | `WORKSPACE_WRITE + LOCAL` |
-| move/rename | `REVIEW + LOCAL`，声明 source 和 destination |
-| shell | `REVIEW + DYNAMIC` |
-| web search/fetch | `EXTERNAL_READ + EXTERNAL` |
-| MCP | 强制 `REVIEW + EXTERNAL` |
-| calculator、ask_user、compact、任务/计划状态 | `INTERNAL + LOCAL`，按需声明 `plan_safe` |
+`tool.output_tokens` 默认 10000，`max_output_tokens` 上限 16000。按 Codex 的约 4 UTF-8 字节/token 口径计算，预算包含元数据和截断提示；不是实际计费 token。工具参数省略时使用配置，显式值须在 128 至配置上限之间。普通成功与错误使用同一预算。独立调用分别整理一次，事件与历史复用最终结果，不按轮均分、不在轮末再次截断。
 
-只有可信 builtin 可以确定性放行。未知或动态工具保守使用 `REVIEW + DYNAMIC`。
+文件结果保留连续源内容，优先在完整行边界结束。首行本身超过预算时用行内字符位置继续。`file_range.start/end` 使用 `{offset,column}`，end 为排他的下一源位置；`total_lines` 是源文件总行数，`eof` 表示到达源 EOF，`line_truncated` 表示最后一行只返回了部分内容。`next_read` 可直接传回 read_file；显式 limit 未到 EOF 时也返回下一位置。未修改文件的连续读取不漏字；文件变化后读取当前内容，不恢复历史快照。
 
-## 执行流水线
+文件脱敏在范围选择前执行，跨行秘密也会被遮盖。`DataGuard.redact_source` 使用等长星号并保留换行，确保源游标不漂移。Hook 附加说明存入独立 annotations 段，最多占文件调用预算四分之一；超长时明确截断，不挤坏源文件范围。文件本身可再次读取，因此不保存日志副本。技能、用户回答等控制内容必须完整返回，超过单次上限时报错并保留结束回合语义。
 
-`ToolsMgr.execute()` 的完整顺序是：
+其他普通工具结果超预算时保留头尾；`ToolOutput` 将脱敏、PostToolUse 后的正文先保存为不可变临时日志，再整理模型输出。单文件 `artifact_max_bytes` 默认 1 MiB、上限 8 MiB；单应用会话总量 `artifact_total_bytes` 默认 32 MiB，不小于单文件上限。超出单文件上限保留头尾并标注缺失；超出总量按创建顺序回收。进程缓冲此前有丢失或日志超过上限时 `artifact_complete=false`。日志保存失败只增加 artifact_error，不改变原始命令状态，不重跑命令。
 
-1. 查找 ToolEntry，拒绝未知或被 feature 排除的工具。
-2. Pydantic 校验原始参数。
-3. 运行可信 `PreToolUse` Hook；blocked 或 deny 立即拒绝。
-4. Hook 改写参数后重新校验。
-5. 调用 `PermissionManager.authorize()`；按裁决结果发布脱敏的 PermissionNotice（放行/拒绝/需确认一行提示，含理由），通知携带 `decision_source`，UI 按真实裁决来源标注。
-6. 发布脱敏的 `ToolCallStarted`，携带 `ToolDisplay`（中文标题 + 参数摘要）。
-7. 执行工具，并把结果立即经 DataGuard 递归脱敏、限制到 1 MiB/20,000 行。
-8. 提取 `ToolResult`：若工具函数返回 `ToolResult`，分离 `.display`（展示侧）和 `.text`（LLM 侧）。
-9. 以脱敏参数和结果运行 `PostToolUse`。
-10. 再次脱敏和限长，发布 `ToolCallCompleted`，携带 `ToolDisplay`（文件 diff 或格式化结果）。
-11. 非 raw_output 结果按模型 token 预算分页；分页缓存只存已脱敏文本。
+日志路径为应用拥有的临时目录下的会话/agent 子目录，目录 0700、文件 0600，原子写入。日志按每次返回保存：write_stdin 的日志只包含本次增量，不重放旧输出。模型用 `read_file` 或只读 `rg` 搜索 artifact_path；被回收的文件按读取失败处理。普通中断或命令结束仍保留日志，clear/resume/关闭回收，历史会话恢复不恢复临时文件。落盘与清理共用线程锁；取消必须等待正在进行的落盘结束，避免清理后文件重现。
 
-授权流程详见 [permissions.md](permissions.md)。PreToolUse 可以读取和改写原始参数，因为项目 Hook 只有通过启动信任门后才会加载；任何离开执行边界的数据必须先脱敏。
+```mermaid
+sequenceDiagram
+    participant A as Agent
+    participant T as ToolsMgr
+    participant O as ToolOutput
+    participant F as 临时日志
+    A->>T: 调用工具
+    T->>T: 授权、执行、脱敏、Hook
+    T->>O: 整理一次最终输出
+    opt 普通非文件结果超预算
+        O->>F: 有界脱敏正文原子落盘
+        F-->>O: 路径或保存失败
+    end
+    O-->>T: 状态、正文、定位信息
+    T-->>A: 完成事件与历史使用相同结果
+    opt 需要更多证据
+        A->>T: 定向读取源文件或临时日志
+    end
+    Note over O,F: 会话切换或关闭时清理，普通中断保留
+```
 
-## 文件工具
-
-文件工具统一通过 `FileMgr` 和 `PathResolver`：
-
-- `list_directory(path=None, max_depth=3)`：树状列目录，深度上限 8，不跟随目录符号链接，累计上限 10,000 项和 10 秒。
-- `glob(pattern, path=None)`：使用 ripgrep 查找文件，10 秒超时。
-- `grep(pattern, path=None)`：使用 ripgrep 搜内容，10 秒超时并限制展示行数。
-- `get_file_info(path)`：返回普通文件或目录元信息。
-- `read_file(path, start_line=None, end_line=None)`：读取带行号文本，单文件不超过 8 MiB。
-- `create_directory(path)`、`write_file(...)`、`edit_file_lines(...)`、`replace_all_in_file(...)`：普通工作区写入走策略快速路径。
-- `move_file(source, destination)`：移动前同时解析源、声明目标和目录语义下的最终目标，始终 REVIEW。
-
-所有相对路径基于 Agent workdir。FileMgr 在实际 I/O 前重新解析路径；读取结果在返回前已经过 DataGuard。
-
-### ToolResult 返回协议与文件差异
-
-文件写入工具（`write_file`、`edit_file_lines`、`replace_all_in_file`）可返回 `ToolResult`（`src/tools/display.py`）而非普通字符串。`ToolResult` 携带 `.text`（LLM 侧结果，不变）和 `.display`（`ToolDisplay`，仅 UI 消费）。`ToolEntry.__call__()` 识别 `ToolResult` 并原样保留，`ToolsMgr.execute()` 提取 `.display` 后将 `.text` 作为常规字符串结果继续流水线。
-
-文件差异由 `build_file_diff()`（`display.py`）生成：在写入前捕获 `old_lines`，写入后捕获 `new_lines`，使用 `difflib.SequenceMatcher` 生成 2 行上下文的分组差异。差异格式为 `  {lineno:>4} |+ {line}`（新增）/ `|- {line}`（删除）/ `| {line}`（上下文），标题含 `(+A -D)` 统计。分块写入（`chunk_index`/`total_chunks`）不生成差异，仅在最终写入完成时由 `FileMgr._make_diff_result()` 返回。
-
-### 展示预算
-
-工具展示内容受以下预算约束（`src/tools/display.py`）：
-
-| 场景 | 行数上限 | 字节上限 |
-|---|---|---|
-| 参数摘要 (`format_params`) | 20 | 4 KiB |
-| 结果内容 (`format_result`) | 60 | 12 KiB |
-| 文件差异 (`build_file_diff`) | 60 | 12 KiB |
-
-超限时截断并附 `… (已截断)` 提示。字节截断保持 UTF-8 完整性（`errors="ignore"`）。
-
-## Shell
-
-Shell 固定为 `REVIEW + DYNAMIC`，不会因命令看似只读而绕过智能权限。代码层只拦截高置信危险命令和外传模式，其他构建、测试、依赖安装与 Git 操作交智能权限审查。
-
-执行 cwd 固定为 workdir，timeout 由 Pydantic 限制在 1–600 秒。子进程创建独立进程组；超时或取消后终止并回收整个进程组。环境由 DataGuard 构造，不继承模型密钥、token、cookie 或密码。stdout/stderr 并发读取并共享 1 MiB/20,000 行预算。
+观测记录原始/返回字节、`returned_tokens_estimate`、截断状态与耗时。实际费用分析使用 provider 的 input/output/cache/reasoning usage；reasoning 是 output 子集，不重复累加。`scripts/benchmark_tool_output.py` 用固定输出比较本次机制与指定 Git 快照的旧输出策略，不能替代真实任务的 API A/B。
 
 ## Web 与 MCP
 
@@ -111,19 +89,10 @@ Shell 固定为 `REVIEW + DYNAMIC`，不会因命令看似只读而绕过智能�
 
 两者固定为 `EXTERNAL_READ + EXTERNAL`，可在 Plan 中使用，但每次仍经过 `WebPrivacyGuard` 本地隐私预检。查询或 URL 含已识别秘密时本地拒绝；疑似个人信息、专有代码或私有标识符时直接请求一次性确认；其余请求本地放行。当前授权路径未调用 LLM Web 安全审查。工具执行阶段仍把发起调用的 Agent 自己的 Provider 传给 `WebAccessMgr`，供上段的原生能力路由使用。
 
-本地抓取只允许标准端口 HTTP/HTTPS，拒绝 URL 凭据和非公网 IPv4/IPv6；DNS 解析结果检查后固定连接 IP，HTTPS 仍按原主机名执行 SNI 与证书校验。重定向最多 5 次，只允许同主机且禁止 HTTPS 降级；不使用系统代理、cookie、认证或 referer，解压后正文上限 1 MiB。Web 完成事件只记录状态和结果长度，不记录搜索结果、网页正文或 URL query value；原始 Web 内容不建立额外磁盘缓存。
+本地抓取只允许标准端口 HTTP/HTTPS，拒绝 URL 凭据和非公网 IPv4/IPv6；DNS 解析结果检查后固定连接 IP，HTTPS 仍按原主机名执行 SNI 与证书校验。重定向最多 5 次，只允许同主机且禁止 HTTPS 降级；不使用系统代理、cookie、认证或 referer，解压后正文上限 1 MiB。Web 完成事件只记录状态和结果长度，不记录搜索结果、网页正文或 URL query value；超长脱敏结果可进入上述受生命周期约束的临时日志。
 
-MCP 工具通过 `_PassThroughArgs(extra="allow")` 接收上游 schema 所描述的参数，名称格式为 `mcp__<server>__<tool>` 并清洗限长。无论上游如何标注，只能注册为 `REVIEW + EXTERNAL`。结果先由 `_format_result()` 转为文本，再进入统一脱敏、Hook、事件和分页流程。
+MCP 工具通过 `_PassThroughArgs(extra="allow")` 接收上游 schema 所描述的参数，名称格式为 `mcp__<server>__<tool>` 并清洗限长。无论上游如何标注，只能注册为 `REVIEW + EXTERNAL`。结果先由 `_format_result()` 转为带 isError 状态的 ToolResult，再进入统一脱敏、Hook、事件和预算流程。
 
-## 工具可见性
-
-`ToolsMgr.get_schemas()` 按 access 类别和工具名稳定排序。Agent 的 `tools` 白名单、`subagent` 元数据和 feature 门控共同决定 schema：
-
-- 主 Agent 使用角色工具白名单，未声明表示全量注册工具。
-- 子 Agent 在自身白名单基础上自动加入 `subagent=True`（如 `read_tool_result`、`note_context`），强制移除 `subagent=False`（如 `task_delegator` 与两个 plan 工具）。
-- 未启用 feature 的工具始终排除，即使白名单显式列出。
-
-Plan 不通过隐藏 schema 表达安全边界；调用时由 `PermissionManager` 独立执行 Plan 约束，避免动态工具或缓存 schema 绕过。
 
 ## 共享上下文工具
 
@@ -131,6 +100,6 @@ Plan 不通过隐藏 schema 表达安全边界；调用时由 `PermissionManager
 
 它与自动记账的分工：`SubAgentMgr.task_delegator` 已经自动把每个子智能体的返回报告记账，那是主力且零 LLM 纪律成本；`note_context` 覆盖自动记账抓不到的部分——主 agent 与用户对话中确认的决策与约束，以及长任务中途得出的阶段性结论。
 
-策略取 `INTERNAL + LOCAL + plan_safe=True`，与 `save_memory`、`task_create` 同构：**落盘由 `ContextMgr` 内部完成，不经 `write_file`**。这一点是刻意的——`.agent` 被 `PathResolver` 归为 protected，`.agent/context/**` 因此是 `PathClass.PROTECTED`，而 Plan 模式下 `_authorize_plan()` 只放行 `PathClass.PLAN`，改用 `write_file` 落盘会让本工具在 Plan 模式下必然被拒。
+策略取 `INTERNAL + LOCAL + plan_safe=True`，与 `save_memory`、`task_create` 同构：**落盘由 `ContextMgr` 内部完成，不经 `apply_patch`**。这一点是刻意的——`.agent` 被 `PathResolver` 归为 protected，`.agent/context/**` 因此是 `PathClass.PROTECTED`，而 Plan 模式下 `_authorize_plan()` 拒绝通用文件写入，改用 `apply_patch` 落盘会让本工具在 Plan 模式下必然被拒。
 
 `task_delegator` 相应增加 `shared_context: "auto" | "none"` 字段：默认注入账本摘要，`"none"` 完全隔离供独立复核（如代码审查）使用。

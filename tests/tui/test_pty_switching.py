@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 import fcntl
 import json
 import os
@@ -14,6 +16,7 @@ import textwrap
 import time
 
 
+@pytest.mark.integration
 def test_vscode_pty_rapid_arrow_switching_stays_stable(tmp_path) -> None:
     ready_path = tmp_path / "ready"
     result_path = tmp_path / "result.json"

@@ -1,7 +1,7 @@
 ---
 agent_type: coder
 description: 在明确的文件或模块范围内实现代码与测试，完成验证并返回改动路径、证据和未完成项。用于可独立验收的实现子任务。
-tools: list_directory, glob, grep, get_file_info, read_file, write_file, edit_file_lines, replace_all_in_file, shell
+tools: exec_command, write_stdin, read_file, apply_patch
 model: default
 memory: project
 ---

@@ -117,5 +117,5 @@ def test_identity_branch_through_reminder_mgr(tmp_path: Path) -> None:
     assert main_text.startswith("<reminder>")
     assert _PLAN_SKILL_KEY in main_text
     assert _PLAN_SKILL_KEY not in sub_text
-    assert "## 产出" in sub_text
+    assert "不提交计划" in sub_text
     assert main_text != sub_text

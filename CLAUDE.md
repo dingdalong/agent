@@ -12,7 +12,9 @@ uv run python main.py                # 运行应用
 uv run python main.py --workdir /path  # 指定工作目录运行
 uv run python main.py --debug        # 启用 asyncio 慢回调告警（事件循环被占用 >0.1s 即告警），排查阻塞
 uv run python main.py --self-check   # 核对随包资源与内置工具/命令注册（验证打包产物）
-uv run pytest                        # 运行全部测试
+uv run pytest                        # 常规测试（排除 integration/packaging）
+make test-integration                # 真实 UI、PTY 集成测试
+make test-all                        # 显式运行所有测试
 uv run pytest -k "test_name"         # 运行匹配名称的测试
 uv run pytest tests/test_foo.py      # 运行单个测试文件
 make build                           # 构建当前平台的可执行分发包
@@ -80,7 +82,7 @@ MCP server 连接配置在独立的 `mcp_servers.json`（角色 `src/roles/<role
 
 ## 关键模式
 
-**工具注册** — 使用 `@tool` 装饰器（`src/tools/decorator.py`）+ Pydantic 参数模型，自动注册到全局 `_registry`。工具实现在 `src/tools/builtin/`。新增工具时须确认其 `subagent` 标记：`ToolsMgr.resolve_subagent_tools()` 会自动注入所有 `subagent=True` 的工具、强制排除所有 `subagent=False` 的工具（如四个 plan 工具从子 agent 排除）。新增工具后同步更新 `src/app/self_check.py` 的 `EXPECTED_TOOL_COUNT`。
+**工具注册** — 使用 `@tool` 装饰器（`src/tools/decorator.py`）+ Pydantic 参数模型，自动注册到全局 `_registry`。工具实现在 `src/tools/builtin/`。新增工具时须确认其 `subagent` 标记：`ToolsMgr.resolve_subagent_tools()` 会自动注入所有 `subagent=True` 的工具、强制排除所有 `subagent=False` 的工具（如 submit_plan从子 agent 排除）。新增工具后同步更新 `src/app/self_check.py` 的 `EXPECTED_TOOL_COUNT`。
 
 **可冻结性（必须遵守）** — 项目以 PyInstaller 打包成可执行分发包（`agent.spec` + `scripts/build_exe.py`）。冻结后**文件系统里不存在 `.py` 源文件**，因此：
   - **禁止**用目录 glob 扫 `*.py` 来发现模块。内置工具（`src/tools/__init__.py`）与内置 slash 命令（`src/commands/mgr.py`）一律用 `pkgutil.iter_modules(<包>.__path__)`；用户层的外部 `.py` 才用 `spec_from_file_location` 按路径加载。新增这类插件式子模块时，须在 `agent.spec` 的 `collect_submodules` 里覆盖到。
@@ -93,15 +95,15 @@ MCP server 连接配置在独立的 `mcp_servers.json`（角色 `src/roles/<role
   - 以上失效**都是静默的**——应用照常启动，只是工具、命令或编码悄悄不见。改动相关机制后必须跑 `make build && make check`，仅跑源码测试发现不了。
 
 **异步/阻塞契约（必须遵守）** — 整个框架跑在单线程 asyncio 事件循环上（UI 状态条按 100ms 重绘、事件分发、Agent 轮次共用同一循环）。事件循环只在 `await` 真异步原语时让出控制权；任何在事件循环上运行的 `async def` 一旦做*同步阻塞*工作（同步网络、文件 I/O、`socket.getaddrinfo`、CPU 密集循环）且不 `await`，就会冻结 UI 并停滞事件分发。因此每个工具 / Manager 方法只能是两类之一：
-  - **真异步**：函数体只 `await` 真正的异步原语（如 `asyncio.create_subprocess_shell` + `await proc.communicate()`、`AsyncAnthropic`/`AsyncOpenAI`、事件总线等待）。保持 `async def`。正例：`shell`（`src/tools/builtin/shell.py`）、hooks（`src/mgr/hooks_mgr.py`）、LLM provider（`src/llm/`）。
+  - **真异步**：函数体只 `await` 真正的异步原语（如 `asyncio.create_subprocess_shell` + `await proc.communicate()`、`AsyncAnthropic`/`AsyncOpenAI`、事件总线等待）。保持 `async def`。正例：`exec_command`（`src/tools/builtin/shell.py`）、hooks（`src/mgr/hooks_mgr.py`）、LLM provider（`src/llm/`）。
   - **阻塞型**：函数体做同步 I/O / CPU 工作。叶子工具直接声明为普通 `def`——装饰器（`decorator.py:94-97`）会用 `asyncio.to_thread` 自动卸载到线程；若方法必须保留 `async def`（被异步调用方 `await` 的 Manager 方法），则把阻塞段包进 `await asyncio.to_thread(...)`。范例：`web_search`/`web_fetch` 用同步库（`ddgs`/`urllib`），声明为 `def`；`FileMgr`（`src/mgr/file_mgr.py`）各方法为普通 `def`，其工具包装（`file.py`/`plan.py`）也是普通 `def`，由装饰器统一经 `to_thread` 卸载（装饰器是唯一的线程卸载点，无需层层手写 `to_thread`）。
   - **禁止**：`async def` 里直接跑同步阻塞工作而不 `await`。排查此类问题可用 `python main.py --debug`（启用 asyncio 调试，事件循环被占用超过 0.1s 即打印 `Executing ... took N seconds` 告警）。
 
 **子智能体** — 定义为 `*.md`（YAML frontmatter 声明 `agent_type`、`tools`、`model`、`memory`、`startInPlanMode`、`thinking`、`reasoning_effort`、`features` 等 + body 作提示词），由 `SubAgentMgr` 四层扫描加载。主 Agent 通过 `task_delegator` 调度子智能体；子智能体继承父 Agent 当前的 `plan_active`，并共享 `AgentDeps`。
 
-**跨 agent 共享上下文** — 子 agent 的 `history` 从空开始，唯一输入是委派 prompt，因此天然会重复探索。`ContextMgr`（`src/mgr/context_mgr.py`，deps 层单例，挂 `subagent` feature）维护会话级「已核实事实」账本：`SubAgentMgr.task_delegator` 在 `run()` 前把 `digest()` 拼到 prompt 之前，在 `SubagentStop` hook 后把子 agent 的返回报告自动记账；`note_context` 工具供 agent 显式记录对话中确认的决策。改这块前必须知道三条约束：**(1)** 动态内容绝不能进 system prompt——Anthropic 把整个 system 包成单个 ephemeral 缓存断点（`src/llm/anthropic.py:_system_blocks`），进去会让 tools+system 整个前缀每次委派全部失效；**(2)** 注入点必须是 `task_delegator` 而非 `ReminderMgr`——后者的 provider 拿不到本次委派信息，按委派过滤就得在进程级单例存槽位，而并行委派会互相覆盖；**(3)** 落盘必须由 `ContextMgr` 直接写，改用 `write_file` 会因 `.agent/context/**` 属 `PathClass.PROTECTED` 而在 Plan 模式下必然被拒。静态环境基线（git/技术栈/目录树）走另一条路：`collect_env_baseline()` 在 `AgentApp._reset_session` 中经 `to_thread` 采集一次存 `deps.env_baseline`，因恒定而可以安全地进 system prompt。
+**跨 agent 共享上下文** — 子 agent 的 `history` 从空开始，唯一输入是委派 prompt，因此天然会重复探索。`ContextMgr`（`src/mgr/context_mgr.py`，deps 层单例，挂 `subagent` feature）维护会话级「已核实事实」账本：`SubAgentMgr.task_delegator` 在 `run()` 前把 `digest()` 拼到 prompt 之前，在 `SubagentStop` hook 后把子 agent 的返回报告自动记账；`note_context` 工具供 agent 显式记录对话中确认的决策。改这块前必须知道三条约束：**(1)** 动态内容绝不能进 system prompt——Anthropic 把整个 system 包成单个 ephemeral 缓存断点（`src/llm/anthropic.py:_system_blocks`），进去会让 tools+system 整个前缀每次委派全部失效；**(2)** 注入点必须是 `task_delegator` 而非 `ReminderMgr`——后者的 provider 拿不到本次委派信息，按委派过滤就得在进程级单例存槽位，而并行委派会互相覆盖；**(3)** 落盘必须由 `ContextMgr` 直接写，改用 `apply_patch` 会因 `.agent/context/**` 属 `PathClass.PROTECTED` 而在 Plan 模式下必然被拒。静态环境基线（git/技术栈/目录树）走另一条路：`collect_env_baseline()` 在 `AgentApp._reset_session` 中经 `to_thread` 采集一次存 `deps.env_baseline`，因恒定而可以安全地进 system prompt。
 
-**统一授权与 Plan** — `PermissionManager.authorize()` 是唯一授权入口；工具声明冻结的 `ToolPolicy`，不从用户配置提升权限。`Agent.plan_active` 是独立状态，Shift+Tab 可双向切换；Plan 激活时只允许本地读取、明确安全的内部工具和 `.agent/plans/**` 写入，其余操作直接拒绝且不调用智能权限。
+**统一授权与 Plan** — `PermissionManager.authorize()` 是唯一授权入口；工具声明冻结的 `ToolPolicy`，不从用户配置提升权限。`Agent.plan_active` 是独立状态，Shift+Tab 可双向切换；Plan 激活时只允许经验证的只读命令、本地/隐私预检后的外部读取与明确安全的内部工具；计划文件仅由 submit_plan 内部写入，其余操作直接拒绝且不调用智能权限。
 
 **技能系统** — `SkillMgr` 四层扫描 `SKILL.md`（共享 → 角色 → 全局 → 项目，插件技能穿插其间），同名后者覆盖；主、子 agent 实际具备 `load_skill` 时均展示技能目录，正文通过工具结果按需进入调用者历史。技能提供方法，不扩大授权、模式或工具范围；主控技能仅供主 agent 使用。
 

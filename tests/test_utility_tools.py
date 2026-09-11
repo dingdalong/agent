@@ -45,7 +45,7 @@ def test_encode_hashes():
 
 def test_encode_bad_operation_returns_error():
     out = encode("rot13", "hello")
-    assert out.startswith("编解码错误：")
+    assert out.status == "error"
 
 
 # ---------------------------------------------------------------------------
@@ -74,7 +74,7 @@ def test_text_stats_summary_contains_all_metrics():
 
 def test_text_stats_count_substring_missing_arg_returns_error():
     out = text_stats("count_substring", "abc")
-    assert out.startswith("文本统计错误：")
+    assert out.status == "error"
 
 
 # ---------------------------------------------------------------------------
@@ -114,7 +114,7 @@ def test_datetime_now_has_fields():
 
 def test_datetime_diff_missing_arg_returns_error():
     out = datetime_tool("diff", date1="2026-01-01")
-    assert out.startswith("时间运算错误：")
+    assert out.status == "error"
 
 
 # ---------------------------------------------------------------------------
@@ -177,9 +177,9 @@ def test_random_dice_sum():
 
 def test_random_choice_empty_items_returns_error():
     out = random_value("choice", items=[])
-    assert out.startswith("随机生成错误：")
+    assert out.status == "error"
 
 
 def test_random_bad_operation_returns_error():
     out = random_value("teleport")
-    assert out.startswith("随机生成错误：")
+    assert out.status == "error"

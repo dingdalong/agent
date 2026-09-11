@@ -32,7 +32,10 @@ llm:
   user_agent: "claude-cli/2.1.201 (external, cli)" # 自定义所有 LLM 请求的 User-Agent；留空则沿用各 SDK 默认 UA
 
 tool:
-  page_token_rate: 0.03 # 工具调用结果每页最多占上下文比例
+  output_tokens: 10000 # 按约 4 UTF-8 字节/token 整理输出，不等同于 API 计费
+  max_output_tokens: 16000
+  artifact_max_bytes: 1048576
+  artifact_total_bytes: 33554432
 
 compact:
   auto_compact_rate: 0.8 # context_limit 已知且输入估算超过该比例时自动压缩；context_limit<=0 时禁用

@@ -28,7 +28,7 @@ class ToolEntry:
         parameters_schema: OpenAI 格式的参数 schema。
         policy: 声明式授权策略；未声明时使用 REVIEW + DYNAMIC。
         origin: 工具注册来源，不参与确定性放行。
-        raw_output: 是否跳过结果分页截断。
+        parallel: 是否允许与其他只读工具并发执行。
         subagent: 子 agent 可见性控制。True=自动注入（即使 agent 定义未列出）；
                   False=强制排除（即使 agent 定义为全量）；None=按 agent 的 tools 集合决定。
         feature: 所属可插拔 feature 名（如 "task"、"file"）。None 表示无归属、恒可用；
@@ -44,13 +44,26 @@ class ToolEntry:
     parameters_schema: dict[str, Any]
     policy: ToolPolicy = DEFAULT_POLICY
     origin: ToolOrigin = ToolOrigin("dynamic")
-    raw_output: bool = False
+    parallel: bool = False
     subagent: bool | None = None
     feature: str | None = None
     counts_as_work: bool = True
 
     def validate_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """应用 Pydantic 默认值并返回授权和执行共用的参数。"""
+        if not isinstance(arguments, dict):
+            raise ValueError("工具参数必须是对象")
+        if self.model.model_config.get("extra") == "allow":
+            # MCP 使用动态 JSON Schema，不能拿空的透传模型拒绝其全部参数。
+            import jsonschema
+            try:
+                jsonschema.validate(arguments, self.parameters_schema)
+            except (jsonschema.ValidationError, jsonschema.SchemaError) as exc:
+                raise ValueError(f"动态工具参数不符合 schema：{exc.message[:200]}") from exc
+            return self.model(**arguments).model_dump()
+        unknown = set(arguments) - set(self.model.model_fields)
+        if unknown:
+            raise ValueError("未知参数：" + ", ".join(sorted(unknown)))
         return self.model(**arguments).model_dump()
 
     @staticmethod
@@ -74,10 +87,12 @@ class ToolEntry:
         Returns:
             工具执行结果字符串。
         """
+        from src.tools.display import ToolResult
+
         try:
             validated_args = kwds if validated else self.validate_arguments(kwds)
-        except ValidationError as error:
-            return self.format_validation_error(error)
+        except (ValidationError, ValueError) as error:
+            return ToolResult.failure("invalid_arguments", self.format_validation_error(error) if isinstance(error, ValidationError) else str(error))
 
         try:
             sig = inspect.signature(self.func)
@@ -86,17 +101,23 @@ class ToolEntry:
             if inspect.iscoroutinefunction(self.func):
                 result = await self.func(**validated_args, **inject)
             else:
-                result = await asyncio.to_thread(self.func, **validated_args, **inject)
+                worker = asyncio.create_task(asyncio.to_thread(self.func, **validated_args, **inject))
+                try:
+                    result = await asyncio.shield(worker)
+                except asyncio.CancelledError:
+                    # Python 线程不可强停；完成实际 I/O 后才允许调用方释放工作区租约。
+                    await asyncio.gather(worker, return_exceptions=True)
+                    raise
 
             from src.tools.display import ToolResult
             if isinstance(result, ToolResult):
                 return result  # 保留 ToolResult，ToolsMgr 提取 .text
-            return str(result)
+            return ToolResult(text=str(result))
         except Exception as e:
             error_msg = f"{type(e).__name__}: {str(e)}"
             if len(error_msg) > 200:
                 error_msg = error_msg[:200] + "..."
-            return f"工具执行出错: {error_msg}"
+            return ToolResult.failure("execution_error", error_msg)
 
 _registry: list[ToolEntry] = []
 
@@ -105,7 +126,7 @@ def tool(
     description: str,
     name: str | None = None,
     policy: ToolPolicy | None = None,
-    raw_output: bool = False,
+    parallel: bool = False,
     subagent: bool | None = None,
     feature: str | None = None,
     counts_as_work: bool = True,
@@ -117,7 +138,7 @@ def tool(
         description: 工具描述。
         name: 工具名称，默认使用函数名。
         policy: 声明式授权策略，未声明时保守使用 REVIEW + DYNAMIC。
-        raw_output: 是否跳过结果分页。
+        parallel: 只读工具的并发声明。
         subagent: 子 agent 可见性。True=自动注入；False=强制排除；None=按 agent 定义决定。
         feature: 所属可插拔 feature 名。None 表示无归属、恒可用；非 None 时随该 feature 的启用与否注入或排除。
         counts_as_work: 工具执行期间是否代表实际计算。委派型与纯人工等待型设 False，不计入回合活跃计算；默认 True。
@@ -138,6 +159,7 @@ def tool(
                 "required": ["input"],
             }
         parameters_schema.pop("description", None)
+        parameters_schema["additionalProperties"] = False
 
         entry = ToolEntry(
             name=tool_name,
@@ -147,7 +169,7 @@ def tool(
             parameters_schema=parameters_schema,
             policy=policy or DEFAULT_POLICY,
             origin=BUILTIN_ORIGIN,
-            raw_output=raw_output,
+            parallel=parallel,
             subagent=subagent,
             feature=feature,
             counts_as_work=counts_as_work,

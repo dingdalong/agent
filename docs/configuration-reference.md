@@ -126,11 +126,16 @@
 
 模型必须配置在 `role.<角色名>.model.default/fast`。模型解析接受两个槽位别名、Claude Code 兼容别名和完整模型引用：`opus`/`sonnet` → `default`，`haiku` → `fast`；显式模型使用 `供应商/模型ID`，格式非法或供应商未配置时报告配置错误。
 
-### 3.3 `tool` — 工具结果分页
+### 3.3 `tool` — 输出预算与临时日志
 
-| 键 | 类型 | 默认值 | 可选值 | 效果 |
-|----|------|--------|--------|------|
-| `tool.page_token_rate` | float | `0.03` | `0`~`1` | 单个工具调用结果每页最多占上下文窗口的比例；`LLMMgr.__post_init__` 读取（`llm_mgr.py:119`）后传给每个 provider（`llm_mgr.py:384`）用于分页。分页机制见 [llm.md](llm.md) |
+| 键 | 类型 | 默认值 | 范围 | 效果 |
+|----|------|--------|------|------|
+| `tool.output_tokens` | int | 10000 | 128 至单次上限 | 省略工具参数时的预算，约 4 UTF-8 字节/token |
+| `tool.max_output_tokens` | int | 16000 | 默认预算至 16000 | 显式请求和完整控制内容的单次上限 |
+| `tool.artifact_max_bytes` | int | 1048576 | 128 至 8 MiB | 单份脱敏临时日志上限，超出保留头尾 |
+| `tool.artifact_total_bytes` | int | 33554432 | 不小于单份上限 | 单应用会话日志总量，超出回收最早创建的文件 |
+
+详见 [tools.md](tools.md) 的范围读取、日志生命周期和近似预算说明。
 
 ### 3.4 `compact` — 上下文压缩
 
@@ -257,9 +262,12 @@ llm:
     max_delay_seconds: 300
   user_agent: "claude-cli/2.1.201 (external, cli)"
 
-# ── 工具结果分页 ────────────────────────────────────────
+# ── 工具输出预算与临时日志 ────────────────────────────────────────
 tool:
-  page_token_rate: 0.03
+  output_tokens: 10000
+  max_output_tokens: 16000
+  artifact_max_bytes: 1048576
+  artifact_total_bytes: 33554432
 
 # ── 上下文压缩（比例，运行时按 context_limit 换算为绝对 token）──
 compact:
@@ -489,3 +497,5 @@ TUI 诊断路径随 `$AGENT_HOME` 改写，不提供独立配置项。`tui.jsonl
 | 换全局配置目录 | 环境变量 `$AGENT_HOME` | 指向新目录 |
 | 换工作目录 | `--workdir` 或 `$AGENT_WORKDIR` | 指定路径 |
 | 排查 UI 卡顿 / 阻塞事件循环 | CLI `--debug` | 加 `--debug` 启动看慢回调告警 |
+
+工具预算：`output_tokens` 默认 10000，常用 4000（精简输出）、10000（减少补读）；按约 4 UTF-8 字节/token 计量，不等同于 API usage。`max_output_tokens` 是单次上限，最大 16000；省略工具参数使用默认配置。`artifact_max_bytes` 限制单份临时日志（默认 1 MiB，最大 8 MiB），`artifact_total_bytes` 限制每应用会话总量（默认 32 MiB），须不小于单份上限。增加日志上限方便定向读取，但增加临时磁盘占用。详细契约见 [tools.md](tools.md)。

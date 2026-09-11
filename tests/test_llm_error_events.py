@@ -1061,6 +1061,7 @@ def test_error_events_end_markdown_streams_before_ui_hook(event: Event, hook: st
     assert ui.order == ["end-thinking", "end-response", hook]
 
 
+@pytest.mark.integration
 def test_tty_partial_retry_prints_separator_and_countdown_uses_safe_category() -> None:
     """TTY 有残片时永久打印尝试分隔，倒计时使用 kind 与安全摘要。"""
     async def scenario() -> None:
@@ -1157,6 +1158,7 @@ def test_completed_agent_panel_keeps_error_diagnostics_without_stream_body_dupli
     assert "stream-only duplicate" not in rendered
 
 
+@pytest.mark.integration
 def test_turn_reset_and_reload_clear_all_retry_status_fields() -> None:
     """回合重置与 /clear 均清空倒计时和全部 retry 文案、序号字段。"""
     async def scenario() -> None:

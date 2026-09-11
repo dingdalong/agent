@@ -22,10 +22,10 @@
    要支持按委派过滤就得在进程级单例上存槽位，而计划工作流允许同一轮并行委派多个
    explore，`asyncio.gather` 会互相覆盖——这正是 PlanMgr 已知缺陷
    （`_pending_injection` 被抢先消费、`_reminder_mgr` 单槽位被覆盖）的同一个坑。
-3. **落盘必须由本 Manager 用 Python 直接写，不能改成 `write_file` 工具。**
+3. **落盘必须由本 Manager 用 Python 直接写，不能改成 `apply_patch` 工具。**
    `PathResolver` 把 `.agent` 列为 protected → `.agent/context/**` 是
    `PathClass.PROTECTED`；而 plan 模式下 `PermissionManager._authorize_plan()`
-   只放行 `PathClass.PLAN`，走 `write_file` 必被拒——plan 模式恰是本机制最痛的场景。
+   拒绝通用文件写入，走 `apply_patch` 必被拒——plan 模式恰是本机制最痛的场景。
    本 Manager 的写盘与 `MemoryMgr.save` / `TaskManager` 同构：框架内部 I/O，
    触发它的工具声明 `AccessKind.INTERNAL + plan_safe=True`。
 

@@ -23,7 +23,7 @@ class ReadMemory(BaseModel):
 def _memory_mgr(deps: Any) -> Any:
     memory_mgr = getattr(deps, "memory_mgr", None) if deps is not None else None
     if memory_mgr is None:
-        return "错误：memory_mgr 未配置，无法使用项目记忆工具。"
+        raise ValueError("memory_mgr 未配置，无法使用项目记忆工具。")
     return memory_mgr
 
 
@@ -38,7 +38,7 @@ def _memory_mgr(deps: Any) -> Any:
     policy=ToolPolicy(AccessKind.INTERNAL, DataFlow.LOCAL, plan_safe=True),
     feature="memory",
 )
-async def save_memory(
+def save_memory(
     title: str,
     description: str,
     type: str,
@@ -46,16 +46,12 @@ async def save_memory(
     deps: Any,
 ) -> str:
     memory_mgr = _memory_mgr(deps)
-    if isinstance(memory_mgr, str):
-        return memory_mgr
     result = memory_mgr.save(
         title=title,
         description=description,
         type=type,
         body=body,
     )
-    if result.startswith("错误："):
-        return result
     return f"已保存项目记忆：{result}"
 
 @tool(
@@ -64,8 +60,6 @@ async def save_memory(
     policy=ToolPolicy(AccessKind.INTERNAL, DataFlow.LOCAL, plan_safe=True),
     feature="memory",
 )
-async def read_memory(title: str, deps: Any) -> str:
+def read_memory(title: str, deps: Any) -> str:
     memory_mgr = _memory_mgr(deps)
-    if isinstance(memory_mgr, str):
-        return memory_mgr
     return memory_mgr.read(title)

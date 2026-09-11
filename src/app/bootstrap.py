@@ -137,7 +137,9 @@ async def create_app(
         passthrough=not ui.is_tty,
         session_state=session_state,
     )
-    tools_mgr = ToolsMgr()
+    tools_mgr = ToolsMgr(output_config=config_mgr.get_config("tool"))
+    from src.mgr.process_mgr import ProcessMgr
+    process_mgr = ProcessMgr()
     memory_mgr = MemoryMgr(work_dir, data_guard=data_guard) if "memory" in feats else None
     # 共享上下文挂在 subagent feature 上而非新增 feature：它的价值完全依附于子 agent
     # 的存在，无子 agent 的角色不该为它付任何代价。
@@ -204,6 +206,7 @@ async def create_app(
         ui=ui,
         event_bus=event_bus,
         tools_mgr=tools_mgr,
+        process_mgr=process_mgr,
         permission_mgr=permission_mgr,
         web_access_mgr=web_access_mgr,
         config_mgr=config_mgr,

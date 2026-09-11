@@ -175,13 +175,18 @@ class OpenAIProvider(ResponsesStreamMixin, LLMProvider):
         if usage is None:
             return None
         input_tokens_details = getattr(usage, "input_tokens_details", None)
-        return {
+        result = {
             "input_tokens": getattr(usage, "input_tokens", None),
             "output_tokens": getattr(usage, "output_tokens", None),
             "total_tokens": getattr(usage, "total_tokens", None),
             "cache_read_input_tokens": getattr(input_tokens_details, "cached_tokens", None),
             "cache_creation_input_tokens": None,
         }
+        details = getattr(usage, "output_tokens_details", None) or getattr(usage, "completion_tokens_details", None)
+        reasoning = getattr(details, "reasoning_tokens", None)
+        if isinstance(reasoning, int):
+            result["reasoning_output_tokens"] = reasoning
+        return result
 
     def _normalize_assistant_extra(self, msg: dict, norm_msg: dict, role: str) -> None:
         if role == "assistant" and msg.get("_response_output"):

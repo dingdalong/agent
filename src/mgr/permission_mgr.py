@@ -31,6 +31,7 @@ class AuthorizationResult:
     reason: str
     safe_detail: str
     path_grants: tuple[PathGrant, ...] = ()
+    command_plan: Any = None
 
 
 JudgeVerdict = ReviewVerdict
@@ -113,8 +114,6 @@ class PermissionManager:
         safe_detail = self._safe_detail(tool_name, policy, arguments)
         try:
             paths = list(self.path_resolver.extract(policy, arguments))
-            if tool_name == "move_file":
-                paths.append(self._move_final_path(arguments))
         except PathResolutionError as exc:
             return self._result(tool_name, False, "hard_rule", str(exc), safe_detail)
 
@@ -123,6 +122,30 @@ class PermissionManager:
         hard_reason = self.hard_deny.check(tool_name, policy, arguments, paths)
         if hard_reason:
             return self._result(tool_name, False, "hard_rule", hard_reason, safe_detail, grants)
+
+        if origin.kind == "builtin" and tool_name == "exec_command":
+            from dataclasses import replace
+            from src.mgr.readonly_command import compile_readonly, UnsupportedCommand
+            cwd = self.path_resolver.resolve(arguments.get("workdir"))
+            try:
+                compiled = await asyncio.to_thread(compile_readonly, str(arguments.get("command", "")), cwd, self.path_resolver)
+            except (UnsupportedCommand, PathResolutionError) as exc:
+                if plan_active:
+                    return self._result(tool_name, False, "plan", str(exc), safe_detail, grants)
+            else:
+                command_grants = tuple(PathGrant(f"command_path_{i}", PathRole.READ, p, self.path_resolver.classify(p)) for i, p in enumerate(compiled.paths))
+                return replace(self._result(tool_name, True, "policy", "已验证的只读命令", safe_detail, command_grants), command_plan=compiled)
+        if origin.kind == "builtin" and tool_name == "apply_patch":
+            from src.mgr.patch import prepare_patch
+            try:
+                patch_paths = await asyncio.to_thread(prepare_patch, arguments["patch"], self.path_resolver, False)
+                paths = patch_paths
+                grants = tuple(self.path_resolver.grant(item) for item in paths)
+            except (ValueError, OSError) as exc:
+                return self._result(tool_name, False, "hard_rule", str(exc), safe_detail)
+            reason = self.hard_deny.check(tool_name, policy, arguments, paths)
+            if reason:
+                return self._result(tool_name, False, "hard_rule", reason, safe_detail, grants)
 
         if plan_active:
             plan_result = self._authorize_plan(tool_name, policy, paths, safe_detail, grants)
@@ -179,13 +202,6 @@ class PermissionManager:
             return None
         if policy.access is AccessKind.INTERNAL and policy.plan_safe:
             return None
-        write_paths = [item for item in paths if item.role in {PathRole.WRITE, PathRole.DESTINATION}]
-        if (
-            policy.access is AccessKind.WORKSPACE_WRITE
-            and write_paths
-            and all(item.classification is PathClass.PLAN for item in write_paths)
-        ):
-            return self._result(tool_name, True, "plan", "Plan 允许写入活动计划目录", safe_detail, grants)
         return self._result(tool_name, False, "plan", "Plan 期间仅允许读取、明确安全的内部操作和计划文件写入", safe_detail, grants)
 
     async def _review(
@@ -312,7 +328,7 @@ class PermissionManager:
         request = self._review_request_base(
             tool_name, policy, arguments, origin, paths, user_intent
         )
-        if tool_name == "shell":
+        if tool_name == "exec_command":
             command = arguments.get("command", "")
             request["redacted_command"] = self.data_guard.shell_summary(str(command))
         return request
@@ -418,20 +434,6 @@ class PermissionManager:
             if host:
                 hosts.add(host)
 
-    def _move_final_path(self, arguments: Mapping[str, Any]) -> ResolvedPath:
-        source = arguments.get("source")
-        destination = arguments.get("destination")
-        if not isinstance(source, str) or not isinstance(destination, str):
-            raise PathResolutionError("move_file 需要 source 和 destination")
-        path = self.path_resolver.resolve_move_target(source, destination)
-        return ResolvedPath(
-            argument="destination_final",
-            role=PathRole.DESTINATION,
-            original=destination,
-            path=path,
-            classification=self.path_resolver.classify(path),
-            exists=path.exists(),
-        )
 
     @staticmethod
     def _ordinary_workspace_targets(paths: Sequence[ResolvedPath]) -> bool:
@@ -446,7 +448,7 @@ class PermissionManager:
         policy: ToolPolicy,
         arguments: Mapping[str, Any],
     ) -> str:
-        if tool_name == "shell":
+        if tool_name == "exec_command":
             return self.data_guard.shell_summary(str(arguments.get("command", "")))
         if tool_name == "web_search":
             return self.data_guard.web_search_summary(str(arguments.get("query", "")))

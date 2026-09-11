@@ -92,6 +92,8 @@ def test_setup_tiktoken_cache_points_into_bundle(
 ) -> None:
     """未指定时指向包内预热缓存。"""
     (fake_bundle / "tiktoken_cache").mkdir()
+    # setup 函数直接写环境；复制映射，确保原本缺失的变量也能完整恢复。
+    monkeypatch.setattr(os, "environ", os.environ.copy())
     monkeypatch.delenv("TIKTOKEN_CACHE_DIR", raising=False)
     frozen.setup_tiktoken_cache()
     assert os.environ["TIKTOKEN_CACHE_DIR"] == str(fake_bundle / "tiktoken_cache")

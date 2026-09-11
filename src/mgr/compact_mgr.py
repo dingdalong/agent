@@ -488,7 +488,9 @@ class CompactMgr:
         Returns:
             更新后的滚动摘要；不存在符合限制的无损请求时返回 None。
         """
-        raw_pages = await asyncio.to_thread(self.llm.split_page, serialized_block)
+        # 压缩分片依据本次摘要预算；不再借用工具分页或模型窗口比例。
+        fragment_chars = max(1, request_budget // 4)
+        raw_pages = [serialized_block[i:i + fragment_chars] for i in range(0, len(serialized_block), fragment_chars)] or [""]
         fragments = await asyncio.to_thread(
             _validate_and_materialize_pages,
             raw_pages,

@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Literal, TYPE_CHECKING
 from pydantic import BaseModel, Field
 
 from src.tools.policy import AccessKind, DataFlow, ToolPolicy
+from src.tools.display import ToolResult
 from src.tools.decorator import tool
 
 if TYPE_CHECKING:
@@ -54,7 +55,7 @@ async def task_create(
         result = agent._task_mgr.create(subject, description, active_form, metadata)
         return json.dumps(result, ensure_ascii=False)
     except ValueError as e:
-        return str(e)
+        return ToolResult.failure("execution_error", str(e))
 
 
 # ── task_update ────────────────────────────────────────────────────
@@ -123,7 +124,7 @@ async def task_update(
         )
         return json.dumps(result, ensure_ascii=False)
     except ValueError as e:
-        return str(e)
+        return ToolResult.failure("execution_error", str(e))
 
 
 # ── task_list ──────────────────────────────────────────────────────
@@ -181,4 +182,4 @@ async def task_get(task_id: str, agent: Agent) -> str:
         result = agent._task_mgr.get_task(task_id)
         return json.dumps(result, ensure_ascii=False)
     except ValueError as e:
-        return str(e)
+        return ToolResult.failure("execution_error", str(e))

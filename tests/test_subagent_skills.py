@@ -163,8 +163,8 @@ def test_loading_skill_preserves_readonly_and_main_tool_isolation(tmp_path: Path
     assert child.plan_active
     assert child._prompt_mgr.build() == system
     assert parent.history == []
-    for tool_name in ("write_file", "set_plan_file", "exit_plan_mode", "task_delegator"):
-        assert "未知工具" in _call(child, tool_name, {})
+    for tool_name in ("apply_patch", "submit_plan", "task_delegator"):
+        assert "unknown_tool" in _call(child, tool_name, {})
     assert "不存在的技能" in _call(child, "load_skill", {"name": "builtin:missing"})
 
 
@@ -175,8 +175,8 @@ def test_skill_does_not_allow_coder_writes_in_plan(tmp_path: Path) -> None:
     child = _child(parent, "coder")
     _call(child, "load_skill", {"name": "builtin:debugging"})
     target = tmp_path / "must-not-exist.txt"
-    result = _call(child, "write_file", {"path": str(target), "content": "mutation"})
-    assert "权限拒绝" in result
+    result = _call(child, "apply_patch", {"patch": "*** Begin Patch\n*** Add File: must-not-exist.txt\n+mutation\n*** End Patch"})
+    assert "permission_denied" in result
     assert not target.exists()
 
 
@@ -258,7 +258,7 @@ def test_mijia_general_executor_uses_registered_mcp_after_skill_loading(tmp_path
     child.history.append({"role": "user", "content": "查询客厅设备，返回候选，不执行控制"})
     assert "<skill " in _call(child, "load_skill", {"name": "builtin:control-devices"})
     assert tool_name in {schema["function"]["name"] for schema in child._tools_schemas}
-    assert json.loads(_call(child, tool_name, {})) == devices
+    assert json.loads(_call(child, tool_name, {}).split("\n", 1)[1]) == devices
     assert queries == ["devices"]
     assert judge.await_count == 1
     assert "write_file" not in {schema["function"]["name"] for schema in child._tools_schemas}

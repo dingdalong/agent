@@ -139,7 +139,7 @@ def test_plan_rejects_review_without_calling_judge_and_allows_plan_file(tmp_path
     manager = make_manager(tmp_path, judge)
     shell = ToolPolicy(AccessKind.REVIEW, DataFlow.DYNAMIC)
     denied = run(manager.authorize(
-        "shell", shell, {"command": "pytest"}, origin=ToolOrigin("builtin"),
+        "exec_command", shell, {"command": "pytest"}, origin=ToolOrigin("builtin"),
         plan_active=True, user_intent="test",
     ))
     plan_write = ToolPolicy(
@@ -152,7 +152,7 @@ def test_plan_rejects_review_without_calling_judge_and_allows_plan_file(tmp_path
         origin=ToolOrigin("builtin"), plan_active=True, user_intent="plan",
     ))
     assert denied.allowed is False and denied.source == "plan"
-    assert allowed.allowed is True and allowed.source == "plan"
+    assert allowed.allowed is False and allowed.source == "plan"
     assert judge.requests == []
 
 
@@ -218,7 +218,7 @@ def test_shell_hard_denies(command, tmp_path):
     judge = RecordingJudge()
     manager = make_manager(tmp_path, judge)
     result = run(manager.authorize(
-        "shell", ToolPolicy(AccessKind.REVIEW, DataFlow.DYNAMIC), {"command": command},
+        "exec_command", ToolPolicy(AccessKind.REVIEW, DataFlow.DYNAMIC), {"command": command},
         origin=ToolOrigin("builtin"), plan_active=False, user_intent="run",
     ))
     assert result.allowed is False and result.source == "hard_rule"
@@ -243,7 +243,7 @@ def test_judge_failure_uses_one_time_confirmation(tmp_path):
     judge = RecordingJudge(RuntimeError("offline"))
     manager = make_manager(tmp_path, judge, answer=True)
     result = run(manager.authorize(
-        "shell", ToolPolicy(AccessKind.REVIEW, DataFlow.DYNAMIC), {"command": "pytest"},
+        "exec_command", ToolPolicy(AccessKind.REVIEW, DataFlow.DYNAMIC), {"command": "pytest"},
         origin=ToolOrigin("builtin"), plan_active=False, user_intent="test",
     ))
     assert result.allowed is True and result.source == "user"
@@ -254,7 +254,7 @@ def test_judge_ask_or_unavailable_without_confirmation_denies(tmp_path, verdict)
     judge = RecordingJudge(verdict) if verdict is not None else None
     manager = PermissionManager(str(tmp_path), judge, None, DataGuard())
     result = run(manager.authorize(
-        "shell", ToolPolicy(AccessKind.REVIEW, DataFlow.DYNAMIC), {"command": "pytest"},
+        "exec_command", ToolPolicy(AccessKind.REVIEW, DataFlow.DYNAMIC), {"command": "pytest"},
         origin=ToolOrigin("builtin"), plan_active=False, user_intent="test",
     ))
     assert result.allowed is False and result.source == "failure"
@@ -313,29 +313,6 @@ def test_large_and_special_local_reads_are_denied(tmp_path):
     ))
     assert large_result.allowed is False and large_result.source == "hard_rule"
     assert special_result.allowed is False and special_result.source == "hard_rule"
-
-
-def test_move_existing_directory_includes_final_target(tmp_path):
-    (tmp_path / "source.txt").write_text("x")
-    (tmp_path / ".vscode").mkdir()
-    judge = RecordingJudge(JudgeVerdict("allow", "reviewed"))
-    manager = make_manager(tmp_path, judge)
-    policy = ToolPolicy(
-        AccessKind.REVIEW,
-        DataFlow.LOCAL,
-        (
-            PathArgument("source", PathRole.SOURCE),
-            PathArgument("destination", PathRole.DESTINATION),
-        ),
-    )
-    result = run(manager.authorize(
-        "move_file", policy, {"source": "source.txt", "destination": ".vscode"},
-        origin=ToolOrigin("builtin"), plan_active=False, user_intent="move",
-    ))
-    paths = judge.requests[0]["paths"]
-    assert result.allowed is True and result.source == "judge"
-    assert {item["argument"] for item in paths} == {"source", "destination", "destination_final"}
-    assert next(item for item in paths if item["argument"] == "destination_final")["class"] == "protected"
 
 
 def test_data_guard_redacts_urls_embedded_in_prose():
@@ -467,7 +444,7 @@ def test_subagent_inherits_parent_plan_state(tmp_path, monkeypatch):
     assert captured["plan_active"] is True
 
 
-def test_tools_mgr_redacts_events_post_hook_and_paging(tmp_path):
+def test_tools_mgr_redacts_events_post_hook_and_artifact(tmp_path):
     secret = "sentinel-secret-value"
 
     class Args(BaseModel):
@@ -488,17 +465,8 @@ def test_tools_mgr_redacts_events_post_hook_and_paging(tmp_path):
         async def emit(self, event):
             self.events.append(event)
 
-    class LLM:
-        page_token_budget = 1
-
-        def estimate_tokens(self, _messages):
-            return 100
-
-        def split_page(self, result):
-            return [result[:10], result[10:]]
-
     async def echo(payload: str) -> str:
-        return f"result={payload}"
+        return (f"result={payload}\n") * 4000
 
     guard = DataGuard({"provider": secret})
     manager = PermissionManager(str(tmp_path), None, None, guard)
@@ -531,7 +499,7 @@ def test_tools_mgr_redacts_events_post_hook_and_paging(tmp_path):
         agent_type="main",
         plan_active=False,
         history=[],
-        llm=LLM(),
+        deps=deps,
     )
     result = run(tools_mgr.execute(
         "echo_internal",
@@ -543,8 +511,10 @@ def test_tools_mgr_redacts_events_post_hook_and_paging(tmp_path):
     post_payload = next(payload for event, payload in hooks.calls if event == "PostToolUse")
     started = next(event for event in bus.events if isinstance(event, ToolCallStarted))
     completed = next(event for event in bus.events if isinstance(event, ToolCallCompleted))
-    stored = repr(tools_mgr._result_store)
-    assert secret not in result
+    stored = Path(result.artifact_path).read_text()
+    tools_mgr.reload()
+    assert not Path(result.artifact_path).exists()
+    assert secret not in str(result)
     assert secret not in repr(post_payload)
     assert secret not in started.detail
     assert secret not in completed.result_preview
@@ -578,8 +548,8 @@ def test_tools_mgr_redacts_pre_hook_denial(tmp_path):
     ))
     deps = SimpleNamespace(data_guard=guard, hooks_mgr=Hooks())
     result = run(tools_mgr.execute("blocked", {}, deps=deps, agent=SimpleNamespace()))
-    assert secret not in result
-    assert REDACTED in result
+    assert secret not in str(result)
+    assert REDACTED in str(result)
 
 
 @pytest.mark.parametrize(
@@ -625,100 +595,10 @@ def test_authorized_path_rejects_symlink_replacement(tmp_path):
         manager.path_resolver.revalidate(grant, "target/file.txt")
 
 
-def test_move_final_grant_rejects_destination_type_change(tmp_path):
-    (tmp_path / "source.txt").write_text("content")
-    destination = tmp_path / "destination"
-    destination.mkdir()
-    judge = RecordingJudge(JudgeVerdict("allow", "reviewed"))
-    manager = make_manager(tmp_path, judge)
-    policy = ToolPolicy(
-        AccessKind.REVIEW,
-        DataFlow.LOCAL,
-        (
-            PathArgument("source", PathRole.SOURCE),
-            PathArgument("destination", PathRole.DESTINATION),
-        ),
-    )
-    result = run(manager.authorize(
-        "move_file", policy,
-        {"source": "source.txt", "destination": "destination"},
-        origin=ToolOrigin("builtin"), plan_active=False, user_intent="move",
-    ))
-    final_grant = next(
-        grant for grant in result.path_grants if grant.argument == "destination_final"
-    )
-
-    destination.rmdir()
-    destination.write_text("now a file")
-    new_final = manager.path_resolver.resolve_move_target("source.txt", "destination")
-    with pytest.raises(PathResolutionError, match="路径或分类已变化"):
-        manager.path_resolver.revalidate(final_grant, new_final)
 
 
-def test_set_plan_file_rejects_authorized_external_file(tmp_path):
-    outside = tmp_path.parent / "external-plan.md"
-    outside.write_text("private plan")
-    guard = DataGuard()
-    permission_mgr = PermissionManager(str(tmp_path), None, None, guard)
-
-    class Plan:
-        path = None
-
-        def set_active_plan_path(self, path):
-            self.path = path
-
-    plan = Plan()
-    deps = SimpleNamespace(
-        data_guard=guard,
-        permission_mgr=permission_mgr,
-        plan_mgr=plan,
-        hooks_mgr=None,
-        event_bus=None,
-        turn_clock=None,
-    )
-    agent = SimpleNamespace(plan_active=True, history=[], agent_type="main", uuid="agent")
-
-    result = run(ToolsMgr().execute(
-        "set_plan_file", {"file_path": str(outside)}, deps=deps, agent=agent
-    ))
-
-    assert result.startswith("错误：只接受 .agent/plans")
-    assert plan.path is None
 
 
-def test_exit_plan_mode_missing_file_stays_in_plan_mode(tmp_path):
-    """计划文件缺失时 exit_plan_mode 报错且不退出计划模式。"""
-    guard = DataGuard()
-    permission_mgr = PermissionManager(str(tmp_path), None, None, guard)
-    exits: list[str] = []
-
-    class Plan:
-        def exit_mode(self, agent, reminder_mgr):
-            exits.append("exit")
-            return True
-
-    plan = Plan()
-    deps = SimpleNamespace(
-        data_guard=guard,
-        permission_mgr=permission_mgr,
-        plan_mgr=plan,
-        hooks_mgr=None,
-        event_bus=None,
-        turn_clock=None,
-    )
-    agent = SimpleNamespace(
-        plan_active=True, history=[], agent_type="main", uuid="agent",
-        _reminder_mgr=None,
-    )
-    missing = tmp_path / ".agent" / "plans" / "missing.md"
-
-    result = run(ToolsMgr().execute(
-        "exit_plan_mode", {"file_path": str(missing)}, deps=deps, agent=agent
-    ))
-
-    assert result.startswith("错误：计划文件不存在")
-    assert agent.plan_active is True
-    assert exits == []
 
 
 @pytest.mark.parametrize(
@@ -733,7 +613,7 @@ def test_exit_plan_mode_missing_file_stays_in_plan_mode(tmp_path):
 def test_shell_hard_deny_recognizes_wrapped_and_absolute_sudo(tmp_path, command):
     manager = make_manager(tmp_path)
     result = run(manager.authorize(
-        "shell", ToolPolicy(AccessKind.REVIEW, DataFlow.DYNAMIC), {"command": command},
+        "exec_command", ToolPolicy(AccessKind.REVIEW, DataFlow.DYNAMIC), {"command": command},
         origin=ToolOrigin("builtin"), plan_active=False, user_intent="run",
     ))
     assert result.allowed is False and result.source == "hard_rule"
@@ -747,7 +627,7 @@ def test_hard_deny_does_not_block_scoped_or_readonly_text_commands(tmp_path, com
     judge = RecordingJudge(JudgeVerdict("allow", "reviewed"))
     manager = make_manager(tmp_path, judge)
     result = run(manager.authorize(
-        "shell", ToolPolicy(AccessKind.REVIEW, DataFlow.DYNAMIC), {"command": command},
+        "exec_command", ToolPolicy(AccessKind.REVIEW, DataFlow.DYNAMIC), {"command": command},
         origin=ToolOrigin("builtin"), plan_active=False, user_intent="run",
     ))
     assert result.allowed is True
@@ -761,7 +641,7 @@ def test_shell_judge_and_confirmation_share_body_free_summary(tmp_path):
     judge = RecordingJudge(JudgeVerdict("allow", "ok"))
     manager = make_manager(tmp_path, judge)
     result = run(manager.authorize(
-        "shell", ToolPolicy(
+        "exec_command", ToolPolicy(
             AccessKind.REVIEW, DataFlow.DYNAMIC, detail_template="{command}"
         ), {"command": command}, origin=ToolOrigin("builtin"),
         plan_active=False, user_intent="request",
@@ -828,12 +708,12 @@ def test_authorization_log_carries_source_and_redacted_reason(tmp_path, caplog):
     policy = ToolPolicy(AccessKind.REVIEW, DataFlow.DYNAMIC)
     with caplog.at_level(logging.INFO, logger="src.mgr.permission_mgr"):
         result = run(manager.authorize(
-            "shell", policy, {"command": "echo hi"}, origin=ToolOrigin("builtin"),
+            "exec_command", policy, {"command": "echo hi"}, origin=ToolOrigin("builtin"),
             plan_active=False, user_intent="do it",
         ))
     assert result.allowed is False
     assert result.source == "judge"
-    assert "授权 shell → deny source=judge" in caplog.text
+    assert "授权 exec_command → deny source=judge" in caplog.text
     assert secret not in caplog.text
     assert REDACTED in caplog.text
 
@@ -891,14 +771,14 @@ def test_confirmation_dialog_logs_open_and_outcome(tmp_path, caplog):
     policy = ToolPolicy(AccessKind.REVIEW, DataFlow.DYNAMIC)
     with caplog.at_level(logging.INFO, logger="src.mgr.permission_mgr"):
         result = run(manager.authorize(
-            "shell", policy, {"command": "echo hi"}, origin=ToolOrigin("builtin"),
+            "exec_command", policy, {"command": "echo hi"}, origin=ToolOrigin("builtin"),
             plan_active=False, user_intent="do it",
         ))
     assert result.allowed is False
     assert result.source == "user"
-    assert "转人工确认 shell" in caplog.text
-    assert "授权 shell → deny source=user" in caplog.text
-    assert caplog.text.index("转人工确认 shell") < caplog.text.index("授权 shell → deny source=user")
+    assert "转人工确认 exec_command" in caplog.text
+    assert "授权 exec_command → deny source=user" in caplog.text
+    assert caplog.text.index("转人工确认 exec_command") < caplog.text.index("授权 exec_command → deny source=user")
 
 
 def test_deterministic_policy_allow_is_debug_only(tmp_path, caplog):
@@ -996,7 +876,7 @@ def test_deny_notice_carries_real_authorization_source(tmp_path):
         deps=deps,
         agent=agent,
     ))
-    assert result.startswith("权限拒绝")
+    assert result.error_code == "permission_denied"
     notice = next(e for e in bus.events if isinstance(e, PermissionNotice))
     assert notice.status == "deny"
     assert notice.decision_source == "hard_rule"

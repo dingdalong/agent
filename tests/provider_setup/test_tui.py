@@ -87,6 +87,7 @@ def _feedback(app) -> str:
 # ---------- provider 与凭据 ----------
 
 
+@pytest.mark.integration
 def test_provider_order_default_highlight_and_url_prefill() -> None:
     """候选顺序即展示顺序、默认高亮第一项；选择后 URL 预填并聚焦输入框。"""
 
@@ -108,6 +109,7 @@ def test_provider_order_default_highlight_and_url_prefill() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_provider_selection_prefills_existing_key_hint_and_clears_on_switch() -> None:
     """已有 key 提示时凭据页预填并仍掩码；切换到无提示 Provider 时清空。"""
 
@@ -135,6 +137,7 @@ def test_provider_selection_prefills_existing_key_hint_and_clears_on_switch() ->
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_key_input_uses_password_masking() -> None:
     """key 输入框启用 password 掩码，值本身不脱敏。"""
 
@@ -149,6 +152,7 @@ def test_key_input_uses_password_masking() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_cloud_empty_key_blocks_submit_and_keeps_credentials() -> None:
     """云 Provider key 为空：显示错误、不调用 discover、停留在 credentials。"""
 
@@ -167,6 +171,7 @@ def test_cloud_empty_key_blocks_submit_and_keeps_credentials() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_ollama_empty_key_submits_none_and_reaches_model() -> None:
     """Ollama 空 key 合法：discover 收到 None，进入模型选择。"""
 
@@ -188,6 +193,7 @@ def test_ollama_empty_key_submits_none_and_reaches_model() -> None:
 # ---------- 键盘纵向导航 ----------
 
 
+@pytest.mark.integration
 def test_arrow_navigation_between_url_key_and_provider_list() -> None:
     """URL Down → key；key Up → URL；URL Up → Provider 列表。"""
 
@@ -208,6 +214,7 @@ def test_arrow_navigation_between_url_key_and_provider_list() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_back_to_provider_list_keeps_arrows_and_enter_reselects() -> None:
     """返回 Provider 列表后方向键导航保持；回车重新选择并清空 key、清除错误。"""
 
@@ -245,6 +252,7 @@ def test_back_to_provider_list_keeps_arrows_and_enter_reselects() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_key_down_stays_in_place_and_does_not_submit() -> None:
     """Key 上 Down 停留原地：不循环、不触发 discover。"""
 
@@ -264,6 +272,7 @@ def test_key_down_stays_in_place_and_does_not_submit() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_left_right_keys_move_cursor_without_changing_focus() -> None:
     """URL/key 中左右键仍移动光标，不改变焦点。"""
 
@@ -294,6 +303,7 @@ def test_left_right_keys_move_cursor_without_changing_focus() -> None:
 # ---------- 成功与失败 ----------
 
 
+@pytest.mark.integration
 def test_success_returns_result_and_trims_inputs() -> None:
     """完整成功流：trim 后透传 discover，模型列表有序，两个槽位选完后返回 SetupResult。"""
 
@@ -329,6 +339,7 @@ def test_success_returns_result_and_trims_inputs() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_discovery_failure_allows_manual_models() -> None:
     async def scenario() -> None:
         stub = StubDiscover(models=[], error=RuntimeError("boom sk-test-secret"))
@@ -366,6 +377,7 @@ def test_discover_async_propagates_control_flow(exc) -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_empty_models_allow_manual_entry() -> None:
     async def scenario() -> None:
         app = SetupApp(options=[_OLLAMA], discover=StubDiscover(models=[]))
@@ -386,6 +398,7 @@ def test_empty_models_allow_manual_entry() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_double_enter_submits_once() -> None:
     """discovering 态防重复提交：连续 Enter 只调用一次 discover。"""
 
@@ -413,6 +426,7 @@ def test_double_enter_submits_once() -> None:
 # ---------- Esc 后退与快捷键 ----------
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize(
     "state", ["provider", "credentials", "discovering", "model_default"]
 )
@@ -446,6 +460,7 @@ def test_ctrl_c_exits_none_and_cancels_discover_from_every_state(state: str) -> 
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_escape_in_provider_list_is_noop() -> None:
     """provider 态 Esc 不退出，列表仍可正常选择 Provider。"""
 
@@ -475,6 +490,7 @@ def test_escape_in_provider_list_is_noop() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_escape_from_credentials_returns_to_provider_list() -> None:
     """credentials 态 Esc 返回 Provider 列表并允许重新选择。"""
 
@@ -502,6 +518,7 @@ def test_escape_from_credentials_returns_to_provider_list() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_escape_from_discovering_cancels_and_returns_to_credentials() -> None:
     """discovering 态 Esc 取消验证、恢复凭据输入，并允许重新提交。"""
 
@@ -541,6 +558,7 @@ def test_escape_from_discovering_cancels_and_returns_to_credentials() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_stale_discover_result_is_ignored_after_resubmit() -> None:
     """旧验证吞掉取消并返回结果时，不得覆盖重新提交的新验证任务。"""
 
@@ -609,6 +627,7 @@ def test_stale_discover_result_is_ignored_after_resubmit() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_stale_discover_error_is_ignored_after_resubmit() -> None:
     """旧验证吞掉取消并晚抛错时，不得污染新验证的空模型反馈。"""
 
@@ -662,6 +681,7 @@ def test_stale_discover_error_is_ignored_after_resubmit() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_escape_from_model_default_returns_to_credentials() -> None:
     """model_default 态 Esc 恢复凭据页，并允许再次验证进入模型页。"""
 
@@ -696,6 +716,7 @@ def test_escape_from_model_default_returns_to_credentials() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize(
     "state", ["provider", "credentials", "discovering", "model_default"]
 )
@@ -770,6 +791,7 @@ def test_ctrl_q_does_not_exit(state: str) -> None:
 # ---------- 布局与命名 ----------
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("size", [(80, 24), (100, 30)])
 def test_layout_no_overlap_at_common_sizes(size: tuple[int, int]) -> None:
     """80x24 与 100x30 下关键控件 region 不重叠且不越界。"""
@@ -824,6 +846,7 @@ def test_source_has_no_legacy_names() -> None:
 # ---------- URL 空值校验 ----------
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("blank_url", ["", "   "])
 def test_cloud_blank_url_blocks_submit_and_keeps_credentials(blank_url: str) -> None:
     """云 Provider URL 为空/空白：显示“API 地址不能为空”、不调用 discover、停留 credentials。"""
@@ -851,6 +874,7 @@ def test_cloud_blank_url_blocks_submit_and_keeps_credentials(blank_url: str) -> 
 # ---------- Ollama 完整成功结果 ----------
 
 
+@pytest.mark.integration
 def test_ollama_success_result_none_key_and_repr_hides_key() -> None:
     """Ollama 完整成功：空 key 提交、返回模型、两个槽位各选一次后退出；
     SetupResult 的 key 字段为 None 且 repr 不含该字段名。"""
@@ -904,6 +928,7 @@ async def _reach_model_default(app, pilot, provider_index: int = 0) -> None:
     await _wait_until(lambda: app.query_one("#model-panel", Vertical).display, pilot)
 
 
+@pytest.mark.integration
 def test_model_default_then_fast_reuses_same_model_list() -> None:
     """选完 default 进入 fast 屏：复用同一份模型列表与控件，不重新拉取。"""
 
@@ -931,6 +956,7 @@ def test_model_default_then_fast_reuses_same_model_list() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_escape_from_model_fast_returns_to_model_default_then_credentials() -> None:
     """Esc 逐级后退：model_fast → model_default（恢复所选高亮）→ credentials。"""
 
@@ -963,6 +989,7 @@ def test_escape_from_model_fast_returns_to_model_default_then_credentials() -> N
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_same_model_for_both_slots() -> None:
     """两个槽位可选同一个模型：fast 屏直接回车沿用 default 屏所选。"""
 
@@ -981,6 +1008,7 @@ def test_same_model_for_both_slots() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_different_model_per_slot() -> None:
     """两个槽位可选不同模型，最终 SetupResult 同时携带两者。"""
 
@@ -1006,6 +1034,7 @@ def test_different_model_per_slot() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_ctrl_c_in_model_fast_exits_none() -> None:
     """model_fast 屏 Ctrl+C 返回 None，不产生任何结果。"""
 

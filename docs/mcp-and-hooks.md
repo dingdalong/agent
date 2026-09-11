@@ -99,7 +99,7 @@ Hooks 写在 `settings.json` 的 `hooks` 段（也可来自插件的 `hooks/hook
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "write_file|edit_file_lines",
+        "matcher": "apply_patch",
         "hooks": [
           { "type": "command", "command": "./check.sh", "timeout": 60, "async": false }
         ]

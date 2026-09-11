@@ -418,8 +418,6 @@ class LLMProvider(ABC):
     max_delay_seconds: float = 300.0
     timeout: float = 120.0
     context_limit: int = 0
-    page_token_rate: float = 0.03
-    page_token_budget: int = field(init=False)
     supports_native_structured_output: bool = False
     reasoning_effort: str = "max"
     preserve_thinking: bool = False
@@ -437,7 +435,6 @@ class LLMProvider(ABC):
             None。
         """
         self._semaphore = asyncio.Semaphore(self.concurrency)
-        self.page_token_budget = max(1, math.floor(self.context_limit * self.page_token_rate))
         self._retry_policy = RetryPolicy(RetryConfig(
             max_attempts=self.max_attempts,
             base_delay_seconds=self.base_delay_seconds,
@@ -567,33 +564,6 @@ class LLMProvider(ABC):
             Estimated token count for the complete provider-specific input payload.
         """
         ...
-
-    def _split_page_once(self, text: str) -> tuple[str, str]:
-        if self.estimate_tokens([{"role": "tool", "content": text}]) <= self.page_token_budget:
-            return text, ""
-
-        lo = 0
-        hi = len(text)
-        best = 0
-        while lo <= hi:
-            mid = (lo + hi) // 2
-            if self.estimate_tokens([{"role": "tool", "content": text[:mid]}]) <= self.page_token_budget:
-                best = mid
-                lo = mid + 1
-            else:
-                hi = mid - 1
-
-        if best <= 0:
-            best = 1
-        return text[:best], text[best:]
-
-    def split_page(self, text: str) -> list[str]:
-        pages: list[str] = []
-        remaining = text
-        while remaining:
-            page, remaining = self._split_page_once(remaining)
-            pages.append(page)
-        return pages or [""]
 
     async def _sleep(self, delay: float) -> None:
         """等待指定秒数后继续重试。
@@ -1244,6 +1214,7 @@ class LLMProvider(ABC):
             call_id=call.call_id if call is not None else "",
             input_tokens=usage.get("input_tokens"),
             output_tokens=output_tokens,
+            reasoning_output_tokens=usage.get("reasoning_output_tokens"),
             total_tokens=total_tokens,
             cache_read_input_tokens=usage.get("cache_read_input_tokens"),
             cache_creation_input_tokens=usage.get("cache_creation_input_tokens"),

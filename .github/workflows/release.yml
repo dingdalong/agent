@@ -39,10 +39,10 @@ jobs:
         # AGENT_REQUIRE_BUILD=1：构建产物缺失时直接失败，避免用例被 skip 掉后流水线假绿
         env:
           AGENT_REQUIRE_BUILD: "1"
-        run: uv run pytest tests/packaging -q
+        run: uv run pytest tests/packaging -m packaging -q
 
       - name: 单元测试
-        run: uv run pytest tests -q --ignore=tests/packaging
+        run: uv run pytest tests -q -m "not packaging"
 
       - uses: actions/upload-artifact@v4
         with:

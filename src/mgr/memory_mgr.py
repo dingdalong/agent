@@ -113,10 +113,10 @@ class MemoryMgr:
         title = title.strip()
         validation_error = self._validate_title(title)
         if validation_error:
-            return validation_error
+            raise ValueError(validation_error)
         type_error = self._validate_type(type)
         if type_error:
-            return type_error
+            raise ValueError(type_error)
 
         path = self._path_for_title(title)
 
@@ -136,10 +136,10 @@ class MemoryMgr:
     def read(self, title: str) -> str:
         validation_error = self._validate_title(title)
         if validation_error:
-            return validation_error
+            raise ValueError(validation_error)
         entry = self.entries.get(title.strip())
         if entry is None:
-            return f"错误：不存在的项目记忆：{title}"
+            raise ValueError(f"不存在的项目记忆：{title}")
         return "\n".join(
             [
                 f"# {entry.title}",

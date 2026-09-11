@@ -100,6 +100,7 @@ def _send_pointer_event(
     return event
 
 
+@pytest.mark.integration
 def test_transcript_burst_uses_event_time_and_caps_at_three_times(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -153,6 +154,7 @@ def test_transcript_burst_uses_event_time_and_caps_at_three_times(
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize(("ctrl", "shift"), [(True, False), (False, True)])
 def test_pointer_modifiers_reset_burst_and_defer_to_textual(
     ctrl: bool,
@@ -187,6 +189,7 @@ def test_pointer_modifiers_reset_burst_and_defer_to_textual(
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_pointer_boundary_resets_and_bubbles_to_parent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -220,6 +223,7 @@ def test_pointer_boundary_resets_and_bubbles_to_parent(
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_history_burst_preserves_tail_following_contract() -> None:
     async def scenario() -> None:
         policy = TuiRenderPolicy(
@@ -270,6 +274,7 @@ def test_history_burst_preserves_tail_following_contract() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_accelerated_history_edge_shifts_one_page_without_losing_anchor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

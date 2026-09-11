@@ -17,7 +17,7 @@ from src.mgr.memory_mgr import MemoryMgr
 from src.mgr.session_mgr import SessionMgr
 from src.mgr.session_state import SessionState
 from src.mgr.task_mgr import TaskManager
-from src.tools.builtin.shell import shell
+from src.mgr.process_mgr import ProcessMgr
 
 
 SECRET = "sentinel-secret-value"
@@ -126,9 +126,14 @@ def test_shell_timeout_reaps_background_process_group(tmp_path):
     )
     started = time.monotonic()
 
-    result = asyncio.run(shell("sleep 30 &", 1, deps))
+    async def scenario():
+        manager = ProcessMgr()
+        result = await manager.start(('test', 'main'), 'sleep 30 &', tmp_path, {}, None, 100, 1000)
+        await manager.close()
+        return result
 
-    assert result == "命令超时（1秒）"
+    result = asyncio.run(scenario())
+    assert result.error_code == 'timeout'
     assert time.monotonic() - started < 3
 
 

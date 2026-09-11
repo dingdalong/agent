@@ -79,29 +79,29 @@ def test_calculator_success_format():
 # ---------------------------------------------------------------------------
 
 def test_unknown_function_returns_error():
-    assert calculator("foo(2)").startswith("计算错误：")
+    assert calculator("foo(2)").status == "error"
 
 
 def test_unknown_name_returns_error():
-    assert calculator("x + 1").startswith("计算错误：")
+    assert calculator("x + 1").status == "error"
 
 
 def test_attribute_access_rejected():
     # (1).__class__ 属性访问必须被挡下。
-    assert calculator("(1).__class__").startswith("计算错误：")
+    assert calculator("(1).__class__").status == "error"
 
 
 def test_keyword_argument_rejected():
-    assert calculator("round(1.5, ndigits=0)").startswith("计算错误：")
+    assert calculator("round(1.5, ndigits=0)").status == "error"
 
 
 def test_dunder_import_rejected():
-    assert calculator("__import__('os')").startswith("计算错误：")
+    assert calculator("__import__('os')").status == "error"
 
 
 def test_factorial_over_limit_returns_error():
-    assert calculator("factorial(200000)").startswith("计算错误：")
+    assert calculator("factorial(200000)").status == "error"
 
 
 def test_bad_syntax_returns_error():
-    assert calculator("2 +").startswith("计算错误：")
+    assert calculator("2 +").status == "error"

@@ -1,7 +1,7 @@
 ---
 agent_type: review
 description: 独立只读核验指定改动的正确性、回归风险和测试缺口，返回按严重程度排序的发现与证据。
-tools: list_directory, glob, grep, get_file_info, read_file
+tools: exec_command, write_stdin, read_file
 model: default
 memory: project
 ---

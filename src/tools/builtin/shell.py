@@ -1,155 +1,42 @@
-from __future__ import annotations
-
-import asyncio
-import os
-import signal
-from dataclasses import dataclass, field
-
+"""有界命令与进程会话工具。"""
 from pydantic import BaseModel, Field
 
 from src.mgr.frozen import clean_env
-from src.tools.policy import AccessKind, DataFlow, ToolPolicy
 from src.tools.decorator import tool
+from src.tools.display import ToolResult
+from src.tools.policy import AccessKind, DataFlow, PathArgument, PathRole, ToolPolicy
 
 
-_OUTPUT_BYTES = 1024 * 1024
-_OUTPUT_LINES = 20_000
+class ExecCommand(BaseModel):
+    command: str = Field(..., min_length=1, description="Shell 命令；探索优先 rg/sed，并主动限制输出")
+    workdir: str | None = Field(None, description="工作目录，默认当前工作区")
+    yield_time_ms: int = Field(1000, ge=0, le=30000)
+    timeout_ms: int = Field(300000, ge=1, le=600000)
+    max_output_tokens: int | None = Field(None, ge=128, le=16000, description="近似输出预算，省略时使用统一配置（默认 10000）")
 
 
-class Shell(BaseModel):
-    command: str = Field(..., description="要执行的 shell 命令")
-    timeout: int = Field(default=300, ge=1, le=600, description="超时时间（秒）")
+@tool(model=ExecCommand, description="执行命令；短暂等待后返回退出状态或 session_id。计划模式仅允许经参数校验的只读命令与安全管道。", policy=ToolPolicy(AccessKind.REVIEW, DataFlow.DYNAMIC, (PathArgument('workdir', PathRole.READ),), detail_template='{command}'))
+async def exec_command(command, workdir, yield_time_ms, timeout_ms, max_output_tokens, deps, agent, authorization):
+    resolver = deps.permission_mgr.path_resolver
+    for grant in authorization.path_grants:
+        resolver.revalidate(grant, grant.path)
+    cwd = resolver.resolve(workdir)
+    if not cwd.is_dir():
+        return ToolResult.failure('invalid_workdir', f'工作目录不存在：{cwd}')
+    environment = deps.data_guard.safe_environment(clean_env(getattr(deps.config_mgr, 'environment', None)))
+    return await deps.process_mgr.start((deps.session_id, str(agent.uuid)), command, cwd, environment, authorization.command_plan, timeout_ms, yield_time_ms)
 
 
-@dataclass
-class _OutputBudget:
-    remaining_bytes: int = _OUTPUT_BYTES
-    remaining_lines: int = _OUTPUT_LINES
-    chunks: dict[str, list[bytes]] = field(
-        default_factory=lambda: {"stdout": [], "stderr": []}
-    )
-    truncated: bool = False
-
-    def add(self, stream: str, chunk: bytes) -> None:
-        if not chunk or self.remaining_bytes <= 0 or self.remaining_lines <= 0:
-            self.truncated = self.truncated or bool(chunk)
-            return
-        accepted = chunk[:self.remaining_bytes]
-        newline_count = accepted.count(b"\n")
-        if newline_count > self.remaining_lines:
-            cutoff = 0
-            for _ in range(self.remaining_lines):
-                cutoff = accepted.index(b"\n", cutoff) + 1
-            accepted = accepted[:cutoff]
-            newline_count = self.remaining_lines
-            self.truncated = True
-        if len(accepted) < len(chunk):
-            self.truncated = True
-        self.chunks[stream].append(accepted)
-        self.remaining_bytes -= len(accepted)
-        self.remaining_lines -= newline_count
-
-    def render(self) -> str:
-        parts: list[str] = []
-        stdout = b"".join(self.chunks["stdout"])
-        stderr = b"".join(self.chunks["stderr"])
-        if stdout:
-            parts.append(stdout.decode(errors="replace"))
-        if stderr:
-            parts.append("[stderr]\n" + stderr.decode(errors="replace"))
-        result = "\n".join(parts)
-        if self.truncated:
-            result += "\n[输出已截断]"
-        return result
+class WriteStdin(BaseModel):
+    session_id: str
+    chars: str = ''
+    yield_time_ms: int = Field(1000, ge=0, le=30000)
+    max_output_tokens: int | None = Field(None, ge=128, le=16000, description="近似输出预算，省略时使用统一配置（默认 10000）")
+    terminate: bool = False
 
 
-async def _drain_stream(
-    stream: asyncio.StreamReader | None,
-    name: str,
-    budget: _OutputBudget,
-) -> None:
-    if stream is None:
-        return
-    while chunk := await stream.read(64 * 1024):
-        budget.add(name, chunk)
-
-
-async def _terminate_process_group(proc: asyncio.subprocess.Process) -> None:
-    try:
-        if os.name == "posix":
-            os.killpg(proc.pid, signal.SIGTERM)
-        elif proc.returncode is None:
-            proc.terminate()
-    except ProcessLookupError:
-        pass
-    if proc.returncode is None:
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=0.5)
-        except asyncio.TimeoutError:
-            pass
-    else:
-        await asyncio.sleep(0.1)
-    try:
-        if os.name == "posix":
-            os.killpg(proc.pid, signal.SIGKILL)
-        elif proc.returncode is None:
-            proc.kill()
-    except ProcessLookupError:
-        pass
-    if proc.returncode is None:
-        await proc.wait()
-
-
-@tool(
-    model=Shell,
-    description="执行 shell 命令并返回输出",
-    policy=ToolPolicy(
-        AccessKind.REVIEW,
-        DataFlow.DYNAMIC,
-        detail_template="{command}",
-    ),
-)
-async def shell(command: str, timeout: int, deps=None) -> str:
-    """并发读取输出；超时或取消时终止并回收整个进程组。"""
-    cwd = str(deps.workdir) if deps and deps.workdir else None
-    data_guard = getattr(deps, "data_guard", None) if deps is not None else None
-    config_mgr = getattr(deps, "config_mgr", None) if deps is not None else None
-    base_environment = clean_env(getattr(config_mgr, "environment", None))
-    env = (
-        data_guard.safe_environment(base_environment)
-        if data_guard is not None
-        else {str(key): str(value) for key, value in base_environment.items()}
-    )
-    proc = await asyncio.create_subprocess_shell(
-        command,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        cwd=cwd,
-        env=env,
-        start_new_session=True,
-    )
-    budget = _OutputBudget()
-    readers = [
-        asyncio.create_task(_drain_stream(proc.stdout, "stdout", budget)),
-        asyncio.create_task(_drain_stream(proc.stderr, "stderr", budget)),
-    ]
-    try:
-        await asyncio.wait_for(
-            asyncio.gather(proc.wait(), *readers),
-            timeout=timeout,
-        )
-    except asyncio.TimeoutError:
-        await _terminate_process_group(proc)
-        await asyncio.gather(*readers, return_exceptions=True)
-        return f"命令超时（{timeout}秒）"
-    except asyncio.CancelledError:
-        await _terminate_process_group(proc)
-        await asyncio.gather(*readers, return_exceptions=True)
-        raise
-
-    output = budget.render()
-    if not output:
-        return f"（无输出，退出码：{proc.returncode}）"
-    if proc.returncode:
-        output += f"\n[退出码: {proc.returncode}]"
-    return output
+@tool(model=WriteStdin, description="获取进程增量输出、发送 stdin 或终止；不重放已消费输出。", policy=ToolPolicy(AccessKind.INTERNAL, DataFlow.LOCAL, plan_safe=True))
+async def write_stdin(session_id, chars, yield_time_ms, max_output_tokens, terminate, deps, agent):
+    if agent.plan_active and chars:
+        return ToolResult.failure('permission_denied', '计划模式不发送 stdin')
+    return await deps.process_mgr.poll((deps.session_id, str(agent.uuid)), session_id, chars, yield_time_ms, terminate)

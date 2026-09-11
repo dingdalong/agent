@@ -1,7 +1,7 @@
 ---
 agent_type: shell
 description: 在独立上下文中运行限定的 Shell 命令，隔离大量输出，汇总关键日志、退出码和环境诊断结果。
-tools: shell
+tools: exec_command, write_stdin
 model: fast
 memory: project
 ---

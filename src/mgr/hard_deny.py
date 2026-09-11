@@ -149,7 +149,7 @@ class HardDenyDetector:
                 return "禁止修改项目全局信任库"
         if policy.data_flow is DataFlow.EXTERNAL and self.data_guard.contains_secret(arguments):
             return "外部工具参数包含敏感数据"
-        if tool_name != "shell":
+        if tool_name != "exec_command":
             return None
         command = arguments.get("command")
         if not isinstance(command, str):

@@ -182,7 +182,7 @@ def test_tools_mgr_passes_current_model_and_omits_web_result_preview(tmp_path: P
         "web_search", {"query": "public docs"}, deps=deps, agent=agent
     ))
     completed = next(event for event in bus.events if isinstance(event, ToolCallCompleted))
-    assert "private web content" in result
+    assert "private web content" in result.text
     # 隐私预检通过直接放行，不调用 LLM 审查
     assert reviewer.calls == []
     assert completed.result_preview.startswith("status=success, length=")

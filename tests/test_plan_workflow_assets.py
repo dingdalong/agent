@@ -55,11 +55,11 @@ def test_coding_role_plan_workflow_skill_still_loads(tmp_path: Path) -> None:
 
     assert mgr.check_skill("builtin:plan-workflow")
     text = mgr.load_full_text("builtin:plan-workflow")
-    assert "Plan 模式 vs task_* 工具" in text
+    assert "不使用 task_* 进度工具" in text
     assert "enter_plan_mode" not in text
     assert "最多 3 个" not in text
     assert "llm.concurrency" not in text
-    assert "方向重叠就合并" in text
+    assert "独立读取同轮发出" in text
 
 
 def test_coding_execute_plan_skill_loads(tmp_path: Path) -> None:

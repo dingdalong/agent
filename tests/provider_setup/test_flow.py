@@ -698,7 +698,7 @@ def test_maybe_run_success_persists_cloud_and_reload_visible(tmp_path, monkeypat
         "timeout": 3.0,
         "user_agent": builtin["llm"]["user_agent"],
     }
-    assert set(captured["models"].models) == set(builtin["llm_provider"]["deepseek"]["models"]) | {"deepseek-v4-flash", "deepseek-v4-pro"}
+    assert set(captured["models"].models) == set(builtin["llm_provider"]["deepseek"].get("models", {})) | {"deepseek-v4-flash", "deepseek-v4-pro"}
     assert [option.name for option in captured["options"]] == _builtin_provider_names()
     assert dotenv_values(tmp_path / "global" / ".env") == {
         "DEEPSEEK_API_URL": "https://api.deepseek.test/v1",

@@ -445,7 +445,6 @@ def test_paginated_compact_summary_failure_reaches_turn_boundary(tmp_path: Path)
         context_limit = 5000
 
         def __init__(self) -> None:
-            self.split_calls = 0
             self.chat_calls = 0
 
         def estimate_tokens(
@@ -467,17 +466,6 @@ def test_paginated_compact_summary_failure_reaches_turn_boundary(tmp_path: Path)
             del prompt, tools
             return sum(len(str(message.get("content", ""))) for message in messages)
 
-        def split_page(self, text: str) -> list[str]:
-            """把序列化原子块无损拆成固定小页。
-
-            Args:
-                text: 完整序列化原子块。
-
-            Returns:
-                可重新拼接为原文的分页。
-            """
-            self.split_calls += 1
-            return [text[index:index + 2500] for index in range(0, len(text), 2500)]
 
         async def chat(self, **kwargs: object) -> LLMResponse:
             """记录摘要调用并抛出终态错误。
@@ -516,7 +504,6 @@ def test_paginated_compact_summary_failure_reaches_turn_boundary(tmp_path: Path)
     agent._handlers[AgentState.COMPACT] = summarize_handler
     result = asyncio.run(agent._run_single_turn(RunContext(messages=[]), AgentState.COMPACT))
 
-    assert paged_llm.split_calls == 1
     assert paged_llm.chat_calls == 1
     assert result.llm_error is error.info
 

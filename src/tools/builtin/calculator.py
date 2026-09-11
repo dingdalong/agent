@@ -5,6 +5,7 @@ import statistics
 from typing import Callable
 
 from src.tools.policy import AccessKind, DataFlow, ToolPolicy
+from src.tools.display import ToolResult
 from src.tools.decorator import tool
 from pydantic import BaseModel, Field
 
@@ -177,4 +178,4 @@ def calculator(expression: str) -> str:
         result = safe_calc(expression)
         return f"计算结果: {result}"
     except Exception as e:
-        return f"计算错误：{str(e)}"
+        return ToolResult.failure("execution_error", f"计算错误：{str(e)}")

@@ -5,6 +5,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from src.tools.policy import AccessKind, DataFlow, ToolPolicy
+from src.tools.display import ToolResult
 from src.tools.decorator import tool
 
 
@@ -22,5 +23,5 @@ async def web_search(query: str, max_results: int, deps: Any, agent: Any) -> str
     web_access_mgr = getattr(deps, "web_access_mgr", None)
     provider = getattr(agent, "llm", None)
     if web_access_mgr is None or provider is None:
-        return "错误：Web 访问服务不可用"
+        return ToolResult.failure("unavailable", '错误：Web 访问服务不可用')
     return await web_access_mgr.search(query, max_results=max_results, provider=provider)

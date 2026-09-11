@@ -213,6 +213,8 @@ class AgentApp:
                             old_session_id,
                             old_state,
                         )
+                    if getattr(self.deps, "process_mgr", None):
+                        await self.deps.process_mgr.close()
                     self.deps.session_id = str(uuid.uuid4())
                     self.deps.session_state = SessionState()
                     bind_state = getattr(self.output_router, "bind_session_state", None)
@@ -273,7 +275,10 @@ class AgentApp:
                     for attr in ("memory_mgr", "tools_mgr", "plan_mgr", "context_mgr", "ui"):
                         mgr = getattr(self.deps, attr, None)
                         if mgr is not None and hasattr(mgr, "reload"):
-                            mgr.reload()
+                            if attr == "tools_mgr":
+                                await asyncio.to_thread(mgr.reload)
+                            else:
+                                mgr.reload()
                     self.agent_view_store.reset()
                     self.deps.session_context.clear()
                     # 环境基线：同步 I/O（git 子进程 + 目录扫描），必须卸载到线程，
@@ -337,6 +342,10 @@ class AgentApp:
                         source_state,
                     )
 
+                if getattr(self.deps, "process_mgr", None):
+                    await self.deps.process_mgr.close()
+                if getattr(self.deps, "tools_mgr", None):
+                    await asyncio.to_thread(self.deps.tools_mgr.reload)
                 self.deps.session_id = result.session_id
                 self.deps.session_state = result.state
                 self.output_router.bind_session_state(result.state)
@@ -426,6 +435,8 @@ class AgentApp:
             None.
         """
         await self._cancel_and_wait_for_current_work()
+        if getattr(self.deps, "process_mgr", None):
+            await self.deps.process_mgr.close()
         self.deps.ui.cancel_active_input()
         await self.deps.event_bus.request_output("\n已中断当前任务。\n")
         await self.deps.event_bus.join()
@@ -442,6 +453,11 @@ class AgentApp:
         Returns:
             None.
         """
+        if getattr(self.deps, "process_mgr", None):
+            await self.deps.process_mgr.close()
+        tools_mgr = getattr(self.deps, "tools_mgr", None)
+        if tools_mgr is not None:
+            await asyncio.to_thread(tools_mgr.reload)
         session_mgr = getattr(self.deps, "session_mgr", None)
         session_state = getattr(self.deps, "session_state", None)
         session_id = getattr(self.deps, "session_id", "")

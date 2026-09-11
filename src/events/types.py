@@ -92,8 +92,12 @@ class ToolCallCompleted(Event):
     """工具调用完成 — 默认可见。"""
     tool_name: str = ""
     tool_call_id: str = ""
-    status: Literal["success", "error"] = "success"
+    status: Literal["success", "error", "running", "cancelled"] = "success"
     duration_seconds: float = 0.0
+    original_bytes: int = 0
+    returned_bytes: int = 0
+    returned_tokens_estimate: int = 0
+    truncated: bool = False
     result_preview: str = ""            # 保留，向后兼容
     display: object | None = None       # ToolDisplay，仅 UI 消费
     level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
@@ -131,6 +135,7 @@ class LLMCallCompleted(Event):
     # 统一约定：提交给模型的全部输入 token（含缓存读取与写入）。各 provider 在 _extract_token_usage 中归一化到此口径。
     input_tokens: int | None = None
     output_tokens: int | None = None
+    reasoning_output_tokens: int | None = None
     total_tokens: int | None = None
     cache_read_input_tokens: int | None = None
     cache_creation_input_tokens: int | None = None

@@ -45,6 +45,7 @@ class TokenUsage:
     input_tokens: int = 0
     output_tokens: int = 0
     cache_read_tokens: int = 0
+    reasoning_output_tokens: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -394,6 +395,7 @@ class AgentViewStore:
                 "input_tokens": snapshot.usage.input_tokens,
                 "output_tokens": snapshot.usage.output_tokens,
                 "cache_read_tokens": snapshot.usage.cache_read_tokens,
+                "reasoning_output_tokens": snapshot.usage.reasoning_output_tokens,
             },
             "context": {
                 "used_tokens": snapshot.context.used_tokens,
@@ -437,6 +439,7 @@ class AgentViewStore:
                 if isinstance(usage, dict) else 0,
                 output_tokens=_nonnegative_int(usage.get("output_tokens", 0))
                 if isinstance(usage, dict) else 0,
+                reasoning_output_tokens=_nonnegative_int(usage.get("reasoning_output_tokens", 0)),
                 cache_read_tokens=_nonnegative_int(usage.get("cache_read_tokens", 0))
                 if isinstance(usage, dict) else 0,
             )
@@ -549,11 +552,12 @@ class AgentViewStore:
             max(0, event.input_tokens or 0),
             max(0, event.output_tokens or 0),
             max(0, event.cache_read_input_tokens or 0),
+            max(0, event.reasoning_output_tokens or 0),
         )
         self._session_usage = self._add_usage(self._session_usage, delta)
         logger.info(
             "LLM token核账 call_id=%s model=%s caller_type=%s caller_uuid=%s "
-            "raw_input_tokens=%s raw_output_tokens=%s raw_total_tokens=%s "
+            "raw_input_tokens=%s raw_output_tokens=%s raw_total_tokens=%s raw_reasoning_output_tokens=%s "
             "raw_cache_read_input_tokens=%s raw_cache_creation_input_tokens=%s "
             "delta_input_tokens=%d delta_output_tokens=%d delta_total_tokens=%d "
             "delta_cache_read_input_tokens=%d session_input_tokens=%d "
@@ -566,6 +570,7 @@ class AgentViewStore:
             event.input_tokens,
             event.output_tokens,
             event.total_tokens,
+            event.reasoning_output_tokens,
             event.cache_read_input_tokens,
             event.cache_creation_input_tokens,
             delta.input_tokens,
@@ -830,7 +835,7 @@ class AgentViewStore:
             return
         display = event.display
         if display is not None and hasattr(display, "title") and hasattr(display, "content"):
-            ok = event.status == "success"
+            ok = event.status in {"success", "running"}
             mark = "✔" if ok else "✘"
             line = f"  {mark} {display.title}  ({event.duration_seconds:.2f}s)\n"
             content = (display.content or "").strip()
@@ -841,7 +846,7 @@ class AgentViewStore:
             self._append_transcript_segment(state, "tool", line)
         else:
             preview_lines = (event.result_preview or "").strip().splitlines()
-            fallback = "完成" if event.status == "success" else "失败"
+            fallback = {"success": "完成", "running": "进程运行中", "cancelled": "已取消", "error": "失败"}[event.status]
             first = preview_lines[0] if preview_lines else fallback
             self._append_transcript_segment(
                 state,
@@ -906,4 +911,5 @@ class AgentViewStore:
             input_tokens=left.input_tokens + right.input_tokens,
             output_tokens=left.output_tokens + right.output_tokens,
             cache_read_tokens=left.cache_read_tokens + right.cache_read_tokens,
+            reasoning_output_tokens=left.reasoning_output_tokens + right.reasoning_output_tokens,
         )

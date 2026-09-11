@@ -1,7 +1,7 @@
 ---
 agent_type: explore
 description: 对明确的文件、资料或网络问题进行只读调查，汇总来源、事实与不确定点，隔离大量中间搜索结果。
-tools: list_directory, glob, grep, get_file_info, read_file, web_search, web_fetch
+tools: exec_command, write_stdin, read_file, web_search, web_fetch
 model: default
 memory: project
 ---
