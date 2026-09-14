@@ -19,9 +19,11 @@ SessionState.records
     ├─ context_ids → Agent.history / LLM 输入
     ├─ view         → TUI 历史
     └─ recallable raw_input → 输入回溯
+SessionState.llm_calls
+    └─ call_id + attempt → provider usage / 结果 / 阶段
 ```
 
-用户记录同时保存原始输入和注入 hook/reminder 后的模型消息；assistant 以 LLM `call_id` 合并流与最终消息，工具以 `tool_call_id` 合并展示和 tool message。compact 只替换 `context_ids`，不会删除已有可见记录。子 Agent 仍使用独立的纯内存 history。
+用户记录同时保存原始输入和注入 hook/reminder 后的模型消息；assistant 以 LLM `call_id` 合并流与最终消息，工具以 `tool_call_id` 合并展示和 tool message。每次实际 provider attempt 的开始与完成事件归并进 `llm_calls`，前台和后台 agent 使用同一核账路径；失败或取消且 provider 未给 usage 时保留 unknown 记录。compact 只替换 `context_ids`，不会删除已有可见记录。子 Agent 仍使用独立的纯内存 history。
 
 ## 2. 状态枚举与流转
 
@@ -183,7 +185,7 @@ handler 映射在 `Agent.__post_init__` 建立（`src/agent/agent.py:236-250`）
 
 `Agent.from_manifest()` 映射 manifest 的身份、提示词、工具、记忆、模型、初始 Plan、思考与 feature。主 Agent 未声明 memory 时默认 `project`，子 Agent 默认不加载；`**overrides` 供委派时注入父 Agent 当前 Plan 等已解析设置。
 
-`Agent.__post_init__()` 解析模型和 feature、过滤工具，创建带调用方身份的 `CompactMgr`，再按 feature 创建 `FileMgr`、`SkillMgr`、`SubAgentMgr`、`TaskManager`，并构造 `PromptMgr`、`ReminderMgr` 与 handler 表。
+`Agent.__post_init__()` 解析模型和 feature、过滤工具，创建带调用方身份的 `CompactMgr`，再按 feature 创建 `SkillMgr`、`SubAgentMgr`、`TaskManager`，并构造 `PromptMgr`、`ReminderMgr` 与 handler 表。
 
 `Agent.run()` 有两种模式（`agent.py:342-379`）：
 
@@ -200,4 +202,4 @@ handler 映射在 `Agent.__post_init__` 建立（`src/agent/agent.py:236-250`）
 
 Agent.plan_active 是模式权威，PlanMgr 管理切换和计划持久化。PromptMgr 在当前系统提示段提供规划正文，正文由已加载的 plan-workflow 技能提供；子 agent 只收到委派边界。模式切换刷新工具 schema 与提示缓存，规划指令不经 ReminderMgr 追加到用户历史。压缩或恢复后从当前模式重新组装，不依赖旧提醒仍在上下文。
 
-规划先定位入口，发现影响目标的歧义时澄清，再补齐关键行为、状态所有者、接口变化、失败路径及验收场景。计划允许沙箱内受限验证；关键决策完整即可 submit_plan，不预先实现普通测试夹具或逐文件代码。
+规划严格按三阶段收敛：先核实环境事实，再只确认无法从环境推导且会改变方案的用户意图，最后补齐接口、数据流、失败路径和验收。首次独立读取同轮并行；已核实的路径、符号和区段不重复访问。计划允许沙箱内受限验证；关键决策完整后立即 `submit_plan`，不做习惯性的最后复查。

@@ -508,7 +508,7 @@ def test_events_package_exports_terminal_failure_without_legacy_error_type() -> 
 
 
 def test_provider_emits_attempt_boundaries_retry_and_one_terminal_failure() -> None:
-    """每次尝试先发 start，重试只发 retry，耗尽只发一次安全 failure。"""
+    """每次尝试均闭合核账事件，耗尽只发一次安全 failure。"""
     bus = RecordingEventBus()
     error_one = LLMStreamResponseError(
         "服务暂时不可用",
@@ -549,6 +549,12 @@ def test_provider_emits_attempt_boundaries_retry_and_one_terminal_failure() -> N
     ]
     starts = [event for event in boundaries if isinstance(event, LLMCallStarted)]
     assert [(event.attempt, event.max_attempts) for event in starts] == [(1, 2), (2, 2)]
+    completions = [event for event in bus.events if isinstance(event, LLMCallCompleted)]
+    assert [(event.attempt, event.outcome) for event in completions] == [
+        (1, "service"),
+        (2, "service"),
+    ]
+    assert all(event.input_tokens is None and event.output_tokens is None for event in completions)
 
     retry = next(event for event in boundaries if isinstance(event, LLMRetrying))
     assert retry.error_kind == "service"
@@ -614,7 +620,7 @@ def test_provider_marks_length_response_partial_after_thinking_only_delta() -> N
     [asyncio.CancelledError("cancel"), KeyboardInterrupt("interrupt"), SystemExit("exit")],
 )
 def test_provider_control_flow_never_emits_terminal_failure(control_error: BaseException) -> None:
-    """取消、中断和退出保持控制流语义，不产生 retry 或 failure。"""
+    """取消、中断和退出保持控制流语义，仅闭合 attempt 核账。"""
     bus = RecordingEventBus()
     provider = ScriptedProvider(bus, [control_error], max_attempts=2)
 
@@ -623,6 +629,9 @@ def test_provider_control_flow_never_emits_terminal_failure(control_error: BaseE
 
     assert len([event for event in bus.events if isinstance(event, LLMCallStarted)]) == 1
     assert not any(isinstance(event, (LLMRetrying, LLMCallFailed)) for event in bus.events)
+    completions = [event for event in bus.events if isinstance(event, LLMCallCompleted)]
+    assert len(completions) == 1
+    assert completions[0].outcome == "cancelled"
 
 
 def test_safe_telemetry_boundary_logs_only_event_and_exception_types(

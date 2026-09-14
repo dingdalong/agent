@@ -158,8 +158,8 @@ class PromptMgr:
         sections.append(
             "# 工具选择与恢复\n"
             "仅调用当前 schema 提供的工具，字段按 schema 填写。文件发现用 exec_command(cmd=...) 的 rg --files，"
-            "内容搜索用 rg -n，字面量用 rg -F；已知文本文件读取用 read_file，文本修改用 apply_patch。"
-            "未知文件路径先用 rg --files 定位，不猜测文件名；已知路径直接读取，不重复检查存在性或大小。后续按 next_read 或具体缺失范围读取。长命令只用 write_stdin 操作已有 session_id，"
+            "内容搜索用 rg -n，字面量用 rg -F；已知文本区段用 sed -n、rg 或 git show 读取，文本修改用 apply_patch。"
+            "未知文件路径先用 rg --files 定位，不猜测文件名；已知路径直接读取，不重复检查存在性或大小。截断后只查询具体缺失范围。长命令只用 write_stdin 操作已有 session_id，"
             "不要重跑原命令获取后续输出。独立调用同轮发出；已在上下文中的有效证据直接复用。\n"
             "ask_user 只澄清改变目标或关键取舍的问题；submit_plan 提交待审核方案；task_* 管理执行进度；"
             "note_context 记录当前协作事实；记忆工具保存跨会话信息；compact 压缩已有上下文，互不替代。\n"

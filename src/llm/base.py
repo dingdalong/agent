@@ -80,6 +80,8 @@ class LLMCallContext:
     call_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     caller_agent_type: str | None = None
     caller_uuid: str | None = None
+    reasoning_effort: str | None = None
+    phase: str = "execute"
     response_displayed: bool = False
     thinking_displayed: bool = False
     tool_fragment_state: str = "none"
@@ -483,11 +485,9 @@ class LLMProvider(ABC):
                 try:
                     return await operation()
                 except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
-                    self._record_attempt(call, started_at, {}, "cancelled")
                     raise
                 except Exception as exc:
                     info = classify_llm_error(exc)
-                    self._record_attempt(call, started_at, {}, info.kind)
                     diagnostic_id = f"llm_{uuid.uuid4().hex[:12]}"
                     self._log_llm_failure(
                         info=info,
@@ -826,6 +826,7 @@ class LLMProvider(ABC):
         reasoning_effort_override: str | None = None,
         ephemeral_instruction: str | None = None,
         max_attempts_cap: int | None = None,
+        phase: str = "execute",
     ) -> LLMResponse:
         """执行带统一分类、退避和尝试级隔离的 LLM 调用。
 
@@ -844,6 +845,7 @@ class LLMProvider(ABC):
                 仅作用于本次调用，不写回调用方 messages。
             max_attempts_cap: 本次调用的最大尝试次数上限；None 时使用 provider
                 配置。有效次数取该值与 provider 配置的较小值，不修改共享实例。
+            phase: 调用所属阶段，取 execute 或 plan，仅用于核账。
 
         Returns:
             最终成功尝试产生的 LLM 响应。
@@ -880,6 +882,8 @@ class LLMProvider(ABC):
                     attempt=attempt,
                     caller_agent_type=caller_agent_type,
                     caller_uuid=caller_uuid,
+                    reasoning_effort=reasoning_effort_override or self.reasoning_effort,
+                    phase=phase,
                 )
                 started_at = None
                 try:
@@ -926,11 +930,21 @@ class LLMProvider(ABC):
                     )
                     return response
                 except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
-                    self._record_attempt(call, started_at, {}, "cancelled")
+                    await self._emit_llm_call_completed(
+                        started_at=started_at,
+                        usage={},
+                        call=call,
+                        outcome="cancelled",
+                    )
                     raise
                 except Exception as exc:
                     info = classify_llm_error(exc)
-                    self._record_attempt(call, started_at, {}, info.kind)
+                    await self._emit_llm_call_completed(
+                        started_at=started_at,
+                        usage={},
+                        call=call,
+                        outcome=info.kind.value,
+                    )
                     diagnostic_id = f"llm_{uuid.uuid4().hex[:12]}"
                     self._log_llm_failure(
                         info=info,
@@ -1183,6 +1197,8 @@ class LLMProvider(ABC):
             tool_count=len(tools or []),
             attempt=call.attempt,
             max_attempts=max_attempts,
+            reasoning_effort=call.reasoning_effort,
+            phase=call.phase if call.phase in {"plan", "execute"} else "execute",
             caller_agent_type=call.caller_agent_type,
             caller_uuid=call.caller_uuid,
         ))
@@ -1190,10 +1206,13 @@ class LLMProvider(ABC):
 
     def _record_attempt(self, call, started_at, usage, outcome):
         """只记录计费与时序，不记录请求正文、工具参数或凭据。"""
+        outcome = getattr(outcome, "value", outcome)
         logger.info("llm_usage_record %s", json.dumps({
             "call_id": call.call_id if call else "", "attempt": call.attempt if call else 1,
             "model": self.model, "caller_uuid": call.caller_uuid if call else None,
             "caller_type": call.caller_agent_type if call else None,
+            "reasoning_effort": call.reasoning_effort if call else self.reasoning_effort,
+            "phase": call.phase if call and call.phase in {"plan", "execute"} else "execute",
             "started_at": started_at, "completed_at": time.time(), "outcome": outcome,
             "usage_known": usage.get("input_tokens") is not None and usage.get("output_tokens") is not None,
             "usage": usage,
@@ -1205,6 +1224,7 @@ class LLMProvider(ABC):
         ended_at: float | None = None,
         usage: dict[str, int | None] | None = None,
         call: LLMCallContext | None = None,
+        outcome: str = "completed",
     ) -> None:
         """发出 LLMCallCompleted 事件。
 
@@ -1212,7 +1232,8 @@ class LLMProvider(ABC):
             started_at: 调用起始时间戳。
             ended_at: 调用结束时间戳（None 时用当前时间）。
             usage: token 用量字典。
-            caller_uuid: 发起本次调用的 agent 实例 uuid，供路由器按 agent 累计 token。
+            call: 本次 provider attempt 的身份和调用方上下文。
+            outcome: completed 或稳定失败类别。
         """
         if started_at is None:
             return
@@ -1223,13 +1244,16 @@ class LLMProvider(ABC):
         output_tokens = usage.get("output_tokens")
         total_tokens = usage.get("total_tokens")
 
-        self._record_attempt(call, started_at, usage, "completed")
+        self._record_attempt(call, started_at, usage, outcome)
         await emit_telemetry_safely(self.event_bus, LLMCallCompleted(
             timestamp=completed_at,
             source=self.model,
             model=self.model,
             call_id=call.call_id if call is not None else "",
             attempt=call.attempt if call is not None else 1,
+            outcome=outcome,
+            reasoning_effort=call.reasoning_effort if call is not None else self.reasoning_effort,
+            phase=call.phase if call is not None and call.phase in {"plan", "execute"} else "execute",
             input_tokens=usage.get("input_tokens"),
             output_tokens=output_tokens,
             reasoning_output_tokens=usage.get("reasoning_output_tokens"),

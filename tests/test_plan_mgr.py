@@ -49,10 +49,10 @@ def test_current_mode_prompt_survives_rebuild_without_history_injection(tmp_path
     first = agent._prompt_mgr.build()[0]['content']
     second = agent._prompt_mgr.build()[0]['content']
     assert first == second
-    assert first.count('新增调查必须解决') == 1
+    assert first.count('每次新增工具调用必须解决') == 1
     assert agent._reminder_mgr.build_turn_start_instructions(True, False) == ''
     agent._prompt_mgr.invalidate_cache()
-    assert agent._prompt_mgr.build()[0]['content'].count('新增调查必须解决') == 1
+    assert agent._prompt_mgr.build()[0]['content'].count('每次新增工具调用必须解决') == 1
     agent.set_plan_active(False)
-    assert '新增调查必须解决' not in agent._prompt_mgr.build()[0]['content']
+    assert '每次新增工具调用必须解决' not in agent._prompt_mgr.build()[0]['content']
     assert agent.history == before

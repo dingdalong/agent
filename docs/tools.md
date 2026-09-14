@@ -6,19 +6,18 @@
 
 调用链：阶段与 agent 可用性校验 → 参数对象/未知字段校验 → PreToolUse → 重验参数 → PermissionManager.authorize → 工具执行 → DataGuard 脱敏 → PostToolUse → 脱敏与单次预算 → ToolCallCompleted → 历史消息。MCP 参数按上游 schema 校验。未知工具、非法 JSON、授权失败、执行错误均返回明确状态；调用方不能从正文前缀推断失败。
 
-`ToolResult` 的模型表示为 JSON 元数据行加正文，字段为 `status`（success/error/running/cancelled）、`error_code`、`exit_code`、`session_id`、`artifact_path`、`artifact_complete`、`artifact_error`、`file_range`、`next_read`、`truncated`、`error_details`、`recovery`。`display` 只供 UI 消费；`end_turn` 控制调度器结束回合。取消补齐未完成调用结果，并保留已完成的证据。执行错误不自动重试有副作用的工具。
+`exec_command` 与正常的 `write_stdin` 使用纯文本响应：`Chunk ID`、耗时、退出码或运行中 session、原始近似 token 数和命令原始输出。非零退出码仍是命令的真实完成结果。沙箱、启动、超时、取消等框架错误以及其他工具使用 JSON 元数据行加正文，模型无需从外部程序正文猜测框架状态。`display` 只供 UI 消费；`end_turn` 控制调度器结束回合。
 
 工具 schema 与执行使用同一 modes 定义。Plan 隐藏 apply_patch、全部 task_* 和 save_memory；执行模式隐藏 submit_plan。切换时刷新 schema 与提示词缓存，子 agent 继承阶段并叠加自身工具和 feature 限制。注册名称冲突直接报错。Pydantic schema 同时用于 JSON 参数验证，嵌套参数拒绝未声明字段，显式字典保留其键空间。
 
-工具分工：exec_command 做发现、搜索和命令执行，read_file 读取已知文本，apply_patch 修改文本，write_stdin 操作已有进程；web_search 发现网页，web_fetch 获取已知 URL；submit_plan 提交审核方案，task_* 管理执行进度，note_context 记录当前协作事实，记忆工具保存跨会话信息，compact 压缩上下文。通用计算通过执行阶段命令完成。
+工具分工：exec_command 通过真实 Shell 做文件发现、内容搜索、已知区段读取和命令执行，apply_patch 修改文本，write_stdin 操作已有进程；web_search 发现网页，web_fetch 获取已知 URL；submit_plan 提交审核方案，task_* 管理执行进度，note_context 记录当前协作事实，记忆工具保存跨会话信息，compact 压缩上下文。通用计算通过执行阶段命令完成。
 
 ## 工具接口
 
 | 工具 | 参数及契约 |
 |---|---|
-| `exec_command` | cmd、workdir、yield_time_ms、timeout_ms、max_output_tokens、stdin_open、additional_permissions、justification。等待上限 30 秒，执行超时上限 600 秒；尚未结束返回 session_id。 |
-| `write_stdin` | session_id、chars、yield_time_ms、max_output_tokens、terminate。消费增量输出；仅 stdin_open=true 的进程接收 stdin，权限保持创建时的范围，terminate 与非空 chars 互斥。session_id 仅在运行时返回，结束后再次轮询返回 unknown_session。 |
-| `read_file` | path、offset（1 起始）、column（行内字符位置，0 起始）、limit（可选源行数上限）、max_output_tokens。省略范围时从开头读到预算或 EOF；普通文本单文件上限 8 MiB。 |
+| `exec_command` | cmd、workdir、yield_time_ms、timeout_ms、max_output_tokens、stdin_open、additional_permissions、justification。默认等待 10 秒，上限 30 秒；执行超时上限 600 秒；尚未结束返回 session_id。 |
+| `write_stdin` | session_id、chars、yield_time_ms、max_output_tokens、terminate。空轮询默认等待 5 秒、上限 300 秒；消费增量输出；仅 stdin_open=true 的进程接收 stdin，权限保持创建时的范围，terminate 与非空 chars 互斥。session_id 仅在运行时返回，结束后再次轮询返回 unknown_session。 |
 | `apply_patch` | patch。Begin/End Patch 包裹 Add/Update/Delete File，可选 Move to 与 EOF 锚点；上下文必须唯一。先计算全部文本变更、复验授权，再原子替换每个文件。多文件 I/O 失败返回已完成清单，不声称全局事务回滚。 |
 | `submit_plan` | title、content。一次保存完整计划、展示和审核；auto 批准后续执行，manual/取消结束当前回合，修改意见返回模型。保存位置受 PlanMgr 控制。 |
 
@@ -58,17 +57,15 @@ sequenceDiagram
 
 独立读取同轮并行，修改/交互形成屏障。运行中的命令租约延续到进程结束；等待写入的存在会阻止后续新读租约，避免写入饥饿。进程轮询不获取租约，因此可继续消费正在阻塞文件操作的命令输出。
 
-## 输出、文件定位与临时日志
+## 输出预算与临时日志
 
-`tool.output_tokens` 默认 10000，`max_output_tokens` 上限 16000。按 Codex 的约 4 UTF-8 字节/token 口径计算，预算包含元数据和截断提示；不是实际计费 token。工具参数省略时使用配置，显式值须在 128 至配置上限之间。普通成功与错误使用同一预算。独立调用分别整理一次，事件与历史复用最终结果，不按轮均分、不在轮末再次截断。
+`tool.output_tokens` 默认 10000，`max_output_tokens` 上限 16000。按照约 4 UTF-8 字节/token 口径计算，预算包含元数据和截断提示；不是实际计费 token。工具参数省略时使用配置，显式值须在 128 至配置上限之间。普通成功与错误使用同一预算。独立调用分别整理一次，事件与历史复用最终结果，不按轮均分、不在轮末再次截断。
 
-文件结果保留连续源内容，优先在完整行边界结束。首行本身超过预算时用行内字符位置继续。`file_range.start/end` 使用 `{offset,column}`，end 为排他的下一源位置；`total_lines` 是源文件总行数，`eof` 表示到达源 EOF，`line_truncated` 表示最后一行只返回了部分内容。`next_read` 可直接传回 read_file；显式 limit 未到 EOF 时也返回下一位置。未修改文件的连续读取不漏字；文件变化后读取当前内容，不恢复历史快照。
+Shell 输出超预算时保留头尾并标记 `truncated`，响应头记录裁剪前的近似 token 数。模型需要更多内容时根据原命令语义使用 `sed -n`、`rg`、`head`、`tail` 或命令自身的过滤参数重新定向查询。技能、用户回答等控制内容必须完整返回，超过单次上限时报错并保留结束回合语义。
 
-文件脱敏在范围选择前执行，跨行秘密也会被遮盖。`DataGuard.redact_source` 使用等长星号并保留换行，确保源游标不漂移。Hook 附加说明存入独立 annotations 段，最多占文件调用预算四分之一；超长时明确截断，不挤坏源文件范围。文件本身可再次读取，因此不保存日志副本。技能、用户回答等控制内容必须完整返回，超过单次上限时报错并保留结束回合语义。
+普通工具结果超预算时保留头尾；`ToolOutput` 将脱敏、PostToolUse 后的正文先保存为有界临时日志，再整理模型输出，并通过 `artifact_path` 暴露该日志。Shell 输出不创建 artifact，模型应使用原命令的过滤参数定向重查。单文件 `artifact_max_bytes` 默认 1 MiB、上限 8 MiB；单应用会话总量 `artifact_total_bytes` 默认 32 MiB，不小于单文件上限。超出总量按创建顺序回收。日志保存失败不改变原始工具状态，也不重跑工具。
 
-其他普通工具结果超预算时保留头尾；`ToolOutput` 将脱敏、PostToolUse 后的正文先保存为不可变临时日志，再整理模型输出。单文件 `artifact_max_bytes` 默认 1 MiB、上限 8 MiB；单应用会话总量 `artifact_total_bytes` 默认 32 MiB，不小于单文件上限。超出单文件上限保留头尾并标注缺失；超出总量按创建顺序回收。进程缓冲此前有丢失或日志超过上限时 `artifact_complete=false`。日志保存失败只增加 artifact_error，不改变原始命令状态，不重跑命令。
-
-日志路径为应用拥有的临时目录下的会话/agent 子目录，目录 0700、文件 0600，原子写入。日志按每次返回保存：write_stdin 的日志只包含本次增量，不重放旧输出。模型用 `read_file` 或只读 `rg` 搜索 artifact_path；被回收的文件按读取失败处理。普通中断或命令结束仍保留日志，clear/resume/关闭回收，历史会话恢复不恢复临时文件。落盘与清理共用线程锁；取消必须等待正在进行的落盘结束，避免清理后文件重现。
+日志路径为应用拥有的临时目录下的会话/agent 子目录，目录 0700、文件 0600，原子写入。普通中断仍保留已生成的普通工具日志，clear/resume/关闭回收，历史会话恢复不恢复临时文件。落盘与清理共用线程锁；取消必须等待正在进行的落盘结束，避免清理后文件重现。
 
 ```mermaid
 sequenceDiagram
@@ -79,19 +76,19 @@ sequenceDiagram
     A->>T: 调用工具
     T->>T: 授权、执行、脱敏、Hook
     T->>O: 整理一次最终输出
-    opt 普通非文件结果超预算
+    opt 普通结果超预算
         O->>F: 有界脱敏正文原子落盘
         F-->>O: 路径或保存失败
     end
-    O-->>T: 状态、正文、定位信息
+    O-->>T: 状态与有界正文
     T-->>A: 完成事件与历史使用相同结果
-    opt 需要更多证据
-        A->>T: 定向读取源文件或临时日志
+    opt Shell 需要更多证据
+        A->>T: 用原命令的过滤参数定向重查
     end
     Note over O,F: 会话切换或关闭时清理，普通中断保留
 ```
 
-观测记录原始/返回字节、`returned_tokens_estimate`、模型输出截断状态与耗时。UI 的 display.truncated 与模型 truncated 分开，文件 eof/next_read 只说明源范围是否读完。实际费用分析使用 provider 的 input/output/cache/reasoning usage；reasoning 是 output 子集，不重复累加。`scripts/benchmark_tool_output.py` 用固定输出比较本次机制与指定 Git 快照的旧输出策略，不能替代真实任务的 API A/B。
+观测记录原始/返回字节、`returned_tokens_estimate`、模型输出截断状态与耗时。UI 的 display.truncated 与模型 truncated 分开。实际费用分析使用 state 内的 provider input/output/cache/reasoning usage；reasoning 是 output 子集，不重复累加。
 
 ## Web 与 MCP
 
@@ -113,8 +110,6 @@ MCP 工具通过 `_PassThroughArgs(extra="allow")` 接收上游 schema 所描述
 策略取 `INTERNAL + LOCAL + plan_safe=True`，与 `save_memory`、`task_create` 同构：**落盘由 `ContextMgr` 内部完成，不经 `apply_patch`**。这一点是刻意的——`.agent` 被 `PathResolver` 归为 protected，`.agent/context/**` 因此是 `PathClass.PROTECTED`，而 Plan 模式下 `_authorize_plan()` 拒绝通用文件写入，改用 `apply_patch` 落盘会让本工具在 Plan 模式下必然被拒。
 
 `task_delegator` 相应增加 `shared_context: "auto" | "none"` 字段：默认注入账本摘要，`"none"` 完全隔离供独立复核（如代码审查）使用。
-
-离线核账用 `python scripts/analyze_session_usage.py SESSION --log LOG`，多个轮转日志重复传 --log；Codex rollout JSONL 可直接作为 SESSION。按首次提交计划截止，计入计划生成 usage，排除提交后的审核等待。llm_usage_record 按唯一 attempt call_id 记录实际 usage 与 API 时间，缺失 usage 标未知；历史日志不能恢复的耗时提供覆盖数，不能当作零耗时。`--prices INPUT CACHE OUTPUT` 接受每百万 token 单价，输出已知用量费用与是否完整，不估算未知请求账单。
 
 Git 的重复 `-C` 按前一个目录解析相对路径，空目录参数保持当前目录，每一步均校验；目录变化不传播到后续命令，子命令和选项仍受白名单约束。未登记选项及 Shell 函数定义只返回框架策略限制，不判断外部程序用法是否正确。未知文件先用 `rg --files` 定位，已知文件直接读，不要求额外存在性检查。
 

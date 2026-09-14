@@ -429,8 +429,7 @@ class ToolsMgr:
         # 写路径解析好放在 authorization.grants 里，这里白拿即可。
         self._mark_context_stale(deps, authorization)
 
-        if result.file_content is None:
-            result.text = str(data_guard.redact(result.text))
+        result.text = str(data_guard.redact(result.text))
         safe_arguments = data_guard.redact(arguments)
         if hooks_mgr is not None:
             post_hook_result = await hooks_mgr.run_event(
@@ -475,8 +474,7 @@ class ToolsMgr:
             result = ToolResult.failure('tool_execution_error', str(exc))
         guard = getattr(deps, "data_guard", None)
         if guard:
-            if result.file_content is None:
-                result.text = str(guard.redact(result.text))
+            result.text = str(guard.redact(result.text))
             result.annotations = str(guard.redact(result.annotations))
             if result.error_details:
                 result.error_details = guard.redact(result.error_details)

@@ -96,7 +96,7 @@ MCP server 连接配置在独立的 `mcp_servers.json`（角色 `src/roles/<role
 
 **异步/阻塞契约（必须遵守）** — 整个框架跑在单线程 asyncio 事件循环上（UI 状态条按 100ms 重绘、事件分发、Agent 轮次共用同一循环）。事件循环只在 `await` 真异步原语时让出控制权；任何在事件循环上运行的 `async def` 一旦做*同步阻塞*工作（同步网络、文件 I/O、`socket.getaddrinfo`、CPU 密集循环）且不 `await`，就会冻结 UI 并停滞事件分发。因此每个工具 / Manager 方法只能是两类之一：
   - **真异步**：函数体只 `await` 真正的异步原语（如 `asyncio.create_subprocess_shell` + `await proc.communicate()`、`AsyncAnthropic`/`AsyncOpenAI`、事件总线等待）。保持 `async def`。正例：`exec_command`（`src/tools/builtin/shell.py`）、hooks（`src/mgr/hooks_mgr.py`）、LLM provider（`src/llm/`）。
-  - **阻塞型**：函数体做同步 I/O / CPU 工作。叶子工具直接声明为普通 `def`——装饰器（`decorator.py:94-97`）会用 `asyncio.to_thread` 自动卸载到线程；若方法必须保留 `async def`（被异步调用方 `await` 的 Manager 方法），则把阻塞段包进 `await asyncio.to_thread(...)`。范例：`web_search`/`web_fetch` 用同步库（`ddgs`/`urllib`），声明为 `def`；`FileMgr`（`src/mgr/file_mgr.py`）各方法为普通 `def`，其工具包装（`file.py`/`plan.py`）也是普通 `def`，由装饰器统一经 `to_thread` 卸载（装饰器是唯一的线程卸载点，无需层层手写 `to_thread`）。
+  - **阻塞型**：函数体做同步 I/O / CPU 工作。叶子工具直接声明为普通 `def`——装饰器（`decorator.py:94-97`）会用 `asyncio.to_thread` 自动卸载到线程；若方法必须保留 `async def`（被异步调用方 `await` 的 Manager 方法），则把阻塞段包进 `await asyncio.to_thread(...)`。范例：补丁与计划保存工具使用同步文件 I/O，声明为普通 `def`，由装饰器统一经 `to_thread` 卸载（装饰器是唯一的线程卸载点，无需层层手写 `to_thread`）。
   - **禁止**：`async def` 里直接跑同步阻塞工作而不 `await`。排查此类问题可用 `python main.py --debug`（启用 asyncio 调试，事件循环被占用超过 0.1s 即打印 `Executing ... took N seconds` 告警）。
 
 **子智能体** — 定义为 `*.md`（YAML frontmatter 声明 `agent_type`、`tools`、`model`、`memory`、`startInPlanMode`、`thinking`、`reasoning_effort`、`features` 等 + body 作提示词），由 `SubAgentMgr` 四层扫描加载。主 Agent 通过 `task_delegator` 调度子智能体；子智能体继承父 Agent 当前的 `plan_active`，并共享 `AgentDeps`。

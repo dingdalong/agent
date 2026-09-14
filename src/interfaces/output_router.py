@@ -15,6 +15,7 @@ from src.events.types import (
     CompactDelta,
     Event,
     InteractionCompleted,
+    LLMCallCompleted,
     LLMCallFailed,
     LLMCallStarted,
     LLMLengthRetrying,
@@ -68,6 +69,8 @@ class OutputRouter:
             None.
         """
         self.store.record(event)
+        if self.session_state is not None and isinstance(event, _LLM_ACCOUNTING_EVENTS):
+            self.session_state.record_llm_event(event)
 
         if (
             self.session_state is not None
@@ -142,3 +145,4 @@ _CONTROL_EVENTS = (
 )
 
 _LLM_BOUNDARY_EVENTS = (LLMCallStarted, LLMRetrying, LLMLengthRetrying, LLMCallFailed)
+_LLM_ACCOUNTING_EVENTS = (LLMCallStarted, LLMCallCompleted, LLMCallFailed)

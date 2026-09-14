@@ -121,6 +121,8 @@ class LLMCallStarted(Event):
     tool_count: int = 0
     attempt: int = 1
     max_attempts: int = 1
+    reasoning_effort: str | None = None
+    phase: Literal["plan", "execute"] = "execute"
     level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
     type: Literal["llm_call_started"] = field(default="llm_call_started", init=False)
 
@@ -134,6 +136,9 @@ class LLMCallCompleted(Event):
     model: str = ""
     call_id: str = ""
     attempt: int = 1
+    outcome: str = "completed"
+    reasoning_effort: str | None = None
+    phase: Literal["plan", "execute"] = "execute"
     # 统一约定：提交给模型的全部输入 token（含缓存读取与写入）。各 provider 在 _extract_token_usage 中归一化到此口径。
     input_tokens: int | None = None
     output_tokens: int | None = None
@@ -247,6 +252,8 @@ class InteractionCompleted(Event):
     request_type: str = ""
     summary: str = ""
     cancelled: bool = False
+    request: dict = field(default_factory=dict)
+    answer: str = ""
     level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
     type: Literal["interaction_completed"] = field(default="interaction_completed", init=False)
 

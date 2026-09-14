@@ -11,18 +11,13 @@ from src.mgr.path_resolver import PathResolver
 
 
 @pytest.mark.integration
-def test_readonly_pipeline_and_eof(runtime, tmp_path):
+def test_readonly_pipeline(runtime, tmp_path):
     (tmp_path / 'a file.txt').write_text('alpha\nbeta\n')
     deps, agent = runtime
     async def scenario():
         result = await deps.tools_mgr.execute('exec_command', {'cmd': "rg alpha 'a file.txt' | rg alpha", 'yield_time_ms': 1000}, deps=deps, agent=agent)
         assert result.status == 'success', str(result)
         assert result.text == 'alpha\n'
-        result = await deps.tools_mgr.execute('read_file', {'path': 'a file.txt', 'offset': 2, 'limit': 2000}, deps=deps, agent=agent)
-        assert result.status == 'success'
-        assert '2 | beta' in result.text and result.file_range['eof']
-        result = await deps.tools_mgr.execute('read_file', {'path': 'a file.txt', 'offset': 9000}, deps=deps, agent=agent)
-        assert result.text == '' and result.file_range['eof']
         await deps.process_mgr.close()
     asyncio.run(scenario())
 

@@ -8,6 +8,10 @@ from unittest.mock import patch
 
 from src.app.app import AgentApp
 from src.events.types import (
+    InteractionCompleted,
+    LLMCallCompleted,
+    LLMCallFailed,
+    LLMCallStarted,
     ResponseDelta,
     SubagentLifecycle,
     ThinkingDelta,
@@ -78,14 +82,69 @@ def test_router_merges_assistant_stream_by_call_id_then_binds_model_message() ->
     asyncio.run(scenario())
 
 
+def test_router_persists_llm_attempt_usage_for_foreground_and_background() -> None:
+    async def scenario() -> None:
+        state = SessionState()
+        store = AgentViewStore()
+        store.register_foreground("main-id", "main")
+        router = OutputRouter(_UI(), store, session_state=state)
+
+        for caller in ("main-id", "worker-id"):
+            await router.dispatch(LLMCallStarted(
+                timestamp=1.0, source="provider/model", model="model", call_id=f"call-{caller}",
+                attempt=1, reasoning_effort="max", phase="plan",
+                caller_agent_type="main" if caller == "main-id" else "worker", caller_uuid=caller,
+            ))
+            await router.dispatch(LLMCallCompleted(
+                timestamp=2.0, source="provider/model", model="model", call_id=f"call-{caller}",
+                attempt=1, outcome="completed", reasoning_effort="max", phase="plan",
+                input_tokens=100, output_tokens=20, reasoning_output_tokens=10,
+                cache_read_input_tokens=80,
+                caller_agent_type="main" if caller == "main-id" else "worker", caller_uuid=caller,
+            ))
+
+        assert len(state.llm_calls) == 2
+        assert {(item.caller_uuid, item.input_tokens) for item in state.llm_calls} == {
+            ("main-id", 100), ("worker-id", 100),
+        }
+        restored = SessionState.from_dict(state.to_dict())
+        assert restored is not None
+        assert restored.llm_calls == state.llm_calls
+
+    asyncio.run(scenario())
+
+
+def test_failed_attempt_and_interaction_answer_are_persisted() -> None:
+    state = SessionState()
+    state.record_llm_event(LLMCallStarted(
+        timestamp=1.0, source="provider/model", model="model", call_id="failed", attempt=2,
+        phase="execute", caller_agent_type="main", caller_uuid="main-id",
+    ))
+    state.record_llm_event(LLMCallFailed(
+        timestamp=2.0, source="provider/model", call_id="failed", attempts=2,
+        error_kind="timeout", caller_agent_type="main", caller_uuid="main-id",
+    ))
+    state.record_event(InteractionCompleted(
+        timestamp=3.0, source="ask_user", request_type="form_menu",
+        summary="作答已提交", cancelled=False,
+        request={"type": "form_menu", "questions": [{"header": "范围", "question": "选择范围"}]},
+        answer='{"scope":"minimal"}', caller_agent_type="main", caller_uuid="main-id",
+    ))
+
+    assert state.llm_calls[0].outcome == "timeout"
+    interaction = state.visible_records()[-1].view.data
+    assert interaction["request"]["questions"][0]["header"] == "范围"
+    assert interaction["answer"] == '{"scope":"minimal"}'
+
+
 def test_tool_events_and_model_result_merge_by_tool_call_id() -> None:
     state = SessionState()
     state.record_event(ToolCallStarted(
-        timestamp=1.0, source="tools", tool_name="read_file", tool_call_id="tool-1",
+        timestamp=1.0, source="tools", tool_name="exec_command", tool_call_id="tool-1",
         detail="a.py",
     ))
     state.record_event(ToolCallCompleted(
-        timestamp=2.0, source="tools", tool_name="read_file", tool_call_id="tool-1",
+        timestamp=2.0, source="tools", tool_name="exec_command", tool_call_id="tool-1",
         status="success", result_preview="ok", duration_seconds=0.2,
     ))
     message = {"role": "tool", "tool_call_id": "tool-1", "content": "ok"}

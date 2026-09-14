@@ -175,8 +175,8 @@ class SandboxBackend:
                        PYTHONPYCACHEPREFIX=str(scratch / 'pycache'), TMPPREFIX=str(scratch / 'zsh'), GIT_OPTIONAL_LOCKS='0',
                        GIT_PAGER='cat', PAGER='cat')
             # 只把随包 rg 放进专用 bin，不把整个冻结资源目录放进 PATH。
-            from src.mgr.file_mgr import _resolve_rg
-            rg = _resolve_rg()
+            from src.mgr.ripgrep import resolve_rg
+            rg = resolve_rg()
             if rg:
                 bin_dir = scratch / 'bin'
                 bin_dir.mkdir()

@@ -1,4 +1,7 @@
 """有界命令与进程会话工具。"""
+import time
+import uuid
+
 from pydantic import BaseModel, Field
 
 from src.mgr.frozen import clean_env
@@ -16,9 +19,9 @@ class ExecCommand(BaseModel):
     stdin_open: bool = Field(False, description="需要后续 write_stdin 发送输入时才设为 true；默认 stdin 关闭")
     additional_permissions: AdditionalPermissions | None = None
     justification: str | None = None
-    cmd: str = Field(..., min_length=1, description="Shell 命令；文件发现用 rg --files，内容搜索用 rg -n；普通读取用 read_file；独立命令同轮调用")
+    cmd: str = Field(..., min_length=1, description="Shell 命令；文件发现用 rg --files，搜索用 rg -n，读取已知区段用 sed -n；独立命令同轮调用")
     workdir: str | None = Field(None, description="工作目录，默认当前工作区")
-    yield_time_ms: int = Field(1000, ge=0, le=30000)
+    yield_time_ms: int = Field(10000, ge=250, le=30000, description="返回仍在运行的 session_id 前的等待时间；默认 10000 ms")
     timeout_ms: int = Field(300000, ge=1, le=600000)
     max_output_tokens: int | None = Field(None, ge=128, le=16000, description="近似输出预算，省略时使用统一配置（默认 10000）")
 
@@ -32,7 +35,13 @@ async def exec_command(cmd, workdir, yield_time_ms, timeout_ms, max_output_token
     if not cwd.is_dir():
         return ToolResult.failure('invalid_workdir', f'工作目录不存在：{cwd}')
     environment = deps.data_guard.safe_environment(clean_env(getattr(deps.config_mgr, 'environment', None)))
-    return await deps.process_mgr.start((deps.session_id, str(agent.uuid)), cmd, cwd, environment, authorization.execution_policy, timeout_ms, yield_time_ms, stdin_open)
+    started = time.monotonic()
+    result = await deps.process_mgr.start((deps.session_id, str(agent.uuid)), cmd, cwd, environment, authorization.execution_policy, timeout_ms, yield_time_ms, stdin_open)
+    if result.error_code is None:
+        result.output_kind = "exec"
+        result.chunk_id = uuid.uuid4().hex[:6]
+        result.wall_time_seconds = time.monotonic() - started
+    return result
 
 
 class WriteStdin(BaseModel):
@@ -42,11 +51,17 @@ class WriteStdin(BaseModel):
     }}}
     session_id: str
     chars: str = ''
-    yield_time_ms: int = Field(1000, ge=0, le=30000)
+    yield_time_ms: int = Field(5000, ge=250, le=300000, description="等待增量输出的时间；空轮询默认 5000 ms")
     max_output_tokens: int | None = Field(None, ge=128, le=16000, description="近似输出预算，省略时使用统一配置（默认 10000）")
     terminate: bool = False
 
 
 @tool(model=WriteStdin, description="获取进程增量输出、发送 stdin 或终止；不重放已消费输出。", policy=ToolPolicy(AccessKind.INTERNAL, DataFlow.LOCAL, plan_safe=True))
 async def write_stdin(session_id, chars, yield_time_ms, max_output_tokens, terminate, deps, agent):
-    return await deps.process_mgr.poll((deps.session_id, str(agent.uuid)), session_id, chars, yield_time_ms, terminate, plan_active=agent.plan_active)
+    started = time.monotonic()
+    result = await deps.process_mgr.poll((deps.session_id, str(agent.uuid)), session_id, chars, yield_time_ms, terminate, plan_active=agent.plan_active)
+    if result.error_code is None:
+        result.output_kind = "exec"
+        result.chunk_id = uuid.uuid4().hex[:6]
+        result.wall_time_seconds = time.monotonic() - started
+    return result

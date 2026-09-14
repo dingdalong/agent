@@ -32,9 +32,9 @@ def test_pipeline_output_and_exit_match_shell(runtime, tmp_path, cmd):
     (tmp_path / 'child').mkdir()
     (tmp_path / 'child' / 'b.txt').write_text('child\n')
     # 使用相同 shell 与 rg 比较输出和退出码。
-    from src.mgr.file_mgr import _resolve_rg
+    from src.mgr.ripgrep import resolve_rg
     import shlex
-    compare_cmd = cmd.replace('rg ', shlex.quote(_resolve_rg()) + ' ')
+    compare_cmd = cmd.replace('rg ', shlex.quote(resolve_rg()) + ' ')
     expected = subprocess.run([runtime[0].process_mgr.sandbox.shell, '-c', compare_cmd], cwd=tmp_path, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     deps, agent = runtime
     async def run():
@@ -51,7 +51,8 @@ def test_pipeline_output_and_exit_match_shell(runtime, tmp_path, cmd):
 def test_tool_schema_modes_and_removed_tools(runtime):
     deps, agent = runtime
     names = lambda active: {t['function']['name'] for t in deps.tools_mgr.get_schemas(plan_active=active)}
-    assert {'submit_plan', 'exec_command', 'read_file'} <= names(True)
+    assert {'submit_plan', 'exec_command'} <= names(True)
+    assert 'read_file' not in names(True) | names(False)
     assert not {'apply_patch', 'task_create', 'task_list', 'task_get', 'task_update', 'save_memory'} & names(True)
     assert 'submit_plan' not in names(False)
     assert not {'calculator', 'random', 'datetime', 'encode', 'text_stats'} & names(False)

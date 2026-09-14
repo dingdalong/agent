@@ -23,18 +23,8 @@ class ToolDisplay:
 
 
 @dataclass
-class FileContent:
-    """已按源位置脱敏的文件片段；仅在最终输出整理前保留。"""
-    path: str
-    lines: list[str]
-    total_lines: int
-    offset: int
-    column: int
-
-
-@dataclass
 class ToolResult:
-    """工具函数返回值包装 — 同时携带模型状态、续读位置和展示信息。"""
+    """工具函数返回值包装 — 同时携带模型状态和展示信息。"""
     text: str
     display: ToolDisplay | None = None
     status: Literal["success", "error", "running", "cancelled"] = "success"
@@ -46,15 +36,30 @@ class ToolResult:
     artifact_path: str | None = None
     artifact_complete: bool | None = None
     artifact_error: str | None = None
-    file_content: FileContent | None = None
-    file_range: dict | None = None
-    next_read: dict | None = None
     annotations: str = ""
     output_budget: int | None = None  # Hook 重验后的有效预算，不进入模型元数据
     truncated: bool = False
     end_turn: bool = False
+    output_kind: Literal["default", "exec"] = "default"
+    chunk_id: str | None = None
+    wall_time_seconds: float | None = None
+    original_token_count: int | None = None
 
     def __str__(self) -> str:
+        if self.output_kind == "exec":
+            sections = []
+            if self.chunk_id:
+                sections.append(f"Chunk ID: {self.chunk_id}")
+            sections.append(f"Wall time: {(self.wall_time_seconds or 0):.4f} seconds")
+            if self.exit_code is not None:
+                sections.append(f"Process exited with code {self.exit_code}")
+            if self.session_id is not None:
+                sections.append(f"Process running with session ID {self.session_id}")
+            if self.original_token_count is not None:
+                sections.append(f"Original token count: {self.original_token_count}")
+            sections.append("Output:")
+            sections.append(self.text)
+            return "\n".join(sections)
         metadata = {
             key: value for key, value in {
                 "status": self.status, "error_code": self.error_code,
@@ -62,7 +67,6 @@ class ToolResult:
                 "exit_code": self.exit_code, "session_id": self.session_id,
                 "artifact_path": self.artifact_path, "artifact_complete": self.artifact_complete,
                 "artifact_error": self.artifact_error,
-                "file_range": self.file_range, "next_read": self.next_read,
                 "truncated": self.truncated or None,
             }.items() if value is not None
         }
@@ -84,8 +88,6 @@ TOOL_TITLES: dict[str, str] = {
     "write_stdin": "进程输入输出",
     "apply_patch": "应用补丁",
     "submit_plan": "提交计划",
-    # 文件工具
-    "read_file": "读取文件",
     # 网络工具
     "web_fetch": "获取网页",
     "web_search": "搜索网页",
@@ -172,9 +174,6 @@ def format_params(tool_name: str, args: dict[str, Any],
     """
     if tool_name == "exec_command":
         return _shell_summary(args)
-
-    if tool_name == "read_file":
-        return args.get("path", "")
 
     if tool_name == "apply_patch":
         return _truncate_text(args.get("patch", ""), budget_lines, budget_bytes)

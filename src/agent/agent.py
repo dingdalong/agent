@@ -17,7 +17,7 @@ from src.agent.states import AgentState, RunContext, RunResult, parse_command
 from src.events import NoEventSubscribers, emit_telemetry_safely
 from src.llm.base import TruncationKind, classify_truncation
 from src.llm.errors import LLMCallError, LLMErrorInfo, LLMErrorKind
-from src.mgr import FileMgr, TaskManager, CompactMgr, CompactResult, PromptMgr, SkillMgr, SubAgentMgr, ReminderMgr
+from src.mgr import TaskManager, CompactMgr, CompactResult, PromptMgr, SkillMgr, SubAgentMgr, ReminderMgr
 
 if TYPE_CHECKING:
     from src.mgr.llm_mgr import LLMMgr
@@ -191,7 +191,6 @@ class Agent:
     _excluded_tools: set[str] = field(init=False, default_factory=set)
     _task_mgr: TaskManager | None = field(init=False, repr=False)
     _compact_mgr: CompactMgr = field(init=False, repr=False)
-    _file_mgr: FileMgr | None = field(init=False, repr=False)
     _skill_mgr: SkillMgr | None = field(init=False, repr=False)
     _subagent_mgr: SubAgentMgr | None = field(init=False, repr=False)
     _prompt_mgr: PromptMgr = field(init=False, repr=False)
@@ -221,7 +220,6 @@ class Agent:
         self._compact_mgr = self._build_compact_mgr(self.llm)
         workdir = self.deps.workdir
         # 可插拔 Manager：仅启用对应 feature 时创建，否则为 None（其工具已从 schema 排除）
-        self._file_mgr = FileMgr(workdir, self.deps) if "file" in self.features else None
         self._skill_mgr = (
             SkillMgr(workdir, global_dir=self.deps.global_dir, plugin_mgr=self.deps.plugin_mgr, role_mgr=self.deps.role_mgr)
             if "skill" in self.features else None
@@ -805,6 +803,7 @@ class Agent:
             enable_thinking=self.enable_thinking,
             reasoning_effort_override=ctx.length_effort_override or self.reasoning_effort,
             ephemeral_instruction=ctx.length_ephemeral_instruction,
+            phase="plan" if self.plan_active else "execute",
         )
         return AgentState.PROCESS_RESPONSE
 

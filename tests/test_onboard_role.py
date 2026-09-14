@@ -24,7 +24,7 @@ EXPECTED_AGENTS = {"repository-map", "evidence-analyst", "evidence-reviewer"}
 DIMENSIONS = ("conventions", "runtime-flow", "change-patterns", "guardrails")
 
 MAIN_TOOLS = {
-    "ask_user", "compact", "exec_command", "write_stdin", "apply_patch", "read_file",
+    "ask_user", "compact", "exec_command", "write_stdin", "apply_patch",
     "load_skill", "task_create", "task_delegator", "task_get", "task_list", "task_update",
 }
 

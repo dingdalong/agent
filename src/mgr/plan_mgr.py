@@ -81,4 +81,4 @@ class PlanMgr:
             return boundary + "只回答委派的具体问题，不提交计划。"
         if skill_mgr is not None and skill_mgr.check_skill(_PLAN_SKILL_KEY):
             return boundary + skill_mgr.load_full_text(_PLAN_SKILL_KEY)
-        return boundary + "定位入口，澄清关键歧义，明确目标行为、接口影响、失败路径及验收后用 submit_plan 一次提交。"
+        return boundary + "先核实环境事实，再确认无法从仓库推导的用户意图，最后补齐接口、数据流、失败路径和验收；决策完整后立即用 submit_plan 一次提交。"

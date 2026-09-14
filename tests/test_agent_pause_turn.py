@@ -805,7 +805,7 @@ def test_network_retry_attempts_do_not_consume_pause_continuations() -> None:
     completed = [event for event in bus.events if isinstance(event, LLMCallCompleted)]
     retries = [event for event in bus.events if isinstance(event, LLMRetrying)]
     assert [event.attempt for event in starts] == [1, 2, 1]
-    assert len(completed) == 2
+    assert [event.outcome for event in completed] == ["service", "completed", "completed"]
     assert len(retries) == 1
     assert not any(isinstance(event, LLMCallFailed) for event in bus.events)
 

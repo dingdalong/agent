@@ -1,7 +1,7 @@
 ---
 agent_type: evidence-reviewer
 description: 独立核验 onboard 证据分类或候选发布条件，按指定技能生成核实侧车或绑定候选内容的质量报告。
-tools: exec_command, write_stdin, read_file, apply_patch, mcp__codebase-memory__search_graph, mcp__codebase-memory__query_graph, mcp__codebase-memory__trace_path, mcp__codebase-memory__get_code_snippet, mcp__codebase-memory__search_code
+tools: exec_command, write_stdin, apply_patch, mcp__codebase-memory__search_graph, mcp__codebase-memory__query_graph, mcp__codebase-memory__trace_path, mcp__codebase-memory__get_code_snippet, mcp__codebase-memory__search_code
 model: default
 features: [file, skill]
 ---

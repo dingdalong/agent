@@ -28,7 +28,7 @@ description: 分析 onboard 指定单个分片的源码与代码图，生成四�
 ## 分析方法
 
 1. 用 `exec_command` 执行 `rg --files` 枚举本片成员文件，按入口、注册点、核心实现、配置、测试的顺序排优先级；排除清单内文件（生成物、第三方）跳过并计入 `coverage`。
-2. 用 `read_file` 读代表性文件；用 `search_code`/`exec_command` 在本片内定位命名、错误处理、日志、跨模块调用（含 Lua `require`/`skynet.call`/`skynet.send` 等文本线索）。
+2. 用 `exec_command` 的 `sed -n` 读代表性文件；用 `search_code`/`exec_command` 在本片内定位命名、错误处理、日志、跨模块调用（含 Lua `require`/`skynet.call`/`skynet.send` 等文本线索）。
 3. 用 `search_graph`/`query_graph` 取本片符号的结构关系；对本片内的链路用 `trace_path` 补调用图（C 侧尤其有效）；`get_code_snippet` 只在需要确认单个符号定义时按符号取用。
 4. **一遍覆盖四个维度**，函数/字段粒度。每条线索给出所属 `module::symbol` 或 `file::field`（可选附文件路径，不强制行号），并标注同片内的样本数与反例。
 5. 无法在本片内判定、或明显依赖 neighbors 的结论，写入「未知项/需跨模块确认」，引用相关 neighbor id，交给跨模块消解阶段核对后再由 REDUCE 归类，不在卡内臆断跨模块结论。

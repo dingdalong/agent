@@ -112,12 +112,72 @@ class SessionRecord:
 
 
 @dataclass(slots=True)
+class LLMCallRecord:
+    """一次 provider attempt 的持久化核账记录。"""
+
+    call_id: str
+    attempt: int
+    model: str
+    caller_uuid: str | None
+    caller_type: str | None
+    reasoning_effort: str | None
+    phase: str
+    started_at: float
+    completed_at: float | None = None
+    outcome: str = "running"
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    reasoning_output_tokens: int | None = None
+    total_tokens: int | None = None
+    cache_read_input_tokens: int | None = None
+    cache_creation_input_tokens: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, value: object) -> LLMCallRecord | None:
+        if not isinstance(value, dict):
+            return None
+        string_fields = ("call_id", "model", "phase", "outcome")
+        nullable_strings = ("caller_uuid", "caller_type", "reasoning_effort")
+        token_fields = (
+            "input_tokens", "output_tokens", "reasoning_output_tokens", "total_tokens",
+            "cache_read_input_tokens", "cache_creation_input_tokens",
+        )
+        if any(not isinstance(value.get(key), str) for key in string_fields):
+            return None
+        if not value.get("call_id") or value.get("phase") not in {"plan", "execute"}:
+            return None
+        if any(value.get(key) is not None and not isinstance(value.get(key), str) for key in nullable_strings):
+            return None
+        if type(value.get("attempt")) is not int or value["attempt"] < 1:
+            return None
+        if not isinstance(value.get("started_at"), (int, float)):
+            return None
+        if value.get("completed_at") is not None and not isinstance(value.get("completed_at"), (int, float)):
+            return None
+        if any(value.get(key) is not None and type(value.get(key)) is not int for key in token_fields):
+            return None
+        return cls(
+            call_id=value["call_id"], attempt=value["attempt"], model=value["model"],
+            caller_uuid=value.get("caller_uuid"), caller_type=value.get("caller_type"),
+            reasoning_effort=value.get("reasoning_effort"), phase=value["phase"],
+            started_at=float(value["started_at"]),
+            completed_at=float(value["completed_at"]) if value.get("completed_at") is not None else None,
+            outcome=value["outcome"],
+            **{key: value.get(key) for key in token_fields},
+        )
+
+
+@dataclass(slots=True)
 class SessionState:
     """会话状态权威写入点。"""
 
     records: list[SessionRecord] = field(default_factory=list)
     context_ids: list[str] = field(default_factory=list)
     plan: dict[str, Any] = field(default_factory=dict)
+    llm_calls: list[LLMCallRecord] = field(default_factory=list)
     _view_streams: dict[tuple[str, str], _TextChunks] = field(
         default_factory=dict,
         init=False,
@@ -129,12 +189,13 @@ class SessionState:
         if (
             not isinstance(value, dict)
             or type(value.get("version")) is not int
-            or value.get("version") != 1
+            or value.get("version") != 2
         ):
             return None
         raw_records = value.get("records")
         context_ids = value.get("context_ids")
-        if not isinstance(raw_records, list) or not isinstance(context_ids, list):
+        raw_llm_calls = value.get("llm_calls")
+        if not isinstance(raw_records, list) or not isinstance(context_ids, list) or not isinstance(raw_llm_calls, list):
             return None
         records: list[SessionRecord] = []
         ids: set[str] = set()
@@ -152,13 +213,25 @@ class SessionState:
         by_id = {record.id: record for record in records}
         if any(by_id[item].model_message is None for item in context_ids):
             return None
-        return cls(records=records, context_ids=list(context_ids), plan=copy.deepcopy(value.get("plan")) if isinstance(value.get("plan"), dict) else {})
+        llm_calls = [LLMCallRecord.from_dict(item) for item in raw_llm_calls]
+        if any(item is None for item in llm_calls):
+            return None
+        call_keys = [(item.call_id, item.attempt) for item in llm_calls if item is not None]
+        if len(call_keys) != len(set(call_keys)):
+            return None
+        return cls(
+            records=records,
+            context_ids=list(context_ids),
+            plan=copy.deepcopy(value.get("plan")) if isinstance(value.get("plan"), dict) else {},
+            llm_calls=[item for item in llm_calls if item is not None],
+        )
 
     def to_dict(self) -> dict[str, Any]:
         self._materialize_all_view_streams()
         return {
-            "version": 1,
+            "version": 2,
             "plan": copy.deepcopy(self.plan),
+            "llm_calls": [call.to_dict() for call in self.llm_calls],
             "records": [record.to_dict() for record in self.records],
             "context_ids": list(self.context_ids),
         }
@@ -367,6 +440,51 @@ class SessionState:
             correlation_id=agent_uuid,
         )
 
+    def record_llm_event(self, event: object) -> None:
+        """把 LLM 生命周期事件归并成 attempt 级核账记录。"""
+        from src.events.types import LLMCallCompleted, LLMCallFailed, LLMCallStarted
+
+        if not isinstance(event, (LLMCallStarted, LLMCallCompleted, LLMCallFailed)):
+            return
+        call_id = event.call_id
+        if not call_id:
+            return
+        attempt = event.attempt if isinstance(event, (LLMCallStarted, LLMCallCompleted)) else max(1, event.attempts)
+        record = next(
+            (item for item in self.llm_calls if item.call_id == call_id and item.attempt == attempt),
+            None,
+        )
+        if record is None:
+            record = LLMCallRecord(
+                call_id=call_id,
+                attempt=attempt,
+                model=getattr(event, "model", "") or event.source,
+                caller_uuid=event.caller_uuid,
+                caller_type=event.caller_agent_type,
+                reasoning_effort=getattr(event, "reasoning_effort", None),
+                phase=getattr(event, "phase", "execute"),
+                started_at=event.timestamp,
+            )
+            self.llm_calls.append(record)
+        if isinstance(event, LLMCallStarted):
+            record.model = event.model
+            record.caller_uuid = event.caller_uuid
+            record.caller_type = event.caller_agent_type
+            record.reasoning_effort = event.reasoning_effort
+            record.phase = event.phase
+            record.started_at = event.timestamp
+            return
+        record.completed_at = event.timestamp
+        if isinstance(event, LLMCallFailed):
+            record.outcome = event.error_kind or "failed"
+            return
+        record.outcome = event.outcome
+        for key in (
+            "input_tokens", "output_tokens", "reasoning_output_tokens", "total_tokens",
+            "cache_read_input_tokens", "cache_creation_input_tokens",
+        ):
+            setattr(record, key, getattr(event, key))
+
     def record_event(self, event: object) -> str | None:
         """把一个已通过前后台筛选的可见事件归并到展示投影。"""
         from rich.text import Text
@@ -445,7 +563,14 @@ class SessionState:
             )
         if isinstance(event, InteractionCompleted):
             return self.record_view(
-                ViewPayload("output", {"content": event.summary, "markdown": False}),
+                ViewPayload("output", {
+                    "content": event.summary,
+                    "markdown": False,
+                    "request_type": event.request_type,
+                    "cancelled": event.cancelled,
+                    "request": copy.deepcopy(event.request),
+                    "answer": event.answer,
+                }),
                 kind="interaction",
                 timestamp=timestamp,
             )

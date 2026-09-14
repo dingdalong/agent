@@ -6,21 +6,21 @@
 
 ## Manager 服务层是什么
 
-Manager 服务层是框架的横切能力层：每个 Manager 类各司其职（角色发现、模型管理、工具执行、权限、上下文压缩、提示词构建、子智能体调度、技能、MCP、记忆、计划、文件、任务、会话、hooks、配置、插件、提醒），彼此低耦合，由上层按需组合。
+Manager 服务层是框架的横切能力层：每个 Manager 类各司其职（角色发现、模型管理、工具执行、权限、上下文压缩、提示词构建、子智能体调度、技能、MCP、记忆、计划、任务、会话、hooks、配置、插件、提醒），彼此低耦合，由上层按需组合。
 
 ### 两处装配点
 
 Manager 分两批被构造：
 
 1. **deps 层 Manager**（进程级、跨 agent 共享）——在 `src/app/bootstrap.py` 的 `create_app()` 中手动构造并注入 `AgentDeps` dataclass。包括：`ConfigManager`、`RoleMgr`、`ToolsMgr`、`MemoryMgr`、`ContextMgr`、`PluginMgr`、`HooksMgr`、`PlanMgr`、`McpMgr`、`PermissionManager`、`WebAccessMgr`、`SessionMgr`、`LLMMgr`。
-2. **每 agent 层 Manager**（随 `Agent` 实例创建，主/子 agent 各自独立）——在 `Agent.__post_init__`（`src/agent/agent.py:113-160`）中构造。包括：`CompactMgr`、`FileMgr`、`SkillMgr`、`SubAgentMgr`、`PromptMgr`、`TaskManager`、`ReminderMgr`。子 agent 是共享同一份 `AgentDeps` 的完整 `Agent` 实例，因此复用 deps 层 Manager，但拥有自己的每 agent 层 Manager。
+2. **每 agent 层 Manager**（随 `Agent` 实例创建，主/子 agent 各自独立）——在 `Agent.__post_init__`（`src/agent/agent.py:113-160`）中构造。包括：`CompactMgr`、`SkillMgr`、`SubAgentMgr`、`PromptMgr`、`TaskManager`、`ReminderMgr`。子 agent 是共享同一份 `AgentDeps` 的完整 `Agent` 实例，因此复用 deps 层 Manager，但拥有自己的每 agent 层 Manager。
 
 ### feature 门控哪些 Manager
 
 角色在 `role.md` frontmatter 声明 `features` 列表，`resolve_features()`（`src/mgr/features.py`）解析为有效启用集（合法名单：`task`、`skill`、`subagent`、`file`、`memory`、`plan`）。据此：
 
 - deps 层：`MemoryMgr`（`memory`）、`PlanMgr`（`plan`）、`ContextMgr`（`subagent`）未启用时在 `bootstrap.create_app()` 注入 `None`。
-- 每 agent 层：`FileMgr`（`file`）、`SkillMgr`（`skill`）、`SubAgentMgr`（`subagent`）、`TaskManager`（`task`）未启用时在 `Agent.__post_init__` 置 `None`。
+- 每 agent 层：`SkillMgr`（`skill`）、`SubAgentMgr`（`subagent`）、`TaskManager`（`task`）未启用时在 `Agent.__post_init__` 置 `None`；`file` 直接门控 `apply_patch` 工具。
 - 未启用 feature 的工具由 `ToolsMgr.excluded_tool_names(enabled)` 从 schema 中排除。
 
 feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `file`）见 [architecture.md](architecture.md#feature-门控) 与 [roles-subagents-skills.md](roles-subagents-skills.md)。
@@ -46,7 +46,6 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 | `MemoryMgr` (`memory_mgr.py`) | 项目记忆的加载/构建/读写 | `memory` | 有 |
 | `ContextMgr` (`context_mgr.py`) | 跨 agent 共享上下文账本的记账、渲染与追加落盘 | `subagent` | 有 |
 | `PlanMgr` (`plan_mgr.py`) | 计划模式切换与当前指令组装 | `plan`（依赖 `file`） | 无 |
-| `FileMgr` (`file_mgr.py`) | 工作区文件读写/搜索（同步阻塞） | `file` | 无 |
 | `TaskManager` (`task_mgr.py`) | 任务 CRUD、依赖、持久化、提醒 | `task` | 无 |
 | `SessionMgr` (`session_mgr.py`) | 会话元数据/SessionState 持久化与恢复 | 否 | 无 |
 | `HooksMgr` (`hooks_mgr.py`) | 8 类生命周期钩子的加载与执行 | 否 | 有 |
@@ -140,7 +139,7 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 **`execute()` 完整流程**：Pydantic 校验 → PreToolUse Hook → 修改后重校验 → `authorize()` → 脱敏的 `ToolCallStarted`（含 `ToolDisplay`） → 调用工具 → 提取 `ToolResult` → 立即脱敏和限长 → PostToolUse → 再次脱敏 → 一次输出整理 → `ToolCallCompleted`（含 `ToolDisplay`） → 历史。临时日志、Hook payload 和事件预览都只接收脱敏数据。
 
 **展示数据生成逻辑**：
-- `_emit_tool_started()`：接收 `arguments`，使用 `tool_title()` 生成中文标题（`src/tools/display.py` 的 `TOOL_TITLES` 映射），使用 `format_params()` 按工具类型格式化参数摘要（exec_command 提取命令、read_file 提取路径等）。`EXTERNAL_READ` 工具不生成参数展示。参数经 `DataGuard.redact()` 脱敏后传入 `ToolDisplay`。
+- `_emit_tool_started()`：接收 `arguments`，使用 `tool_title()` 生成中文标题（`src/tools/display.py` 的 `TOOL_TITLES` 映射），使用 `format_params()` 按工具类型格式化参数摘要（如 exec_command 提取命令）。`EXTERNAL_READ` 工具不生成参数展示。参数经 `DataGuard.redact()` 脱敏后传入 `ToolDisplay`。
 - `_emit_tool_completed()`：接收 `tool_display`（来自 `ToolResult`，如文件差异）。若存在则直接使用并对 `content` 脱敏；否则使用 `format_result()` 截断结果内容生成通用 `ToolDisplay`。`EXTERNAL_READ` 工具不生成结果展示（`display=None`）。
 
 **feature 门控**：否（但 `excluded_tool_names`/`resolve_subagent_tools` 是 feature 门控的执行点）。 **reload**：有，回收工具临时日志。
@@ -377,11 +376,11 @@ MCP 连接配置和授权边界见 [mcp-and-hooks.md](mcp-and-hooks.md)。
 
 ---
 
-## PlanMgr、FileMgr 与工具运行时
+## PlanMgr 与工具运行时
 
 `PlanMgr` 管理模式切换、当前指令正文与受控计划保存。正文由 PromptMgr 注入系统段，不追加到用户历史。`save(content, previous)` 原子写入 `.agent/plans/`，审核状态和路径保存在 `SessionState.plan`。`agent.plan_active` 是模式状态权威，授权由 PermissionManager 执行。
 
-`FileMgr.read_file(path, authorization, offset, column, limit)` 负责经复验的有界读取。补丁文本计算与提交在 `patch.py`；进程生命周期与工作区读写租约在 `ProcessMgr`；一次输出整理及临时日志归 `ToolOutput`。管理器均在 bootstrap 组装，流程与接口见 [tools.md](tools.md)。
+文件发现、搜索和读取由 `exec_command` 在真实受限 Shell 中执行；随包 ripgrep 的定位由 `ripgrep.resolve_rg()` 负责。补丁文本计算与提交在 `patch.py`；进程生命周期与工作区读写租约在 `ProcessMgr`；一次输出整理及临时日志归 `ToolOutput`。流程与接口见 [tools.md](tools.md)。
 
 ---
 
@@ -423,9 +422,9 @@ MCP 连接配置和授权边界见 [mcp-and-hooks.md](mcp-and-hooks.md)。
 
 **单一职责**：持久化会话元数据与单一 `SessionState` 快照，支持 `/resume` 恢复。
 
-**消费的配置或文件**：`{global_dir}/sessions/` 下——`{id}.json`（元数据：`workdir`/时间戳/`topic`/`plan_active`）、`{id}.state.json`（版本化 `records` + `context_ids`，经 DataGuard 脱敏并原子写）。旧 `.hist.json` 与 `.input.json` 不读取、不迁移、不删除。
+**消费的配置或文件**：`{global_dir}/sessions/` 下——`{id}.json`（元数据：`workdir`/时间戳/`topic`/`plan_active`）、`{id}.state.json`（version 2：`records`、`context_ids` 与 attempt 级 `llm_calls`，经 DataGuard 脱敏并原子写）。旧格式不读取、不迁移。
 
-`SessionRecord` 可同时包含模型消息、可见 `ViewPayload`、原始输入和关联 ID。`SessionState` 分别投影 LLM 上下文、TUI 历史与输入回溯；compact 只更新上下文投影。
+`SessionRecord` 可同时包含模型消息、可见 `ViewPayload`、原始输入和关联 ID。`SessionState` 分别投影 LLM 上下文、TUI 历史与输入回溯，并以 `LLMCallRecord` 持久化每次 provider attempt 的模型、调用者、阶段、结果和原始 usage；compact 只更新上下文投影。
 
 **公共方法**：
 

@@ -59,7 +59,7 @@ def test_coding_role_plan_workflow_skill_still_loads(tmp_path: Path) -> None:
     assert "enter_plan_mode" not in text
     assert "最多 3 个" not in text
     assert "llm.concurrency" not in text
-    assert "独立读取同轮发出" in text
+    assert "首次探索将独立的文件发现、内容搜索和读取合并到同一轮并行调用" in text
 
 
 def test_coding_execute_plan_skill_loads(tmp_path: Path) -> None:

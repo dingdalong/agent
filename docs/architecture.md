@@ -148,7 +148,7 @@ ConfigManager 三层合并
 | `workdir` | `Path \| None` | 否 | 用户工作目录 |
 | `global_dir` | `Path \| None` | 否 | 全局配置目录 |
 
-> 说明：`memory_mgr`、`plan_mgr` 与 `context_mgr` 在 `bootstrap.create_app()` 处即按 feature 门控决定是否实例化（`bootstrap.py:50,53`）。而 `FileMgr`、`SkillMgr`、`SubAgentMgr`、`TaskManager` 则是在每个 `Agent.__post_init__` 内按该 agent 自身的 feature 集创建（见 [agent-runtime.md](./agent-runtime.md) 第 6 节），不进入 `AgentDeps`。
+> 说明：`memory_mgr`、`plan_mgr` 与 `context_mgr` 在 `bootstrap.create_app()` 处即按 feature 门控决定是否实例化（`bootstrap.py:50,53`）。而 `SkillMgr`、`SubAgentMgr`、`TaskManager` 则是在每个 `Agent.__post_init__` 内按该 agent 自身的 feature 集创建（见 [agent-runtime.md](./agent-runtime.md) 第 6 节），不进入 `AgentDeps`。
 
 `AgentViewStore` 与 `OutputRouter` 属于 app/UI 层，不进入业务依赖容器 `AgentDeps`。同一个 Store 实例由 `TextualInterface`、`OutputRouter` 和 `AgentApp` 共享，避免业务 Agent 持有展示状态。
 
@@ -180,7 +180,7 @@ ALL_FEATURES = frozenset({"task", "skill", "subagent", "file", "memory", "plan"}
 | `task` | `TaskManager`（`agent.py:151-155`），任务工具，任务提醒段 |
 | `skill` | `SkillMgr`（`agent.py:141-144`），`load_skill` 等技能工具，技能提示词段 |
 | `subagent` | `SubAgentMgr`（`agent.py:145-148`），`task_delegator` 工具 |
-| `file` | `FileMgr`（`agent.py:140`），文件读写工具 |
+| `file` | `apply_patch` 文本修改工具 |
 | `memory` | `MemoryMgr`（`bootstrap.py:50`），记忆工具与提示词段 |
 | `plan` | `PlanMgr`（`bootstrap.py:53`），`submit_plan` 工具，计划模式 |
 

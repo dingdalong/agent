@@ -21,7 +21,6 @@ from src.tools.display import (
 
 def test_tool_title_known():
     assert tool_title("exec_command") == "执行命令"
-    assert tool_title("read_file") == "读取文件"
     assert tool_title("web_fetch") == "获取网页"
     assert tool_title("web_search") == "搜索网页"
 
@@ -73,8 +72,8 @@ def test_permission_line_maps_all_sources():
 
 def test_permission_line_full_format():
     assert (
-        permission_line("deny", "read_file", "不允许读取", "hard_rule")
-        == "✘ 硬规则 · 读取文件 · 已拒绝(不允许读取)"
+        permission_line("deny", "exec_command", "不允许读取", "hard_rule")
+        == "✘ 硬规则 · 执行命令 · 已拒绝(不允许读取)"
     )
 
 
@@ -114,14 +113,6 @@ def test_format_params_shell_multiline():
     cmd = "\n".join(f"echo line{i}" for i in range(10))
     result = format_params("exec_command", {"cmd": cmd})
     assert "共 10 行" in result
-
-
-def test_format_params_read_file():
-    assert format_params("read_file", {"path": "/foo/bar.py"}) == "/foo/bar.py"
-
-
-
-
 
 
 

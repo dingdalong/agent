@@ -1,7 +1,7 @@
 ---
 agent_type: repository-map
 description: 建立仓库快照、索引代码图、产出模块分层地图与分片计划。
-tools: exec_command, write_stdin, read_file, apply_patch, mcp__codebase-memory__index_repository, mcp__codebase-memory__get_architecture, mcp__codebase-memory__get_graph_schema, mcp__codebase-memory__search_graph, mcp__codebase-memory__query_graph
+tools: exec_command, write_stdin, apply_patch, mcp__codebase-memory__index_repository, mcp__codebase-memory__get_architecture, mcp__codebase-memory__get_graph_schema, mcp__codebase-memory__search_graph, mcp__codebase-memory__query_graph
 model: default
 features: [file, skill]
 ---
@@ -36,7 +36,7 @@ MCP server 维护的 `.agent/codebase-memory/` 是唯一例外；不得通过文
 
 ### 2. 建立/更新代码图索引
 
-- **先探活代码图工具**：若 `index_repository`、`get_architecture` 等 codebase-memory 代码图工具不可用（未注册或调用报错），必须在报告与返回中硬报错并停止，禁止改用 `exec_command`/`read_file` 兜底充当代码图；缺少代码图 substrate 即无法产出可信分层与分片，交主 agent 处置。
+- **先探活代码图工具**：若 `index_repository`、`get_architecture` 等 codebase-memory 代码图工具不可用（未注册或调用报错），必须在报告与返回中硬报错并停止，禁止改用 `exec_command` 兜底充当代码图；缺少代码图 substrate 即无法产出可信分层与分片，交主 agent 处置。
 - 用 `index_repository` 对工作目录建或更新索引（内容哈希增量、幂等，可安全重跑），记录其返回的项目标识和索引摘要。
 - 用 `get_architecture` 与 `get_graph_schema` 确认可检索的结构、语言和关系；覆盖明显不足时根据这些结果与范围清单记录缺口，不伪造完整性。
 - **生成物与第三方排除**：优先依赖目标仓库既有 `.gitignore`（codebase-memory 尊重它）与 `index_repository` 支持的忽略参数。**不得**把 `.cbmignore` 或任何忽略/快照文件写进仓库。`.gitignore` 未覆盖的生成物（如生成的 protobuf `**/*_pb.lua`、`db/proto/**`、`common/protobuf/**`，及第三方 `3rd/`、`bin/`）改由下面的分片计划**排除清单**兜底，MAP 阶段据此跳过。

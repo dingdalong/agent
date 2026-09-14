@@ -87,7 +87,7 @@ def test_local_read_outside_workspace_skips_judge(tmp_path):
         (PathArgument("path", PathRole.READ),),
     )
     result = run(manager.authorize(
-        "read_file", policy, {"path": str(outside)}, origin=ToolOrigin("builtin"),
+        "local_reader", policy, {"path": str(outside)}, origin=ToolOrigin("builtin"),
         plan_active=False, user_intent="read it",
     ))
     assert result.allowed is True
@@ -304,11 +304,11 @@ def test_large_and_special_local_reads_are_denied(tmp_path):
         (PathArgument("path", PathRole.READ),),
     )
     large_result = run(manager.authorize(
-        "read_file", policy, {"path": str(large)}, origin=ToolOrigin("builtin"),
+        "local_reader", policy, {"path": str(large)}, origin=ToolOrigin("builtin"),
         plan_active=False, user_intent="read",
     ))
     special_result = run(manager.authorize(
-        "read_file", policy, {"path": "/dev/null"}, origin=ToolOrigin("builtin"),
+        "local_reader", policy, {"path": "/dev/null"}, origin=ToolOrigin("builtin"),
         plan_active=False, user_intent="read",
     ))
     assert large_result.allowed is False and large_result.source == "hard_rule"
@@ -793,20 +793,20 @@ def test_deterministic_policy_allow_is_debug_only(tmp_path, caplog):
     )
     with caplog.at_level(logging.INFO, logger="src.mgr.permission_mgr"):
         result = run(manager.authorize(
-            "read_file", policy, {"path": str(target)}, origin=ToolOrigin("builtin"),
+            "local_reader", policy, {"path": str(target)}, origin=ToolOrigin("builtin"),
             plan_active=False, user_intent="read it",
         ))
     assert result.allowed is True
     assert result.source == "policy"
-    assert "授权 read_file" not in caplog.text
+    assert "授权 local_reader" not in caplog.text
 
     caplog.clear()
     with caplog.at_level(logging.DEBUG, logger="src.mgr.permission_mgr"):
         run(manager.authorize(
-            "read_file", policy, {"path": str(target)}, origin=ToolOrigin("builtin"),
+            "local_reader", policy, {"path": str(target)}, origin=ToolOrigin("builtin"),
             plan_active=False, user_intent="read it",
         ))
-    assert "授权 read_file → allow source=policy" in caplog.text
+    assert "授权 local_reader → allow source=policy" in caplog.text
 
 
 def test_deny_notice_carries_real_authorization_source(tmp_path):

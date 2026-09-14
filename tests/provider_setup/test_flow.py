@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import nullcontext
 import logging
 import sys
 from pathlib import Path
@@ -944,6 +945,10 @@ def test_create_app_continues_after_setup_returns(tmp_path, monkeypatch):
         order.append("setup")
 
     monkeypatch.setattr(bootstrap, "maybe_run_provider_setup", fake_setup)
+    monkeypatch.setattr(
+        "src.mgr.sandbox.SandboxBackend.prepare",
+        lambda *_args, **_kwargs: nullcontext(),
+    )
 
     class RoleBoom:
         def __init__(self, *args, **kwargs):

@@ -1,7 +1,7 @@
 ---
 agent_type: evidence-analyst
 description: 在独立上下文中执行 onboard 有界证据分析，按指定技能生成分片卡、跨模块账本或单维度报告。
-tools: exec_command, write_stdin, read_file, apply_patch, mcp__codebase-memory__search_graph, mcp__codebase-memory__query_graph, mcp__codebase-memory__trace_path, mcp__codebase-memory__get_code_snippet, mcp__codebase-memory__search_code
+tools: exec_command, write_stdin, apply_patch, mcp__codebase-memory__search_graph, mcp__codebase-memory__query_graph, mcp__codebase-memory__trace_path, mcp__codebase-memory__get_code_snippet, mcp__codebase-memory__search_code
 model: default
 features: [file, skill]
 ---

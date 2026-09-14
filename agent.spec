@@ -29,8 +29,8 @@ TIKTOKEN_CACHE = ROOT / "build" / "tiktoken_cache"
 def _ripgrep_binary():
     """构建和运行复用相同的 rg 定位规则，系统包也须随产物分发。"""
     sys.path.insert(0, str(ROOT))
-    from src.mgr.file_mgr import _resolve_rg
-    path = _resolve_rg()
+    from src.mgr.ripgrep import resolve_rg
+    path = resolve_rg()
     if not path:
         raise SystemExit("构建需要 ripgrep；请安装 Python wheel 或系统 rg")
     return [(path, ".")]

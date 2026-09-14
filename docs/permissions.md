@@ -34,21 +34,21 @@ MCP 工具固定为 `REVIEW + EXTERNAL`。上游 annotation（包括 `readOnlyHi
 10. 其余调用交通用 LLM 智能权限审查；返回 ask、异常、超时或无效响应时，只进行一次 yes/no 人工确认，无 TTY、取消或拒绝均为 deny。
 11. 工具执行结果立即经 DataGuard 脱敏和限长，再进入 PostToolUse、事件、输出预算和 Agent 历史。
 
-`AuthorizationResult.source` 标明裁决来源：`hard_rule`、`plan`、`policy`、`judge`、`web_safety`、`user` 或 `failure`。当前 EXTERNAL_READ 本地隐私预检通过时仍使用 `source="web_safety"`，该来源名不表示已调用 LLM Web 审查。`reason` 和 `safe_detail` 在返回前再次脱敏并限长。允许结果还包含冻结的 `path_grants`，只记录参数名、角色、授权时规范路径和分类；FileMgr 在每次实际 I/O 前复检规范路径与分类，移动操作同时复检 source、destination 与最终目标。
+`AuthorizationResult.source` 标明裁决来源：`hard_rule`、`plan`、`policy`、`judge`、`web_safety`、`user` 或 `failure`。当前 EXTERNAL_READ 本地隐私预检通过时仍使用 `source="web_safety"`，该来源名不表示已调用 LLM Web 审查。`reason` 和 `safe_detail` 在返回前再次脱敏并限长。允许结果还包含冻结的 `path_grants`，只记录参数名、角色、授权时规范路径和分类；工具在实际 I/O 前按自身契约复检路径。
 
 ## 路径解析
 
-`PathResolver` 是授权层和 `FileMgr` 的共同路径语义：
+`PathResolver` 是授权层、Shell 和补丁工具的共同路径语义：
 
 - 相对路径始终基于 Agent workdir，而非进程当前目录。
 - 展开 `~` 和 `..`，解析已有符号链接；新路径通过最近存在父目录得到真实目标。
 - 可选读取路径为 `None` 时解释为 workdir。
 - 移动同时解析 source、destination；若 destination 是已有目录，再追加源文件名形成 `destination_final`。
-- FileMgr 在创建父目录后和实际 I/O 前重新解析，降低检查后路径替换风险。
+- 补丁和 Shell 在实际 I/O 前重新解析授权路径，降低检查后路径替换风险。
 
 普通工作区快速写入排除 `.git/**`、`.agent/**`、`.vscode/**`、`.idea/**`、`.env*`、私钥和常见凭证路径；`.agent/plans/**` 单独分类为 PLAN。受保护路径、工作区外写入和移动操作进入 REVIEW。
 
-LOCAL_READ 可以读取工作区外的普通文件或目录，但拒绝设备、FIFO、socket、`/dev`、`/proc`、`/sys` 等伪文件。read_file 单文件上限 8 MiB；命令执行与临时结果日志分别有界，具体预算和只读参数白名单见 [tools.md](tools.md)。
+LOCAL_READ 可以读取工作区外的普通文件或目录，但拒绝设备、FIFO、socket、`/dev`、`/proc`、`/sys` 等伪文件。命令执行与临时结果日志分别有界，具体预算和 Plan 只读命令规则见 [tools.md](tools.md)。
 
 ## Hard Deny
 

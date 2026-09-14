@@ -91,7 +91,7 @@ def test_real_providers_accept_new_signature(tmp_path: Path) -> None:
     # 造出 TaskManager 真正产出提醒的条件：有未完成任务且连续 3 轮未调用任务工具
     task_mgr.create("task 1", "desc 1")
     for _ in range(3):
-        task_mgr.notify_tool_round(["read_file"])
+        task_mgr.notify_tool_round(["exec_command"])
 
     plan_turn_start = mgr.build_turn_start_instructions(True, False)
     task_turn_start = mgr.build_turn_start_instructions(False, False)

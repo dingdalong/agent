@@ -242,8 +242,8 @@ class TranscriptView(ViewRequest):
         <初始任务提示…>
         ● 助手
         <正文…>
-          ⚙ read_file
-          { "path": "..." }
+          ⚙ exec_command
+          { "cmd": "sed -n '1,120p' path" }
           ⚙ 结果 (…)
         <工具返回原文…>
 

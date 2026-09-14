@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 # 与 src/tools/builtin 下 @tool 装饰器的实际数量对齐；新增内置工具时同步更新。
-EXPECTED_TOOL_COUNT = 18
+EXPECTED_TOOL_COUNT = 17
 EXPECTED_COMMANDS = {"plan", "clear", "resume", "agents", "models", "help"}
 EXPECTED_ROLES = {"coding", "mijia", "onboard"}
 # anthropic provider 固定用 cl100k_base，openai provider 未收录模型名回退 o200k_base
@@ -76,10 +76,10 @@ def _check_ripgrep() -> dict[str, Any]:
     """rg 是否定位得到；冻结产物应命中随包副本而非宿主 PATH。"""
     import os
 
-    from src.mgr.file_mgr import _resolve_rg
+    from src.mgr.ripgrep import resolve_rg
     from src.mgr.frozen import bundle_root
 
-    path = _resolve_rg()
+    path = resolve_rg()
     root = bundle_root()
     bundled = bool(path and root and Path(path).is_relative_to(root))
     return {

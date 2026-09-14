@@ -191,10 +191,33 @@ class EventBus:
                 request_type=event.type,
                 summary=summary,
                 cancelled=not bool(answer),
+                request=self._interaction_request(event),
+                answer=answer,
                 caller_agent_type=event.caller_agent_type,
                 caller_uuid=event.caller_uuid,
             ))
         return answer
+
+    @staticmethod
+    def _interaction_request(event: UiRequest) -> dict:
+        """返回不含 future 和路由字段的可持久化交互请求。"""
+        from dataclasses import asdict, is_dataclass
+
+        result = {"type": event.type}
+        omitted = {
+            "future", "level", "type", "timestamp", "source",
+            "caller_agent_type", "caller_uuid",
+        }
+        for key, value in vars(event).items():
+            if key in omitted:
+                continue
+            if is_dataclass(value):
+                result[key] = asdict(value)
+            elif isinstance(value, list):
+                result[key] = [asdict(item) if is_dataclass(item) else item for item in value]
+            elif isinstance(value, (str, int, float, bool)) or value is None:
+                result[key] = value
+        return result
 
     @staticmethod
     def _interaction_summary(event: UiRequest, answer: str) -> str:

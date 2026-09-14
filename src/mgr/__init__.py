@@ -1,4 +1,3 @@
-from src.mgr.file_mgr import FileMgr
 from src.mgr.compact_mgr import CompactMgr, CompactResult
 from src.mgr.task_mgr import TaskManager
 from src.mgr.tools_mgr import ToolsMgr
@@ -17,9 +16,9 @@ from src.mgr.plan_mgr import PlanMgr
 from src.mgr.plugin_mgr import PluginMgr, PluginInfo, PluginLayer
 from src.mgr.reminder_mgr import ReminderMgr
 from src.mgr.session_mgr import SessionMgr, ResumeResult
-from src.mgr.session_state import SessionRecord, SessionState, ViewPayload
+from src.mgr.session_state import LLMCallRecord, SessionRecord, SessionState, ViewPayload
 from src.mgr.mcp_mgr import McpMgr
 from src.mgr.role_mgr import RoleMgr
 from src.mgr.features import ALL_FEATURES, resolve_features
 
-__all__ = ["FileMgr", "CompactMgr", "CompactResult", "TaskManager", "ToolsMgr", "PromptMgr", "SkillMgr", "SubAgentMgr", "PermissionManager", "WebAccessMgr", "ConfigManager", "ContextEntry", "ContextMgr", "collect_env_baseline", "MemoryMgr", "HooksMgr", "LLMMgr", "PlanMgr", "PluginMgr", "PluginInfo", "PluginLayer", "ReminderMgr", "SessionMgr", "ResumeResult", "SessionRecord", "SessionState", "ViewPayload", "McpMgr", "RoleMgr", "ALL_FEATURES", "resolve_features"]
+__all__ = ["CompactMgr", "CompactResult", "TaskManager", "ToolsMgr", "PromptMgr", "SkillMgr", "SubAgentMgr", "PermissionManager", "WebAccessMgr", "ConfigManager", "ContextEntry", "ContextMgr", "collect_env_baseline", "MemoryMgr", "HooksMgr", "LLMMgr", "PlanMgr", "PluginMgr", "PluginInfo", "PluginLayer", "ReminderMgr", "SessionMgr", "ResumeResult", "LLMCallRecord", "SessionRecord", "SessionState", "ViewPayload", "McpMgr", "RoleMgr", "ALL_FEATURES", "resolve_features"]

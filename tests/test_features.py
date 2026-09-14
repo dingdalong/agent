@@ -88,11 +88,9 @@ def test_expected_tool_feature_mapping():
     assert by_name["task_get"] == "task"
     assert by_name["load_skill"] == "skill"
     assert by_name["task_delegator"] == "subagent"
-    assert by_name["read_file"] == "file"
     assert by_name["apply_patch"] == "file"
     assert by_name["save_memory"] == "memory"
     assert by_name["read_memory"] == "memory"
-    assert by_name["submit_plan"] == "plan"
     assert by_name["submit_plan"] == "plan"
     assert "enter_plan_mode" not in by_name
     # 无归属工具恒可用
@@ -110,9 +108,8 @@ def test_excluded_tool_names_by_feature():
     # 其他 feature 工具被排除
     assert "task_create" in excluded
     assert "load_skill" in excluded
-    assert "read_file" in excluded
+    assert "apply_patch" in excluded
     assert "save_memory" in excluded
-    assert "submit_plan" in excluded
     assert "submit_plan" in excluded
     # 无归属工具不排除
     assert "exec_command" not in excluded
@@ -173,7 +170,7 @@ def test_mijia_role_features_and_schema():
     effective = mgr.all_tool_names() - mgr.excluded_tool_names(feats)
     assert "task_delegator" in effective
     assert "load_skill" in effective
-    for absent in ("task_create", "read_file", "apply_patch",
+    for absent in ("task_create", "apply_patch",
                    "save_memory", "submit_plan", "submit_plan"):
         assert absent not in effective
 

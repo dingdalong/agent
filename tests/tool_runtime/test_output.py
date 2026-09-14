@@ -76,11 +76,9 @@ def test_concurrent_artifacts_are_bounded(runtime):
 def test_config_budget_is_used_and_invalid_override_never_executes(runtime):
     deps, agent = runtime
     deps.tools_mgr.output = ToolOutput({'output_tokens': 1000, 'max_output_tokens': 2000})
-    target = deps.workdir / 'large.txt'
-    target.write_text('line\n' * 2000)
     async def scenario():
-        default = await deps.tools_mgr.execute('read_file', {'path': 'large.txt'}, deps=deps, agent=agent)
-        expanded = await deps.tools_mgr.execute('read_file', {'path': 'large.txt', 'max_output_tokens': 2000}, deps=deps, agent=agent)
+        default = deps.tools_mgr.output.finalize(ToolResult('line\n' * 2000, output_kind='exec'), agent)
+        expanded = deps.tools_mgr.output.finalize(ToolResult('line\n' * 2000, output_kind='exec'), agent, 2000)
         assert len(str(default).encode()) <= 4000
         assert len(expanded.text) > len(default.text)
         invalid = await deps.tools_mgr.execute('exec_command', {'cmd': 'rg --files', 'max_output_tokens': 2001}, deps=deps, agent=agent)
@@ -89,8 +87,34 @@ def test_config_budget_is_used_and_invalid_override_never_executes(runtime):
     asyncio.run(scenario())
 
 
+def test_exec_result_uses_plain_envelope_and_never_exposes_artifact(runtime):
+    _, agent = runtime
+    output = ToolOutput()
+    short = output.finalize(ToolResult(
+        'ok\n', output_kind='exec', chunk_id='abc123',
+        wall_time_seconds=1.25, exit_code=1,
+    ), agent)
+    assert str(short) == (
+        'Chunk ID: abc123\n'
+        'Wall time: 1.2500 seconds\n'
+        'Process exited with code 1\n'
+        'Original token count: 1\n'
+        'Output:\n'
+        'ok\n'
+    )
+
+    long = output.finalize(ToolResult(
+        'head\n' + 'x' * 5000 + '\ntail\n', output_kind='exec',
+        chunk_id='def456', wall_time_seconds=0.5, exit_code=0,
+    ), agent, 128)
+    assert long.truncated is True
+    assert long.artifact_path is None
+    assert len(str(long).encode()) <= 512
+    assert 'head' in long.text and 'tail' in long.text
+
+
 @pytest.mark.integration
-def test_process_increment_artifact_survives_command_completion(runtime):
+def test_process_increment_is_truncated_without_artifact(runtime):
     import sys
     deps, agent = runtime
     async def scenario():
@@ -100,22 +124,16 @@ def test_process_increment_artifact_survives_command_completion(runtime):
         result = await deps.tools_mgr.execute('write_stdin', {'session_id': started.session_id, 'yield_time_ms': 3000}, deps=deps, agent=agent)
         assert result.status == 'success', str(result)
         assert not deps.process_mgr.sessions
-        artifact = Path(result.artifact_path)
-        assert artifact.exists()
-        assert 'sentinel-secret' not in artifact.read_text()
+        assert result.artifact_path is None
+        assert 'sentinel-secret' not in result.text
         await deps.process_mgr.close()
-        assert artifact.exists()
         deps.tools_mgr.reload()
-        assert not artifact.exists()
-        gone = await deps.tools_mgr.execute('read_file', {'path': str(artifact)}, deps=deps, agent=agent)
-        assert gone.error_code == 'read_failed'
     asyncio.run(scenario())
 
 
-def test_hook_modified_output_budget_is_validated_and_used(runtime):
+def test_hook_modified_output_budget_is_validated_and_used(runtime, monkeypatch):
     from src.mgr.hooks_mgr import HookRunResult
     deps, agent = runtime
-    (deps.workdir / 'a').write_text('content\n' * 5000)
     class Hooks:
         budget = 256
         async def run_event(self, event, name, payload, **kwargs):
@@ -124,11 +142,14 @@ def test_hook_modified_output_budget_is_validated_and_used(runtime):
             return HookRunResult()
     hooks = Hooks()
     deps.hooks_mgr = hooks
+    async def start(*_args, **_kwargs):
+        return ToolResult('x' * 5000, exit_code=0)
+    monkeypatch.setattr(deps.process_mgr, 'start', start)
     async def scenario():
-        result = await deps.tools_mgr.execute('read_file', {'path': 'a'}, deps=deps, agent=agent)
+        result = await deps.tools_mgr.execute('exec_command', {'cmd': 'printf x'}, deps=deps, agent=agent)
         assert result.status == 'success', str(result)
         assert len(str(result).encode()) <= 1024
         hooks.budget = 16001
-        result = await deps.tools_mgr.execute('read_file', {'path': 'a'}, deps=deps, agent=agent)
+        result = await deps.tools_mgr.execute('exec_command', {'cmd': 'printf x'}, deps=deps, agent=agent)
         assert result.error_code == 'invalid_arguments'
     asyncio.run(scenario())

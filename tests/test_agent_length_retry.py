@@ -261,7 +261,7 @@ def test_nonempty_text_at_recovery_limit_keeps_prior_history_and_current_user() 
                 {
                     "id": "call_version",
                     "type": "function",
-                    "function": {"name": "read_file", "arguments": '{"path":"VERSION"}'},
+                    "function": {"name": "exec_command", "arguments": '{"cmd":"sed -n 1p VERSION"}'},
                 }
             ],
         },

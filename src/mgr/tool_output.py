@@ -1,4 +1,4 @@
-"""一次性输出整理：近似字节预算、源文件定位与有界脱敏结果文件。"""
+"""一次性输出整理：近似字节预算与有界脱敏结果文件。"""
 from collections import OrderedDict
 from dataclasses import replace
 import hashlib
@@ -102,95 +102,26 @@ class ToolOutput:
         """输入必须已经脱敏；完成后事件、UI 与历史复用同一份结果。"""
         budget = (self.max_tokens if control else self.budget(requested)) * 4
         result = replace(result)
-        if result.file_content is not None:
-            return self._file_result(result, budget)
+        if result.output_kind == 'exec':
+            result.original_token_count = self.estimate_tokens(result.text)
         if len(str(result).encode('utf-8')) <= budget:
             return result
         if control:
             return replace(ToolResult.failure('control_output_too_large', f'完整控制内容超过 {budget // 4} 近似 token，请缩短后重试'), end_turn=result.end_turn)
         text = result.text + ('\n\n[工具附加说明]\n' + result.annotations if result.annotations else '')
         result.annotations = ''
-        try:
-            result.artifact_path, complete = self._save_artifact(text, agent)
-            result.artifact_complete = complete and not result.truncated
-        except OSError as exc:
-            # 保存失败不能改变原命令的真实状态，也不能触发命令重跑。
-            result.artifact_error = f'日志保存失败（{type(exc).__name__}）；请定向查询，勿自动重跑有副作用的命令'
+        if result.output_kind != 'exec':
+            try:
+                artifact_path, complete = self._save_artifact(text, agent)
+                result.artifact_path = artifact_path
+                result.artifact_complete = complete and not result.truncated
+            except OSError as exc:
+                # 保存失败不能改变原工具的真实状态，也不能触发重跑。
+                result.artifact_error = f'日志保存失败（{type(exc).__name__}）；请定向查询，勿自动重跑有副作用的工具'
         result.truncated = True
         result.text = ''
         available = budget - len(str(result).encode('utf-8'))
         if available < 0:
             return ToolResult.failure('output_budget_too_small', '预算无法容纳结果元数据，请增大 max_output_tokens')
         result.text = _head_tail(text, available)
-        return result
-
-    @staticmethod
-    def _file_result(result, budget):
-        source = result.file_content
-        result.file_content = None
-        # Hook 的附加说明不混入源文件行号；最多使用本次预算的四分之一。
-        annotation = result.annotations
-        result.annotations = _head_tail(annotation, budget // 4)
-        annotation_truncated = result.annotations != annotation
-        start = {'offset': source.offset, 'column': source.column}
-
-        def position(line, column):
-            return {'offset': line, 'column': column}
-
-        def set_range(end, partial):
-            result.file_range = {
-                'path': source.path, 'total_lines': source.total_lines,
-                'start': start, 'end': end, 'eof': end['offset'] > source.total_lines,
-                'line_truncated': partial,
-            }
-            result.next_read = None if result.file_range['eof'] else end
-
-        # 全部可见时直接返回，包括源文件原始行结束符。
-        rendered = []
-        for index, line in enumerate(source.lines, source.offset):
-            column = source.column if index == source.offset else 0
-            prefix = f'{index}:{column} | ' if column else f'{index} | '
-            rendered.append(prefix + line[column:])
-        end = position(source.offset + len(source.lines), 0)
-        set_range(end, False)
-        result.text = ''.join(rendered)
-        result.truncated = annotation_truncated
-        if len(str(result).encode('utf-8')) <= budget:
-            return result
-
-        # 用最大可能游标预留元数据空间，正文只走一次线性字节裁剪。
-        max_column = max((len(line) for line in source.lines), default=0)
-        set_range(position(source.total_lines + 1, max_column), False)
-        result.file_range['eof'] = False
-        result.next_read = position(source.total_lines + 1, max_column)
-        result.truncated = True
-        result.text = ''
-        available = budget - len(str(result).encode('utf-8'))
-        chunks = []
-        end = start.copy()
-        partial = False
-        for index, (line, rendered_line) in enumerate(zip(source.lines, rendered), source.offset):
-            data = rendered_line.encode('utf-8')
-            if len(data) <= available:
-                chunks.append(rendered_line)
-                available -= len(data)
-                end = position(index + 1, 0)
-                continue
-            # 已有完整行就停在行边界。首行本身过长才使用行内游标。
-            if not chunks:
-                column = source.column
-                prefix = f'{index}:{column} | ' if column else f'{index} | '
-                piece = line[column:].encode('utf-8')[:max(0, available - len(prefix.encode()))].decode('utf-8', errors='ignore')
-                # CRLF 视作同一个行结束符，不能在其中间停住。
-                if piece.endswith('\r') and line[column + len(piece):].startswith('\n'):
-                    piece = piece[:-1]
-                if piece:
-                    chunks.append(prefix + piece)
-                    end = position(index, column + len(piece))
-                    partial = True
-            break
-        if not chunks:
-            return ToolResult.failure('output_budget_too_small', '预算无法容纳文件定位与正文，请增大 max_output_tokens')
-        set_range(end, partial)
-        result.text = ''.join(chunks)
         return result
