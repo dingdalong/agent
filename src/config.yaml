@@ -73,3 +73,8 @@ events:
 
 logging:
   level: info    # debug | info | warning | error
+
+# shell 留空使用系统账户 Shell；Linux 需要 Bubblewrap 0.11+（--bind-fd）与 libseccomp。
+shell:
+  shell: null
+  bubblewrap: null # 留空从 PATH 查找；配置时使用绝对路径

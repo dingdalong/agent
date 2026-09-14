@@ -372,7 +372,7 @@ def test_parallel_delegations_are_isolated(
 
     计划工作流允许同一轮并行委派多个 explore。若把"本次委派注入什么"存到进程级
     单例的槽位上，`asyncio.gather` 会让它们互相覆盖——这正是 PlanMgr 的
-    `_pending_injection` / `_reminder_mgr` 已经踩过的坑。注入点放在
+    共享提醒消费槽位已经踩过的坑。注入点放在
     task_delegator 的局部变量里天然免疫。
 
     Args:

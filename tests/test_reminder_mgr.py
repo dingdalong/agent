@@ -87,7 +87,6 @@ def test_real_providers_accept_new_signature(tmp_path: Path) -> None:
     mgr = ReminderMgr()
     plan_mgr = PlanMgr(tmp_path)
     task_mgr = TaskManager()
-    mgr.register(plan_mgr)
     mgr.register(task_mgr)
     # 造出 TaskManager 真正产出提醒的条件：有未完成任务且连续 3 轮未调用任务工具
     task_mgr.create("task 1", "desc 1")
@@ -98,7 +97,7 @@ def test_real_providers_accept_new_signature(tmp_path: Path) -> None:
     task_turn_start = mgr.build_turn_start_instructions(False, False)
     task_post_round = mgr.collect_post_round_messages(False, False)
 
-    assert _PLAN_SKILL_KEY in plan_turn_start
+    assert plan_turn_start == ""
     assert "当前任务列表" not in plan_turn_start  # Plan 模式静默任务提醒
     assert "当前任务列表" in task_turn_start
     assert task_post_round == [
@@ -106,16 +105,7 @@ def test_real_providers_accept_new_signature(tmp_path: Path) -> None:
     ]
 
 
-def test_identity_branch_through_reminder_mgr(tmp_path: Path) -> None:
-    """经中介调用真 PlanMgr 时身份一路传到指令生成：主 agent 拿主版、子 agent 拿子版。"""
+def test_plan_instructions_do_not_enter_user_history(tmp_path):
     mgr = ReminderMgr()
-    mgr.register(PlanMgr(tmp_path))
-
-    main_text = mgr.build_turn_start_instructions(True, False)
-    sub_text = mgr.build_turn_start_instructions(True, True)
-
-    assert main_text.startswith("<reminder>")
-    assert _PLAN_SKILL_KEY in main_text
-    assert _PLAN_SKILL_KEY not in sub_text
-    assert "不提交计划" in sub_text
-    assert main_text != sub_text
+    assert mgr.build_turn_start_instructions(True, False) == ""
+    assert mgr.collect_post_round_messages(True, False) == []

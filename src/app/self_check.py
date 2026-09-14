@@ -113,6 +113,22 @@ def _check_tiktoken() -> dict[str, Any]:
     return {"ok": ok, "encodings": results, "available": len(tiktoken.list_encoding_names())}
 
 
+def _check_sandbox(workdir: Path) -> dict[str, Any]:
+    """在产物内真实安装策略；不把依赖存在误报为隔离可用。"""
+    from src.mgr.frozen import clean_env
+    from src.mgr.sandbox import ExecutionPolicy, SandboxBackend, SandboxError
+    backend = SandboxBackend()
+    workdir = workdir.resolve()
+    if backend.system not in {'Darwin', 'Linux'}:
+        return {"ok": True, "supported": False, "reason": "Shell 仅支持 macOS/Linux"}
+    try:
+        with backend.prepare(ExecutionPolicy('exit 0', workdir, workdir), clean_env()):
+            pass
+        return {"ok": True, "supported": True, "backend": backend.system}
+    except (SandboxError, OSError) as exc:
+        return {"ok": False, "supported": True, "reason": str(exc)}
+
+
 def run_self_check() -> int:
     """执行全部自检项并把结果以 JSON 打到 stdout。
 
@@ -124,6 +140,7 @@ def run_self_check() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         workdir = Path(tmp)
         checks: dict[str, Any] = {
+            "sandbox": _check_sandbox(workdir),
             "tools": _check_tools(),
             "commands": _check_commands(workdir),
             "resources": _check_resources(),

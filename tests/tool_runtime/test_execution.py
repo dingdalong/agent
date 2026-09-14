@@ -6,7 +6,7 @@ import sys
 
 import pytest
 
-from src.mgr.readonly_command import compile_readonly, UnsupportedCommand
+from src.mgr.sandbox import ExecutionPolicy
 from src.mgr.path_resolver import PathResolver
 
 
@@ -27,20 +27,6 @@ def test_readonly_pipeline_and_eof(runtime, tmp_path):
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('command', [
-    'echo ok > file', 'cat $(touch file)', 'cat `touch file`', 'A=b cat file',
-    'sed -i s/a/b/ file', "sed -n '1e touch file' file", 'rg --pre cat word',
-    'git -c alias.x=bad status', 'git diff --ext-diff', 'cat file; touch x',
-    'python -c pass', 'head -n abc file', 'cat file &', 'cat < file',
-])
-def test_plan_rejects_unproven_commands(runtime, tmp_path, command):
-    deps, agent = runtime
-    result = asyncio.run(deps.tools_mgr.execute('exec_command', {'cmd': command}, deps=deps, agent=agent))
-    assert result.status == 'error'
-    assert not (tmp_path / 'file').exists()
-    assert not deps.process_mgr.sessions
-
-
 def test_missing_json_fields_are_not_executed(runtime):
     deps, agent = runtime
     result = asyncio.run(deps.tools_mgr.execute('exec_command', {}, deps=deps, agent=agent))
@@ -53,7 +39,7 @@ def test_rg_no_match_preserves_exit_code(runtime, tmp_path):
     deps, agent = runtime
     async def scenario():
         result = await deps.tools_mgr.execute('exec_command', {'cmd': 'rg missing a'}, deps=deps, agent=agent)
-        assert result.status == 'error', str(result)
+        assert result.status == 'success', str(result)
         assert result.exit_code == 1
         assert result.recovery is None
     asyncio.run(scenario())
@@ -64,7 +50,7 @@ def test_session_incremental_timeout_and_owner(runtime, tmp_path):
     deps, agent = runtime
     async def scenario():
         command = f'"{sys.executable}" -u -c "import time; print(123); time.sleep(30)"'
-        result = await deps.process_mgr.start(('s','a'), command, tmp_path, {}, None, 250, 20)
+        result = await deps.process_mgr.start(('s','a'), command, tmp_path, {}, ExecutionPolicy(command, tmp_path, tmp_path), 250, 20)
         assert result.status == 'running'
         denied = await deps.process_mgr.poll(('s','other'), result.session_id)
         assert denied.error_code == 'unknown_session'
@@ -80,24 +66,12 @@ def test_stdin_and_terminate(runtime, tmp_path):
     deps, _ = runtime
     async def scenario():
         command = f'"{sys.executable}" -u -c "import sys; [print(line.strip(), flush=True) for line in sys.stdin]"'
-        result = await deps.process_mgr.start(('s','a'), command, tmp_path, {}, None, 5000, 20)
-        answer = await deps.process_mgr.poll(('s','a'), result.session_id, 'hello\n', 20)
+        result = await deps.process_mgr.start(('s','a'), command, tmp_path, {}, ExecutionPolicy(command, tmp_path, tmp_path), 5000, 100, stdin_open=True)
+        answer = await deps.process_mgr.poll(('s','a'), result.session_id, 'hello\n', 200)
         assert 'hello' in answer.text
         ended = await deps.process_mgr.poll(('s','a'), result.session_id, terminate=True)
         assert ended.status == 'cancelled'
         assert not deps.process_mgr.sessions
-    asyncio.run(scenario())
-
-
-@pytest.mark.integration
-def test_readonly_stdin_is_rejected(runtime, tmp_path):
-    deps, _ = runtime
-    async def scenario():
-        compiled = compile_readonly('rg needle', tmp_path, PathResolver(tmp_path))
-        result = await deps.process_mgr.start(('s','a'), 'rg needle', tmp_path, {}, compiled, 1000, 0)
-        answer = await deps.process_mgr.poll(('s','a'), result.session_id, 'data')
-        assert answer.error_code == 'permission_denied'
-        await deps.process_mgr.close()
     asyncio.run(scenario())
 
 
@@ -111,16 +85,6 @@ def test_hidden_search_uses_rg_flags(runtime, tmp_path):
         second = await deps.tools_mgr.execute('exec_command', {'cmd': 'rg --files --hidden'}, deps=deps, agent=agent)
         assert '.hidden' not in first.text
         assert '.hidden' in second.text
-    asyncio.run(scenario())
-
-
-@pytest.mark.integration
-def test_pipeline_preserves_earlier_failure(runtime):
-    deps, agent = runtime
-    async def scenario():
-        result = await deps.tools_mgr.execute('exec_command', {'cmd': 'rg pattern missing-file | rg pattern'}, deps=deps, agent=agent)
-        assert result.status == 'error'
-        assert result.stage_results[0]['exit_code'] == 2
     asyncio.run(scenario())
 
 

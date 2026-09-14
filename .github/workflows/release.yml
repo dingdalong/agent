@@ -29,6 +29,16 @@ jobs:
         with:
           enable-cache: true
 
+      - name: Linux 沙箱依赖
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libseccomp2 meson ninja-build pkg-config libglib2.0-dev libcap-dev
+          git clone --depth 1 --branch v0.11.0 https://github.com/containers/bubblewrap.git "$RUNNER_TEMP/bubblewrap"
+          meson setup "$RUNNER_TEMP/bubblewrap/build" "$RUNNER_TEMP/bubblewrap" --prefix=/usr/local -Dtests=false
+          ninja -C "$RUNNER_TEMP/bubblewrap/build"
+          sudo ninja -C "$RUNNER_TEMP/bubblewrap/build" install
+
       - name: 安装依赖
         run: uv sync --extra dev
 
@@ -42,7 +52,11 @@ jobs:
         run: uv run pytest tests/packaging -m packaging -q
 
       - name: 单元测试
-        run: uv run pytest tests -q -m "not packaging"
+        run: uv run pytest tests -q
+
+      - name: Shell 沙箱集成测试
+        if: runner.os != 'Windows'
+        run: uv run pytest tests/tool_runtime -m integration -q
 
       - uses: actions/upload-artifact@v4
         with:

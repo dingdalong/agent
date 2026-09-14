@@ -9,7 +9,10 @@ from src.mgr.file_mgr import FileMgr
 
 
 @pytest.fixture
-def runtime(tmp_path):
+def runtime(tmp_path, request):
+    import sys
+    if sys.platform == "win32" and request.node.get_closest_marker("integration"):
+        pytest.skip("真实 Shell 沙箱仅支持 macOS/Linux")
     guard = DataGuard({'test': 'sentinel-secret'})
     deps = SimpleNamespace(session_id='session', workdir=tmp_path, data_guard=guard,
         config_mgr=SimpleNamespace(environment={}), hooks_mgr=None, event_bus=None,

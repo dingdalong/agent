@@ -1,4 +1,4 @@
-"""Codex 风格文本补丁：先验证所有文件，再提交经过授权的变更。"""
+"""先验证所有文件，再提交经过授权的变更。"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field

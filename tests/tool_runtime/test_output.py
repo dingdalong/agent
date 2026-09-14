@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from src.mgr.sandbox import ExecutionPolicy
 
 from src.mgr.tool_output import ToolOutput
 from src.tools.display import ToolResult
@@ -88,13 +89,14 @@ def test_config_budget_is_used_and_invalid_override_never_executes(runtime):
     asyncio.run(scenario())
 
 
+@pytest.mark.integration
 def test_process_increment_artifact_survives_command_completion(runtime):
     import sys
     deps, agent = runtime
     async def scenario():
         owner = (deps.session_id, str(agent.uuid))
         command = f'"{sys.executable}" -c "print(\'sentinel-secret\' * 5000)"'
-        started = await deps.process_mgr.start(owner, command, deps.workdir, {}, None, 5000, 0)
+        started = await deps.process_mgr.start(owner, command, deps.workdir, {}, ExecutionPolicy(command, deps.workdir, deps.workdir), 5000, 0)
         result = await deps.tools_mgr.execute('write_stdin', {'session_id': started.session_id, 'yield_time_ms': 3000}, deps=deps, agent=agent)
         assert result.status == 'success', str(result)
         assert not deps.process_mgr.sessions

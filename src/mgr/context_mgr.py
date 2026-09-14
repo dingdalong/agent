@@ -21,7 +21,7 @@
    ReminderMgr 的 provider 只收 `(plan_active, is_subagent)`，拿不到本次委派信息；
    要支持按委派过滤就得在进程级单例上存槽位，而计划工作流允许同一轮并行委派多个
    explore，`asyncio.gather` 会互相覆盖——这正是 PlanMgr 已知缺陷
-   （`_pending_injection` 被抢先消费、`_reminder_mgr` 单槽位被覆盖）的同一个坑。
+   （提醒被抢先消费、所有者被覆盖）的同一个坑。
 3. **落盘必须由本 Manager 用 Python 直接写，不能改成 `apply_patch` 工具。**
    `PathResolver` 把 `.agent` 列为 protected → `.agent/context/**` 是
    `PathClass.PROTECTED`；而 plan 模式下 `PermissionManager._authorize_plan()`

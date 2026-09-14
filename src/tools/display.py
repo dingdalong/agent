@@ -41,7 +41,6 @@ class ToolResult:
     error_code: str | None = None
     error_details: dict | None = None
     recovery: str | None = None
-    stage_results: list[dict] | None = None
     exit_code: int | None = None
     session_id: str | None = None
     artifact_path: str | None = None
@@ -60,7 +59,6 @@ class ToolResult:
             key: value for key, value in {
                 "status": self.status, "error_code": self.error_code,
                 "error_details": self.error_details, "recovery": self.recovery,
-                "stage_results": self.stage_results,
                 "exit_code": self.exit_code, "session_id": self.session_id,
                 "artifact_path": self.artifact_path, "artifact_complete": self.artifact_complete,
                 "artifact_error": self.artifact_error,

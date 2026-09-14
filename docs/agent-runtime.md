@@ -195,3 +195,9 @@ handler 映射在 `Agent.__post_init__` 建立（`src/agent/agent.py:236-250`）
 ## 9. Plan 状态协调
 
 `PlanModeController` 只作用于入口主 Agent。Shift+Tab 调用 `toggle()`，直接翻转 `agent.plan_active`、刷新 UI 并发布 `PlanStateChanged`。切换不重建工具 schema，退出 Plan 也不清除活动计划路径。子 Agent 构造时继承父 Agent 当前 Plan 状态；调用时安全边界由 `PermissionManager.authorize()` 独立执行。
+
+## 规划指令的生命周期
+
+Agent.plan_active 是模式权威，PlanMgr 管理切换和计划持久化。PromptMgr 在当前系统提示段提供规划正文，正文由已加载的 plan-workflow 技能提供；子 agent 只收到委派边界。模式切换刷新工具 schema 与提示缓存，规划指令不经 ReminderMgr 追加到用户历史。压缩或恢复后从当前模式重新组装，不依赖旧提醒仍在上下文。
+
+规划先定位入口，发现影响目标的歧义时澄清，再补齐关键行为、状态所有者、接口变化、失败路径及验收场景。计划允许沙箱内受限验证；关键决策完整即可 submit_plan，不预先实现普通测试夹具或逐文件代码。

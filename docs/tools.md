@@ -6,7 +6,7 @@
 
 调用链：阶段与 agent 可用性校验 → 参数对象/未知字段校验 → PreToolUse → 重验参数 → PermissionManager.authorize → 工具执行 → DataGuard 脱敏 → PostToolUse → 脱敏与单次预算 → ToolCallCompleted → 历史消息。MCP 参数按上游 schema 校验。未知工具、非法 JSON、授权失败、执行错误均返回明确状态；调用方不能从正文前缀推断失败。
 
-`ToolResult` 的模型表示为 JSON 元数据行加正文，字段为 `status`（success/error/running/cancelled）、`error_code`、`exit_code`、`session_id`、`artifact_path`、`artifact_complete`、`artifact_error`、`file_range`、`next_read`、`truncated`、`error_details`、`recovery`、`stage_results`。`display` 只供 UI 消费；`end_turn` 控制调度器结束回合。取消补齐未完成调用结果，并保留已完成的证据。执行错误不自动重试有副作用的工具。
+`ToolResult` 的模型表示为 JSON 元数据行加正文，字段为 `status`（success/error/running/cancelled）、`error_code`、`exit_code`、`session_id`、`artifact_path`、`artifact_complete`、`artifact_error`、`file_range`、`next_read`、`truncated`、`error_details`、`recovery`。`display` 只供 UI 消费；`end_turn` 控制调度器结束回合。取消补齐未完成调用结果，并保留已完成的证据。执行错误不自动重试有副作用的工具。
 
 工具 schema 与执行使用同一 modes 定义。Plan 隐藏 apply_patch、全部 task_* 和 save_memory；执行模式隐藏 submit_plan。切换时刷新 schema 与提示词缓存，子 agent 继承阶段并叠加自身工具和 feature 限制。注册名称冲突直接报错。Pydantic schema 同时用于 JSON 参数验证，嵌套参数拒绝未声明字段，显式字典保留其键空间。
 
@@ -16,8 +16,8 @@
 
 | 工具 | 参数及契约 |
 |---|---|
-| `exec_command` | cmd、workdir、yield_time_ms、timeout_ms、max_output_tokens。等待上限 30 秒，执行超时上限 600 秒；尚未结束返回 session_id。 |
-| `write_stdin` | session_id、chars、yield_time_ms、max_output_tokens、terminate。消费增量输出；只读命令和 Plan 不接收 stdin，terminate 与非空 chars 互斥。session_id 仅在运行时返回，结束后再次轮询返回 unknown_session。 |
+| `exec_command` | cmd、workdir、yield_time_ms、timeout_ms、max_output_tokens、stdin_open、additional_permissions、justification。等待上限 30 秒，执行超时上限 600 秒；尚未结束返回 session_id。 |
+| `write_stdin` | session_id、chars、yield_time_ms、max_output_tokens、terminate。消费增量输出；仅 stdin_open=true 的进程接收 stdin，权限保持创建时的范围，terminate 与非空 chars 互斥。session_id 仅在运行时返回，结束后再次轮询返回 unknown_session。 |
 | `read_file` | path、offset（1 起始）、column（行内字符位置，0 起始）、limit（可选源行数上限）、max_output_tokens。省略范围时从开头读到预算或 EOF；普通文本单文件上限 8 MiB。 |
 | `apply_patch` | patch。Begin/End Patch 包裹 Add/Update/Delete File，可选 Move to 与 EOF 锚点；上下文必须唯一。先计算全部文本变更、复验授权，再原子替换每个文件。多文件 I/O 失败返回已完成清单，不声称全局事务回滚。 |
 | `submit_plan` | title、content。一次保存完整计划、展示和审核；auto 批准后续执行，manual/取消结束当前回合，修改意见返回模型。保存位置受 PlanMgr 控制。 |
@@ -26,9 +26,13 @@
 
 ## 命令授权与生命周期
 
-只读命令先完整编译 AST，再执行 argv。支持普通命令、管道、&&、分号与换行、开头 cd、Git 子命令前的 -C 目录参数、未引用路径通配符，以及 2>/dev/null、2>&1、1>&2。词法解码保留双引号内正则反斜杠；路径展开前后均校验。重定向保留从左到右的描述符复制语义，禁止文件写入、变量与命令替换、后台执行以及未登记命令。白名单集中在 readonly_command.py，Git 禁用外部 diff/textconv、配置和分页器。无法证明只读时 Plan 返回 invalid_syntax（解析失败）或 policy_unsupported（只读策略不支持），并明确命令未执行；执行模式走既有一般授权。此解析器不是操作系统沙箱。
+命令由 PermissionManager 生成绑定 cmd/workdir 的 ExecutionPolicy，SandboxBackend 安装系统限制后运行真实非登录 Shell。macOS 使用 Seatbelt；Linux 使用 Bubblewrap 与 libseccomp。变量、函数、管道、命令替换与重定向由 Shell 自身解释。默认 stdin 关闭，需要后续输入时显式 stdin_open=true；不分配 PTY。
 
-命令链 exit_code 保留最终执行管道末阶段的真实退出码，status 按该退出码判断；stage_results 只记录阶段序号、程序名称和真实退出码。上游非零退出、rg 无匹配、SIGPIPE 等不做语义解释，不覆盖最终状态。分号继续执行，&& 依据上一管道末阶段退出码决定是否执行。外部程序原始正文不添加诊断或恢复建议；脱敏、预算、artifact 与 Hook 附加内容仍分开标识。内置工具可显式说明自身参数、授权与生命周期契约，不按错误码自动注入模板。
+正常执行完成返回 success 与实际 exit_code，包括非零退出；不额外设置 pipefail，不输出阶段退出码。error_code 仅描述授权、沙箱安装、启动、超时和取消等框架状态。先用独立空命令探测沙箱，避免从用户程序 stderr 猜测沙箱错误。程序正文不添加专项诊断、恢复建议或自动重试；脱敏、预算、artifact 与 Hook 内容继续独立处理。
+
+Plan 只可写专用临时目录，执行模式另可写工作区。additional_permissions 可申请本次进程的额外可写目录和网络，须提供 justification 并通过现有审核；Plan 不允许扩权。默认网络关闭，网络授权不开放宿主 Unix socket。沙箱缺失或安装失败返回 sandbox_unavailable / sandbox_setup_failed，绝不回退无沙箱执行。shell.shell 选择绝对路径，留空使用账户 Shell；shell.bubblewrap 留空时从 PATH 查找。
+
+临时目录、缓存与随包 rg 的独立 bin 随进程回收，不修改 HOME。Shell 或验证程序若硬编码写入系统 /tmp 或项目缓存，需显式改用 TMPDIR；沙箱不会自动扩大写权限。Linux 的挂载保护针对已存在控制路径，不能表达“禁止未来创建某个文件名”；macOS 可限制尚不存在的控制目录。路径外的写入、已有保护目录及宿主服务访问仍由系统隔离执行。
 
 ProcessMgr 是进程会话与工作区租约的唯一所有者，bootstrap 创建、AgentApp 在中断/clear/resume/关闭时回收，子 agent 结束时只回收自身进程。会话按应用会话 ID 与 agent UUID 隔离；最多 32 个进程会话，单会话未消费缓冲上限 1 MiB。进程不跨重启恢复，不分配 PTY。子进程使用 clean_env 与脱敏环境，超时/取消终止整个进程组。
 
@@ -40,7 +44,7 @@ sequenceDiagram
     participant P as ProcessMgr
     A->>T: 同轮独立读调用
     T->>W: 获取读租约（允许并发）
-    T->>P: 启动只读命令
+    T->>P: 启动受限沙箱进程
     P-->>A: running + session_id
     Note over P,W: 命令执行期间保留租约
     A->>T: 文件修改（调度屏障）

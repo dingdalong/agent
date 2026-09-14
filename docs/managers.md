@@ -45,7 +45,7 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 | `McpMgr` (`mcp_mgr.py`) | 连接 MCP server、注册其工具 | 否 | 无（编辑需重启） |
 | `MemoryMgr` (`memory_mgr.py`) | 项目记忆的加载/构建/读写 | `memory` | 有 |
 | `ContextMgr` (`context_mgr.py`) | 跨 agent 共享上下文账本的记账、渲染与追加落盘 | `subagent` | 有 |
-| `PlanMgr` (`plan_mgr.py`) | 计划模式切换与 plan 指令注入 | `plan`（依赖 `file`） | 有 |
+| `PlanMgr` (`plan_mgr.py`) | 计划模式切换与当前指令组装 | `plan`（依赖 `file`） | 无 |
 | `FileMgr` (`file_mgr.py`) | 工作区文件读写/搜索（同步阻塞） | `file` | 无 |
 | `TaskManager` (`task_mgr.py`) | 任务 CRUD、依赖、持久化、提醒 | `task` | 无 |
 | `SessionMgr` (`session_mgr.py`) | 会话元数据/SessionState 持久化与恢复 | 否 | 无 |
@@ -366,7 +366,7 @@ MCP 连接配置和授权边界见 [mcp-and-hooks.md](mcp-and-hooks.md)。
 **三条设计约束**（改这块前必读）：
 
 1. **注入载体只能是子 agent 的首条 user 消息，绝不能进 system prompt。** Anthropic 把整个 system 包成单个 ephemeral 缓存断点（`src/llm/anthropic.py:_system_blocks`），断点覆盖 tools+system 整个前缀；账本是动态的，进 system 会让一个 coder 约 8-15k token 的前缀每次委派全部 miss。
-2. **注入点是 `SubAgentMgr.task_delegator` 而非 `ReminderMgr`。** ReminderMgr 的 provider 只收 `(plan_active, is_subagent)`，拿不到本次委派信息；按委派过滤就得在进程级单例上存槽位，而计划工作流允许同一轮并行委派多个 `explore`，`asyncio.gather` 会互相覆盖——PlanMgr 的 `_pending_injection` / `_reminder_mgr` 已经踩过同一个坑。
+2. **注入点是 `SubAgentMgr.task_delegator` 而非 `ReminderMgr`。** ReminderMgr 的 provider 只收 `(plan_active, is_subagent)`，拿不到本次委派信息；按委派过滤就得在进程级单例上存槽位，而计划工作流允许同一轮并行委派多个 `explore`，`asyncio.gather` 会互相覆盖——共享消费槽位会产生同样的竞态。
 3. **落盘必须由本 Manager 直接写，不能改成 `apply_patch` 工具。** `.agent` 被 `PathResolver` 归为 protected，`.agent/context/**` 因此是 `PathClass.PROTECTED`；而 plan 模式下 `PermissionManager._authorize_plan()` 拒绝通用文件写入，走 `apply_patch` 必被拒——plan 模式恰是本机制最痛的场景。触发它的工具（`task_delegator`、`note_context`）声明 `INTERNAL + plan_safe=True`，与 `save_memory` 同构。
 
 **生命周期语义**：`/clear` 走 `reload()` 清内存、磁盘旧文件保留供排查，新会话按新 `session_id` 另开文件。**resume 不恢复账本**——恢复的历史里主 agent 已带着全部工具结果，账本只服务后续新委派，这是刻意设计不是遗漏。
@@ -379,7 +379,7 @@ MCP 连接配置和授权边界见 [mcp-and-hooks.md](mcp-and-hooks.md)。
 
 ## PlanMgr、FileMgr 与工具运行时
 
-`PlanMgr` 管理模式提醒与受控计划保存。`save(content, previous)` 原子写入 `.agent/plans/`，审核状态和路径保存在 `SessionState.plan`。`agent.plan_active` 是模式状态权威，授权由 PermissionManager 执行。
+`PlanMgr` 管理模式切换、当前指令正文与受控计划保存。正文由 PromptMgr 注入系统段，不追加到用户历史。`save(content, previous)` 原子写入 `.agent/plans/`，审核状态和路径保存在 `SessionState.plan`。`agent.plan_active` 是模式状态权威，授权由 PermissionManager 执行。
 
 `FileMgr.read_file(path, authorization, offset, column, limit)` 负责经复验的有界读取。补丁文本计算与提交在 `patch.py`；进程生命周期与工作区读写租约在 `ProcessMgr`；一次输出整理及临时日志归 `ToolOutput`。管理器均在 bootstrap 组装，流程与接口见 [tools.md](tools.md)。
 
@@ -541,7 +541,7 @@ hook 协议、JSON 字段与插件 `CLAUDE_PLUGIN_ROOT` 环境变量见 [mcp-and
 
 `src/mgr/reminder_mgr.py`
 
-**单一职责**：作为中介，在 agent 运行循环的三处时机统一向已注册的提醒源（`PlanMgr`、`TaskManager`）收集提醒，用 `<reminder>` 标签包装后交给状态机注入。提醒源通过 duck typing 识别（实现哪个接口方法就在对应时机被调用）。
+**单一职责**：作为中介，在 agent 运行循环的三处时机统一向已注册的提醒源（如 `TaskManager`）收集提醒，用 `<reminder>` 标签包装后交给状态机注入。提醒源通过 duck typing 识别（实现哪个接口方法就在对应时机被调用）。
 
 **公共方法**：
 

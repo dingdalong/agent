@@ -272,7 +272,7 @@ class AgentApp:
                             bool(getattr(config_mgr, "project_trusted", False)),
                         )
 
-                    for attr in ("memory_mgr", "tools_mgr", "plan_mgr", "context_mgr", "ui"):
+                    for attr in ("memory_mgr", "tools_mgr", "context_mgr", "ui"):
                         mgr = getattr(self.deps, attr, None)
                         if mgr is not None and hasattr(mgr, "reload"):
                             if attr == "tools_mgr":

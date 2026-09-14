@@ -195,3 +195,9 @@ uv run pytest tests/test_foo.py      # 运行单个测试文件
 ## 深入参考
 
 完整的面向人的技术文档见 [`docs/`](docs/README.md)（架构、运行时、配置参考、权限、角色/子智能体/技能、MCP 与 Hooks 等）。
+
+### Shell 沙箱依赖
+
+macOS 使用系统 `/usr/bin/sandbox-exec`；Linux 需安装 支持 `--bind-fd` 的 Bubblewrap 0.11+、`libseccomp2` 并允许 user namespace，例如 Debian/Ubuntu：`sudo apt-get install bubblewrap libseccomp2`。发行版仓库版本低于 0.11 时需先升级 Bubblewrap。用 `agent --self-check` 验证实际隔离能力。Windows 可使用其他功能，但 Shell 工具不执行命令；所有平台均不会自动无沙箱回退。
+
+默认本地文件可读，网络关闭；计划阶段仅临时目录可写，执行阶段另可写工作区。需要网络或额外目录时通过单次工具扩权审核。自定义 Shell 与 Bubblewrap 路径见配置 `shell` 节。

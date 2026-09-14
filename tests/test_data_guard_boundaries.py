@@ -18,6 +18,7 @@ from src.mgr.session_mgr import SessionMgr
 from src.mgr.session_state import SessionState
 from src.mgr.task_mgr import TaskManager
 from src.mgr.process_mgr import ProcessMgr
+from src.mgr.sandbox import ExecutionPolicy
 
 
 SECRET = "sentinel-secret-value"
@@ -118,6 +119,7 @@ def test_hook_output_is_redacted_but_trusted_pretool_update_stays_raw(tmp_path):
     ))
 
 
+@pytest.mark.integration
 def test_shell_timeout_reaps_background_process_group(tmp_path):
     deps = SimpleNamespace(
         workdir=tmp_path,
@@ -128,7 +130,7 @@ def test_shell_timeout_reaps_background_process_group(tmp_path):
 
     async def scenario():
         manager = ProcessMgr()
-        result = await manager.start(('test', 'main'), 'sleep 30 &', tmp_path, {}, None, 100, 1000)
+        result = await manager.start(('test', 'main'), 'sleep 30 &', tmp_path, {}, ExecutionPolicy('sleep 30 &', tmp_path, tmp_path), 100, 1000)
         await manager.close()
         return result
 

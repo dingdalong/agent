@@ -243,7 +243,7 @@ class Agent:
         self._reminder_mgr = ReminderMgr()
         if self.plan_active and self.deps.plan_mgr is not None:
             self.plan_active = False
-            self.deps.plan_mgr.enter_mode(self, self._reminder_mgr)
+            self.deps.plan_mgr.enter_mode(self)
         if self._task_mgr is not None:
             self._reminder_mgr.register(self._task_mgr)
         self._handlers = {
@@ -366,9 +366,9 @@ class Agent:
         if active == self.plan_active:
             return False
         if active and plan_mgr is not None:
-            return plan_mgr.enter_mode(self, self._reminder_mgr)
+            return plan_mgr.enter_mode(self)
         if not active and plan_mgr is not None:
-            return plan_mgr.exit_mode(self, self._reminder_mgr)
+            return plan_mgr.exit_mode(self)
         self.plan_active = active
         self.refresh_tools_schemas()
         return True
@@ -1062,7 +1062,6 @@ class Agent:
     async def _on_execute_tools(self, ctx: RunContext) -> AgentState:
         """并发独立读取；修改和交互形成屏障。取消保留已完成调用结果。"""
         from src.tools.display import ToolResult
-        from src.mgr.readonly_command import compile_readonly
         ctx.has_tool_calls = True
         ctx.manual_compact = False
         ctx.compact_focus = None
@@ -1093,13 +1092,8 @@ class Agent:
                 return False
             if tc["name"] != "exec_command":
                 return tool.parallel
-            try:
-                args = json.loads(tc["arguments"])
-                resolver = self.deps.permission_mgr.path_resolver
-                await asyncio.to_thread(compile_readonly, args["command"], resolver.resolve(args.get("workdir")), resolver)
-                return True
-            except (ValueError, TypeError, KeyError, AttributeError):
-                return False
+            # Plan 沙箱不能写工作区；实际权限仍由工具入口独立授权。
+            return self.plan_active
 
         async def flush(batch):
             tasks = [asyncio.create_task(run_one(tc)) for tc in batch]

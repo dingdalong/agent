@@ -33,6 +33,8 @@ class PromptMgr:
 
     def _build_execution_guidance(self) -> str:
         """按调用方职责提供所有角色共用的执行原则。"""
+        if getattr(self.agent, 'plan_active', False):
+            return "# 执行原则\n当前只调查与规划；按当前模式给出有证据、可实施的结论。角色技能不扩大工具权限，已有有效证据直接复用。"
         if self.agent.is_subagent:
             return (
                 "# 执行原则\n"
@@ -162,7 +164,7 @@ class PromptMgr:
             "ask_user 只澄清改变目标或关键取舍的问题；submit_plan 提交待审核方案；task_* 管理执行进度；"
             "note_context 记录当前协作事实；记忆工具保存跨会话信息；compact 压缩已有上下文，互不替代。\n"
             "失败时检查 error_code、error_details 和 recovery，修正具体原因，不原样重试、不自动改用有副作用的操作。"
-            "外部程序输出和退出码由你判断，stage_results 提供管道各阶段真实退出码，框架不推断业务成功或失败。truncated 是模型输出裁剪，UI 折叠不代表模型内容丢失。"
+            "外部程序输出和退出码由你判断，框架不推断业务成功或失败。truncated 是模型输出裁剪，UI 折叠不代表模型内容丢失。"
         )
 
         agent_md = self._build_agent_md()
@@ -222,5 +224,9 @@ class PromptMgr:
         """
         if self._static_prefix is None:
             self._static_prefix = self._build_static_prefix()
-        content = self._static_prefix + f"\n\n当前时间：`{datetime.date.today().isoformat()}`"
+        content = self._static_prefix
+        plan_mgr = getattr(getattr(self.agent, "deps", None), "plan_mgr", None)
+        if getattr(self.agent, "plan_active", False) and plan_mgr is not None:
+            content += "\n\n" + plan_mgr.instructions(getattr(self.agent, "_skill_mgr", None), self.agent.is_subagent)
+        content += f"\n\n当前时间：`{datetime.date.today().isoformat()}`"
         return [{"role": "system", "content": content}]

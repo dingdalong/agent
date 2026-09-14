@@ -39,7 +39,7 @@ async def submit_plan(title, content, agent, deps, authorization):
     )
     if choice in {'auto', 'manual'} and not feedback.strip():
         state['approved'] = True
-        deps.plan_mgr.exit_mode(agent, agent._reminder_mgr)
+        deps.plan_mgr.exit_mode(agent)
     if deps.session_mgr is not None and deps.session_state is not None:
         await asyncio.to_thread(deps.session_mgr.save_state, deps.session_id, deps.session_state)
     if feedback.strip():

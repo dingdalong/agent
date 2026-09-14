@@ -46,7 +46,7 @@ class ToolOutput:
 
     @staticmethod
     def estimate_tokens(text):
-        """与 Codex 输出预算一致；近似值不能当作 API usage。"""
+        """近似值不能当作 API usage。"""
         return (len(text.encode('utf-8')) + 3) // 4
 
     def budget(self, requested=None):

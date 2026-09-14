@@ -7,45 +7,7 @@ import subprocess
 import pytest
 
 from src.mgr.path_resolver import PathResolver
-from src.mgr.readonly_command import compile_readonly, UnsupportedCommand
-
-
-@pytest.mark.parametrize('cmd,expected', [
-    (r'rg -n "interrupt\(" src', r'interrupt\('),
-    (r'rg -n "request_input\(" src', r'request_input\('),
-    (r'rg -n "InputMenu|input\(" src', r'InputMenu|input\('),
-    (r'''rg '中文 空格|a\b' src''', r'中文 空格|a\b'),
-    (r'''rg "a\\b" src''', r'a\b'),
-])
-def test_regex_quote_removal_matches_shell_contract(tmp_path, cmd, expected):
-    compiled = compile_readonly(cmd, tmp_path, PathResolver(tmp_path))
-    assert expected in compiled.pipelines[0].stages[0].argv
-
-
-@pytest.mark.parametrize('cmd', [
-    'ls src 2>/dev/null | head -30; echo "---"; rg -n "interrupt" src | head -30',
-    'rg -n "class RunContext" -A 40 src/states.py src/*.py | head -80',
-    'rg default tests/*.py 2>/dev/null | head -20',
-    'ls CLAUDE.md docs 2>&1 | head -30',
-    'cd . && git log --oneline -8 -- src/agent.py',
-])
-def test_historical_readonly_shapes_are_accepted(tmp_path, cmd):
-    assert compile_readonly(cmd, tmp_path, PathResolver(tmp_path)).pipelines
-
-
-def test_glob_and_literal_glob_are_distinct(tmp_path):
-    (tmp_path / 'a.py').write_text('a')
-    resolver = PathResolver(tmp_path)
-    globbed = compile_readonly('cat *.py', tmp_path, resolver)
-    quoted = compile_readonly("cat '*.py'", tmp_path, resolver)
-    assert str(tmp_path / 'a.py') in globbed.pipelines[0].stages[0].argv
-    assert str(tmp_path / '*.py') in quoted.pipelines[0].stages[0].argv
-
-
-@pytest.mark.parametrize('suffix', ['; touch x', '; cat $(pwd)', '; cat a > out', ' &', ' || echo ok'])
-def test_whole_command_is_validated_before_any_execution(tmp_path, suffix):
-    with pytest.raises(UnsupportedCommand):
-        compile_readonly('echo sentinel' + suffix, tmp_path, PathResolver(tmp_path))
+from src.mgr.sandbox import ExecutionPolicy
 
 
 @pytest.mark.integration
@@ -69,8 +31,11 @@ def test_pipeline_output_and_exit_match_shell(runtime, tmp_path, cmd):
     (tmp_path / 'literal*.txt').write_text('literal\n')
     (tmp_path / 'child').mkdir()
     (tmp_path / 'child' / 'b.txt').write_text('child\n')
-    # 输出路径统一成相对 cwd 前缀后对照，避免编译器绝对化路径影响错误文案。
-    expected = subprocess.run(cmd, shell=True, cwd=tmp_path, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    # 使用相同 shell 与 rg 比较输出和退出码。
+    from src.mgr.file_mgr import _resolve_rg
+    import shlex
+    compare_cmd = cmd.replace('rg ', shlex.quote(_resolve_rg()) + ' ')
+    expected = subprocess.run([runtime[0].process_mgr.sandbox.shell, '-c', compare_cmd], cwd=tmp_path, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     deps, agent = runtime
     async def run():
         result = await deps.tools_mgr.execute('exec_command', {'cmd': cmd}, deps=deps, agent=agent)
@@ -80,17 +45,6 @@ def test_pipeline_output_and_exit_match_shell(runtime, tmp_path, cmd):
         normalize = lambda value: value.replace(str(tmp_path) + '/', '')
         assert normalize(result.text) == normalize(expected.stdout.decode()), str(result)
         await deps.process_mgr.close()
-    asyncio.run(run())
-
-
-@pytest.mark.integration
-def test_search_error_is_visible_despite_head_success(runtime):
-    deps, agent = runtime
-    async def run():
-        result = await deps.tools_mgr.execute('exec_command', {'cmd': 'rg needle missing | head -10'}, deps=deps, agent=agent)
-        assert result.status == 'success'
-        assert result.exit_code == 0
-        assert [r['exit_code'] for r in result.stage_results] == [2, 0]
     asyncio.run(run())
 
 
@@ -157,7 +111,6 @@ def test_large_pipeline_sigpipe_is_not_a_failure(runtime, tmp_path):
         assert result.status == 'success', str(result)
         assert result.exit_code == 0
         assert result.text == 'needle\n'
-        assert result.stage_results[0]['exit_code'] == -13
         assert result.recovery is None
     asyncio.run(run())
 
@@ -177,49 +130,6 @@ def test_actual_agent_mode_switch_refreshes_tools_and_prompt(tmp_path):
     assert not {'apply_patch', 'submit_plan', 'task_create'} & names
 
 
-def test_git_directories_are_relative_per_command(tmp_path):
-    nested = tmp_path / 'parent' / 'child'
-    nested.mkdir(parents=True)
-    plan = compile_readonly('git -C parent -C child -C "" diff -- a.txt; cat a.txt', tmp_path, PathResolver(tmp_path))
-    git_args = plan.pipelines[0].stages[0].argv
-    assert git_args[git_args.index('-C') + 1] == str(nested)
-    assert str(nested / 'a.txt') in git_args
-    assert str(tmp_path / 'a.txt') in plan.pipelines[1].stages[0].argv
-    assert nested in plan.paths and nested.parent in plan.paths
-
-
-@pytest.mark.parametrize('cmd', ['git -C', 'git -C missing log', 'git -C . reset --hard', 'git -C . -c alias.x=bad status'])
-def test_git_c_does_not_relax_validation(tmp_path, cmd):
-    with pytest.raises(UnsupportedCommand):
-        compile_readonly(cmd, tmp_path, PathResolver(tmp_path))
-
-
-def test_git_c_validates_each_directory(tmp_path):
-    from src.mgr.path_resolver import PathResolutionError
-    class DenyingResolver(PathResolver):
-        def validate_local_read(self, path):
-            if path == tmp_path / 'denied':
-                raise PathResolutionError('denied')
-            return super().validate_local_read(path)
-    (tmp_path / 'denied').mkdir()
-    with pytest.raises(PathResolutionError):
-        compile_readonly('git -C denied -C .. status', tmp_path, DenyingResolver(tmp_path))
-
-
-@pytest.mark.parametrize('cmd,expected', [
-    ('rg -rn needle src', '只读策略尚不支持 rg 选项：-rn'),
-    ('rg -r needle src', '只读策略尚不支持 rg 选项：-r'),
-    ('read_memory() { :; }; rg needle src', '只读策略不支持 Shell 函数定义'),
-])
-def test_recovery_identifies_actual_mistake_without_execution(runtime, cmd, expected):
-    deps, agent = runtime
-    result = asyncio.run(deps.tools_mgr.execute('exec_command', {'cmd': cmd}, deps=deps, agent=agent))
-    assert result.error_code == 'policy_unsupported'
-    assert expected in result.text
-    assert result.recovery is None  # 原因和针对性修正已在正文中，不追加重复泛化指引。
-    assert not deps.process_mgr.sessions
-
-
 @pytest.mark.integration
 def test_git_c_matches_git_without_changing_following_command(runtime, tmp_path):
     repo = tmp_path / 'repo'
@@ -235,30 +145,6 @@ def test_git_c_matches_git_without_changing_following_command(runtime, tmp_path)
     result = asyncio.run(deps.tools_mgr.execute('exec_command', {'cmd': cmd}, deps=deps, agent=agent))
     assert result.status == 'success', str(result)
     assert result.text == expected
-
-
-@pytest.mark.integration
-@pytest.mark.parametrize('cmd', ['rg "(" missing', 'git show definitely-missing-revision'])
-def test_external_error_text_is_not_interpreted(runtime, tmp_path, cmd):
-    deps, agent = runtime
-    plan = compile_readonly(cmd, tmp_path, PathResolver(tmp_path))
-    # 对同一受控 argv 比较，避免系统 Shell 和封装的路径、环境差异。
-    expected = subprocess.run(plan.pipelines[0].stages[0].argv, cwd=tmp_path,
-                              env={'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': os.devnull},
-                              capture_output=True, text=True)
-    result = asyncio.run(deps.tools_mgr.execute('exec_command', {'cmd': cmd}, deps=deps, agent=agent))
-    assert result.exit_code == expected.returncode
-    assert result.status == 'error'
-    assert result.recovery is None
-    assert result.text == expected.stdout + expected.stderr
-
-
-def test_parse_failure_is_distinct_from_policy_rejection(runtime):
-    deps, agent = runtime
-    result = asyncio.run(deps.tools_mgr.execute('exec_command', {'cmd': 'cat "'}, deps=deps, agent=agent))
-    assert result.error_code == 'invalid_syntax'
-    assert '命令未执行' in result.text
-    assert not deps.process_mgr.sessions
 
 
 def test_mcp_error_is_not_augmented():

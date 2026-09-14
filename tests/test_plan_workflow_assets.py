@@ -55,7 +55,7 @@ def test_coding_role_plan_workflow_skill_still_loads(tmp_path: Path) -> None:
 
     assert mgr.check_skill("builtin:plan-workflow")
     text = mgr.load_full_text("builtin:plan-workflow")
-    assert "不创建执行进度任务" in text
+    assert "不要创建执行进度任务" in text
     assert "enter_plan_mode" not in text
     assert "最多 3 个" not in text
     assert "llm.concurrency" not in text

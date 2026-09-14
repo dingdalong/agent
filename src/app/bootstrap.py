@@ -16,6 +16,7 @@ from src.events import EventBus, EventLevel
 from src.events.types import TaskStateChanged
 from src.mgr import ConfigManager, ContextMgr, HooksMgr, LLMMgr, McpMgr, MemoryMgr, PermissionManager, PlanMgr, PluginMgr, RoleMgr, SessionMgr, ToolsMgr, WebAccessMgr, resolve_features
 from src.mgr.data_guard import DataGuard, register_runtime_secrets
+from src.mgr.frozen import clean_env
 from src.mgr.session_state import SessionState
 from src.mgr.permission_mgr import LLMJudgeClient
 from src.mgr.web_safety_mgr import LLMWebSafetyClient
@@ -25,6 +26,7 @@ from src.agent import AgentDeps
 from src.commands import CommandMgr
 from src.app.app import AgentApp
 from src.app.provider_setup import maybe_run_provider_setup
+from src.llm import LLMConfigurationError
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +96,15 @@ async def create_app(
     # 失败（非 TTY/取消/持久化错误）时抛 LLMConfigurationError 由 main.cli 干净退出。
     await maybe_run_provider_setup(config_mgr)
 
+    # 启动阶段确认沙箱可用，必要时由系统弹出授权/提示；不可用则阻止进入 REPL。
+    from src.mgr.sandbox import ExecutionPolicy, SandboxBackend, SandboxError
+    sandbox_backend = SandboxBackend(**(config_mgr.get_config("shell") or {}))
+    try:
+        with sandbox_backend.prepare(ExecutionPolicy("exit 0", work_dir, work_dir), clean_env()):
+            pass
+    except SandboxError as exc:
+        raise LLMConfigurationError(f"Shell 沙箱不可用（{exc.code}）：{exc}") from exc
+
     # 配置项目级日志：写入 {workdir}/.agent/logs/agent.log
     log_dir = work_dir / ".agent" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -139,7 +150,8 @@ async def create_app(
     )
     tools_mgr = ToolsMgr(output_config=config_mgr.get_config("tool"))
     from src.mgr.process_mgr import ProcessMgr
-    process_mgr = ProcessMgr()
+    from src.mgr.sandbox import SandboxBackend
+    process_mgr = ProcessMgr(sandbox=sandbox_backend)
     memory_mgr = MemoryMgr(work_dir, data_guard=data_guard) if "memory" in feats else None
     # 共享上下文挂在 subagent feature 上而非新增 feature：它的价值完全依附于子 agent
     # 的存在，无子 agent 的角色不该为它付任何代价。

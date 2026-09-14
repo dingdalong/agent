@@ -17,7 +17,6 @@
 构建前需先跑 scripts/warm_tiktoken_cache.py 生成 build/tiktoken_cache（Makefile 已代劳）。
 """
 
-from importlib import metadata
 from pathlib import Path
 import sys
 
@@ -28,22 +27,13 @@ TIKTOKEN_CACHE = ROOT / "build" / "tiktoken_cache"
 
 
 def _ripgrep_binary():
-    """定位 ripgrep 包随 wheel 装进环境 bin 目录的 rg 可执行文件。
-
-    Returns:
-        [(源路径, 包内目标目录)]；未找到时返回空列表，产物将退化为依赖宿主预装 rg。
-    """
-    exe = "rg.exe" if sys.platform == "win32" else "rg"
-    try:
-        dist = metadata.distribution("ripgrep")
-    except metadata.PackageNotFoundError:
-        return []
-    for f in dist.files or []:
-        if f.name == exe:
-            path = Path(dist.locate_file(f)).resolve()
-            if path.exists():
-                return [(str(path), ".")]
-    return []
+    """构建和运行复用相同的 rg 定位规则，系统包也须随产物分发。"""
+    sys.path.insert(0, str(ROOT))
+    from src.mgr.file_mgr import _resolve_rg
+    path = _resolve_rg()
+    if not path:
+        raise SystemExit("构建需要 ripgrep；请安装 Python wheel 或系统 rg")
+    return [(path, ".")]
 
 
 if not TIKTOKEN_CACHE.is_dir():

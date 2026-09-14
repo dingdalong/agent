@@ -104,7 +104,7 @@ Plan 激活时只允许：
 - LOCAL_READ。
 - EXTERNAL_READ，但仍须通过 Web 本地隐私预检；疑似敏感内容转一次性人工确认。
 - `plan_safe=True` 的 INTERNAL 工具；`task_create`/`task_update` 不声明 `plan_safe`，因此在 Plan 模式下被拒绝，只读的 `task_list`/`task_get` 仍放行。
-- 经只读 AST/argv 验证的 exec_command；计划文件仅由 submit_plan 内部保存。
+- 在只读项目沙箱中执行的 exec_command；诊断、测试和脚本仅可写专用临时目录。计划文件仅由 submit_plan 内部保存。
 
 其他调用直接以 `source="plan"` 拒绝，不调用智能权限。子 Agent 在构造时继承父 Agent 当前 Plan 状态。
 
@@ -121,3 +121,11 @@ Plan 激活时只允许：
 ## 安全边界
 
 智能权限是风险分类器，不是 OS 沙箱。明确高危操作、已识别秘密外发、项目启动信任、路径复检、结果脱敏和安全子进程环境由代码保证；无法可靠静态判断的 Shell、网络、MCP、移动和动态工具交智能权限审查，并在不确定时回到一次性人工确认。
+
+## Shell 运行时隔离
+
+PermissionManager 签发绑定命令、目录与可写范围的 ExecutionPolicy，ProcessMgr 持有运行会话，SandboxBackend 安装平台策略。普通沙箱内调用不进入模型审核；额外可写目录或网络权限经过现有审核且只属于该进程。保护目录不能通过额外目录申请直接扩权，路径与工作目录启动前重验。
+
+macOS 需要 /usr/bin/sandbox-exec；Linux 需要 bubblewrap 0.11+、libseccomp 和可用的 user namespace。Linux 用隔离的进程与网络 namespace、只读根文件系统、限定可写挂载及 seccomp，禁止宿主 socket、提权和危险系统调用；网络授权仍不开放 Unix socket。Windows Shell 明确不可用。依赖缺失或安装失败时不执行用户命令。agent --self-check 会实际探测沙箱安装能力。
+
+当前本地读取与操作系统用户权限一致，不额外限定为工作区；传入环境继续剔除秘密。已有 .git/.agent 等控制路径、凭证文件及信任库在可写范围内仍设为只读。Linux 挂载无法按未来文件名实施拒绝，因此不能把静态保护路径视为对任意未来同名文件的完整保证。
