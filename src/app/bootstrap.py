@@ -127,7 +127,7 @@ async def create_app(
     data_guard = DataGuard()
     register_runtime_secrets(data_guard, config_mgr, global_dir, work_dir, project_trusted)
     role_mgr = RoleMgr(config_mgr=config_mgr, workdir=work_dir, global_dir=global_dir)
-    # 按激活角色的 feature 集门控 deps 层可插拔 Manager；未启用则注入 None，其工具从 schema 排除。
+    # 按激活角色的 feature 集门控 deps 层可插拔 Manager；工具 schema 保持完整，执行期由权限层拒绝。
     feats = resolve_features(role_mgr.manifest.features if role_mgr.manifest else None)
     command_mgr = CommandMgr(workdir=work_dir, global_dir=global_dir, project_trusted=project_trusted)
     event_bus = EventBus(level=EventLevel.from_str(config_mgr.get_config("events").get("level", "progress")))

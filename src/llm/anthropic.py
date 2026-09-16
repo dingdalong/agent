@@ -422,7 +422,7 @@ class AnthropicProvider(LLMProvider):
         """将 OpenAI 工具格式转换为 Claude 格式。"""
         if not tools:
             return None
-        return [
+        converted = [
             {
                 "name": t["function"]["name"],
                 "description": t["function"].get("description", ""),
@@ -432,6 +432,8 @@ class AnthropicProvider(LLMProvider):
             }
             for t in tools
         ]
+        converted[-1]["cache_control"] = {"type": "ephemeral"}
+        return converted
 
     def _convert_tool_choice(self, tool_choice: str | dict | None) -> dict:
         """将 OpenAI tool_choice 格式转换为 Claude 格式。"""
@@ -449,7 +451,7 @@ class AnthropicProvider(LLMProvider):
 
     def _convert_messages(
         self, messages: list[dict], prompt: list[dict] | None
-    ) -> tuple[str | None, list[dict]]:
+    ) -> tuple[list[str] | None, list[dict]]:
         """将 OpenAI 兼容格式消息转换为 Claude Messages API 格式。
 
         Args:
@@ -457,12 +459,23 @@ class AnthropicProvider(LLMProvider):
             prompt: 可选系统提示词消息列表。
 
         Returns:
-            合并后的可选系统文本与独立的 Claude 消息列表。
+            保持边界的可选系统文本列表与独立的 Claude 消息列表。
         """
         system_parts: list[str] = []
         claude_messages: list[dict] = []
 
-        for msg in (prompt or []) + messages:
+        for msg in prompt or []:
+            role = msg.get("role")
+            if role in ("system", "developer"):
+                content = msg.get("content", "")
+                if isinstance(content, list):
+                    content = "".join(
+                        p.get("text", "") for p in content if isinstance(p, dict)
+                    )
+                if content:
+                    system_parts.append(content)
+
+        for msg in messages:
             role = msg.get("role")
 
             if role in ("system", "developer"):
@@ -472,7 +485,14 @@ class AnthropicProvider(LLMProvider):
                         p.get("text", "") for p in content if isinstance(p, dict)
                     )
                 if content:
-                    system_parts.append(content)
+                    claude_messages.append({
+                        "role": "user",
+                        "content": (
+                            "<framework_instruction>\n"
+                            f"{content}\n"
+                            "</framework_instruction>"
+                        ),
+                    })
 
             elif role == "user":
                 claude_messages.append({
@@ -522,22 +542,24 @@ class AnthropicProvider(LLMProvider):
                 })
 
         merged = self._merge_messages(claude_messages)
-        system = "\n\n".join(system_parts) if system_parts else None
-        return system, merged
+        return system_parts or None, merged
 
-    def _system_blocks(self, system: str) -> list[dict]:
-        """把系统提示词包成带缓存断点的单个文本块。
+    def _system_blocks(self, system: list[str]) -> list[dict]:
+        """把系统提示词转换为保留稳定前缀的缓存块。
 
-        Anthropic 缓存排序为 tools → system → messages，system 断点即缓存 tools+system
-        整个稳定前缀。
+        Anthropic 缓存排序为 tools → system → messages。工具目录、固定 system 和
+        最新消息分别设置断点，不超过 API 的四断点上限。
 
         Args:
-            system: 合并后的系统提示词文本。
+            system: 按缓存稳定性分段的系统提示词文本。
 
         Returns:
-            含单个 text 块的列表，该块带 ephemeral cache_control 断点。
+            各段对应的 text 块；首尾段带 ephemeral cache_control 断点。
         """
-        return [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
+        blocks = [{"type": "text", "text": text} for text in system]
+        blocks[0]["cache_control"] = {"type": "ephemeral"}
+        blocks[-1]["cache_control"] = {"type": "ephemeral"}
+        return blocks
 
     def _apply_cache_control(self, messages: list[dict]) -> None:
         """给最后一条消息中最后一个 SDK 允许的内容块添加缓存断点。

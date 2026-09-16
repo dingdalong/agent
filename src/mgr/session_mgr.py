@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from src.mgr.secure_io import atomic_write_text
+from src.mode import RunMode
 from src.mgr.session_state import SessionState
 
 logger = logging.getLogger(__name__)
@@ -27,7 +28,7 @@ class ResumeResult:
     Attributes:
         session_id: 目标会话 UUID。
         state: 加载的单一会话状态。
-        metadata: 目标会话的元数据字典（含 plan_active、topic 等）。
+        metadata: 目标会话的元数据字典（含 mode、topic 等）。
     """
     session_id: str
     state: SessionState
@@ -59,7 +60,7 @@ class SessionMgr:
         *,
         is_new: bool = False,
         topic: str = "",
-        plan_active: bool = False,
+        mode: RunMode = RunMode.EXECUTE,
     ) -> None:
         """保存或更新会话元数据文件。
 
@@ -69,7 +70,7 @@ class SessionMgr:
             session_id: 会话 UUID。
             is_new: 是否为新会话首次写入。
             topic: 会话主题（截取前 100 字符）。非空时写入或覆盖 topic 字段。
-            plan_active: 当前会话是否处于 Plan。
+            mode: 当前会话运行模式。
         """
         self._sessions_dir.mkdir(parents=True, exist_ok=True)
         meta_path = self._sessions_dir / f"{session_id}.json"
@@ -90,7 +91,7 @@ class SessionMgr:
         meta["updated_at"] = now
         if topic:
             meta["topic"] = topic[:100]
-        meta["plan_active"] = plan_active
+        meta["mode"] = mode.value
 
         try:
             safe_meta = self._data_guard.redact(meta) if self._data_guard is not None else meta

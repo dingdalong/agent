@@ -32,11 +32,7 @@ def test_switch_model_rebinds_model_state_without_replacing_history(tmp_path: Pa
     agent.llm = old_llm
     agent.history = [{"role": "user", "content": "保留历史"}]
     agent._input_history = ["保留输入"]
-    invalidations = []
-    agent._prompt_mgr = SimpleNamespace(
-        model="old-model",
-        invalidate_cache=lambda: invalidations.append(True),
-    )
+    agent._prompt_mgr = SimpleNamespace()
     agent.deps = SimpleNamespace(
         llm_mgr=SimpleNamespace(get=lambda model: new_llm if model == "new-model" else old_llm),
         config_mgr=ConfigStub(),
@@ -64,8 +60,6 @@ def test_switch_model_rebinds_model_state_without_replacing_history(tmp_path: Pa
     assert agent._compact_mgr.recent_messages_token_limit == 500
     assert agent._compact_mgr.recent_files == ["src/old.py"]
     assert agent._compact_mgr.has_compacted is True
-    assert agent._prompt_mgr.model == "new-model"
-    assert invalidations == [True]
 
 
 def test_model_role_overrides_are_written_together(tmp_path: Path) -> None:

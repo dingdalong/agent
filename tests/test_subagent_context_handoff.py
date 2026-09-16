@@ -21,6 +21,7 @@ from src.agent import Agent
 from src.mgr.context_mgr import ContextMgr
 from src.mgr.role_mgr import AgentManifest
 from src.mgr.subagent_mgr import SubAgentMgr
+from src.mode import RunMode
 
 _REPORT = "结论：注入点在 task_delegator，见 src/mgr/subagent_mgr.py:291 处的 run 调用。"
 
@@ -103,7 +104,6 @@ def _build_mgr(
         for name in agent_types
     }
     deps_fields = {
-        "tools_mgr": SimpleNamespace(resolve_subagent_tools=lambda tools: set(tools or ())),
         "hooks_mgr": None,
         "event_bus": None,
     }
@@ -120,7 +120,7 @@ def _parent() -> SimpleNamespace:
         父 agent 替身。
     """
     return SimpleNamespace(
-        plan_active=False,
+        mode=RunMode.EXECUTE,
         llm=SimpleNamespace(model="m"),
         enable_thinking=True,
         reasoning_effort=None,

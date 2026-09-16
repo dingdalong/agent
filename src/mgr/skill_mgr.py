@@ -18,6 +18,7 @@ class SkillManifest:
     name: str
     description: str
     path: Path
+    listed: bool = True
 
 @dataclass
 class SkillDocument:
@@ -102,7 +103,10 @@ class SkillMgr:
         skill_name = meta.get("name", path.parent.name)
         name = f"{namespace}:{skill_name}"
         description = meta.get("description", "没有说明内容")
-        manifest = SkillManifest(name=name, description=description, path=path)
+        listed = meta.get("listed", True)
+        if not isinstance(listed, bool):
+            listed = True
+        manifest = SkillManifest(name=name, description=description, path=path, listed=listed)
         skill_dir = manifest.path.parent.resolve()
         try:
             skill_dir_rel = skill_dir.relative_to(self.workdir)
@@ -138,6 +142,8 @@ class SkillMgr:
         lines = []
         for name in sorted(self._documents):
             manifest = self._documents[name].manifest
+            if not manifest.listed:
+                continue
             lines.append(f"- [{manifest.name}]: {manifest.description}")
         return "\n".join(lines)
 

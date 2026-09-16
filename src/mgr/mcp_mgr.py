@@ -359,6 +359,5 @@ class McpMgr:
             parameters_schema=schema,
             policy=policy,
             origin=ToolOrigin("mcp", server),
-            subagent=None,
         ))
         return tool_name

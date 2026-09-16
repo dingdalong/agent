@@ -22,6 +22,7 @@ from src.events.types import (
 from src.llm.base import LLMCallContext, LLMProvider, LLMResponse
 from src.llm.anthropic import AnthropicProvider
 from src.llm.errors import LLMErrorKind, LLMStreamResponseError
+from src.mode import RunMode
 
 
 class PauseNormalizer:
@@ -263,34 +264,37 @@ class StaticPromptMgr:
         """
         return [{"role": "system", "content": "固定提示"}]
 
+    def build_initial_context_messages(self) -> list[dict]:
+        return []
+
+    def build_mode_instructions(self) -> str:
+        return ""
+
 
 class NoopReminder:
     """不生成轮次提示或工具后提醒的测试 reminder。"""
 
-    def build_turn_start_instructions(self, mode: object, is_subagent: bool) -> str:
-        """返回空轮次提示。
+    def queue_turn_start(self, mode: object, is_subagent: bool) -> None:
+        """忽略轮次提示。
 
         Args:
             mode: 当前权限模式。
             is_subagent: 调用方是否为子智能体。
 
-        Returns:
-            空字符串。
         """
         del mode, is_subagent
-        return ""
 
-    def collect_post_round_messages(self, mode: object, is_subagent: bool) -> list[dict]:
-        """返回空工具后提醒列表。
+    def queue_post_round(self, mode: object, is_subagent: bool) -> None:
+        """忽略工具后提醒。
 
         Args:
             mode: 当前权限模式。
             is_subagent: 调用方是否为子智能体。
 
-        Returns:
-            空列表。
         """
         del mode, is_subagent
+
+    def pop_pending(self) -> list[str]:
         return []
 
 
@@ -351,7 +355,7 @@ def _runtime_agent(
     agent.description = ""
     agent.history = []
     agent.llm = llm
-    agent._tools_schemas = [
+    schemas = [
         {
             "type": "function",
             "function": {
@@ -362,7 +366,7 @@ def _runtime_agent(
         }
     ]
     agent.enable_thinking = True
-    agent.plan_active = False
+    agent.mode = RunMode.EXECUTE
     agent.is_subagent = False
     agent._pending_input = ""
     agent._prompt_mgr = StaticPromptMgr()
@@ -373,6 +377,7 @@ def _runtime_agent(
         hooks_mgr=hooks_mgr,
         session_mgr=None,
         session_id="session-test",
+        tools_mgr=SimpleNamespace(schemas=lambda: schemas),
     )
     agent._handlers = {
         AgentState.CHECK_COMPACT: agent._on_check_compact,
@@ -668,7 +673,6 @@ def test_pause_then_length_keeps_checkpoint_but_clears_pause_carrier_index() -> 
         "user",
         "assistant",
         "assistant",
-        "user",
     ]
 
     new_pause_carrier = {"role": "assistant", "content": "第三段"}
@@ -926,8 +930,11 @@ def test_pause_length_stop_mixed_chain_commits_history_and_clears_state() -> Non
         pause_carrier,
         {"role": "assistant", "content": "第二段"},
         {
-            "role": "user",
-            "content": "输出达到长度上限。请从中断处直接继续，不要回顾、不要重复，必要时可以从半句话接续。",
+            "role": "developer",
+            "content": (
+                "<reminder>\n输出达到长度上限。请从中断处直接继续，"
+                "不要回顾、不要重复，必要时可以从半句话接续。\n</reminder>"
+            ),
         },
         {"role": "assistant", "content": "第三段"},
     ]
@@ -982,7 +989,7 @@ def test_thinking_content_pause_mixed_chain_persists_effort_until_clean_terminal
     # 思考腿与正文腿各计一次长度恢复；干净终态复位降档与压缩瞬态。
     assert ctx.length_recoveries == 2
     assert ctx.length_effort_override is None
-    assert ctx.length_ephemeral_instruction is None
+    assert ctx.pending_framework_instructions == []
     assert ctx.response_recovery_start_idx is None
     assert ctx.pause_turn_continuations == 0
     # 思考腿不写历史；正文腿保留 assistant 与续写 user；暂停/收尾正常提交。
@@ -990,8 +997,11 @@ def test_thinking_content_pause_mixed_chain_persists_effort_until_clean_terminal
         {"role": "user", "content": "执行混合恢复"},
         {"role": "assistant", "content": "正文段"},
         {
-            "role": "user",
-            "content": "输出达到长度上限。请从中断处直接继续，不要回顾、不要重复，必要时可以从半句话接续。",
+            "role": "developer",
+            "content": (
+                "<reminder>\n输出达到长度上限。请从中断处直接继续，"
+                "不要回顾、不要重复，必要时可以从半句话接续。\n</reminder>"
+            ),
         },
         {"role": "assistant", "content": "暂停段"},
         {"role": "assistant", "content": "收尾段"},

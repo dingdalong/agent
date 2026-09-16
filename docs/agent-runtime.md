@@ -86,11 +86,11 @@ LLM_CALL → PROCESS_RESPONSE ──length────→ LENGTH_RETRY ──可
 | 轮次回滚 | `turn_start_messages`（追加本轮 user 前的浅快照）、`round_start_idx`（无快照上下文的兼容回退） |
 | 轮次与工具 | `has_tool_calls`、`manual_compact`、`compact_focus` |
 | 自动压缩 | `compact_streak`、`max_compact_streak=3`、压缩前 token、摘要消息数、摘要是否非空 |
-| 响应恢复 | `length_recoveries`、`max_length_recoveries=3`、`response_recovery_start_idx`、`response_recovery_response_count`、`pause_turn_message_idx`、`pause_turn_continuations`、`length_effort_override`（思考截断重生成时的临时降档 effort）、`length_ephemeral_instruction`（触底时一次性压缩指令，永不落历史） |
+| 响应恢复 | `length_recoveries`、`max_length_recoveries=3`、`response_recovery_start_idx`、`response_recovery_response_count`、`pause_turn_message_idx`、`pause_turn_continuations`、`length_effort_override`（思考截断重生成时的临时降档 effort）、`pending_framework_instructions`（下一次 chat 前合并为 developer，发送后清空） |
 | 交互终态 | `user_input`、`user_record_id`、`command`、`exit_requested`、`stop_hook_used` |
 | LLM 终态 | `llm_error: LLMErrorInfo | None` |
 
-`RunResult` 返回 `final_text`、`command`、`exit_requested`、`user_input` 和 `llm_error`。调用方无需从错误文本反向推断类别。`/plan`、`/models` 在 Agent 内处理；`/clear`、`/resume` 与 `/agents` 通过 `command` 交给应用层。`/models` 一次提交 default/fast 槽位与角色 effort：default 或 effort 变化时原地替换当前 Agent 的 Provider、推理强度、压缩器和提示词模型信息，不更换 UUID、会话或消息历史；只改变 fast 时当前 Agent 保持不变，新建子 agent 与智能权限现读新槽位。
+`RunResult` 返回 `final_text`、`command`、`exit_requested`、`user_input` 和 `llm_error`。调用方无需从错误文本反向推断类别。`/plan`、`/models` 在 Agent 内处理；`/clear`、`/resume` 与 `/agents` 通过 `command` 交给应用层。`/models` 一次提交 default/fast 槽位与角色 effort：default 或 effort 变化时原地替换当前 Agent 的 Provider、推理强度和压缩器，不更换 UUID、固定 system、会话或消息历史；只改变 fast 时当前 Agent 保持不变，新建子 agent 与智能权限现读新槽位。
 
 ## 4. 单点 LLM 错误收口
 
@@ -126,7 +126,7 @@ handler 映射在 `Agent.__post_init__` 建立（`src/agent/agent.py:236-250`）
 
 ### 输入与命令
 
-`_on_request_input()` 读取输入；处理 `exit` / `quit`；分派 `/plan`、`/clear`、`/agents`、`/resume`、`/models`；运行 `UserPromptSubmit` Hook；注入 turn-start reminder；最后保存 `turn_start_messages` 并追加 user 消息。
+`_on_request_input()` 读取输入；处理 `exit` / `quit`；分派 `/plan`、`/clear`、`/agents`、`/resume`、`/models`；运行 `UserPromptSubmit` Hook；首次输入前追加外部上下文 user 消息，排队 turn-start reminder，最后保存 `turn_start_messages` 并追加真实 user 消息。Hook 附加文本使用带来源标记的外部 user 上下文，不进入 system/developer。
 
 ### 压缩检查
 
@@ -136,7 +136,7 @@ handler 映射在 `Agent.__post_init__` 建立（`src/agent/agent.py:236-250`）
 
 ### LLM 调用与正常响应
 
-`_on_llm_call()`（`agent.py:819-840`）先 `normalize_messages()`，再调用 `llm.chat()`，传递 prompt、工具 schema、agent 身份与思考开关。它不捕获 LLM 异常。
+`_on_llm_call()`（`agent.py` 的 `_on_llm_call`）先调用 `_append_pending_framework_message()`：只在模式相对上次 chat 发生变化时生成当前最终模式说明，并与 ReminderMgr 及恢复指令合并为最多一条 developer；随后 `normalize_messages()` 并调用 `llm.chat()`。工具执行和模式切换只更新状态或排队，不在中途改消息。
 
 `_on_process_response()`（`agent.py:842-870`）在普通调用中用当前正文替换 `final_text`（包括空串，避免旧工具前言残留），在已建立恢复 checkpoint 时只累加非空正文；`length` 与 `pause_turn` 分别转专用恢复状态。普通终态或完整工具调用会清空恢复状态、追加真实 `assistant_message`，再转 `EXECUTE_TOOLS` 或 `CHECK_STOP`。因此恢复链能给 `RunResult` 与 Stop hook 完整拼接正文，后续普通工具轮仍只返回最后一份完整回答。
 
@@ -144,7 +144,7 @@ handler 映射在 `Agent.__post_init__` 建立（`src/agent/agent.py:236-250`）
 
 `_on_execute_tools()`（`agent.py:991-1051`）用 `asyncio.gather` 并行执行同一回复的所有工具调用，结果按原顺序追加为 tool 消息。禁用/未知工具与执行异常都转换为对应工具结果文本。`POST_ROUND` 注入提醒；如本轮调用 `compact` 工具，则执行带 focus 的手动压缩，再回 `CHECK_COMPACT`（`agent.py:1073-1093`）。
 
-`_on_check_stop()`（`agent.py:1053-1071`）只允许 Stop hook 阻断一次；阻断时追加 reminder user 消息并回 `CHECK_COMPACT`，否则结束本轮。
+`_on_check_stop()`（`agent.py` 的 `_on_check_stop`）只允许 Stop hook 阻断一次；阻断原因作为带来源标记的外部 user 上下文追加并回 `CHECK_COMPACT`，否则结束本轮。
 
 ## 6. 响应恢复链
 
@@ -154,9 +154,9 @@ handler 映射在 `Agent.__post_init__` 建立（`src/agent/agent.py:236-250`）
 
 `_on_length_retry()`（`src/agent/agent.py` 的 `_on_length_retry`）处理 provider 已合法返回的 `finish_reason="length"`。每趟按 `response.truncation_kind`（`LLMProvider.chat()` 在 length 终态下用 `classify_truncation` 计算，Agent 侧再用 `classify_truncation(response)` 兜底）分四类，优先级 **工具 → 正文 → 思考 → 未知**：
 
-- **正文截断（CONTENT）**：保存真实 assistant 消息，追加“从中断处继续”的 user 指令，经归一化后再调 LLM。
+- **正文截断（CONTENT）**：保存真实 assistant 消息，把“从中断处继续”排为框架指令，在下一次 chat 前合并进 developer。
 - **工具调用截断（TOOL_CALL）**：不执行、不保存半截调用 ID、名称、参数或 provider 原始工具载体；仅保存非空正文为纯文本 assistant，再要求模型生成完整且更小的工具调用。
-- **思考/未知截断（THINKING / UNKNOWN）**：模型在推理阶段就耗尽输出预算（正文为空、无工具调用，仅半截 reasoning，或全空）。**丢弃整条不完整响应、不向 `ctx.messages` 追加任何内容**，改为按调用临时降低推理力度重生成：`self.llm.next_lower_effort()` 有更低档位时写入 `ctx.length_effort_override`（strategy `regenerate-lower-effort`）；无更低档位时改用一次性压缩指令 `ctx.length_ephemeral_instruction`（strategy `regenerate-compress`）。因不追加消息，checkpoint 使回滚成为 no-op，历史全程干净。降档/压缩瞬态跨恢复腿持续，只在干净终态由 `_on_process_response` 复位为 None。
+- **思考/未知截断（THINKING / UNKNOWN）**：模型在推理阶段就耗尽输出预算（正文为空、无工具调用，仅半截 reasoning，或全空）。**丢弃整条不完整响应、不向 `ctx.messages` 追加任何响应载体**，改为按调用临时降低推理力度重生成：`self.llm.next_lower_effort()` 有更低档位时写入 `ctx.length_effort_override`（strategy `regenerate-lower-effort`）；无更低档位时把压缩要求放入 `pending_framework_instructions`，下一次 chat 前追加 developer（strategy `regenerate-compress`）。降档状态在干净终态复位。
 - 从 pause 转入 length 时清除 `pause_turn_message_idx`，停止替换旧 pause 载体，但保留整条恢复链 checkpoint。
 
 四类都在分支末尾发出 `LLMLengthRetrying` 进度事件（携 `truncation_kind`、`strategy`、`effort`、`attempt`/`max_attempts`），供 UI 标记与 Store 转录隔断。`length_recoveries` 以 `max_length_recoveries`（=3）封顶，耗尽时经 `_fail_response_recovery` 产出 `output_limit`；思考/未知阶段用思考专属失败文案（`_length_failure_message`），提示降低推理力度后仍无法完成、建议缩小任务或改用输出上限更高的模型。
@@ -175,17 +175,17 @@ handler 映射在 `Agent.__post_init__` 建立（`src/agent/agent.py:236-250`）
 
 ## 7. 退出总结与 compact 错误
 
-`_on_summarize_exit()`（`src/agent/agent.py:1095-1128`）在自动压缩无进展或连续压缩仍超阈值时构造一份临时 `summary_messages`，以 `tools=[]`、`enable_thinking=False` 调用同一 `llm.chat()`。成功时才把临时消息和真实 assistant 总结写回历史。
+`_on_summarize_exit()`（`src/agent/agent.py` 的 `_on_summarize_exit`）在自动压缩无进展或连续压缩仍超阈值时，在 chat 前追加总结 developer 指令，以 `tools=[]`、`enable_thinking=False` 调用同一 `llm.chat()`。成功时保留该指令和真实 assistant 总结；失败时回滚本次追加。
 
-如果 compact 的内部摘要调用或退出总结调用失败，`LLMCallError` 都由 `_run_single_turn()` 捕获。失败的临时总结 user 指令不会写回 `ctx.messages`；原用户历史保持可继续使用。上下文类别进入 `CONTEXT_OVERFLOW`，其他类别进入 `LLM_FAILURE`。
+如果 compact 的内部摘要调用或退出总结调用失败，`LLMCallError` 都由 `_run_single_turn()` 捕获。失败的总结 developer 指令不会留在 `ctx.messages`；原用户历史保持可继续使用。上下文类别进入 `CONTEXT_OVERFLOW`，其他类别进入 `LLM_FAILURE`。
 
 `CompactMgr._call_summary_request()` 透传所属 Agent 的 `caller_agent_type` / `caller_uuid`（`src/mgr/compact_mgr.py:454-469`），因此压缩调用的开始、重试、失败和流增量都进入正确 agent 的 Store 视图。
 
 ## 8. 主 Agent 与子 Agent
 
-`Agent.from_manifest()` 映射 manifest 的身份、提示词、工具、记忆、模型、初始 Plan、思考与 feature。主 Agent 未声明 memory 时默认 `project`，子 Agent 默认不加载；`**overrides` 供委派时注入父 Agent 当前 Plan 等已解析设置。
+`Agent.from_manifest()` 映射 manifest 的身份、提示词、工具、记忆、模型、初始 `RunMode`、思考与 feature。主 Agent 未声明 memory 时默认 `project`，子 Agent 默认不加载；`**overrides` 供委派时注入父 Agent 当前模式等已解析设置。
 
-`Agent.__post_init__()` 解析模型和 feature、过滤工具，创建带调用方身份的 `CompactMgr`，再按 feature 创建 `SkillMgr`、`SubAgentMgr`、`TaskManager`，并构造 `PromptMgr`、`ReminderMgr` 与 handler 表。
+`Agent.__post_init__()` 解析模型和 feature，创建带调用方身份的 `CompactMgr`，再按 feature 创建 `SkillMgr`、`SubAgentMgr`、`TaskManager`，并构造 `PromptMgr`、`ReminderMgr` 与 handler 表。它不持有或过滤工具 schema。
 
 `Agent.run()` 有两种模式（`agent.py:342-379`）：
 
@@ -196,10 +196,10 @@ handler 映射在 `Agent.__post_init__` 建立（`src/agent/agent.py:236-250`）
 
 ## 9. Plan 状态协调
 
-`PlanModeController` 只作用于入口主 Agent。Shift+Tab 调用 `toggle()`，直接翻转 `agent.plan_active`、刷新 UI 并发布 `PlanStateChanged`。切换不重建工具 schema，退出 Plan 也不清除活动计划路径。子 Agent 构造时继承父 Agent 当前 Plan 状态；调用时安全边界由 `PermissionManager.authorize()` 独立执行。
+`PlanModeController` 只作用于入口主 Agent。Shift+Tab 调用 `toggle()`，在 `RunMode.EXECUTE` 与 `RunMode.PLAN` 间切换 `agent.mode`、刷新 UI 并发布 `PlanStateChanged`。切换不重建工具 schema，退出 Plan 也不清除活动计划路径。子 Agent 构造时继承父 Agent 当前模式；调用时安全边界由 `PermissionManager.authorize()` 独立执行。
 
 ## 规划指令的生命周期
 
-Agent.plan_active 是模式权威，PlanMgr 管理切换和计划持久化。PromptMgr 在当前系统提示段提供规划正文，正文由已加载的 plan-workflow 技能提供；子 agent 只收到委派边界。模式切换刷新工具 schema 与提示缓存，规划指令不经 ReminderMgr 追加到用户历史。压缩或恢复后从当前模式重新组装，不依赖旧提醒仍在上下文。
+`Agent.mode` 是模式权威，PlanMgr 管理切换和计划持久化。PromptMgr 的 `build()` 只返回 Agent 生命周期内固定的一条 system；普通/Plan 指令由 `build_mode_instructions()` 生成，在下一次 chat 前作为 developer 追加。普通模式不提计划流程、Plan 控制技能或 `submit_plan`；Plan 模式先明确当前模式及完整限制，再要求通过 `load_skill(name="builtin:plan-workflow")` 加载流程。Skill 正文是工具结果，不能进入 system/developer。模式切换不刷新工具 schema，也不即时改消息；compact 后会在下一次 chat 重申当前模式。
 
 规划严格按三阶段收敛：先核实环境事实，再只确认无法从环境推导且会改变方案的用户意图，最后补齐接口、数据流、失败路径和验收。首次独立读取同轮并行；已核实的路径、符号和区段不重复访问。计划允许沙箱内受限验证；关键决策完整后立即 `submit_plan`，不做习惯性的最后复查。

@@ -17,6 +17,7 @@ from src.llm.errors import LLMConfigurationError
 from src.mgr.llm_mgr import MODEL_ALIASES
 from src.mgr.role_mgr import AgentManifest
 from src.mgr.subagent_mgr import SubAgentMgr
+from src.mode import RunMode
 
 _MODEL_REFERENCE = "anthropic/claude-opus-5"
 
@@ -289,13 +290,9 @@ def test_delegation_passes_manifest_model_verbatim(
             model="inherit",
         )
     }
-    mgr.deps = SimpleNamespace(
-        tools_mgr=SimpleNamespace(resolve_subagent_tools=lambda tools: set(tools or ())),
-        hooks_mgr=None,
-        event_bus=None,
-    )
+    mgr.deps = SimpleNamespace(hooks_mgr=None, event_bus=None)
     parent = SimpleNamespace(
-        plan_active=False,
+        mode=RunMode.EXECUTE,
         llm=SimpleNamespace(model="parent-real-model"),
         enable_thinking=True,
         reasoning_effort=None,

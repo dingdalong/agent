@@ -20,6 +20,7 @@ from src.mgr.env_baseline import collect_env_baseline
 from src.mgr.features import resolve_features
 from src.mgr.session_mgr import ResumeResult
 from src.mgr.session_state import SessionState
+from src.mode import RunMode
 
 logger = logging.getLogger(__name__)
 
@@ -283,7 +284,7 @@ class AgentApp:
                     self.deps.session_context.clear()
                     # 环境基线：同步 I/O（git 子进程 + 目录扫描），必须卸载到线程，
                     # 且只能在这里算一次——本方法同时覆盖 startup 与 /clear，而下面
-                    # 才创建新 Agent → 新 PromptMgr 自然读到新值，无需 invalidate_cache。
+                    # 才创建新 Agent，新 PromptMgr 自然读到新值。
                     if workdir is not None:
                         self.deps.env_baseline = await asyncio.to_thread(
                             collect_env_baseline, workdir
@@ -360,15 +361,16 @@ class AgentApp:
                 self._install_plan_mode_controller()
                 self.deps.plan_mode_controller = self._plan_mode_controller
 
-                target_plan_active = result.metadata.get("plan_active") is True
+                try:
+                    target_mode = RunMode(result.metadata.get("mode", RunMode.EXECUTE.value))
+                except ValueError:
+                    target_mode = RunMode.EXECUTE
                 agent = Agent.from_manifest(
                     manifest=self.deps.role_mgr.manifest if self.deps.role_mgr else None,
                     deps=self.deps,
                     is_subagent=False,
-                    plan_active=target_plan_active,
+                    mode=target_mode,
                 )
-                if agent.plan_active != target_plan_active:
-                    agent.set_plan_active(target_plan_active)
                 self.agent_view_store.register_foreground(str(agent.uuid), agent.agent_type)
                 restore_subagents = getattr(self.agent_view_store, "restore_subagents", None)
                 if restore_subagents is not None:
@@ -394,13 +396,12 @@ class AgentApp:
                     f"当前会话已从历史会话恢复（session {result.session_id[:8]}...）。"
                     f"会话主题: \"{topic}\"。请基于恢复的上下文继续对话。"
                 )
-                agent._prompt_mgr.invalidate_cache()
                 task_info = ""
                 if agent._task_mgr is not None and agent._task_mgr.has_open_items():
                     tasks = agent._task_mgr.list_tasks()["tasks"]
                     open_count = sum(1 for task in tasks if task["status"] != "completed")
                     task_info = f"，{open_count} 个未完成任务"
-                plan_info = "，Plan: active" if agent.plan_active else ""
+                plan_info = "，Plan: active" if agent.mode is RunMode.PLAN else ""
                 summary = (
                     f"已恢复会话 {result.session_id[:8]}..."
                     f"（{len(result.state.context_ids)} 条消息{task_info}{plan_info}）\n"

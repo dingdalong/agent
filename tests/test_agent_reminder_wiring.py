@@ -7,7 +7,7 @@
 全绿，只在真实会话的首个 turn 才暴露。
 
 本文件用一个记录实参的假 provider 补上这个缺口：它不关心 ReminderMgr 内部实现，
-只断言 Agent 传下去的实参确实取自 `self.is_subagent` 与 `self.plan_active`。
+只断言 Agent 传下去的实参确实取自 `self.is_subagent` 与 `self.mode`。
 """
 
 from __future__ import annotations
@@ -19,36 +19,41 @@ from types import SimpleNamespace
 import pytest
 
 from src.agent import Agent
-from src.agent.states import RunResult
+from src.agent.states import RunContext, RunResult
+from src.mgr.reminder_mgr import ReminderMgr
+from src.mode import RunMode
 
 
 class _RecordingReminder:
-    """记录 build_turn_start_instructions 收到的实参。"""
+    """记录 queue_turn_start 收到的实参。"""
 
     def __init__(self) -> None:
         """初始化调用记录。"""
         self.calls: list[tuple[object, object]] = []
+        self.pending: list[str] = []
 
-    def build_turn_start_instructions(self, plan_active: object, is_subagent: object) -> str:
-        """记录实参并返回空注入。
+    def queue_turn_start(self, mode: object, is_subagent: object) -> None:
+        """记录实参。
 
         Args:
-            plan_active: 调用方 agent 的 Plan 状态。
+            mode: 调用方 agent 的运行模式。
             is_subagent: 调用方是否为子智能体。
 
-        Returns:
-            空字符串（本用例只关心实参）。
         """
-        self.calls.append((plan_active, is_subagent))
-        return ""
+        self.calls.append((mode, is_subagent))
+
+    def pop_pending(self) -> list[str]:
+        pending = self.pending
+        self.pending = []
+        return pending
 
 
-def _agent(*, is_subagent: bool, plan_active: bool) -> tuple[Agent, _RecordingReminder]:
+def _agent(*, is_subagent: bool, mode: RunMode) -> tuple[Agent, _RecordingReminder]:
     """装配一个只跑到 `_run_single_turn` 的最小 Agent。
 
     Args:
         is_subagent: 目标 agent 的子智能体标志。
-        plan_active: 目标 agent 的 Plan 状态。
+        mode: 目标 agent 的运行模式。
 
     Returns:
         (Agent 实例, 记录用的 reminder)。
@@ -59,7 +64,7 @@ def _agent(*, is_subagent: bool, plan_active: bool) -> tuple[Agent, _RecordingRe
     agent.description = ""
     agent.history = []
     agent.is_subagent = is_subagent
-    agent.plan_active = plan_active
+    agent.mode = mode
     agent.deps = SimpleNamespace(data_guard=None, session_state=None)
     agent.llm = SimpleNamespace(clear_reasoning_content=lambda _messages: None)
     reminder = _RecordingReminder()
@@ -95,35 +100,90 @@ def _agent(*, is_subagent: bool, plan_active: bool) -> tuple[Agent, _RecordingRe
 
 
 @pytest.mark.parametrize("is_subagent", [True, False], ids=["subagent", "main"])
-@pytest.mark.parametrize("plan_active", [True, False], ids=["plan-on", "plan-off"])
-def test_run_passes_own_identity_to_reminder(is_subagent: bool, plan_active: bool) -> None:
+@pytest.mark.parametrize("mode", [RunMode.PLAN, RunMode.EXECUTE], ids=["plan", "execute"])
+def test_run_passes_own_identity_to_reminder(is_subagent: bool, mode: RunMode) -> None:
     """单轮路径传给 ReminderMgr 的实参取自本 agent，不是写死的常量。
 
     Args:
         is_subagent: 目标 agent 的子智能体标志。
-        plan_active: 目标 agent 的 Plan 状态。
+        mode: 目标 agent 的运行模式。
 
     Returns:
         None。
     """
-    agent, reminder = _agent(is_subagent=is_subagent, plan_active=plan_active)
+    agent, reminder = _agent(is_subagent=is_subagent, mode=mode)
 
     asyncio.run(agent.run("任务正文"))
 
-    assert reminder.calls == [(plan_active, is_subagent)]
+    assert reminder.calls == [(mode, is_subagent)]
 
 
-def test_turn_start_instructions_are_prepended_before_task() -> None:
-    """非空注入拼在任务正文之前，且原任务正文完整保留。
+def test_turn_start_instructions_remain_separate_from_task() -> None:
+    """框架提醒保持独立排队，不拼接或改写用户任务。
 
     Returns:
         None。
     """
-    agent, reminder = _agent(is_subagent=True, plan_active=True)
-    reminder.build_turn_start_instructions = lambda *_: "<reminder>只读</reminder>"
+    agent, reminder = _agent(is_subagent=True, mode=RunMode.PLAN)
+    reminder.pending.append("只读")
 
     asyncio.run(agent.run("任务正文"))
 
-    content = agent.history[0]["content"]
-    assert content.startswith("<reminder>只读</reminder>")
-    assert content.endswith("任务正文")
+    assert agent.history == [{"role": "user", "content": "任务正文"}]
+    assert reminder.pop_pending() == ["只读"]
+
+
+def test_chat_boundary_combines_mode_and_reminders_into_one_developer() -> None:
+    """一次 chat 前的模式与多项框架提醒合并成一条 developer 消息。"""
+    agent = object.__new__(Agent)
+    agent.history = [{"role": "user", "content": "任务正文"}]
+    agent.mode = RunMode.EXECUTE
+    agent.is_subagent = False
+    agent.deps = SimpleNamespace(data_guard=None, session_state=None)
+    agent._last_injected_mode = None
+    agent._prompt_mgr = SimpleNamespace(
+        build_mode_instructions=lambda: f"MODE-{agent.mode.value}",
+    )
+    agent._reminder_mgr = ReminderMgr()
+    ctx = RunContext(
+        messages=agent.history,
+        pending_framework_instructions=["提醒 A", "提醒 A", "提醒 B"],
+    )
+
+    agent._append_pending_framework_message(ctx)
+
+    assert [message["role"] for message in agent.history] == ["user", "developer"]
+    content = agent.history[-1]["content"]
+    assert "MODE-execute" in content
+    assert content.count("提醒 A") == 1
+    assert content.count("提醒 B") == 1
+    assert ctx.pending_framework_instructions == []
+
+    agent._append_pending_framework_message(ctx)
+    assert len(agent.history) == 2
+
+
+def test_mode_injection_uses_final_mode_at_next_chat_boundary() -> None:
+    """多次模式切换不即时写历史，下一次 chat 只注入最终模式。"""
+    agent = object.__new__(Agent)
+    agent.history = []
+    agent.mode = RunMode.EXECUTE
+    agent.is_subagent = False
+    agent.deps = SimpleNamespace(data_guard=None, session_state=None)
+    agent._last_injected_mode = RunMode.EXECUTE
+    agent._prompt_mgr = SimpleNamespace(
+        build_mode_instructions=lambda: f"MODE-{agent.mode.value}",
+    )
+    agent._reminder_mgr = ReminderMgr()
+    ctx = RunContext(messages=agent.history)
+
+    agent.mode = RunMode.PLAN
+    agent.mode = RunMode.EXECUTE
+    agent._append_pending_framework_message(ctx)
+    assert agent.history == []
+
+    agent.mode = RunMode.PLAN
+    agent._append_pending_framework_message(ctx)
+    assert len(agent.history) == 1
+    assert agent.history[0]["role"] == "developer"
+    assert "MODE-plan" in agent.history[0]["content"]

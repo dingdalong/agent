@@ -321,6 +321,26 @@ def test_provider_drops_truly_empty_assistant(
     ) == []
 
 
+@pytest.mark.parametrize(
+    "provider_type",
+    [
+        OpenAIProvider,
+        AnthropicProvider,
+        DeepSeekProvider,
+        OllamaProvider,
+        MoonshotProvider,
+    ],
+    ids=["openai", "anthropic", "deepseek", "ollama", "moonshot"],
+)
+def test_provider_normalization_preserves_canonical_developer_role(
+    provider_type: type[LLMProvider],
+) -> None:
+    """供应商角色降级只能发生在请求构造阶段，不能改写共享历史。"""
+    message = {"role": "developer", "content": "mode update"}
+
+    assert object.__new__(provider_type).normalize_messages([message]) == [message]
+
+
 def test_moonshot_preserves_reasoning_content_for_valid_tool_round_trip() -> None:
     """Moonshot 的合法工具往返继续携带必需的 reasoning_content。"""
     provider = object.__new__(MoonshotProvider)

@@ -165,9 +165,14 @@ class MoonshotProvider(LLMProvider):
         Returns:
             归一化后的 LLMResponse。
         """
+        request_messages = [
+            {**message, "role": "system"}
+            if message.get("role") == "developer" else message
+            for message in (prompt or []) + messages
+        ]
         kwargs: dict = {
             "model": self.model,
-            "messages": prompt + messages if prompt is not None else messages,
+            "messages": request_messages,
             "stream": True,
             "stream_options": {"include_usage": True},
         }

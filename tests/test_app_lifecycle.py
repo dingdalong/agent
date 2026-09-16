@@ -17,6 +17,7 @@ from src.app.app import AgentApp
 from src.mgr.session_state import SessionState
 from src.events.types import SubagentLifecycle
 from src.interfaces.agent_view_store import AgentViewStore
+from src.mode import RunMode
 
 
 class _RecordingUI:
@@ -253,7 +254,7 @@ def test_reset_session_refreshes_env_baseline_and_rebinds_ledger(tmp_path) -> No
     """会话重置时重算环境基线、清空共享账本并绑定新会话 ID。
 
     环境基线只在这一处采集（本方法同时覆盖 startup 与 /clear），采集后才创建新
-    Agent，因此新 PromptMgr 自然读到新值，不需要 invalidate_cache。
+    Agent，因此新 PromptMgr 自然读到新值。
 
     Args:
         tmp_path: 测试工作目录。
@@ -414,7 +415,7 @@ def test_agent_round_persistence_serializes_in_worker_thread() -> None:
             session_state=state,
         )
         agent.history = [{"role": "user", "content": "hello"}]
-        agent.plan_active = False
+        agent.mode = RunMode.EXECUTE
         main_thread = threading.get_ident()
         beats = 0
         running = True

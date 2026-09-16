@@ -84,11 +84,6 @@ class OllamaProvider(LLMProvider):
             result["reasoning_output_tokens"] = reasoning
         return result
 
-    def _normalize_role(self, role: str) -> str:
-        if role == "developer":
-            return "system"
-        return role
-
     def _normalize_assistant_extra(self, msg: dict, norm_msg: dict, role: str) -> None:
         if role != "assistant":
             return
@@ -125,9 +120,14 @@ class OllamaProvider(LLMProvider):
         Returns:
             归一化后的 LLM 响应。
         """
+        request_messages = [
+            {**message, "role": "system"}
+            if message.get("role") == "developer" else message
+            for message in (prompt or []) + messages
+        ]
         kwargs: dict = {
             "model": self.model,
-            "messages": prompt + messages if prompt else messages,
+            "messages": request_messages,
             "stream": True,
             "stream_options": {"include_usage": True},
             "temperature": temperature,

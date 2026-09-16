@@ -9,6 +9,7 @@ from pathlib import Path
 import signal
 import uuid
 
+from src.mode import RunMode
 from src.mgr.frozen import clean_env
 from src.mgr.sandbox import ExecutionPolicy, SandboxBackend, SandboxError
 from src.mgr.workspace_access import WorkspaceAccess
@@ -135,14 +136,14 @@ class ProcessMgr:
             await proc.wait()
         session.processes.clear()
 
-    async def poll(self, owner, session_id, chars='', yield_time_ms=1000, terminate=False, plan_active=False):
+    async def poll(self, owner, session_id, chars='', yield_time_ms=1000, terminate=False, mode=RunMode.EXECUTE):
         if terminate and chars:
             return ToolResult.failure('invalid_arguments', 'terminate 与非空 chars 不能同时使用', recovery='只传 terminate=true，或只传 chars。')
         session = self.sessions.get(session_id)
         if session is None or session.owner != owner:
             return ToolResult.failure('unknown_session', '进程不存在、已回收或不属于当前 agent')
         async with session.lock:
-            if chars and plan_active and not session.readonly:
+            if chars and mode is RunMode.PLAN and not session.readonly:
                 return ToolResult.failure('permission_denied', '计划模式不能向有工作区写权限的旧进程发送输入')
             if terminate and session.task:
                 session.task.cancel()

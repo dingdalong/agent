@@ -5,7 +5,8 @@ from pydantic import BaseModel, Field
 from src.events.types import caller_identity
 from src.tools.decorator import tool
 from src.tools.display import ToolResult
-from src.tools.policy import AccessKind, DataFlow, ToolPolicy
+from src.mode import RunMode
+from src.tools.policy import AccessKind, DataFlow, ToolAudience, ToolAvailability, ToolPolicy
 
 
 class SubmitPlan(BaseModel):
@@ -13,9 +14,9 @@ class SubmitPlan(BaseModel):
     content: str = Field(..., min_length=1, description='完整自包含计划正文；修订时提交完整替换内容')
 
 
-@tool(model=SubmitPlan, description='一次提交完整计划。框架保存、展示、审核；不要另写文件、登记路径或重复输出计划。', policy=ToolPolicy(AccessKind.INTERNAL, DataFlow.LOCAL, plan_safe=True), subagent=False, feature='plan', counts_as_work=False, modes=("plan",))
+@tool(model=SubmitPlan, description='一次提交完整计划。框架保存、展示、审核；不要另写文件、登记路径或重复输出计划。', policy=ToolPolicy(AccessKind.INTERNAL, DataFlow.LOCAL, plan_safe=True), availability=ToolAvailability(frozenset({RunMode.PLAN}), feature='plan', audience=ToolAudience.MAIN_ONLY), counts_as_work=False)
 async def submit_plan(title, content, agent, deps, authorization):
-    if not authorization.allowed or not agent.plan_active or deps.plan_mgr is None:
+    if not authorization.allowed or agent.mode is not RunMode.PLAN or deps.plan_mgr is None:
         return ToolResult.failure('invalid_plan_state', '仅计划模式下可提交计划')
     if not title.strip() or not content.strip():
         return ToolResult.failure('invalid_arguments', '计划标题和正文不能为空')

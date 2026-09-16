@@ -104,11 +104,11 @@ def test_truncated_tool_call_is_discarded_before_retry() -> None:
     assert retry_state is AgentState.LLM_CALL
     assert ctx.length_recoveries == 1
     assert ctx.messages[1] == {"role": "assistant", "content": "先准备文件"}
-    assert ctx.messages[2]["role"] == "user"
-    assert "未执行" in ctx.messages[2]["content"]
-    assert "完整" in ctx.messages[2]["content"]
-    assert "拆分" in ctx.messages[2]["content"]
-    assert "分块" in ctx.messages[2]["content"]
+    assert len(ctx.messages) == 2
+    assert "未执行" in ctx.pending_framework_instructions[0]
+    assert "完整" in ctx.pending_framework_instructions[0]
+    assert "拆分" in ctx.pending_framework_instructions[0]
+    assert "分块" in ctx.pending_framework_instructions[0]
     assert all("tool_calls" not in message for message in ctx.messages)
     assert all("reasoning_content" not in message for message in ctx.messages)
     assert all("_response_output" not in message for message in ctx.messages)
@@ -135,7 +135,7 @@ def test_text_truncation_keeps_existing_continuation_flow() -> None:
 
     assert state is AgentState.LLM_CALL
     assert ctx.messages[0] is assistant_message
-    assert "从中断处直接继续" in ctx.messages[1]["content"]
+    assert "从中断处直接继续" in ctx.pending_framework_instructions[0]
 
 
 def test_length_recovery_accumulates_all_text_segments() -> None:
@@ -226,7 +226,7 @@ def test_empty_truncation_discards_response_and_lowers_effort() -> None:
     assert ctx.messages == [{"role": "user", "content": "开始任务"}]
     # max 有更低档位 high，降档而非压缩指令。
     assert ctx.length_effort_override == "high"
-    assert ctx.length_ephemeral_instruction is None
+    assert ctx.pending_framework_instructions == []
 
 
 def test_truncated_tool_call_at_recovery_limit_leaves_valid_history() -> None:
@@ -313,9 +313,8 @@ def test_recovery_limit_removes_all_previous_continuation_scaffolding() -> None:
     first_state = asyncio.run(agent._on_length_retry(ctx))
 
     assert first_state is AgentState.LLM_CALL
-    assert ctx.messages[-2] == {"role": "assistant", "content": "第一段截断正文"}
-    assert ctx.messages[-1]["role"] == "user"
-    assert "从中断处直接继续" in ctx.messages[-1]["content"]
+    assert ctx.messages[-1] == {"role": "assistant", "content": "第一段截断正文"}
+    assert "从中断处直接继续" in ctx.pending_framework_instructions[0]
 
     ctx.response = LLMResponse(
         content="第二段仍然截断",
@@ -356,7 +355,7 @@ def test_recovery_limit_uses_checkpoint_after_compact_rewrites_history() -> None
     first_state = asyncio.run(agent._on_length_retry(ctx))
 
     assert first_state is AgentState.LLM_CALL
-    assert ctx.messages[-2]["content"] == "压缩后第一段截断正文"
+    assert ctx.messages[-1]["content"] == "压缩后第一段截断正文"
     ctx.response = LLMResponse(
         content="压缩后第二段仍截断",
         finish_reason="length",
@@ -393,7 +392,7 @@ def test_thinking_truncation_discards_all_reasoning_carriers() -> None:
     assert ctx.length_recoveries == 1
     assert ctx.messages == [{"role": "user", "content": "深度分析"}]
     assert ctx.length_effort_override == "high"
-    assert ctx.length_ephemeral_instruction is None
+    assert ctx.pending_framework_instructions == []
     assert all("reasoning_content" not in message for message in ctx.messages)
     assert all("_anthropic_content" not in message for message in ctx.messages)
     assert all("_response_output" not in message for message in ctx.messages)
@@ -423,14 +422,14 @@ def test_thinking_effort_steps_down_then_resets_on_clean_terminal() -> None:
         assert asyncio.run(agent._on_process_response(ctx)) is AgentState.LENGTH_RETRY
         assert asyncio.run(agent._on_length_retry(ctx)) is AgentState.LLM_CALL
         assert ctx.length_effort_override == expected
-        assert ctx.length_ephemeral_instruction is None
+        assert ctx.pending_framework_instructions == []
 
     # low 已是最低档，无更低档位 → 一次性压缩指令兜底，override 保持 low。
     ctx.response = _thinking_length()
     assert asyncio.run(agent._on_process_response(ctx)) is AgentState.LENGTH_RETRY
     assert asyncio.run(agent._on_length_retry(ctx)) is AgentState.LLM_CALL
     assert ctx.length_effort_override == "low"
-    assert ctx.length_ephemeral_instruction is not None
+    assert ctx.pending_framework_instructions
 
     # 历史全程未被追加合成 assistant 或续写 user。
     assert ctx.messages == [{"role": "user", "content": "长思考任务"}]
@@ -443,7 +442,7 @@ def test_thinking_effort_steps_down_then_resets_on_clean_terminal() -> None:
     )
     assert asyncio.run(agent._on_process_response(ctx)) is AgentState.CHECK_STOP
     assert ctx.length_effort_override is None
-    assert ctx.length_ephemeral_instruction is None
+    assert ctx.pending_framework_instructions == []
 
 
 def test_thinking_bottom_of_ladder_uses_compress_instruction_not_history() -> None:
@@ -473,8 +472,8 @@ def test_thinking_bottom_of_ladder_uses_compress_instruction_not_history() -> No
 
     assert state is AgentState.LLM_CALL
     assert ctx.length_effort_override is None
-    assert ctx.length_ephemeral_instruction is not None
-    assert "压缩" in ctx.length_ephemeral_instruction
+    assert ctx.pending_framework_instructions
+    assert "压缩" in ctx.pending_framework_instructions[0]
     assert ctx.messages == [{"role": "user", "content": "长思考"}]
 
 

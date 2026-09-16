@@ -13,12 +13,11 @@
 
 ## 三条设计约束
 
-1. **注入载体只能是子 agent 的首条 user 消息，绝不能进 system prompt。**
-   Anthropic 把整个 system 包成单个 ephemeral 缓存断点（`src/llm/anthropic.py`），
-   断点覆盖 tools+system 整个前缀；账本是动态的，进 system 会让一个 coder 约
-   8-15k token 的前缀每次委派全部 miss。放消息尾部则只是增量，前缀命中不受影响。
+1. **注入载体只能是子 agent 的首条 user 消息，绝不能进固定 system 或框架
+   developer 消息。** 账本是动态外部数据；放在消息尾部既维持信任边界，也不改变
+   已缓存的固定前缀。
 2. **注入点是 `SubAgentMgr.task_delegator` 而非 `ReminderMgr`。**
-   ReminderMgr 的 provider 只收 `(plan_active, is_subagent)`，拿不到本次委派信息；
+   ReminderMgr 的 provider 只收 `(mode, is_subagent)`，拿不到本次委派信息；
    要支持按委派过滤就得在进程级单例上存槽位，而计划工作流允许同一轮并行委派多个
    explore，`asyncio.gather` 会互相覆盖——这正是 PlanMgr 已知缺陷
    （提醒被抢先消费、所有者被覆盖）的同一个坑。

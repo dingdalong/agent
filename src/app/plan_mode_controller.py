@@ -8,6 +8,7 @@ from typing import Any
 
 from src.events.types import PlanStateChanged
 from src.interfaces.base import UserInterface
+from src.mode import RunMode
 
 
 class PlanModeController:
@@ -16,7 +17,7 @@ class PlanModeController:
         self.event_bus = event_bus
         self.agent: Any = None
         self.ui.set_plan_state_provider(
-            lambda: bool(self.agent is not None and self.agent.plan_active)
+            lambda: bool(self.agent is not None and self.agent.mode is RunMode.PLAN)
         )
 
     def install_shortcut(self, agent: Any) -> None:
@@ -26,8 +27,8 @@ class PlanModeController:
     def toggle(self) -> bool:
         if self.agent is None:
             return False
-        active = not self.agent.plan_active
-        changed = self.agent.set_plan_active(active)
+        target = RunMode.EXECUTE if self.agent.mode is RunMode.PLAN else RunMode.PLAN
+        changed = self.agent.set_mode(target)
         if not changed:
             return False
         self.notify_state_changed()
@@ -35,7 +36,7 @@ class PlanModeController:
             asyncio.create_task(self.event_bus.emit(PlanStateChanged(
                 timestamp=time.time(),
                 source=self.agent.agent_type,
-                active=active,
+                active=target is RunMode.PLAN,
             )))
         except RuntimeError:
             pass

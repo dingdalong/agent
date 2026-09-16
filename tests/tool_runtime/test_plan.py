@@ -6,6 +6,7 @@ import pytest
 from src.mgr.plan_mgr import PlanMgr
 from src.mgr.session_state import SessionState
 from src.mgr.reminder_mgr import ReminderMgr
+from src.mode import RunMode
 
 
 @pytest.mark.parametrize('choice,feedback,active,end_turn', [
@@ -30,7 +31,7 @@ def test_one_call_plan_submission(runtime, tmp_path, choice, feedback, active, e
     assert result.status == 'success', str(result)
     assert 'sentinel-secret' not in ''.join(output)
     assert 'sentinel-secret' not in deps.session_state.plan['title']
-    assert agent.plan_active is active
+    assert (agent.mode is RunMode.PLAN) is active
     assert result.end_turn is end_turn
     assert sum(text == '完整计划正文' for text in output) == 1
     assert '完整计划正文' not in result.text
@@ -47,5 +48,5 @@ def test_plan_save_failure_does_not_exit(runtime, tmp_path):
     (tmp_path / '.agent/plans').write_text('not a directory')
     result = asyncio.run(deps.tools_mgr.execute('submit_plan', {'title':'目标','content':'正文'}, deps=deps, agent=agent))
     assert result.error_code == 'plan_save_failed'
-    assert agent.plan_active
+    assert agent.mode is RunMode.PLAN
     assert not deps.session_state.plan

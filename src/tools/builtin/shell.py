@@ -59,7 +59,7 @@ class WriteStdin(BaseModel):
 @tool(model=WriteStdin, description="获取进程增量输出、发送 stdin 或终止；不重放已消费输出。", policy=ToolPolicy(AccessKind.INTERNAL, DataFlow.LOCAL, plan_safe=True))
 async def write_stdin(session_id, chars, yield_time_ms, max_output_tokens, terminate, deps, agent):
     started = time.monotonic()
-    result = await deps.process_mgr.poll((deps.session_id, str(agent.uuid)), session_id, chars, yield_time_ms, terminate, plan_active=agent.plan_active)
+    result = await deps.process_mgr.poll((deps.session_id, str(agent.uuid)), session_id, chars, yield_time_ms, terminate, mode=agent.mode)
     if result.error_code is None:
         result.output_kind = "exec"
         result.chunk_id = uuid.uuid4().hex[:6]

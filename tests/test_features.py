@@ -74,14 +74,15 @@ def test_plan_requires_file():
 def test_every_tool_feature_is_valid():
     """注册表中每个工具的 feature 为 None 或 ∈ ALL_FEATURES（防拼写漂移）。"""
     for entry in _registry:
-        assert entry.feature is None or entry.feature in ALL_FEATURES, (
-            f"工具 {entry.name} 的 feature={entry.feature!r} 非法"
+        feature = entry.availability.feature
+        assert feature is None or feature in ALL_FEATURES, (
+            f"工具 {entry.name} 的 feature={feature!r} 非法"
         )
 
 
 def test_expected_tool_feature_mapping():
     """核心工具的 feature 归属符合设计映射。"""
-    by_name = {e.name: e.feature for e in _registry}
+    by_name = {e.name: e.availability.feature for e in _registry}
     assert by_name["task_create"] == "task"
     assert by_name["task_update"] == "task"
     assert by_name["task_list"] == "task"
@@ -97,28 +98,20 @@ def test_expected_tool_feature_mapping():
     assert by_name["exec_command"] is None
 
 
-# ── 按 feature 排除工具 ─────────────────────────────────────────────
+# ── feature 只控制运行时可用性，不改变 schema ───────────────────────
 
-def test_excluded_tool_names_by_feature():
-    """仅启用 subagent 时，其他 feature 的工具全部被排除，无归属工具不排除。"""
+def test_feature_metadata_does_not_filter_schema():
+    """所有 feature 的工具都进入统一 schema，运行时再由权限层判定。"""
     mgr = ToolsMgr()
-    excluded = mgr.excluded_tool_names({"subagent"})
-    # subagent 工具不排除
-    assert "task_delegator" not in excluded
-    # 其他 feature 工具被排除
-    assert "task_create" in excluded
-    assert "load_skill" in excluded
-    assert "apply_patch" in excluded
-    assert "save_memory" in excluded
-    assert "submit_plan" in excluded
-    # 无归属工具不排除
-    assert "exec_command" not in excluded
+    names = {schema["function"]["name"] for schema in mgr.schemas()}
+    assert {"task_delegator", "task_create", "load_skill", "apply_patch",
+            "save_memory", "submit_plan", "exec_command"} <= names
 
 
-def test_all_features_excludes_nothing():
-    """全部 feature 启用时不排除任何工具。"""
+def test_schema_cache_is_stable_for_all_features():
+    """feature 集不作为 schema API 的输入。"""
     mgr = ToolsMgr()
-    assert mgr.excluded_tool_names(set(ALL_FEATURES)) == set()
+    assert mgr.schemas() is mgr.schemas()
 
 
 # ── 角色 role.md → features 端到端 ──────────────────────────────────
@@ -161,18 +154,15 @@ def test_mijia_role_configuration_contract():
 
 
 def test_mijia_role_features_and_schema():
-    """mijia 可加载技能，仍不开放文件、任务、记忆或计划工具。"""
+    """mijia 共享完整 schema，feature 仅在运行时限制能力。"""
     manifest = _load_role_manifest("mijia")
     assert manifest.features == {"subagent", "skill"}
     feats = resolve_features(manifest.features)
     assert feats == {"subagent", "skill"}
     mgr = ToolsMgr()
-    effective = mgr.all_tool_names() - mgr.excluded_tool_names(feats)
-    assert "task_delegator" in effective
-    assert "load_skill" in effective
-    for absent in ("task_create", "apply_patch",
-                   "save_memory", "submit_plan", "submit_plan"):
-        assert absent not in effective
+    names = {schema["function"]["name"] for schema in mgr.schemas()}
+    assert {"task_delegator", "load_skill", "task_create", "apply_patch",
+            "save_memory", "submit_plan"} <= names
 
 
 def test_coding_role_defaults_to_all_features():
@@ -181,5 +171,4 @@ def test_coding_role_defaults_to_all_features():
     assert manifest.features is None
     feats = resolve_features(manifest.features)
     assert feats == set(ALL_FEATURES)
-    mgr = ToolsMgr()
-    assert mgr.excluded_tool_names(feats) == set()
+    assert ToolsMgr().schemas()

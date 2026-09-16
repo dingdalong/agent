@@ -9,7 +9,12 @@ from typing import Any, Dict, TYPE_CHECKING
 from pydantic import ValidationError
 
 from src.events.types import ToolCallCompleted, ToolCallStarted, caller_identity
-from src.mgr.permission_mgr import tool_sort_order
+from src.mode import RunMode
+from src.mgr.permission_mgr import (
+    ToolAuthorizationRequest,
+    ToolCallerContext,
+    tool_sort_order,
+)
 from src.tools import ToolDict, ToolEntry
 from src.tools.display import ToolResult
 from src.mgr.tool_output import ToolOutput
@@ -38,6 +43,7 @@ class ToolsMgr:
 
     def __init__(self, load_registered: bool = True, output_config=None):
         self._tools: dict[str, ToolEntry] = {}
+        self._schemas: list[ToolDict] | None = None
         self.output = ToolOutput(output_config)
         if not load_registered:
             return
@@ -62,6 +68,7 @@ class ToolsMgr:
                 tool.policy.detail_template,
             ))
         self._tools[tool.name] = tool
+        self._schemas = None
 
     def get(self, name: str) -> ToolEntry | None:
         """按名称获取工具。"""
@@ -72,6 +79,7 @@ class ToolsMgr:
         self._tools = {
             name: entry for name, entry in self._tools.items() if entry.origin.kind != kind
         }
+        self._schemas = None
 
     def reload(self) -> None:
         self.output.clear()
@@ -88,79 +96,29 @@ class ToolsMgr:
         """返回所有已注册工具名的集合。"""
         return set(self._tools.keys())
 
-    def excluded_tool_names(self, enabled: set[str]) -> set[str]:
-        """返回因所属 feature 未启用而应被排除的工具名集合。
+    def schemas(self) -> list[ToolDict]:
+        """返回所有已注册工具的稳定 schema 目录。"""
+        if self._schemas is None:
+            tools = sorted(self._tools.values(), key=_tool_sort_key)
+            self._schemas = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": tool.parameters_schema,
+                    },
+                }
+                for tool in tools
+            ]
+        return self._schemas
 
-        扫描工具注册表，任何声明了 feature 且该 feature 不在 enabled 中的工具均被排除；
-        无 feature 归属的工具恒不排除。
-
-        Args:
-            enabled: 当前 agent 启用的 feature 名集合。
-
-        Returns:
-            应排除的工具名集合。
-        """
-        return {e.name for e in self._tools.values() if e.feature and e.feature not in enabled}
-
-    def resolve_subagent_tools(self, tool_names: set[str] | None) -> set[str]:
-        """解析子 agent 的最终工具集。
-
-        在 agent 定义的 tools 基础上：
-        - 追加所有 subagent=True 的工具（自动注入）
-        - 移除所有 subagent=False 的工具（强制排除）
-
-        Args:
-            tool_names: agent 定义中声明的工具名集合，None 表示全量。
-
-        Returns:
-            解析后的工具名集合（始终为 set，不再是 None）。
-        """
-        if tool_names is None:
-            base = set(self._tools.keys())
-        else:
-            base = set(tool_names)
-        for name, entry in self._tools.items():
-            if entry.subagent is True:
-                base.add(name)
-            elif entry.subagent is False:
-                base.discard(name)
-        return base
-
-    def get_schemas(
-        self,
-        tool_names: set[str] | list[str] | None = None,
-        *, plan_active: bool | None = None,
-    ) -> list[ToolDict]:
-        """返回 OpenAI function-calling 格式的工具 schema 列表。
-
-        Args:
-            tool_names: 要返回的工具名集合，None 返回全部。
-
-        Returns:
-            工具 schema 列表。
-        """
-        if tool_names is None:
-            tools = list(self._tools.values())
-        else:
-            missing = set(tool_names) - self._tools.keys()
-            if missing:
-                logger.warning("工具声明包含未注册名称，请更新角色工具列表：%s", ", ".join(sorted(missing)))
-            tools = [self._tools[name] for name in tool_names if name in self._tools]
-        if plan_active is not None:
-            mode = "plan" if plan_active else "execute"
-            tools = [tool for tool in tools if mode in tool.modes]
-        tools = sorted(tools, key=_tool_sort_key)
-        return [
-            {
-                "type": "function",
-                "function": {
-                    "name": tool.name,
-                    "description": tool.description,
-                    "parameters": tool.parameters_schema,
-                },
-            }
-            for tool in tools
-        ]
+    def unavailable_in_mode(self, mode: RunMode) -> tuple[str, ...]:
+        """返回当前模式不能执行的完整工具名列表。"""
+        return tuple(sorted(
+            entry.name for entry in self._tools.values()
+            if mode not in entry.availability.modes
+        ))
 
     def _result_preview(self, result: str, limit: int = 160) -> str:
         """生成结果预览文本。"""
@@ -304,15 +262,6 @@ class ToolsMgr:
             return ToolResult.failure("unknown_tool", f"未知工具 {tool_name}")
 
         tool = self._tools[tool_name]
-        if agent is not None:
-            mode = "plan" if getattr(agent, "plan_active", False) else "execute"
-            declared = getattr(agent, "tools", None)
-            excluded = getattr(agent, "_excluded_tools", set())
-            if (mode not in tool.modes or tool_name in excluded
-                    or (declared is not None and tool_name not in declared)
-                    or (getattr(agent, "is_subagent", False) and tool.subagent is False)):
-                return ToolResult.failure("tool_unavailable", f"当前模式或 agent 不提供 {tool_name}",
-                                          recovery="使用当前请求提供的工具列表；不要重试不可用工具。")
         data_guard = getattr(deps, "data_guard", None) if deps is not None else None
         if data_guard is None:
             from src.mgr.data_guard import DataGuard
@@ -365,15 +314,28 @@ class ToolsMgr:
             return ToolResult.failure("permission_denied", "授权服务不可用")
 
         user_intent = self._latest_user_intent(agent)
-        authorization = await permission_mgr.authorize(
-            tool_name,
-            tool.policy,
-            arguments,
+        mode = getattr(agent, "mode", RunMode.EXECUTE)
+        declared_tools = getattr(agent, "tools", None)
+        caller = ToolCallerContext(
+            mode=mode,
+            agent_type=str(getattr(agent, "agent_type", "")),
+            is_subagent=bool(getattr(agent, "is_subagent", False)),
+            features=frozenset(getattr(agent, "features", set()) or ()),
+            declared_tools=(
+                frozenset(declared_tools) if declared_tools is not None else None
+            ),
+            unavailable_tools=self.unavailable_in_mode(mode),
+        )
+        authorization = await permission_mgr.authorize(ToolAuthorizationRequest(
+            tool_name=tool_name,
+            policy=tool.policy,
+            availability=tool.availability,
+            arguments=arguments,
             origin=tool.origin,
-            plan_active=bool(getattr(agent, "plan_active", False)),
+            caller=caller,
             user_intent=user_intent,
             review_model=getattr(getattr(agent, "llm", None), "model", None),
-        )
+        ))
         if not authorization.allowed:
             event_bus = getattr(deps, "event_bus", None) if deps is not None else None
             if event_bus is not None and hasattr(event_bus, "notify_permission"):

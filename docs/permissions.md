@@ -4,14 +4,14 @@
 
 ## 工具策略
 
-工具通过冻结的 `ToolPolicy` 声明授权所需事实，定义见 `src/tools/policy.py`：
+工具通过冻结的 `ToolAvailability` 声明运行时可用模式、所需 feature 与调用方范围，通过 `ToolPolicy` 声明风险事实，定义见 `src/tools/policy.py`。availability 不改变发送给模型的 schema。
 
 | 字段 | 含义 |
 |---|---|
 | `access` | `LOCAL_READ`、`EXTERNAL_READ`、`INTERNAL`、`WORKSPACE_WRITE` 或 `REVIEW` |
 | `data_flow` | `LOCAL`、`EXTERNAL` 或 `DYNAMIC` |
 | `path_args` | 一个或多个 `PathArgument(name, role)`；role 为 read/write/source/destination |
-| `plan_safe` | INTERNAL 工具是否可在 Plan 激活时执行 |
+| `plan_safe` | availability 允许 Plan 后，INTERNAL 工具是否满足 Plan 风险约束 |
 | `detail_template` | 仅用于经 DataGuard 脱敏后的 UI 展示 |
 
 `ToolOrigin` 记录 builtin、mcp 或 dynamic 来源。只有仓库内可信的 builtin 注册代码能获得确定性放行；非 builtin 工具即使传入更宽松策略，也会降级到 REVIEW。未声明策略的工具使用 `REVIEW + DYNAMIC`。
@@ -25,16 +25,17 @@ MCP 工具固定为 `REVIEW + EXTERNAL`。上游 annotation（包括 `readOnlyHi
 1. 用 Pydantic 校验原始参数并展开默认值。
 2. 运行已经过项目启动信任门的 `PreToolUse` Hook。
 3. Hook 修改参数后重新校验。
-4. 用 `PathResolver` 提取、规范化并分类全部路径；移动操作额外解析最终目标。
-5. 运行 `HardDenyDetector` 和秘密外发检查。
-6. 若 `agent.plan_active`，先执行独立 Plan 约束。
-7. LOCAL_READ 和 INTERNAL 走确定性放行。
-8. WORKSPACE_WRITE 仅在全部写目标为普通工作区或计划目录时确定性放行。
-9. EXTERNAL_READ 进入 Web 专用本地隐私预检。
-10. 其余调用交通用 LLM 智能权限审查；返回 ask、异常、超时或无效响应时，只进行一次 yes/no 人工确认，无 TTY、取消或拒绝均为 deny。
-11. 工具执行结果立即经 DataGuard 脱敏和限长，再进入 PostToolUse、事件、输出预算和 Agent 历史。
+4. `PermissionManager` 先检查 mode、feature、主/子身份和 manifest 声明；不满足时直接返回 `tool_unavailable`。
+5. 用 `PathResolver` 提取、规范化并分类全部路径；移动操作额外解析最终目标。
+6. 运行 `HardDenyDetector` 和秘密外发检查。
+7. 若 `caller.mode` 为 Plan，执行独立 Plan 风险约束。
+8. LOCAL_READ 和 INTERNAL 走确定性放行。
+9. WORKSPACE_WRITE 仅在全部写目标为普通工作区或计划目录时确定性放行。
+10. EXTERNAL_READ 进入 Web 专用本地隐私预检。
+11. 其余调用交通用 LLM 智能权限审查；返回 ask、异常、超时或无效响应时，只进行一次 yes/no 人工确认，无 TTY、取消或拒绝均为 deny。
+12. 工具执行结果立即经 DataGuard 脱敏和限长，再进入 PostToolUse、事件、输出预算和 Agent 历史。
 
-`AuthorizationResult.source` 标明裁决来源：`hard_rule`、`plan`、`policy`、`judge`、`web_safety`、`user` 或 `failure`。当前 EXTERNAL_READ 本地隐私预检通过时仍使用 `source="web_safety"`，该来源名不表示已调用 LLM Web 审查。`reason` 和 `safe_detail` 在返回前再次脱敏并限长。允许结果还包含冻结的 `path_grants`，只记录参数名、角色、授权时规范路径和分类；工具在实际 I/O 前按自身契约复检路径。
+`AuthorizationResult.source` 标明裁决来源：`availability`、`hard_rule`、`plan`、`policy`、`judge`、`web_safety`、`user` 或 `failure`。当前 EXTERNAL_READ 本地隐私预检通过时仍使用 `source="web_safety"`，该来源名不表示已调用 LLM Web 审查。`reason` 和 `safe_detail` 在返回前再次脱敏并限长。允许结果还包含冻结的 `path_grants`，只记录参数名、角色、授权时规范路径和分类；工具在实际 I/O 前按自身契约复检路径。
 
 ## 路径解析
 
@@ -97,16 +98,18 @@ EXTERNAL 工具在执行前发现秘密即 Hard Deny；DYNAMIC Shell 还会运�
 
 ## Plan
 
-Plan 是 `Agent.plan_active: bool`，不是授权策略变体。`PlanModeController` 只管理入口 Agent 的 Shift+Tab 双向切换和 `PlanStateChanged`；`/plan` 与 Shift+Tab 进入 Plan，`submit_plan` 提供展示与审核工作流。进入计划模式只能由用户触发；submit_plan 审核批准后由框架退出。活动计划路径在快捷键退出时保留。
+Plan 是 `Agent.mode == RunMode.PLAN`，不是授权策略变体。`PlanModeController` 只管理入口 Agent 的 Shift+Tab 双向切换和 `PlanStateChanged`；`/plan` 与 Shift+Tab 进入 Plan，`submit_plan` 提供展示与审核工作流。进入计划模式只能由用户触发；submit_plan 审核批准后由框架退出。活动计划路径在快捷键退出时保留。
 
 Plan 激活时只允许：
 
-- LOCAL_READ。
-- EXTERNAL_READ，但仍须通过 Web 本地隐私预检；疑似敏感内容转一次性人工确认。
-- `plan_safe=True` 的 INTERNAL 工具；`task_create`/`task_update` 不声明 `plan_safe`，因此在 Plan 模式下被拒绝，只读的 `task_list`/`task_get` 仍放行。
-- 在只读项目沙箱中执行的 exec_command；诊断、测试和脚本仅可写专用临时目录。计划文件仅由 submit_plan 内部保存。
+- 读取和搜索本地文件、代码、配置、日志以及 Git 元数据和历史。
+- 只读检查系统和环境；EXTERNAL_READ 仍须通过 Web 本地隐私预检，疑似敏感内容转一次性人工确认。
+- 在只读项目沙箱中运行现有单元测试、集成测试和端到端测试；不得修改项目或外部状态，缓存、临时文件和测试输出只能写入框架专用临时目录。
+- availability 允许 Plan 且 `plan_safe=True` 的 INTERNAL 工具；全部 `task_*` 工具为执行模式专属，因此在 availability 阶段拒绝。计划文件仅由主 agent 的 submit_plan 内部保存。
 
-其他调用直接以 `source="plan"` 拒绝，不调用智能权限。子 Agent 在构造时继承父 Agent 当前 Plan 状态。
+禁止创建、编辑、删除或移动项目文件，禁止申请额外写权限或网络权限，禁止通过已有可写进程间接修改项目。仅用户或计划审核可以切换模式。
+
+授权首先检查 `ToolAvailability`。模式不匹配时直接以 `error_code="tool_unavailable"`、`source="availability"` 拒绝，返回当前模式、目标工具及该模式完整禁用列表，不调用智能权限。因 Plan 模式导致的 availability 拒绝、Shell 扩权拒绝以及 Plan 风险约束拒绝都会在理由和恢复建议中重申上述限制。子 Agent 在构造时继承父 Agent 当前模式。
 
 ## 授权日志
 

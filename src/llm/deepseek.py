@@ -205,12 +205,19 @@ class DeepSeekProvider(ResponsesStreamMixin, LLMProvider):
         instructions_parts: list[str] = []
         input_items: list[dict] = []
 
-        for message in (prompt or []) + messages:
+        for message in prompt or []:
             role = message.get("role")
             if role in {"system", "developer"}:
                 text = self._content_text(message.get("content", ""))
                 if text:
                     instructions_parts.append(text)
+
+        for message in messages:
+            role = message.get("role")
+            if role in {"system", "developer"}:
+                text = self._content_text(message.get("content", ""))
+                if text:
+                    input_items.append({"role": "developer", "content": text})
             elif role == "user":
                 input_items.append({
                     "role": "user",

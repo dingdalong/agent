@@ -118,6 +118,7 @@ def tool_title(tool_name: str) -> str:
 
 # AuthorizationResult.source → 中文标签；未登记的来源原样显示（暴露漏配），不回退成「智能权限」。
 PERMISSION_SOURCES: dict[str, str] = {
+    "availability": "工具可用性",
     "hard_rule": "硬规则",
     "plan": "计划模式",
     "policy": "策略放行",

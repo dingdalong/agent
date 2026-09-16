@@ -7,6 +7,7 @@ import time
 from src.commands import command
 from src.commands.context import CommandContext
 from src.events.types import PlanStateChanged
+from src.mode import RunMode
 
 
 @command("进入计划模式", feature="plan")
@@ -15,7 +16,7 @@ async def plan(ctx: CommandContext, args: list[str]) -> None:
     agent = ctx.agent
     if agent is None:
         return
-    if not agent.set_plan_active(True):
+    if not agent.set_mode(RunMode.PLAN):
         await ctx.deps.event_bus.request_output("已在计划模式中。\n")
         return
     await ctx.deps.event_bus.emit(PlanStateChanged(

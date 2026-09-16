@@ -6,6 +6,8 @@ from dataclasses import dataclass, fields
 from enum import StrEnum
 from typing import Literal
 
+from src.mode import RunMode
+
 
 class AccessKind(StrEnum):
     LOCAL_READ = "local_read"
@@ -26,6 +28,29 @@ class PathRole(StrEnum):
     WRITE = "write"
     SOURCE = "source"
     DESTINATION = "destination"
+
+
+class ToolAudience(StrEnum):
+    ALL = "all"
+    MAIN_ONLY = "main_only"
+    DECLARED = "declared"
+
+
+@dataclass(frozen=True, slots=True)
+class ToolAvailability:
+    """工具的运行时可用性；不影响发送给模型的 schema。"""
+
+    modes: frozenset[RunMode] = frozenset(RunMode)
+    feature: str | None = None
+    audience: ToolAudience = ToolAudience.DECLARED
+
+    def __post_init__(self) -> None:
+        if not self.modes or any(not isinstance(mode, RunMode) for mode in self.modes):
+            raise TypeError("ToolAvailability.modes 必须是非空 RunMode 集合")
+        if self.feature is not None and not isinstance(self.feature, str):
+            raise TypeError("ToolAvailability.feature 必须是字符串或 None")
+        if not isinstance(self.audience, ToolAudience):
+            raise TypeError("ToolAvailability.audience 必须是 ToolAudience")
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,4 +97,5 @@ class ToolOrigin:
 
 
 DEFAULT_POLICY = ToolPolicy()
+DEFAULT_AVAILABILITY = ToolAvailability()
 BUILTIN_ORIGIN = ToolOrigin("builtin")

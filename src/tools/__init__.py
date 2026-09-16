@@ -11,11 +11,21 @@ src.mgr/__init__ ↔ src.tools/__init__ 的包级循环导入。延迟扫描让 
 import importlib
 import pkgutil
 
-from src.tools.policy import AccessKind, DataFlow, PathArgument, PathRole, ToolOrigin, ToolPolicy
+from src.tools.policy import (
+    AccessKind,
+    DataFlow,
+    PathArgument,
+    PathRole,
+    ToolAudience,
+    ToolAvailability,
+    ToolOrigin,
+    ToolPolicy,
+)
 
 __all__ = [
-    "AccessKind", "DataFlow", "PathArgument", "PathRole", "ToolDict", "ToolEntry",
-    "ToolOrigin", "ToolPolicy", "tool", "_registry",
+    "AccessKind", "DataFlow", "PathArgument", "PathRole", "ToolAudience",
+    "ToolAvailability", "ToolDict", "ToolEntry", "ToolOrigin", "ToolPolicy", "tool",
+    "_registry",
 ]
 
 # 首次访问时触发一次 builtin 扫描并缓存 decorator 导出。

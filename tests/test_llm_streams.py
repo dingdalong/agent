@@ -1897,6 +1897,104 @@ _ANTHROPIC_CACHEABLE_BLOCK_TYPES = [
 ]
 
 
+def test_framework_messages_preserve_order_across_responses_providers() -> None:
+    """固定 prompt 保持前缀，历史 developer 留在原有消息位置。"""
+    prompt = [{"role": "system", "content": "fixed system"}]
+    history = [
+        {"role": "user", "content": "task"},
+        {"role": "developer", "content": "mode update"},
+    ]
+
+    openai_input = _bare_provider(OpenAIProvider)._convert_to_input(history, prompt)
+    deepseek_instructions, deepseek_input = _bare_provider(
+        DeepSeekProvider
+    )._convert_to_input(history, prompt)
+
+    assert openai_input == [
+        {"role": "developer", "content": "fixed system"},
+        {"role": "user", "content": "task"},
+        {"role": "developer", "content": "mode update"},
+    ]
+    assert deepseek_instructions == "fixed system"
+    assert deepseek_input == [
+        {"role": "user", "content": "task"},
+        {"role": "developer", "content": "mode update"},
+    ]
+
+
+@pytest.mark.parametrize("provider_type", [OllamaProvider, MoonshotProvider])
+def test_chat_provider_maps_developer_in_request_copy_only(
+    provider_type: type[LLMProvider],
+) -> None:
+    """不支持 developer 的 Chat API 只在请求副本中映射为 system。"""
+    history = [
+        {"role": "user", "content": "task"},
+        {"role": "developer", "content": "mode update"},
+    ]
+    provider, create = _capturing_chat_provider(
+        provider_type,
+        FakeAsyncStream([_chat_chunk(finish_reason="stop")]),
+    )
+
+    asyncio.run(
+        provider._do_chat(
+            history,
+            prompt=[{"role": "system", "content": "fixed system"}],
+            enable_thinking=False,
+            call=_call(),
+        )
+    )
+
+    assert history == [
+        {"role": "user", "content": "task"},
+        {"role": "developer", "content": "mode update"},
+    ]
+    assert create.requests[0]["messages"] == [
+        {"role": "system", "content": "fixed system"},
+        {"role": "user", "content": "task"},
+        {"role": "system", "content": "mode update"},
+    ]
+
+
+def test_anthropic_keeps_only_fixed_prompt_in_system_cache_prefix() -> None:
+    """Anthropic 的模式 developer 留在 messages，system 只承载固定 prompt。"""
+    provider = _bare_provider(AnthropicProvider)
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": name,
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+        for name in ("first", "last")
+    ]
+    system, messages = provider._convert_messages(
+        [
+            {"role": "user", "content": "latest"},
+            {"role": "developer", "content": "mode update"},
+        ],
+        [{"role": "system", "content": "stable prefix"}],
+    )
+
+    assert system == ["stable prefix"]
+    assert "<framework_instruction>" in str(messages)
+    assert "mode update" in str(messages)
+    system_blocks = provider._system_blocks(system)
+    converted_tools = provider._convert_tools(tools)
+    provider._apply_cache_control(messages)
+
+    assert system_blocks[0]["cache_control"] == {"type": "ephemeral"}
+    assert "cache_control" not in converted_tools[0]
+    assert converted_tools[-1]["cache_control"] == {"type": "ephemeral"}
+    breakpoints = sum(
+        "cache_control" in item
+        for item in converted_tools + system_blocks + messages[0]["content"]
+    )
+    assert breakpoints == 3
+
+
 @pytest.mark.parametrize("block_type", _ANTHROPIC_CACHEABLE_BLOCK_TYPES)
 def test_anthropic_cache_control_accepts_sdk_whitelist(block_type: str) -> None:
     """Anthropic 当前允许 cache_control 的 MessageParam block 应可作为断点。

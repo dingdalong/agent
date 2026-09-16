@@ -17,7 +17,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from src.tools.policy import AccessKind, DataFlow, ToolPolicy
+from src.tools.policy import AccessKind, DataFlow, ToolAudience, ToolAvailability, ToolPolicy
 from src.tools.display import ToolResult
 from src.tools.decorator import tool
 
@@ -47,8 +47,7 @@ class NoteContext(BaseModel):
         plan_safe=True,
         detail_template="记录 {topic}",
     ),
-    subagent=True,
-    feature="subagent",
+    availability=ToolAvailability(feature="subagent", audience=ToolAudience.ALL),
     counts_as_work=False,
 )
 async def note_context(

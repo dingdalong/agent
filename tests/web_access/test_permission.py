@@ -10,8 +10,12 @@ from src.tools import AccessKind, DataFlow, ToolOrigin, ToolPolicy
 from src.events.types import ToolCallCompleted
 from src.mgr.data_guard import DataGuard
 from src.mgr.permission_mgr import JudgeVerdict, PermissionManager
+from src.mgr.permission_mgr import ToolAuthorizationRequest, ToolCallerContext
 from src.mgr.tools_mgr import ToolsMgr
+from src.mgr.features import ALL_FEATURES
+from src.mode import RunMode
 from src.tools.decorator import ToolEntry
+from src.tools.policy import DEFAULT_AVAILABILITY
 
 
 class WebReviewer:
@@ -32,18 +36,45 @@ def policy() -> ToolPolicy:
     return ToolPolicy(AccessKind.EXTERNAL_READ, DataFlow.EXTERNAL)
 
 
+def authorize(
+    manager: PermissionManager,
+    tool_name: str,
+    arguments: dict,
+    *,
+    mode: RunMode,
+    user_intent: str,
+    review_model: str | None = None,
+):
+    return manager.authorize(ToolAuthorizationRequest(
+        tool_name=tool_name,
+        policy=policy(),
+        availability=DEFAULT_AVAILABILITY,
+        arguments=arguments,
+        origin=ToolOrigin("builtin"),
+        caller=ToolCallerContext(
+            mode=mode,
+            agent_type="main",
+            is_subagent=False,
+            features=frozenset(ALL_FEATURES),
+            declared_tools=None,
+            unavailable_tools=(),
+        ),
+        user_intent=user_intent,
+        review_model=review_model,
+    ))
+
+
 def test_safe_web_fetch_is_allowed_by_privacy_precheck(tmp_path: Path):
     """隐私预检通过的安全 URL 应直接放行，不调用 LLM 审查。"""
     reviewer = WebReviewer()
     manager = PermissionManager(
         str(tmp_path), None, None, DataGuard(), web_safety_client=reviewer
     )
-    result = run(manager.authorize(
+    result = run(authorize(
+        manager,
         "web_fetch",
-        policy(),
         {"url": "https://example.test/doc?lang=zh"},
-        origin=ToolOrigin("builtin"),
-        plan_active=True,
+        mode=RunMode.PLAN,
         user_intent="读取这份公开文档",
         review_model="current-model",
     ))
@@ -62,12 +93,11 @@ def test_personal_search_skips_llm_and_asks_once(tmp_path: Path):
     manager = PermissionManager(
         str(tmp_path), None, confirm, DataGuard(), web_safety_client=reviewer
     )
-    result = run(manager.authorize(
+    result = run(authorize(
+        manager,
         "web_search",
-        policy(),
         {"query": "alice@example.com recent profile", "max_results": 5},
-        origin=ToolOrigin("builtin"),
-        plan_active=True,
+        mode=RunMode.PLAN,
         user_intent="search",
         review_model="current-model",
     ))
@@ -82,12 +112,11 @@ def test_secret_is_denied_before_web_reviewer(tmp_path: Path):
     manager = PermissionManager(
         str(tmp_path), None, None, DataGuard(), web_safety_client=reviewer
     )
-    result = run(manager.authorize(
+    result = run(authorize(
+        manager,
         "web_search",
-        policy(),
         {"query": secret, "max_results": 5},
-        origin=ToolOrigin("builtin"),
-        plan_active=False,
+        mode=RunMode.EXECUTE,
         user_intent="search",
         review_model="current-model",
     ))
@@ -101,12 +130,11 @@ def test_normal_long_search_does_not_trigger_false_private_identifier(tmp_path: 
     manager = PermissionManager(
         str(tmp_path), None, None, DataGuard(), web_safety_client=reviewer
     )
-    result = run(manager.authorize(
+    result = run(authorize(
+        manager,
         "web_search",
-        policy(),
         {"query": "OpenAI Responses API web search documentation", "max_results": 5},
-        origin=ToolOrigin("builtin"),
-        plan_active=False,
+        mode=RunMode.EXECUTE,
         user_intent="research",
         review_model="current-model",
     ))
@@ -121,12 +149,11 @@ def test_invalid_or_private_fetch_is_denied_before_web_reviewer(tmp_path: Path):
         str(tmp_path), None, None, DataGuard(), web_safety_client=reviewer
     )
     for url in ("file:///etc/passwd", "http://127.0.0.1/", "https://example.test:8443/"):
-        result = run(manager.authorize(
+        result = run(authorize(
+            manager,
             "web_fetch",
-            policy(),
             {"url": url},
-            origin=ToolOrigin("builtin"),
-            plan_active=False,
+            mode=RunMode.EXECUTE,
             user_intent="fetch",
             review_model="current-model",
         ))
@@ -174,7 +201,10 @@ def test_tools_mgr_passes_current_model_and_omits_web_result_preview(tmp_path: P
     agent = SimpleNamespace(
         uuid="agent",
         agent_type="main",
-        plan_active=True,
+        mode=RunMode.PLAN,
+        is_subagent=False,
+        features=set(ALL_FEATURES),
+        tools=None,
         history=[{"role": "user", "content": "research"}],
         llm=SimpleNamespace(model="current-model"),
     )

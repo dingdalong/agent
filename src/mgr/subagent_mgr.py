@@ -154,7 +154,7 @@ class SubAgentMgr:
         本方法同时是**跨 agent 上下文交接的唯一枢纽**：委派前把共享账本摘要拼到
         prompt 前面，委派后把子智能体的返回报告自动记账供后续委派复用。之所以放在
         这里而不是 ReminderMgr，是因为 ReminderMgr 的 provider 只收
-        `(plan_active, is_subagent)`，拿不到本次委派信息，按委派过滤就得在进程级
+        `(mode, is_subagent)`，拿不到本次委派信息，按委派过滤就得在进程级
         单例上存槽位——而计划工作流允许同一轮并行委派多个 explore，`asyncio.gather`
         会互相覆盖那个槽位（共享消费槽位已经
         踩过同一个坑）。本方法的局部变量天然 per-delegation、并发安全。
@@ -210,9 +210,6 @@ class SubAgentMgr:
         run_result: Any = None
 
         try:
-            # 解析子 agent 的最终工具集（自动注入 subagent=True、排除 subagent=False）
-            tools = self.deps.tools_mgr.resolve_subagent_tools(manifest.tools)
-
             # 模型：加载期已校验，None 表示走激活角色的 default 槽位
             model_value = manifest.model
 
@@ -239,12 +236,12 @@ class SubAgentMgr:
                 manifest=manifest,
                 deps=self.deps,
                 is_subagent=True,
-                tools=tools,
+                tools=manifest.tools,
                 model=model_value,
                 enable_thinking=enable_thinking,
                 reasoning_effort=reasoning_effort,
                 features=features,
-                plan_active=bool(getattr(parent_agent, "plan_active", False)),
+                mode=parent_agent.mode,
             )
 
             hooks_mgr = self.deps.hooks_mgr
@@ -275,11 +272,10 @@ class SubAgentMgr:
                 ))
 
             # —— 注入共享上下文 ——
-            # 必须在 run() 之前：run() 内部会 redact 并 prepend turn-start reminder。
+            # 必须在 run() 之前：run() 内部会脱敏并追加真实 user 消息。
             # 摘要在前、任务正文在最后（recency）——参考材料靠前、指令靠后，同时降低
             # 子 agent 把背景事实误当成任务的概率（摘要头部另有显式声明）。
-            # 只拼字符串、不进 system prompt：system 带着 Anthropic 的单一缓存断点，
-            # 动态内容进去会让 tools+system 整个前缀每次委派全部失效。
+            # 只拼进委派 user 内容，不进入固定 system 或框架 developer。
             if context_mgr is not None and shared_context != "none":
                 digest = context_mgr.digest()
                 if digest:

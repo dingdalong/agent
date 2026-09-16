@@ -4,10 +4,17 @@ from __future__ import annotations
 
 import asyncio, inspect
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, TypedDict, Literal
+from typing import Any, Callable, Dict, TypedDict
 from pydantic import BaseModel, ValidationError
 
-from src.tools.policy import BUILTIN_ORIGIN, DEFAULT_POLICY, ToolOrigin, ToolPolicy
+from src.tools.policy import (
+    BUILTIN_ORIGIN,
+    DEFAULT_AVAILABILITY,
+    DEFAULT_POLICY,
+    ToolAvailability,
+    ToolOrigin,
+    ToolPolicy,
+)
 
 
 class ToolDict(TypedDict):
@@ -29,11 +36,7 @@ class ToolEntry:
         policy: 声明式授权策略；未声明时使用 REVIEW + DYNAMIC。
         origin: 工具注册来源，不参与确定性放行。
         parallel: 是否允许与其他只读工具并发执行。
-        subagent: 子 agent 可见性控制。True=自动注入（即使 agent 定义未列出）；
-                  False=强制排除（即使 agent 定义为全量）；None=按 agent 的 tools 集合决定。
-        feature: 所属可插拔 feature 名（如 "task"、"file"）。None 表示无归属、恒可用；
-                 非 None 时，仅当该 feature 被角色启用才注入，否则从 schema 排除并在调用时拒绝。
-        modes: 可用阶段，同时控制 schema 暴露与实际调用。
+        availability: 模式、feature 与调用方范围组成的运行时可用性契约。
         counts_as_work: 工具执行期间是否代表实际计算（占用本地 CPU/IO），用于状态栏耗时的人工等待暂停判定。
                         委派型（task，实际计算在子 agent）与纯人工等待型（ask_user，只等用户输入无计算）设 False，
                         其执行不计入回合活跃计算；其余工具默认 True。
@@ -46,10 +49,8 @@ class ToolEntry:
     policy: ToolPolicy = DEFAULT_POLICY
     origin: ToolOrigin = ToolOrigin("dynamic")
     parallel: bool = False
-    subagent: bool | None = None
-    feature: str | None = None
+    availability: ToolAvailability = DEFAULT_AVAILABILITY
     counts_as_work: bool = True
-    modes: tuple[Literal["plan", "execute"], ...] = ("plan", "execute")
 
     def validate_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """应用 Pydantic 默认值并返回授权和执行共用的参数。"""
@@ -141,10 +142,8 @@ def tool(
     name: str | None = None,
     policy: ToolPolicy | None = None,
     parallel: bool = False,
-    subagent: bool | None = None,
-    feature: str | None = None,
+    availability: ToolAvailability = DEFAULT_AVAILABILITY,
     counts_as_work: bool = True,
-    modes: tuple[Literal["plan", "execute"], ...] = ("plan", "execute"),
 ) -> Callable:
     """工具注册装饰器。
 
@@ -154,17 +153,13 @@ def tool(
         name: 工具名称，默认使用函数名。
         policy: 声明式授权策略，未声明时保守使用 REVIEW + DYNAMIC。
         parallel: 只读工具的并发声明。
-        subagent: 子 agent 可见性。True=自动注入；False=强制排除；None=按 agent 定义决定。
-        feature: 所属可插拔 feature 名。None 表示无归属、恒可用；非 None 时随该 feature 的启用与否注入或排除。
-        modes: 可用阶段，同时控制 schema 暴露与实际调用。
+        availability: 工具的运行时模式、feature 与调用方范围。
         counts_as_work: 工具执行期间是否代表实际计算。委派型与纯人工等待型设 False，不计入回合活跃计算；默认 True。
 
     Returns:
         装饰后的原函数。
     """
     def decorator(func: Callable) -> Callable:
-        if not modes or set(modes) - {"plan", "execute"}:
-            raise ValueError("工具 modes 必须由 plan/execute 组成")
         tool_name = name or func.__name__
 
         model_schema = model.model_json_schema()
@@ -197,10 +192,8 @@ def tool(
             policy=policy or DEFAULT_POLICY,
             origin=BUILTIN_ORIGIN,
             parallel=parallel,
-            subagent=subagent,
-            feature=feature,
+            availability=availability,
             counts_as_work=counts_as_work,
-            modes=modes,
         )
         _registry.append(entry)
         return func

@@ -16,7 +16,7 @@ def test_project_agents_md_is_loaded(tmp_path: Path) -> None:
     """
     (tmp_path / "AGENTS.md").write_text("project guidance")
     agent = SimpleNamespace(deps=SimpleNamespace(role_mgr=None))
-    prompt_mgr = PromptMgr(agent=agent, model="test-model", workdir=tmp_path)
+    prompt_mgr = PromptMgr(agent=agent, workdir=tmp_path)
 
     guidance = prompt_mgr._build_agent_md()
 

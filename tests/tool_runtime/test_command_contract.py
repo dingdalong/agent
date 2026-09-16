@@ -6,6 +6,7 @@ import subprocess
 
 import pytest
 
+from src.mode import RunMode
 from src.mgr.path_resolver import PathResolver
 from src.mgr.sandbox import ExecutionPolicy
 
@@ -48,14 +49,15 @@ def test_pipeline_output_and_exit_match_shell(runtime, tmp_path, cmd):
     asyncio.run(run())
 
 
-def test_tool_schema_modes_and_removed_tools(runtime):
+def test_tool_schema_is_unified_across_modes(runtime):
     deps, agent = runtime
-    names = lambda active: {t['function']['name'] for t in deps.tools_mgr.get_schemas(plan_active=active)}
-    assert {'submit_plan', 'exec_command'} <= names(True)
-    assert 'read_file' not in names(True) | names(False)
-    assert not {'apply_patch', 'task_create', 'task_list', 'task_get', 'task_update', 'save_memory'} & names(True)
-    assert 'submit_plan' not in names(False)
-    assert not {'calculator', 'random', 'datetime', 'encode', 'text_stats'} & names(False)
+    schemas = deps.tools_mgr.schemas()
+    names = {tool['function']['name'] for tool in schemas}
+    assert {'submit_plan', 'apply_patch', 'task_create', 'exec_command'} <= names
+    assert 'read_file' not in names
+    assert not {'calculator', 'random', 'datetime', 'encode', 'text_stats'} & names
+    agent.mode = RunMode.EXECUTE
+    assert deps.tools_mgr.schemas() is schemas
     schema = deps.tools_mgr.get('exec_command').parameters_schema
     assert 'cmd' in schema['required'] and 'command' not in schema['properties']
     result = asyncio.run(deps.tools_mgr.execute('exec_command', {'command': 'echo never'}, deps=deps, agent=agent))
@@ -116,19 +118,30 @@ def test_large_pipeline_sigpipe_is_not_a_failure(runtime, tmp_path):
     asyncio.run(run())
 
 
-def test_actual_agent_mode_switch_refreshes_tools_and_prompt(tmp_path):
+def test_actual_agent_mode_switch_keeps_schema_and_system_fixed(tmp_path):
     from tests.test_subagent_skills import _main, _child
     parent = _main(tmp_path, 'coding')
-    parent.set_plan_active(False)
-    assert 'apply_patch' in {s['function']['name'] for s in parent._tools_schemas}
-    parent._prompt_mgr.build()
-    parent.set_plan_active(True)
-    assert parent._prompt_mgr._static_prefix is None
-    names = {s['function']['name'] for s in parent._tools_schemas}
-    assert 'apply_patch' not in names and 'submit_plan' in names
+    parent.set_mode(RunMode.EXECUTE)
+    schemas = parent.deps.tools_mgr.schemas()
+    execute_prompt = parent._prompt_mgr.build()
+    execute_mode = parent._prompt_mgr.build_mode_instructions()
+    parent.set_mode(RunMode.PLAN)
+    plan_prompt = parent._prompt_mgr.build()
+    plan_mode = parent._prompt_mgr.build_mode_instructions()
+    assert parent.deps.tools_mgr.schemas() is schemas
+    assert execute_prompt == plan_prompt
+    assert execute_mode != plan_mode
+    names = {s['function']['name'] for s in schemas}
+    assert {'apply_patch', 'submit_plan', 'task_create'} <= names
     child = _child(parent, 'coder')
-    names = {s['function']['name'] for s in child._tools_schemas}
-    assert not {'apply_patch', 'submit_plan', 'task_create'} & names
+    assert child.deps.tools_mgr.schemas() is schemas
+    denied = asyncio.run(child.deps.tools_mgr.execute(
+        'apply_patch',
+        {'patch': '*** Begin Patch\n*** End Patch'},
+        deps=child.deps,
+        agent=child,
+    ))
+    assert denied.error_code == 'tool_unavailable'
 
 
 @pytest.mark.integration

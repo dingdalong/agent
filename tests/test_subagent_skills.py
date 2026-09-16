@@ -16,6 +16,7 @@ import src.tools
 from src.agent.agent import Agent, AgentDeps
 from src.agent.states import RunContext
 from src.llm.base import LLMResponse
+from src.mode import RunMode
 from src.mgr.data_guard import DataGuard
 from src.mgr.features import resolve_features
 from src.mgr.permission_mgr import JudgeVerdict, PermissionManager
@@ -68,19 +69,19 @@ def _main(tmp_path: Path, role_name: str) -> Agent:
             workdir=str(tmp_path), judge_client=None, confirm=None, data_guard=guard,
         ),
     )
-    return Agent.from_manifest(role.manifest, deps, plan_active=False)
+    return Agent.from_manifest(role.manifest, deps, mode=RunMode.EXECUTE)
 
 
 def _child(parent: Agent, agent_type: str) -> Agent:
-    """按调度器的工具与 feature 规则构造独立实例。"""
+    """按调度器的 manifest、feature 与模式规则构造独立实例。"""
     manifest = parent._subagent_mgr._documents[agent_type]
     return Agent.from_manifest(
         manifest,
         parent.deps,
         is_subagent=True,
-        tools=parent.deps.tools_mgr.resolve_subagent_tools(manifest.tools),
+        tools=manifest.tools,
         features=manifest.features if manifest.features is not None else parent.features,
-        plan_active=parent.plan_active,
+        mode=parent.mode,
     )
 
 
@@ -124,54 +125,59 @@ def test_roles_resolve_shared_agents_and_loadable_skills(
 
 @pytest.mark.parametrize("is_subagent", [False, True])
 @pytest.mark.parametrize("enabled", [False, True])
-@pytest.mark.parametrize("listed", [False, True])
-def test_skill_directory_requires_feature_and_actual_tool(
-    tmp_path: Path, is_subagent: bool, enabled: bool, listed: bool,
+def test_skill_directory_requires_feature(
+    tmp_path: Path, is_subagent: bool, enabled: bool,
 ) -> None:
-    """有 Manager 但无实际工具时也不能宣告可加载技能。"""
+    """技能目录由 feature/Manager 决定，不受统一 schema 或 manifest 列表影响。"""
     parent = _main(tmp_path, "coding")
     agent = _child(parent, "explore") if is_subagent else parent
     if not enabled:
         agent.features = resolve_features({"file"})
-        agent._excluded_tools = agent.deps.tools_mgr.excluded_tool_names(agent.features)
         agent._skill_mgr = None
-    agent.tools = set(agent.tools or agent.deps.tools_mgr.all_tool_names())
-    if listed:
-        agent.tools.add("load_skill")
-    else:
-        agent.tools.discard("load_skill")
-    agent.refresh_tools_schemas()
-    agent._prompt_mgr.invalidate_cache()
-    prompt = agent._prompt_mgr.build()[0]["content"]
-    assert ("# 可用技能" in prompt) == (enabled and listed)
-    if not enabled or not listed:
+    prompt = "\n\n".join(
+        message["content"]
+        for message in agent._prompt_mgr.build_initial_context_messages()
+    )
+    assert ("# 可用技能" in prompt) == enabled
+    if not enabled:
         assert "<skill " not in _call(agent, "load_skill", {"name": "builtin:debugging"})
 
 
-def test_loading_skill_preserves_readonly_and_main_tool_isolation(tmp_path: Path) -> None:
-    """技能进入子历史，不能借此开放写入、Plan 管理或再次委派。"""
+def test_loading_skill_preserves_readonly_and_execution_permissions(tmp_path: Path) -> None:
+    """技能作为工具结果进入历史，不能扩大模式或调用方权限。"""
     parent = _main(tmp_path, "coding")
-    parent.plan_active = True
+    parent.mode = RunMode.PLAN
     child = _child(parent, "explore")
     before_tools = set(child.tools)
     system = child._prompt_mgr.build()
-    assert "# 可用技能" in system[0]["content"]
+    external_context = child._prompt_mgr.build_initial_context_messages()
+    assert "# 可用技能" in external_context[0]["content"]
+    assert "# 可用技能" not in system[0]["content"]
     assert '<skill name="builtin:debugging"' in _call(
         child, "load_skill", {"name": "builtin:debugging"},
     )
     assert child.tools == before_tools
-    assert child.plan_active
+    assert child.mode is RunMode.PLAN
     assert child._prompt_mgr.build() == system
     assert parent.history == []
-    for tool_name in ("apply_patch", "submit_plan", "task_delegator"):
-        assert "unknown_tool" in _call(child, tool_name, {})
+    forbidden_calls = {
+        "apply_patch": {"patch": "*** Begin Patch\n*** End Patch"},
+        "submit_plan": {"title": "计划", "content": "内容"},
+        "task_delegator": {
+            "description": "任务",
+            "agent_type": "explore",
+            "prompt": "任务",
+        },
+    }
+    for tool_name, arguments in forbidden_calls.items():
+        assert "tool_unavailable" in _call(child, tool_name, arguments)
     assert "不存在的技能" in _call(child, "load_skill", {"name": "builtin:missing"})
 
 
 def test_skill_does_not_allow_coder_writes_in_plan(tmp_path: Path) -> None:
     """有写工具的子 agent 加载技能后仍被 Plan 授权拒绝。"""
     parent = _main(tmp_path, "coding")
-    parent.plan_active = True
+    parent.mode = RunMode.PLAN
     child = _child(parent, "coder")
     _call(child, "load_skill", {"name": "builtin:debugging"})
     target = tmp_path / "must-not-exist.txt"
@@ -257,8 +263,8 @@ def test_mijia_general_executor_uses_registered_mcp_after_skill_loading(tmp_path
     child = _child(parent, "general-purpose")
     child.history.append({"role": "user", "content": "查询客厅设备，返回候选，不执行控制"})
     assert "<skill " in _call(child, "load_skill", {"name": "builtin:control-devices"})
-    assert tool_name in {schema["function"]["name"] for schema in child._tools_schemas}
+    assert tool_name in {schema["function"]["name"] for schema in child.deps.tools_mgr.schemas()}
     assert json.loads(_call(child, tool_name, {}).split("\n", 1)[1]) == devices
     assert queries == ["devices"]
     assert judge.await_count == 1
-    assert "write_file" not in {schema["function"]["name"] for schema in child._tools_schemas}
+    assert "write_file" not in {schema["function"]["name"] for schema in child.deps.tools_mgr.schemas()}

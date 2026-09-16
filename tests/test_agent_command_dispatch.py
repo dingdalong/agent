@@ -37,7 +37,7 @@ def _agent(inputs: list[str], *, features: set[str] | None, tmp_path: Path) -> A
     agent.agent_type = "main"
     agent.features = features
     agent.deps = SimpleNamespace(event_bus=bus, command_mgr=command_mgr, hooks_mgr=None)
-    agent.set_plan_active = lambda active: True
+    agent.set_mode = lambda mode: True
     return agent
 
 

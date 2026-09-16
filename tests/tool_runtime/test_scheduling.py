@@ -9,6 +9,7 @@ from src.agent.states import RunContext
 from src.llm.base import LLMResponse
 from src.mgr.workspace_access import WorkspaceAccess
 from src.mgr.reminder_mgr import ReminderMgr
+from src.mode import RunMode
 from src.tools.decorator import ToolEntry
 from src.tools.policy import AccessKind, DataFlow, ToolOrigin, ToolPolicy
 
@@ -44,10 +45,9 @@ def test_cancel_keeps_completed_tool_and_invalid_json_does_not_execute(runtime):
     agent.deps = deps
     agent.uuid = fake.uuid
     agent.agent_type = 'main'
-    agent.plan_active = False
+    agent.mode = RunMode.EXECUTE
     agent.llm = fake.llm
     agent.tools = None
-    agent._excluded_tools = set()
     agent.history = []
     agent._reminder_mgr = ReminderMgr()
     ready = asyncio.Event()
@@ -94,7 +94,7 @@ def test_cancel_keeps_completed_tool_and_invalid_json_does_not_execute(runtime):
 def test_cancel_sync_write_holds_lease_until_thread_finishes(runtime):
     import threading
     deps, agent = runtime
-    agent.plan_active = False
+    agent.mode = RunMode.EXECUTE
     started = threading.Event()
     finish = threading.Event()
     from src.tools.policy import PathArgument, PathRole
@@ -124,8 +124,8 @@ def test_parallel_results_keep_individual_budget_and_match_events(runtime):
     deps, fake = runtime
     agent = object.__new__(Agent)
     agent.deps, agent.uuid, agent.llm = deps, fake.uuid, fake.llm
-    agent.agent_type, agent.plan_active, agent.tools = 'main', False, None
-    agent._excluded_tools, agent.history = set(), []
+    agent.agent_type, agent.mode, agent.tools = 'main', RunMode.EXECUTE, None
+    agent.history = []
     agent._reminder_mgr = ReminderMgr()
     events = []
     class Bus:

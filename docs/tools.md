@@ -1,14 +1,14 @@
 # 工具层参考
 
-工具在 `src/tools/builtin/` 用 `@tool` + Pydantic 声明，由 `ToolsMgr` 注册和执行。装饰器保留 `policy`、`subagent`、`feature`、`counts_as_work`、`modes`；`parallel=True` 仅用于可并发的独立读取。同步工具卸载到线程，取消时等待实际 I/O 结束后才释放工作区租约。
+工具在 `src/tools/builtin/` 用 `@tool` + Pydantic 声明，由 `ToolsMgr` 注册和执行。装饰器保留 `policy`、`availability`、`counts_as_work`；`ToolAvailability` 集中描述可用模式、所需 feature 和调用方范围，`parallel=True` 仅用于可并发的独立读取。同步工具卸载到线程，取消时等待实际 I/O 结束后才释放工作区租约。
 
 ## 调用与结果
 
-调用链：阶段与 agent 可用性校验 → 参数对象/未知字段校验 → PreToolUse → 重验参数 → PermissionManager.authorize → 工具执行 → DataGuard 脱敏 → PostToolUse → 脱敏与单次预算 → ToolCallCompleted → 历史消息。MCP 参数按上游 schema 校验。未知工具、非法 JSON、授权失败、执行错误均返回明确状态；调用方不能从正文前缀推断失败。
+调用链：参数对象/未知字段校验 → PreToolUse → 重验参数 → `PermissionManager.authorize(ToolAuthorizationRequest)`（模式、feature、调用方范围、manifest、路径与风险）→ 工具执行 → DataGuard 脱敏 → PostToolUse → 脱敏与单次预算 → ToolCallCompleted → 历史消息。MCP 参数按上游 schema 校验。未知工具、非法 JSON、授权失败、执行错误均返回明确状态；调用方不能从正文前缀推断失败。
 
 `exec_command` 与正常的 `write_stdin` 使用纯文本响应：`Chunk ID`、耗时、退出码或运行中 session、原始近似 token 数和命令原始输出。非零退出码仍是命令的真实完成结果。沙箱、启动、超时、取消等框架错误以及其他工具使用 JSON 元数据行加正文，模型无需从外部程序正文猜测框架状态。`display` 只供 UI 消费；`end_turn` 控制调度器结束回合。
 
-工具 schema 与执行使用同一 modes 定义。Plan 隐藏 apply_patch、全部 task_* 和 save_memory；执行模式隐藏 submit_plan。切换时刷新 schema 与提示词缓存，子 agent 继承阶段并叠加自身工具和 feature 限制。注册名称冲突直接报错。Pydantic schema 同时用于 JSON 参数验证，嵌套参数拒绝未声明字段，显式字典保留其键空间。
+所有模式、主 agent 和子 agent 都接收 `ToolsMgr.schemas()` 返回的同一份完整 schema 目录；模式切换不重建 schema。执行期由 `PermissionManager` 按 `ToolAvailability`、agent feature 与 manifest 声明拒绝不可用工具。模式拒绝使用 `tool_unavailable`，并携带当前模式、目标工具和该模式完整禁用列表。注册名称冲突直接报错。Pydantic schema 同时用于 JSON 参数验证，嵌套参数拒绝未声明字段，显式字典保留其键空间。
 
 工具分工：exec_command 通过真实 Shell 做文件发现、内容搜索、已知区段读取和命令执行，apply_patch 修改文本，write_stdin 操作已有进程；web_search 发现网页，web_fetch 获取已知 URL；submit_plan 提交审核方案，task_* 管理执行进度，note_context 记录当前协作事实，记忆工具保存跨会话信息，compact 压缩上下文。通用计算通过执行阶段命令完成。
 
@@ -103,7 +103,7 @@ MCP 工具通过 `_PassThroughArgs(extra="allow")` 接收上游 schema 所描述
 
 ## 共享上下文工具
 
-`note_context`（`src/tools/builtin/note_context.py`）把关键发现写入跨 agent 账本，`subagent=True` 因此对所有子 agent 自动可见，`feature="subagent"`、`counts_as_work=False`。
+`note_context`（`src/tools/builtin/note_context.py`）把关键发现写入跨 agent 账本；其 availability 要求 `subagent` feature、调用方范围为 `ALL`，`counts_as_work=False`。
 
 它与自动记账的分工：`SubAgentMgr.task_delegator` 已经自动把每个子智能体的返回报告记账，那是主力且零 LLM 纪律成本；`note_context` 覆盖自动记账抓不到的部分——主 agent 与用户对话中确认的决策与约束，以及长任务中途得出的阶段性结论。
 

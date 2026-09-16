@@ -222,7 +222,18 @@ class OpenAIProvider(ResponsesStreamMixin, LLMProvider):
         instructions_parts: list[str] = []
         input_items: list[dict] = []
 
-        for msg in (prompt or []) + messages:
+        for msg in prompt or []:
+            role = msg.get("role")
+            if role in ("system", "developer"):
+                content = msg.get("content", "")
+                if isinstance(content, list):
+                    content = "".join(
+                        p.get("text", "") for p in content if isinstance(p, dict)
+                    )
+                if content:
+                    instructions_parts.append(content)
+
+        for msg in messages:
             role = msg.get("role")
 
             if role in ("system", "developer"):
@@ -231,7 +242,8 @@ class OpenAIProvider(ResponsesStreamMixin, LLMProvider):
                     content = "".join(
                         p.get("text", "") for p in content if isinstance(p, dict)
                     )
-                instructions_parts.append(content)
+                if content:
+                    input_items.append({"role": "developer", "content": content})
 
             elif role == "user":
                 input_items.append({"role": "user", "content": msg["content"]})

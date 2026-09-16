@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from src.mode import RunMode
+
 from src.mgr.secure_io import atomic_write_text
 
 
@@ -594,7 +596,7 @@ class TaskManager:
         return (
             "# 任务管理\n\n"
             "复杂工作需要跟踪进度或依赖时使用 task_*，按可验收结果组织任务；简单工作直接执行。\n"
-            "复用已有相关任务，不按计划条目或子 agent 数量机械拆分。\n"
+            "复用已有相关任务，不按用户步骤或子 agent 数量机械拆分。\n"
             "subject 使用简短祈使句；description 写清目标、范围和验证方式；active_form 可提供进行时描述。\n"
             "先用 task_create 获得任务 ID，再用 task_update 的 add_blocked_by / add_blocks 声明依赖。\n"
             "优先推进无未完成依赖的任务；实际执行前标记 in_progress，完全完成并验收后标记 completed。\n"
@@ -613,32 +615,25 @@ class TaskManager:
 
     # ── 提醒注入接口（由 ReminderMgr 调用）──────────────────────────
 
-    def get_turn_start_reminder(self, mode: object | None, is_subagent: bool) -> str:
-        """在 turn 开始时注入当前任务状态摘要。
+    def get_turn_start_reminder(self, mode: RunMode, is_subagent: bool) -> str:
+        """在 turn 开始时返回不含任务数据的固定框架提醒。
 
-        当存在未完成任务且连续多轮未使用任务工具时，
-        返回格式化的任务列表帮助模型恢复对任务的感知（特别是 compact 后）。
+        当存在未完成任务且连续多轮未使用任务工具时，返回固定指令要求模型调用
+        task_list 获取当前数据。任务标题、描述等外部内容不得进入框架 developer 消息。
         Plan 模式下任务写工具被权限层拒绝，因此不注入任何任务提醒。
 
         Args:
-            mode: 调用方 agent 是否处于 Plan 模式；为真时静默。
+            mode: 调用方 agent 当前运行模式。
             is_subagent: 调用方是否为子智能体（TaskManager 不使用，遵循统一接口）。
 
         Returns:
-            任务状态摘要文本，无未完成任务或近期使用过任务工具时返回空串。
+            固定提醒文本，无未完成任务或近期使用过任务工具时返回空串。
         """
-        if mode:
+        if mode is RunMode.PLAN:
             return ""
         if not self.has_open_items() or self._rounds_without_update < 3:
             return ""
-        lines: list[str] = []
-        for task in self._tasks.values():
-            if task.metadata and task.metadata.get("_internal"):
-                continue
-            lines.append(f"#{task.id}. [{task.status}] {task.subject}")
-        if not lines:
-            return ""
-        return "当前任务列表：\n" + "\n".join(lines)
+        return "存在久未更新的未完成任务；调用 task_list 获取当前数据并按实际进展更新。"
 
     def notify_tool_round(self, tool_names: list[str]) -> None:
         """工具执行轮结束时更新轮次计数。
@@ -651,7 +646,7 @@ class TaskManager:
         else:
             self._rounds_without_update += 1
 
-    def pop_post_round_reminder(self, mode: object | None, is_subagent: bool) -> str | None:
+    def pop_post_round_reminder(self, mode: RunMode, is_subagent: bool) -> str | None:
         """检查是否需要提醒更新任务列表。
 
         当存在未完成项且连续多轮未调用任务工具时，返回提醒文本。
@@ -659,13 +654,13 @@ class TaskManager:
         Plan 模式下任务写工具被权限层拒绝，因此不注入任何任务提醒。
 
         Args:
-            mode: 调用方 agent 是否处于 Plan 模式；为真时静默。
+            mode: 调用方 agent 当前运行模式。
             is_subagent: 调用方是否为子智能体（TaskManager 不使用，遵循统一接口）。
 
         Returns:
             提醒纯文本，或 None 表示无需注入。
         """
-        if mode:
+        if mode is RunMode.PLAN:
             return None
         if self.has_open_items() and self._rounds_without_update >= 3:
             return "更新你的任务列表。"

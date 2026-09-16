@@ -11,14 +11,29 @@ import pytest
 
 from src.mgr.sandbox import ExecutionPolicy, SandboxBackend, SandboxError
 from src.mgr.process_mgr import ProcessMgr
+from src.mgr.features import ALL_FEATURES
+from src.mgr.permission_mgr import ToolAuthorizationRequest, ToolCallerContext
+from src.mode import RunMode
 from src.tools import AccessKind, DataFlow, ToolOrigin, ToolPolicy
+from src.tools.policy import DEFAULT_AVAILABILITY
 
 
 def authorize(runtime, cmd='x=1; echo "$x"', extra=None):
     deps, agent = runtime
-    return asyncio.run(deps.permission_mgr.authorize('exec_command', ToolPolicy(AccessKind.REVIEW, DataFlow.DYNAMIC),
-        {'cmd': cmd, 'additional_permissions': extra, 'justification': '测试扩权'},
-        origin=ToolOrigin('builtin'), plan_active=agent.plan_active, user_intent='测试'))
+    request = ToolAuthorizationRequest(
+        tool_name='exec_command',
+        policy=ToolPolicy(AccessKind.REVIEW, DataFlow.DYNAMIC),
+        availability=DEFAULT_AVAILABILITY,
+        arguments={'cmd': cmd, 'additional_permissions': extra, 'justification': '测试扩权'},
+        origin=ToolOrigin('builtin'),
+        caller=ToolCallerContext(
+            mode=agent.mode, agent_type='main', is_subagent=False,
+            features=frozenset(ALL_FEATURES), declared_tools=None,
+            unavailable_tools=(),
+        ),
+        user_intent='测试',
+    )
+    return asyncio.run(deps.permission_mgr.authorize(request))
 
 
 def test_shell_permissions_are_bound_to_call_and_mode(runtime, tmp_path):
@@ -28,7 +43,7 @@ def test_shell_permissions_are_bound_to_call_and_mode(runtime, tmp_path):
     with pytest.raises(SandboxError):
         first.execution_policy.validate('another command', tmp_path)
     assert not authorize(runtime, extra={'network': True}).allowed
-    agent.plan_active = False
+    agent.mode = RunMode.EXECUTE
     second = authorize(runtime)
     assert second.allowed and second.execution_policy.writes_workspace
     assert not first.execution_policy.writes_workspace
@@ -171,7 +186,7 @@ def test_plan_cannot_feed_previous_writable_process():
     async def run():
         manager = ProcessMgr()
         manager.sessions['old'] = ProcessSession(('s', 'a'), False)
-        result = await manager.poll(('s', 'a'), 'old', 'touch file', plan_active=True)
+        result = await manager.poll(('s', 'a'), 'old', 'touch file', mode=RunMode.PLAN)
         assert result.error_code == 'permission_denied'
         await manager.close()
     asyncio.run(run())

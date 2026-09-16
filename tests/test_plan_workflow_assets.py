@@ -13,7 +13,7 @@ from src.mgr.skill_mgr import SkillMgr
 from src.mgr.subagent_mgr import SubAgentMgr
 from src.mgr.prompt_mgr import PromptMgr
 from src.mgr.task_mgr import TaskManager
-from src.mgr.tools_mgr import ToolsMgr
+from src.mode import RunMode
 
 
 class _ConfigStub:
@@ -56,10 +56,12 @@ def test_coding_role_plan_workflow_skill_still_loads(tmp_path: Path) -> None:
     assert mgr.check_skill("builtin:plan-workflow")
     text = mgr.load_full_text("builtin:plan-workflow")
     assert "不要创建执行进度任务" in text
+    assert "计划模式只调查与规划" not in text
     assert "enter_plan_mode" not in text
     assert "最多 3 个" not in text
     assert "llm.concurrency" not in text
     assert "首次探索将独立的文件发现、内容搜索和读取合并到同一轮并行调用" in text
+    assert "builtin:plan-workflow" not in mgr.describe()
 
 
 def test_coding_execute_plan_skill_loads(tmp_path: Path) -> None:
@@ -71,6 +73,7 @@ def test_coding_execute_plan_skill_loads(tmp_path: Path) -> None:
     assert "接续计划" in text
     assert "推进实现" in text
     assert "验证与交付" in text
+    assert "builtin:execute-plan" not in mgr.describe()
 
 
 @pytest.mark.parametrize("role_name", ["coding", "mijia", "onboard", "custom"])
@@ -93,25 +96,30 @@ def test_execution_guidance_follows_role_and_actual_tools(
     assert role_mgr.role_name == role_name
     deps = SimpleNamespace(role_mgr=role_mgr, llm_mgr=None)
     subagent_mgr = SubAgentMgr(tmp_path / "work", deps)
-    tools_mgr = ToolsMgr()
-    schemas = tools_mgr.get_schemas({"task_delegator"} if can_delegate else set())
-    agent = SimpleNamespace(plan_active=False,
+    agent = SimpleNamespace(mode=RunMode.EXECUTE,
         deps=deps, is_subagent=is_subagent, memory=None,
-        _task_mgr=TaskManager(), _subagent_mgr=subagent_mgr, _tools_schemas=schemas,
+        _task_mgr=TaskManager(),
+        _subagent_mgr=subagent_mgr if can_delegate else None,
+        _skill_mgr=None,
     )
     prompt_mgr = PromptMgr(
-        agent=agent, model="test-model", workdir=tmp_path / "work",
+        agent=agent, workdir=tmp_path / "work",
         role_prompt="限定子任务" if is_subagent else role_mgr.manifest.prompt,
     )
-    text = prompt_mgr.build()[0]["content"]
+    text = "\n\n".join(
+        message["content"]
+        for message in prompt_mgr.build() + prompt_mgr.build_initial_context_messages()
+    ) + "\n\n" + prompt_mgr.build_mode_instructions()
     assert text.count("# 执行原则") == 1
     assert text.count("# 工具选择与恢复") == 1
     assert "决定提交后不再" not in text  # 规划流程只由按需加载的技能注入。
     assert ("你持续负责理解用户目标" in text) is (not is_subagent)
     assert ("完成委派范围内的任务" in text) is is_subagent
-    assert ("# 子智能体协作" in text) is (can_delegate and not is_subagent)
+    assert ("# 可用子智能体" in text) is (can_delegate and not is_subagent)
     assert "优先通过 task_delegator" not in text
 
-    subagent_mgr._documents.clear()
-    prompt_mgr.invalidate_cache()
-    assert "# 子智能体协作" not in prompt_mgr.build()[0]["content"]
+    if agent._subagent_mgr is not None:
+        subagent_mgr._documents.clear()
+    assert "# 可用子智能体" not in "\n\n".join(
+        message["content"] for message in prompt_mgr.build_initial_context_messages()
+    )

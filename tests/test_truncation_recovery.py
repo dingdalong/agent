@@ -244,8 +244,8 @@ def test_chat_threads_effort_override_without_mutating_shared_field() -> None:
     assert provider.reasoning_effort == "max"
 
 
-def test_chat_ephemeral_instruction_appended_without_mutating_caller_messages() -> None:
-    """一次性指令作为尾部 user 传给 _do_chat，且不改动调用方消息列表。"""
+def test_chat_does_not_mutate_caller_messages() -> None:
+    """Provider chat 原样读取框架已组装的消息，不修改调用方列表。"""
     provider = RecordingProvider(
         LLMResponse(
             content="ok",
@@ -255,19 +255,11 @@ def test_chat_ephemeral_instruction_appended_without_mutating_caller_messages() 
     )
     caller_messages = [{"role": "user", "content": "原始问题"}]
 
-    asyncio.run(
-        provider.chat(
-            caller_messages,
-            ephemeral_instruction="请压缩思考",
-        )
-    )
+    asyncio.run(provider.chat(caller_messages))
 
     # 调用方列表保持原样，未被追加一次性指令。
     assert caller_messages == [{"role": "user", "content": "原始问题"}]
-    # _do_chat 收到的消息尾部才是一次性 user 指令。
-    seen = provider.seen_messages[0]
-    assert seen[-1] == {"role": "user", "content": "请压缩思考"}
-    assert seen[0] == {"role": "user", "content": "原始问题"}
+    assert provider.seen_messages[0] == [{"role": "user", "content": "原始问题"}]
 
 
 def test_next_lower_effort_walks_and_bottoms_out() -> None:

@@ -21,7 +21,7 @@ Manager 分两批被构造：
 
 - deps 层：`MemoryMgr`（`memory`）、`PlanMgr`（`plan`）、`ContextMgr`（`subagent`）未启用时在 `bootstrap.create_app()` 注入 `None`。
 - 每 agent 层：`SkillMgr`（`skill`）、`SubAgentMgr`（`subagent`）、`TaskManager`（`task`）未启用时在 `Agent.__post_init__` 置 `None`；`file` 直接门控 `apply_patch` 工具。
-- 未启用 feature 的工具由 `ToolsMgr.excluded_tool_names(enabled)` 从 schema 中排除。
+- 所有 agent 共享 `ToolsMgr.schemas()` 的完整 schema；未启用 feature 的工具由 `PermissionManager` 在执行期拒绝。
 
 feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `file`）见 [architecture.md](architecture.md#feature-门控) 与 [roles-subagents-skills.md](roles-subagents-skills.md)。
 
@@ -39,7 +39,7 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 | `PermissionManager` (`permission_mgr.py`) | 路径解析、代码硬拒绝、Plan 约束、智能权限和一次性确认 | 否 | 无 |
 | `WebAccessMgr` (`web_access_mgr.py`) | 按当前模型和统一配置路由本地或 provider 原生 Web 能力 | 否 | 无 |
 | `CompactMgr` (`compact_mgr.py`) | 上下文压缩与 transcript 落盘 | 否 | 无 |
-| `PromptMgr` (`prompt_mgr.py`) | 分层拼装系统提示词 | 否 | 无（缓存可 invalidate） |
+| `PromptMgr` (`prompt_mgr.py`) | 构建固定 system、模式指令与初始外部上下文 | 否 | 无 |
 | `SubAgentMgr` (`subagent_mgr.py`) | 四层扫描子 agent，调度委派 | `subagent` | 无 |
 | `SkillMgr` (`skill_mgr.py`) | 多层扫描技能，按需注入全文 | `skill` | 无 |
 | `McpMgr` (`mcp_mgr.py`) | 连接 MCP server、注册其工具 | 否 | 无（编辑需重启） |
@@ -118,7 +118,7 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 
 `src/mgr/tools_mgr.py`
 
-**单一职责**：工具注册表与执行引擎——注册工具、按 feature/权限过滤 schema、执行工具（串联 hook 与权限检查）、保存有界脱敏临时日志。
+**单一职责**：工具注册表与执行引擎——维护稳定的完整 schema 目录、执行工具（串联 hook 与权限检查）、保存有界脱敏临时日志。
 
 **消费的配置或文件**：构造时（`load_registered=True`）从 `src/tools/decorator.py` 的全局 `_registry` 载入所有 `@tool` 注册的工具（`tools_mgr.py:40-42`）；MCP 工具由 `McpMgr` 额外 `register()`。
 
@@ -131,9 +131,8 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 | `has` | `name: str` | `bool` | 是否已注册 |
 | `list_entries` | — | `list[ToolEntry]` | 全部工具（只读优先排序） |
 | `all_tool_names` | — | `set[str]` | 全部工具名 |
-| `excluded_tool_names` | `enabled: set[str]` | `set[str]` | 因所属 feature 未启用而应排除的工具名 |
-| `resolve_subagent_tools` | `tool_names: set[str] \| None` | `set[str]` | 在声明集上注入 `subagent=True`、排除 `subagent=False` |
-| `get_schemas` | `tool_names` | `list[ToolDict]` | OpenAI function-calling schema |
+| `schemas` | — | `list[ToolDict]` | 所有已注册工具的稳定 OpenAI function-calling schema 目录 |
+| `unavailable_in_mode` | `mode: RunMode` | `tuple[str, ...]` | 当前模式不能执行的完整工具名列表 |
 | `execute` (async) | `tool_name`, `arguments`, `current_tool_call_id`, `deps`, `agent` | `ToolResult` | 执行工具全流程（见下） |
 
 **`execute()` 完整流程**：Pydantic 校验 → PreToolUse Hook → 修改后重校验 → `authorize()` → 脱敏的 `ToolCallStarted`（含 `ToolDisplay`） → 调用工具 → 提取 `ToolResult` → 立即脱敏和限长 → PostToolUse → 再次脱敏 → 一次输出整理 → `ToolCallCompleted`（含 `ToolDisplay`） → 历史。临时日志、Hook payload 和事件预览都只接收脱敏数据。
@@ -142,9 +141,9 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 - `_emit_tool_started()`：接收 `arguments`，使用 `tool_title()` 生成中文标题（`src/tools/display.py` 的 `TOOL_TITLES` 映射），使用 `format_params()` 按工具类型格式化参数摘要（如 exec_command 提取命令）。`EXTERNAL_READ` 工具不生成参数展示。参数经 `DataGuard.redact()` 脱敏后传入 `ToolDisplay`。
 - `_emit_tool_completed()`：接收 `tool_display`（来自 `ToolResult`，如文件差异）。若存在则直接使用并对 `content` 脱敏；否则使用 `format_result()` 截断结果内容生成通用 `ToolDisplay`。`EXTERNAL_READ` 工具不生成结果展示（`display=None`）。
 
-**feature 门控**：否（但 `excluded_tool_names`/`resolve_subagent_tools` 是 feature 门控的执行点）。 **reload**：有，回收工具临时日志。
+**feature 门控**：否；feature、模式与 agent 范围统一在授权请求中判定。 **reload**：有，回收工具临时日志。
 
-**持有的关键状态**：`_tools`（工具名→`ToolEntry`）、`output`（ToolOutput 预算和临时日志）。
+**持有的关键状态**：`_tools`（工具名→`ToolEntry`）、`_schemas`（注册表变化时失效的完整 schema 缓存）、`output`（ToolOutput 预算和临时日志）。
 
 工具体系与内置工具见 [tools.md](tools.md)。
 
@@ -154,13 +153,13 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 
 `src/mgr/permission_mgr.py`
 
-**单一职责**：对一次已经校验的工具调用执行路径解析、Hard Deny、Plan 约束、确定性策略、LLM 智能权限审查和一次性人工确认，返回冻结的 `AuthorizationResult`。
+**单一职责**：对一次已经校验的工具调用先执行 availability 判定，再执行路径解析、Hard Deny、Plan 约束、确定性策略、LLM 智能权限审查和一次性人工确认，返回冻结的 `AuthorizationResult`。
 
 **构造依赖**：规范化 workdir、`JudgeClient`、一次性 yes/no 确认回调和共享 `DataGuard`。工具策略由调用方显式传入；授权服务不读取用户授权配置，也不依赖 EventBus、MCP Manager、ToolEntry 或 Agent。
 
 | 方法 | 关键参数 | 返回 | 作用 |
 |---|---|---|---|
-| `authorize` (async) | `tool_name`, `policy`, `arguments`, `origin`, `plan_active`, `user_intent`, `review_model` | `AuthorizationResult` | 每次调用独立裁决；不缓存、不创建后续放行 |
+| `authorize` (async) | `request: ToolAuthorizationRequest` | `AuthorizationResult` | 按 `ToolCallerContext` 检查 mode、feature、主/子身份和 manifest，再独立裁决风险；不缓存、不创建后续放行 |
 
 **关键协作者**：`PathResolver` 统一规范化和分类路径，`HardDenyDetector` 处理不可覆盖的高危动作，`LLMJudgeClient` 每次通过 `llm_mgr.get("fast")` 现读激活角色的 fast 槽位，`StructuredVerdictRunner` 对该次结构化裁决覆盖 `reasoning_effort="low"`（并关闭 thinking、最多尝试三次），不修改缓存 Provider。fast 缺失或格式非法是配置错误；候选列表不限制调用，实际调用错误不触发 default 回退。`WebPrivacyGuard` 负责 Web 外部读取的本地隐私预检；`LLMWebSafetyClient` 虽在装配时注入，但当前 `_review_web()` 路径未调用，不应视为已启用的 LLM Web 审查。`DataGuard` 保证裁决请求、原因和展示详情不含原始秘密。**feature 门控**：否。**reload**：无。
 
@@ -206,28 +205,30 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 
 `src/mgr/prompt_mgr.py`
 
-**职责**：提供所有角色共用的执行原则，分层拼装系统提示词的静态前缀并缓存，构建时附上当前日期。各可插拔段内容由对应 Manager 提供（Manager 缺席则该段自动省略）。
+**职责**：构建 Agent 生命周期内固定不变的一条 system；另行生成模式 developer 指令和首次 chat 前的外部 user 上下文。模式切换、模型切换和工具轮都不重建 system。
 
-**段顺序**（`_build_static_prefix`）：
-1. **核心身份与执行原则**——`role_prompt` 非空时用之，否则默认身份（`_build_core`）；随后由 `_build_execution_guidance` 按主/子 agent 职责注入统一执行规则；
+**固定 system 顺序**（`_build_static_prompt`）：
+1. **核心身份与通用工具规则**——`role_prompt` 非空时用之，否则默认身份（`_build_core`）；不包含任何模式流程或模式专属工具；
 2. **行为准则**——`AGENTS.md` 四层叠加：共享 `roles/common/AGENTS.md` → 角色 `AGENTS.md` → 全局 `~/.agent/AGENTS.md` → 项目 `AGENTS.md`（`_build_agent_md`）；激活角色层会注入该角色的主 agent 与所有子 agent；
-3. **运行环境**——平台/模型/工作目录，外加 `deps.env_baseline`（`_build_environment`）。基线由 `collect_env_baseline()`（`src/mgr/env_baseline.py`）在 `AgentApp._reset_session` 中经 `asyncio.to_thread` 采集一次：shell、git 分支与短 HEAD、技术栈入口文件、深度 2 顶层目录树，硬上限 1200 字符。**不能在 PromptMgr 里现算**——`build()` 的调用点在 async 函数里（阻塞契约），且每个子 agent 各有自己的 PromptMgr（会重复采集十几次）。它对所有 agent 必须逐字节相同，否则跨委派的 tools+system 前缀缓存会失效；
-4. **任务管理指导**——`TaskManager.describe()`（仅 task feature），只说明任务进度与依赖，不决定分工；
-5. **项目记忆**——`MemoryMgr.build_prompt()`（仅主 agent 视角，`agent.memory == "project"` 时，`_build_memory_context`）；
-6. **会话上下文**——`deps.session_context`（`_build_session_context`）；
-7. **协作指引与可用子智能体**（**仅主 agent**）——`SubAgentMgr.prompt_section()`。协作段仅在实际工具 schema 包含 task_delegator 且存在候选子 agent 时注入；委派条件、等待式调用、上下文交接与关联任务认领规则由 SubAgentMgr 统一提供。
-8. **可用技能**——主、子 agent 实际具备 `load_skill` 时均注入 `SkillMgr.prompt_section()`，技能正文只在调用工具后进入调用者历史。
+3. **固定 Web 安全规则与当前日期**。
+
+**初始外部上下文**（`build_initial_context_messages`）：运行平台、工作目录、`deps.env_baseline`、项目记忆、会话上下文、子智能体目录和技能目录合并为一条带 `<external_context>` 标记的 user 消息。它们属于环境或扩展数据，不能进入 system/developer。环境基线由 `collect_env_baseline()` 在 `AgentApp._reset_session` 中经 `asyncio.to_thread` 采集一次，PromptMgr 只拼接已有结果。
+
+**模式指令**（`build_mode_instructions`）：普通模式包含主/子执行原则、任务指导与执行工具指导，且不得提及计划流程、计划模式或 `submit_plan`；Plan 模式由 `PlanMgr.instructions()` 明确当前模式、只读边界、测试例外与禁止事项，并要求主 agent 通过 `load_skill(name="builtin:plan-workflow")` 加载流程。Skill 正文仍是工具结果，不提升为框架指令。
+
+`Agent._append_pending_framework_message()` 是唯一落点：每次 `llm.chat()` 前检查最终模式，将模式变化、turn-start/post-round 提醒和恢复指令去重合并为最多一条 developer 消息。工具执行中途只排队，不修改消息。
 
 **公共方法**：
 
 | 方法 | 关键参数 | 返回 | 作用 |
 |---|---|---|---|
-| `invalidate_cache` | — | `None` | 清除 `_static_prefix` 缓存，下次 `build()` 重建 |
-| `build` | — | `list` | 返回 `[{"role":"system","content":静态前缀 + 当前日期}]` |
+| `build` | — | `list` | 返回一条固定 system 消息 |
+| `build_mode_instructions` | — | `str` | 返回当前最终模式的框架指令 |
+| `build_initial_context_messages` | — | `list[dict]` | 返回首次 chat 前追加的外部 user 上下文 |
 
-**feature 门控**：否（但各段内容按对应 feature Manager 是否存在动态出现）。 **reload**：无（提供 `invalidate_cache`；随新 Agent 重建）。
+**feature 门控**：否（初始上下文和模式段按对应 Manager 是否存在动态出现）。 **reload**：无（随新 Agent 重建）。
 
-**持有的关键状态**：`_static_prefix`（缓存的静态前缀）。
+**持有的关键状态**：`_system_content`（Agent 生命周期内固定的 system 正文）。
 
 ---
 
@@ -248,9 +249,9 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 
 **`task_delegator` 关键行为**：
 - 未知 `agent_type` 返回错误并列出已知；带 `task_id` 时先置 `in_progress` 并设 owner，异常或 `RunResult.llm_error` 时回滚为无 owner 的 `pending`，正常返回不自动 completed；
-- 工具集经 `resolve_subagent_tools()` 解析，模型原样传 manifest：`None`、槽位别名、兼容别名或完整 ID 最终都由 `LLMMgr.get()` 解析；
+- manifest 工具声明原样传给 Agent，作为执行期授权边界；所有子 agent 仍接收统一 schema。模型原样传 manifest：`None`、槽位别名、兼容别名或完整 ID 最终都由 `LLMMgr.get()` 解析；
 - `thinking` 自身未声明时继承父 agent；`reasoning_effort` 自身合法声明优先，否则继承 `parent_agent.reasoning_effort`，父值仍为空时继承父 Provider 的 effort；该 effort 继承与子 agent 选择哪个模型槽位相互独立；
-- `features` 未声明时继承父 agent 已解析集，同时继承父 agent 当前 `plan_active`；
+- `features` 未声明时继承父 agent 已解析集，同时继承父 agent 当前 `mode`；
 - 用 `Agent.from_manifest(is_subagent=True, ...)` 构造实例，触发 `SubagentStart`/`SubagentStop` hook 与 start/end 生命周期事件，异常和取消路径也发 end；
 - **跨 agent 上下文交接的唯一枢纽**（见 [ContextMgr](#contextmgr--跨-agent-共享上下文)）：
   - *注入*——`run()` 之前把 `ContextMgr.digest()` 拼到 `prompt` 前面（摘要在前、任务正文在最后，recency）。`shared_context="none"` 可完全隔离，供独立复核用。账本为空时 prompt 逐字节不变。
@@ -364,8 +365,8 @@ MCP 连接配置和授权边界见 [mcp-and-hooks.md](mcp-and-hooks.md)。
 
 **三条设计约束**（改这块前必读）：
 
-1. **注入载体只能是子 agent 的首条 user 消息，绝不能进 system prompt。** Anthropic 把整个 system 包成单个 ephemeral 缓存断点（`src/llm/anthropic.py:_system_blocks`），断点覆盖 tools+system 整个前缀；账本是动态的，进 system 会让一个 coder 约 8-15k token 的前缀每次委派全部 miss。
-2. **注入点是 `SubAgentMgr.task_delegator` 而非 `ReminderMgr`。** ReminderMgr 的 provider 只收 `(plan_active, is_subagent)`，拿不到本次委派信息；按委派过滤就得在进程级单例上存槽位，而计划工作流允许同一轮并行委派多个 `explore`，`asyncio.gather` 会互相覆盖——共享消费槽位会产生同样的竞态。
+1. **注入载体只能是子 agent 的首条 user 消息，绝不能进固定 system 或框架 developer。** 账本是动态外部数据；放消息尾部既保持信任边界，也不改变已缓存的固定前缀。
+2. **注入点是 `SubAgentMgr.task_delegator` 而非 `ReminderMgr`。** ReminderMgr 的 provider 只收 `(mode, is_subagent)`，拿不到本次委派信息；按委派过滤就得在进程级单例上存槽位，而计划工作流允许同一轮并行委派多个 `explore`，`asyncio.gather` 会互相覆盖——共享消费槽位会产生同样的竞态。
 3. **落盘必须由本 Manager 直接写，不能改成 `apply_patch` 工具。** `.agent` 被 `PathResolver` 归为 protected，`.agent/context/**` 因此是 `PathClass.PROTECTED`；而 plan 模式下 `PermissionManager._authorize_plan()` 拒绝通用文件写入，走 `apply_patch` 必被拒——plan 模式恰是本机制最痛的场景。触发它的工具（`task_delegator`、`note_context`）声明 `INTERNAL + plan_safe=True`，与 `save_memory` 同构。
 
 **生命周期语义**：`/clear` 走 `reload()` 清内存、磁盘旧文件保留供排查，新会话按新 `session_id` 另开文件。**resume 不恢复账本**——恢复的历史里主 agent 已带着全部工具结果，账本只服务后续新委派，这是刻意设计不是遗漏。
@@ -378,7 +379,7 @@ MCP 连接配置和授权边界见 [mcp-and-hooks.md](mcp-and-hooks.md)。
 
 ## PlanMgr 与工具运行时
 
-`PlanMgr` 管理模式切换、当前指令正文与受控计划保存。正文由 PromptMgr 注入系统段，不追加到用户历史。`save(content, previous)` 原子写入 `.agent/plans/`，审核状态和路径保存在 `SessionState.plan`。`agent.plan_active` 是模式状态权威，授权由 PermissionManager 执行。
+`PlanMgr` 管理模式切换、当前指令正文与受控计划保存。正文由 PromptMgr 生成，并在下一次 chat 前作为 developer 消息追加；模式切换本身不改历史。`save(content, previous)` 原子写入 `.agent/plans/`，审核状态和路径保存在 `SessionState.plan`。`agent.mode` 是模式状态权威，授权由 PermissionManager 执行。
 
 文件发现、搜索和读取由 `exec_command` 在真实受限 Shell 中执行；随包 ripgrep 的定位由 `ripgrep.resolve_rg()` 负责。补丁文本计算与提交在 `patch.py`；进程生命周期与工作区读写租约在 `ProcessMgr`；一次输出整理及临时日志归 `ToolOutput`。流程与接口见 [tools.md](tools.md)。
 
@@ -422,7 +423,7 @@ MCP 连接配置和授权边界见 [mcp-and-hooks.md](mcp-and-hooks.md)。
 
 **单一职责**：持久化会话元数据与单一 `SessionState` 快照，支持 `/resume` 恢复。
 
-**消费的配置或文件**：`{global_dir}/sessions/` 下——`{id}.json`（元数据：`workdir`/时间戳/`topic`/`plan_active`）、`{id}.state.json`（version 2：`records`、`context_ids` 与 attempt 级 `llm_calls`，经 DataGuard 脱敏并原子写）。旧格式不读取、不迁移。
+**消费的配置或文件**：`{global_dir}/sessions/` 下——`{id}.json`（元数据：`workdir`/时间戳/`topic`/`mode`）、`{id}.state.json`（version 2：`records`、`context_ids` 与 attempt 级 `llm_calls`，经 DataGuard 脱敏并原子写）。旧格式不读取、不迁移。
 
 `SessionRecord` 可同时包含模型消息、可见 `ViewPayload`、原始输入和关联 ID。`SessionState` 分别投影 LLM 上下文、TUI 历史与输入回溯，并以 `LLMCallRecord` 持久化每次 provider attempt 的模型、调用者、阶段、结果和原始 usage；compact 只更新上下文投影。
 
@@ -430,7 +431,7 @@ MCP 连接配置和授权边界见 [mcp-and-hooks.md](mcp-and-hooks.md)。
 
 | 方法 | 关键参数 | 返回 | 作用 |
 |---|---|---|---|
-| `save_metadata` | `session_id`, `is_new`, `topic`, `plan_active` | `None` | 原子写/更新元数据（首次写 `created_at`，后续更 `updated_at`） |
+| `save_metadata` | `session_id`, `is_new`, `topic`, `mode` | `None` | 原子写/更新元数据（首次写 `created_at`，后续更 `updated_at`） |
 | `save_state` | `session_id`, `state` | `None` | DataGuard 脱敏后原子覆写 `.state.json` |
 | `load_state` | `session_id` | `SessionState \| None` | 加载并完整校验 version、record 与 context 引用 |
 | `list_sessions` | `limit` | `list[dict]` | 按 `updated_at` 降序列出会话元数据 |
@@ -540,7 +541,7 @@ hook 协议、JSON 字段与插件 `CLAUDE_PLUGIN_ROOT` 环境变量见 [mcp-and
 
 `src/mgr/reminder_mgr.py`
 
-**单一职责**：作为中介，在 agent 运行循环的三处时机统一向已注册的提醒源（如 `TaskManager`）收集提醒，用 `<reminder>` 标签包装后交给状态机注入。提醒源通过 duck typing 识别（实现哪个接口方法就在对应时机被调用）。
+**单一职责**：在 turn start 和 post round 向已注册的提醒源（如 `TaskManager`）收集固定框架提醒并排队。它不构造消息；Agent 在下一次 chat 前与模式指令合并为一条 developer。提醒源不得返回任务标题、工具结果或其他外部内容。
 
 **公共方法**：
 
@@ -548,13 +549,14 @@ hook 协议、JSON 字段与插件 `CLAUDE_PLUGIN_ROOT` 环境变量见 [mcp-and
 |---|---|---|---|
 | `register` | `provider` | `None` | 注册提醒源（重复注册忽略） |
 | `unregister` | `provider` | `None` | 注销（不存在静默跳过） |
-| `build_turn_start_instructions` | `plan_active, is_subagent` | `str` | turn 开始：收集各源 `get_turn_start_reminder(plan_active, is_subagent)`，`<reminder>` 包装拼接（prepend 用户输入） |
+| `queue_turn_start` | `mode, is_subagent` | `None` | turn 开始：收集各源 `get_turn_start_reminder(mode, is_subagent)` 并排队 |
 | `notify_tool_round` | `tool_names` | `None` | 工具轮后：调各源 `notify_tool_round(tool_names)` |
-| `collect_post_round_messages` | `plan_active, is_subagent` | `list[dict]` | POST_ROUND：收集各源 `pop_post_round_reminder(plan_active, is_subagent)`，构造 `user` 消息追加到历史 |
+| `queue_post_round` | `mode, is_subagent` | `None` | POST_ROUND：收集各源 `pop_post_round_reminder(mode, is_subagent)` 并排队 |
+| `pop_pending` | — | `list[str]` | chat 前一次取出并清空去重后的待发送提醒 |
 
 **feature 门控**：否（但注册的提醒源受各自 feature 门控）。 **reload**：无（随新 Agent 重建）。
 
-**持有的关键状态**：`_providers`（提醒源列表，按注册顺序迭代）。
+**持有的关键状态**：`_providers`（提醒源列表，按注册顺序迭代）、`_pending`（下一次 chat 的固定框架提醒）。
 
 三处注入时机在状态机中的位置见 [agent-runtime.md](agent-runtime.md)。
 

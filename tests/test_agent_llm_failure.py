@@ -14,6 +14,7 @@ from src.agent.agent import Agent
 from src.agent.states import AgentState, RunContext, RunResult
 from src.llm.base import LLMResponse
 from src.llm.errors import LLMCallError, LLMErrorInfo, LLMErrorKind
+from src.mode import RunMode
 from src.mgr.compact_mgr import CompactMgr
 from src.mgr.role_mgr import AgentManifest
 from src.mgr.subagent_mgr import SubAgentMgr
@@ -76,30 +77,27 @@ class RecordingEventBus:
 class NoopReminder:
     """不生成任何提示词的测试 reminder。"""
 
-    def build_turn_start_instructions(self, mode: object, is_subagent: bool) -> str:
-        """返回空轮次提示词。
+    def queue_turn_start(self, mode: object, is_subagent: bool) -> None:
+        """忽略轮次提示词。
 
         Args:
             mode: 当前权限模式。
             is_subagent: 调用方是否为子智能体。
 
-        Returns:
-            空字符串。
         """
         del mode, is_subagent
-        return ""
 
-    def collect_post_round_messages(self, mode: object, is_subagent: bool) -> list[dict]:
-        """返回空的工具轮后消息。
+    def queue_post_round(self, mode: object, is_subagent: bool) -> None:
+        """忽略工具轮后提醒。
 
         Args:
             mode: 当前权限模式。
             is_subagent: 调用方是否为子智能体。
 
-        Returns:
-            空消息列表。
         """
         del mode, is_subagent
+
+    def pop_pending(self) -> list[str]:
         return []
 
 
@@ -113,6 +111,12 @@ class StaticPromptMgr:
             固定系统提示词。
         """
         return [{"role": "system", "content": "test"}]
+
+    def build_initial_context_messages(self) -> list[dict]:
+        return []
+
+    def build_mode_instructions(self) -> str:
+        return ""
 
 
 class SequenceLLM:
@@ -277,9 +281,8 @@ def _runtime_agent(
     agent.description = ""
     agent.history = []
     agent.llm = llm
-    agent._tools_schemas = []
     agent.enable_thinking = True
-    agent.plan_active = False
+    agent.mode = RunMode.EXECUTE
     agent.is_subagent = False
     agent._pending_input = ""
     agent._prompt_mgr = StaticPromptMgr()
@@ -289,6 +292,7 @@ def _runtime_agent(
         event_bus=event_bus or RecordingEventBus(),
         hooks_mgr=None,
         session_mgr=None,
+        tools_mgr=SimpleNamespace(schemas=lambda: []),
     )
     agent._handlers = {
         AgentState.REQUEST_INPUT: agent._on_request_input,
@@ -373,8 +377,11 @@ def test_length_continuation_failure_rolls_back_recovery_artifacts() -> None:
     assert llm.requests[1]["messages"][-2:] == [
         {"role": "assistant", "content": "已显示但尚未完成的正文"},
         {
-            "role": "user",
-            "content": "输出达到长度上限。请从中断处直接继续，不要回顾、不要重复，必要时可以从半句话接续。",
+            "role": "developer",
+            "content": (
+                "<reminder>\n输出达到长度上限。请从中断处直接继续，"
+                "不要回顾、不要重复，必要时可以从半句话接续。\n</reminder>"
+            ),
         },
     ]
     assert agent.history == [{"role": "user", "content": "生成长篇报告"}]
@@ -679,6 +686,7 @@ def test_subagent_llm_failure_rolls_back_associated_task(
     task_mgr = RecordingTaskMgr()
     parent = SimpleNamespace(
         _task_mgr=task_mgr,
+        mode=RunMode.EXECUTE,
         llm=SimpleNamespace(model="test"),
         enable_thinking=True,
         features=set(),
@@ -694,7 +702,6 @@ def test_subagent_llm_failure_rolls_back_associated_task(
         )
     }
     mgr.deps = SimpleNamespace(
-        tools_mgr=SimpleNamespace(resolve_subagent_tools=lambda tools: set()),
         hooks_mgr=None,
         event_bus=None,
     )
@@ -843,22 +850,6 @@ class _StageLifecycleBus:
             raise self.end_error
 
 
-class _SubagentTools:
-    """返回空子 agent 工具集的测试 tools manager。"""
-
-    def resolve_subagent_tools(self, tools: set[str] | None) -> set[str]:
-        """返回空工具集。
-
-        Args:
-            tools: manifest 工具声明。
-
-        Returns:
-            空工具集。
-        """
-        del tools
-        return set()
-
-
 def _configured_subagent_mgr(
     tmp_path: Path,
     task_mgr: _RecordingTaskManager,
@@ -878,6 +869,7 @@ def _configured_subagent_mgr(
     """
     parent = SimpleNamespace(
         _task_mgr=task_mgr,
+        mode=RunMode.EXECUTE,
         llm=SimpleNamespace(model="test"),
         enable_thinking=True,
         features=set(),
@@ -895,7 +887,6 @@ def _configured_subagent_mgr(
         )
     }
     mgr.deps = SimpleNamespace(
-        tools_mgr=_SubagentTools(),
         hooks_mgr=hooks_mgr,
         event_bus=event_bus,
         session_id="session",

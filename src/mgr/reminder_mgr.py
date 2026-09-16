@@ -1,22 +1,21 @@
-"""提醒注入管理器 — 集中管理 agent 运行循环中的提醒注入。
+"""提醒注入管理器 — 收集待在下一次 chat 前发送的框架提醒。
 
 通过 register() 注册提醒源（如 PlanMgr、TaskManager），
-在 agent 状态机的三个时机统一调度注入：
-- turn start: prepend 到用户输入
-- tool round: 通知各提醒源更新内部状态
-- post round: 收集需要追加到 messages 的提醒消息
+提醒源只返回框架自身的固定指令，不得返回用户、工具或外部读取内容。ReminderMgr
+只排队纯文本；消息角色和历史追加由 Agent 在 chat 前统一处理。
 
 提醒源通过 duck typing 识别：
-- get_turn_start_reminder(plan_active, is_subagent) -> str: 返回纯文本内容
+- get_turn_start_reminder(mode, is_subagent) -> str: 返回纯文本内容
 - notify_tool_round(tool_names) -> None
-- pop_post_round_reminder(plan_active, is_subagent) -> str | None: 返回纯文本内容
+- pop_post_round_reminder(mode, is_subagent) -> str | None: 返回纯文本内容
 提醒源只需实现所需的方法，未实现的方法会被跳过。
-所有注入内容统一用 <reminder> 标签包装，由 ReminderMgr 处理。
 """
 
 from __future__ import annotations
 
 from typing import Any
+
+from src.mode import RunMode
 
 
 class ReminderMgr:
@@ -28,6 +27,7 @@ class ReminderMgr:
 
     def __init__(self) -> None:
         self._providers: list[Any] = []
+        self._pending: list[str] = []
 
     def register(self, provider: Any) -> None:
         """注册提醒源。重复注册同一对象会被忽略。
@@ -49,29 +49,24 @@ class ReminderMgr:
         except ValueError:
             pass
 
-    def build_turn_start_instructions(
-        self, plan_active: bool, is_subagent: bool,
-    ) -> str:
-        """收集所有提醒源的 turn start 注入文本，用 <reminder> 标签包装后拼接。
+    def queue_turn_start(
+        self, mode: RunMode, is_subagent: bool,
+    ) -> None:
+        """收集 turn-start 框架提醒，等待下一次 chat 前发送。
 
         在 _on_request_input 和 run() 子智能体路径中调用。
 
         Args:
-            plan_active: 调用方 agent 是否处于 Plan。
+            mode: 调用方 agent 当前运行模式。
             is_subagent: 调用方是否为子智能体。
 
-        Returns:
-            用 <reminder> 包装并拼接后的注入文本。无注入时返回空串。
         """
-        parts: list[str] = []
         for p in self._providers:
             fn = getattr(p, "get_turn_start_reminder", None)
             if fn is None:
                 continue
-            text = fn(plan_active, is_subagent)
-            if text:
-                parts.append(f"<reminder>{text}</reminder>")
-        return "\n\n".join(parts)
+            text = fn(mode, is_subagent)
+            self._queue(text)
 
     def notify_tool_round(self, tool_names: list[str]) -> None:
         """通知所有提醒源一轮工具执行已完成。
@@ -86,30 +81,30 @@ class ReminderMgr:
             if fn is not None:
                 fn(tool_names)
 
-    def collect_post_round_messages(
-        self, plan_active: bool, is_subagent: bool,
-    ) -> list[dict]:
-        """收集所有提醒源的 post-round 消息，用 <reminder> 标签包装后构造消息字典。
-
-        在 _on_post_round 开头调用，返回值逐条追加到 ctx.messages。
-        提醒源只需返回纯文本内容（str），格式包装由本方法统一处理。
+    def queue_post_round(
+        self, mode: RunMode, is_subagent: bool,
+    ) -> None:
+        """收集 post-round 框架提醒，等待下一次 chat 前发送。
 
         Args:
-            plan_active: 调用方 agent 是否处于 Plan。
+            mode: 调用方 agent 当前运行模式。
             is_subagent: 调用方是否为子智能体。
 
-        Returns:
-            需追加到 messages 的消息字典列表。
         """
-        msgs: list[dict] = []
         for p in self._providers:
             fn = getattr(p, "pop_post_round_reminder", None)
             if fn is None:
                 continue
-            text = fn(plan_active, is_subagent)
-            if text:
-                msgs.append({
-                    "role": "user",
-                    "content": f"<reminder>{text}</reminder>",
-                })
-        return msgs
+            text = fn(mode, is_subagent)
+            self._queue(text)
+
+    def _queue(self, text: str | None) -> None:
+        """排队非空且未重复的框架提醒。"""
+        if text and text not in self._pending:
+            self._pending.append(text)
+
+    def pop_pending(self) -> list[str]:
+        """取出并清空下一次 chat 的全部框架提醒。"""
+        pending = self._pending
+        self._pending = []
+        return pending

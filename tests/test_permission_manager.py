@@ -18,11 +18,23 @@ from src.mgr.hooks_mgr import HookRunResult
 from src.mgr.mcp_mgr import McpMgr
 from src.mgr.path_resolver import PathClass, PathResolutionError, PathResolver
 from src.mgr.permission_mgr import JudgeVerdict, PermissionManager
+from src.mgr.permission_mgr import ToolAuthorizationRequest, ToolCallerContext
 from src.mgr.role_mgr import AgentManifest
 from src.mgr.subagent_mgr import SubAgentMgr
-from src.tools import AccessKind, DataFlow, PathArgument, PathRole, ToolOrigin, ToolPolicy
+from src.mode import RunMode
+from src.mgr.features import ALL_FEATURES
+from src.tools import (
+    AccessKind,
+    DataFlow,
+    PathArgument,
+    PathRole,
+    ToolAudience,
+    ToolAvailability,
+    ToolOrigin,
+    ToolPolicy,
+)
 from src.tools.decorator import ToolEntry, _registry
-from src.tools.policy import DEFAULT_POLICY
+from src.tools.policy import DEFAULT_AVAILABILITY, DEFAULT_POLICY
 from src.mgr.tools_mgr import ToolsMgr
 
 
@@ -52,6 +64,44 @@ def make_manager(tmp_path: Path, judge=None, answer=False, guard=None):
 
 def run(coro):
     return asyncio.run(coro)
+
+
+def authorize(
+    manager: PermissionManager,
+    tool_name: str,
+    policy: ToolPolicy,
+    arguments: dict[str, Any],
+    *,
+    origin: ToolOrigin,
+    mode: RunMode,
+    user_intent: str,
+    availability: ToolAvailability = DEFAULT_AVAILABILITY,
+    is_subagent: bool = False,
+    features: set[str] | frozenset[str] = ALL_FEATURES,
+    declared_tools: set[str] | frozenset[str] | None = None,
+    unavailable_tools: tuple[str, ...] = (),
+    review_model: str | None = None,
+):
+    """构造统一授权请求，保持各测试只突出自身风险输入。"""
+    return manager.authorize(ToolAuthorizationRequest(
+        tool_name=tool_name,
+        policy=policy,
+        availability=availability,
+        arguments=arguments,
+        origin=origin,
+        caller=ToolCallerContext(
+            mode=mode,
+            agent_type="subagent" if is_subagent else "main",
+            is_subagent=is_subagent,
+            features=frozenset(features),
+            declared_tools=(
+                frozenset(declared_tools) if declared_tools is not None else None
+            ),
+            unavailable_tools=unavailable_tools,
+        ),
+        user_intent=user_intent,
+        review_model=review_model,
+    ))
 
 
 def test_policy_is_frozen_and_rejects_callable():
@@ -86,9 +136,9 @@ def test_local_read_outside_workspace_skips_judge(tmp_path):
         DataFlow.LOCAL,
         (PathArgument("path", PathRole.READ),),
     )
-    result = run(manager.authorize(
+    result = run(authorize(manager,
         "local_reader", policy, {"path": str(outside)}, origin=ToolOrigin("builtin"),
-        plan_active=False, user_intent="read it",
+        mode=RunMode.EXECUTE, user_intent="read it",
     ))
     assert result.allowed is True
     assert judge.requests == []
@@ -102,13 +152,13 @@ def test_workspace_write_fast_path_and_protected_path_review(tmp_path):
         DataFlow.LOCAL,
         (PathArgument("path", PathRole.WRITE),),
     )
-    ordinary = run(manager.authorize(
+    ordinary = run(authorize(manager,
         "write_file", policy, {"path": "src/new.py"}, origin=ToolOrigin("builtin"),
-        plan_active=False, user_intent="edit source",
+        mode=RunMode.EXECUTE, user_intent="edit source",
     ))
-    protected = run(manager.authorize(
+    protected = run(authorize(manager,
         "write_file", policy, {"path": ".env"}, origin=ToolOrigin("builtin"),
-        plan_active=False, user_intent="edit config",
+        mode=RunMode.EXECUTE, user_intent="edit config",
     ))
     assert ordinary.allowed is True and ordinary.source == "policy"
     assert protected.allowed is True and protected.source == "judge"
@@ -126,34 +176,160 @@ def test_symlink_escape_is_reviewed(tmp_path):
         DataFlow.LOCAL,
         (PathArgument("path", PathRole.WRITE),),
     )
-    result = run(manager.authorize(
+    result = run(authorize(manager,
         "write_file", policy, {"path": "link/file"}, origin=ToolOrigin("builtin"),
-        plan_active=False, user_intent="write",
+        mode=RunMode.EXECUTE, user_intent="write",
     ))
     assert result.allowed is False and result.source == "judge"
     assert judge.requests[0]["risk_flags"]["outside_workspace"] is True
 
 
-def test_plan_rejects_review_without_calling_judge_and_allows_plan_file(tmp_path):
+def test_plan_allows_readonly_shell_and_rejects_workspace_write(tmp_path):
     judge = RecordingJudge()
     manager = make_manager(tmp_path, judge)
     shell = ToolPolicy(AccessKind.REVIEW, DataFlow.DYNAMIC)
-    denied = run(manager.authorize(
+    denied = run(authorize(manager,
         "exec_command", shell, {"cmd": "pytest"}, origin=ToolOrigin("builtin"),
-        plan_active=True, user_intent="test",
+        mode=RunMode.PLAN, user_intent="test",
     ))
     plan_write = ToolPolicy(
         AccessKind.WORKSPACE_WRITE,
         DataFlow.LOCAL,
         (PathArgument("path", PathRole.WRITE),),
     )
-    allowed = run(manager.authorize(
+    allowed = run(authorize(manager,
         "write_file", plan_write, {"path": ".agent/plans/a.md"},
-        origin=ToolOrigin("builtin"), plan_active=True, user_intent="plan",
+        origin=ToolOrigin("builtin"), mode=RunMode.PLAN, user_intent="plan",
     ))
     assert denied.allowed is True and not denied.execution_policy.writable_roots
     assert allowed.allowed is False and allowed.source == "plan"
+    assert "计划模式仅允许" in allowed.reason
+    assert "单元测试、集成测试和端到端测试" in allowed.reason
+    assert "保持项目与外部状态只读" in allowed.recovery
     assert judge.requests == []
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"network": True},
+        {"writable_roots": ["."]},
+    ],
+)
+def test_plan_shell_expansion_denial_repeats_mode_limits(tmp_path, extra):
+    judge = RecordingJudge()
+    manager = make_manager(tmp_path, judge)
+
+    result = run(authorize(
+        manager,
+        "exec_command",
+        ToolPolicy(AccessKind.REVIEW, DataFlow.DYNAMIC),
+        {
+            "cmd": "pytest",
+            "additional_permissions": extra,
+            "justification": "运行测试",
+        },
+        origin=ToolOrigin("builtin"),
+        mode=RunMode.PLAN,
+        user_intent="运行测试",
+    ))
+
+    assert result.allowed is False and result.source == "plan"
+    assert "计划模式不能扩权" in result.reason
+    assert "计划模式仅允许" in result.reason
+    assert "禁止申请额外写权限或网络权限" in result.reason
+    assert "保持项目与外部状态只读" in result.recovery
+    assert judge.requests == []
+
+
+def test_mode_availability_denial_reports_complete_disabled_list(tmp_path):
+    """模式拒绝先于智能审查，并返回当前模式、目标工具和完整禁用列表。"""
+    judge = RecordingJudge()
+    manager = make_manager(tmp_path, judge)
+    disabled = ("apply_patch", "save_memory", "task_create")
+    result = run(authorize(
+        manager,
+        "apply_patch",
+        ToolPolicy(AccessKind.WORKSPACE_WRITE, DataFlow.LOCAL),
+        {"patch": "irrelevant"},
+        origin=ToolOrigin("builtin"),
+        mode=RunMode.PLAN,
+        user_intent="修改文件",
+        availability=ToolAvailability(frozenset({RunMode.EXECUTE})),
+        unavailable_tools=disabled,
+    ))
+
+    assert result.allowed is False
+    assert result.source == "availability"
+    assert result.error_code == "tool_unavailable"
+    assert result.error_details == {
+        "mode": "plan",
+        "requested_tool": "apply_patch",
+        "unavailable_tools": list(disabled),
+    }
+    assert "计划模式" in result.reason
+    assert "apply_patch" in result.reason
+    assert all(name in result.reason for name in disabled)
+    assert "计划模式仅允许" in result.reason
+    assert "单元测试、集成测试和端到端测试" in result.reason
+    assert "保持项目与外部状态只读" in result.recovery
+    assert judge.requests == []
+
+
+def test_execute_mode_availability_denial_does_not_add_plan_limits(tmp_path):
+    manager = make_manager(tmp_path)
+    result = run(authorize(
+        manager,
+        "submit_plan",
+        ToolPolicy(AccessKind.INTERNAL, DataFlow.LOCAL, plan_safe=True),
+        {},
+        origin=ToolOrigin("builtin"),
+        mode=RunMode.EXECUTE,
+        user_intent="提交计划",
+        availability=ToolAvailability(frozenset({RunMode.PLAN})),
+        unavailable_tools=("submit_plan",),
+    ))
+
+    assert result.error_code == "tool_unavailable"
+    assert "当前为普通模式" in result.reason
+    assert "计划模式仅允许" not in result.reason
+    assert "保持项目与外部状态只读" not in result.recovery
+
+
+@pytest.mark.parametrize(
+    ("availability", "kwargs", "detail_key"),
+    [
+        (ToolAvailability(feature="file"), {"features": {"skill"}}, "required_feature"),
+        (
+            ToolAvailability(audience=ToolAudience.MAIN_ONLY),
+            {"is_subagent": True},
+            "audience",
+        ),
+        (
+            ToolAvailability(audience=ToolAudience.DECLARED),
+            {"declared_tools": {"exec_command"}},
+            "declared_tools",
+        ),
+    ],
+)
+def test_non_mode_availability_rules_are_centralized(
+    tmp_path, availability, kwargs, detail_key,
+):
+    manager = make_manager(tmp_path)
+    result = run(authorize(
+        manager,
+        "apply_patch",
+        ToolPolicy(AccessKind.INTERNAL, DataFlow.LOCAL),
+        {},
+        origin=ToolOrigin("builtin"),
+        mode=RunMode.EXECUTE,
+        user_intent="测试",
+        availability=availability,
+        **kwargs,
+    ))
+    assert result.error_code == "tool_unavailable"
+    assert result.source == "availability"
+    assert detail_key in result.error_details
 
 
 @pytest.mark.parametrize("tool_name", ["note_context", "task_delegator"])
@@ -168,9 +344,9 @@ def test_plan_allows_shared_context_tools(tool_name, tmp_path):
     manager = make_manager(tmp_path, judge)
     policy = ToolPolicy(AccessKind.INTERNAL, DataFlow.LOCAL, plan_safe=True)
 
-    result = run(manager.authorize(
+    result = run(authorize(manager,
         tool_name, policy, {"topic": "t", "content": "c"},
-        origin=ToolOrigin("builtin"), plan_active=True, user_intent="plan",
+        origin=ToolOrigin("builtin"), mode=RunMode.PLAN, user_intent="plan",
     ))
 
     assert result.allowed is True
@@ -184,9 +360,9 @@ def test_plan_rejects_task_write_tools(tool_name, tmp_path):
     manager = make_manager(tmp_path, judge)
     policy = ToolPolicy(AccessKind.INTERNAL, DataFlow.LOCAL)
 
-    result = run(manager.authorize(
+    result = run(authorize(manager,
         tool_name, policy, {"subject": "t", "description": "d"},
-        origin=ToolOrigin("builtin"), plan_active=True, user_intent="plan",
+        origin=ToolOrigin("builtin"), mode=RunMode.PLAN, user_intent="plan",
     ))
 
     assert result.allowed is False and result.source == "plan"
@@ -200,9 +376,9 @@ def test_plan_allows_task_read_tools(tool_name, tmp_path):
     manager = make_manager(tmp_path, judge)
     policy = ToolPolicy(AccessKind.INTERNAL, DataFlow.LOCAL, plan_safe=True)
 
-    result = run(manager.authorize(
+    result = run(authorize(manager,
         tool_name, policy, {"task_id": "1"},
-        origin=ToolOrigin("builtin"), plan_active=True, user_intent="plan",
+        origin=ToolOrigin("builtin"), mode=RunMode.PLAN, user_intent="plan",
     ))
 
     assert result.allowed is True
@@ -217,9 +393,9 @@ def test_plan_allows_task_read_tools(tool_name, tmp_path):
 def test_shell_hard_denies(command, tmp_path):
     judge = RecordingJudge()
     manager = make_manager(tmp_path, judge)
-    result = run(manager.authorize(
+    result = run(authorize(manager,
         "exec_command", ToolPolicy(AccessKind.REVIEW, DataFlow.DYNAMIC), {"cmd": command},
-        origin=ToolOrigin("builtin"), plan_active=False, user_intent="run",
+        origin=ToolOrigin("builtin"), mode=RunMode.EXECUTE, user_intent="run",
     ))
     assert result.allowed is False and result.source == "hard_rule"
     assert judge.requests == []
@@ -229,10 +405,10 @@ def test_external_secret_denied_before_judge(tmp_path):
     guard = DataGuard({"provider": "sentinel-secret-value"})
     judge = RecordingJudge()
     manager = make_manager(tmp_path, judge, guard=guard)
-    result = run(manager.authorize(
+    result = run(authorize(manager,
         "web_fetch", ToolPolicy(AccessKind.REVIEW, DataFlow.EXTERNAL),
         {"url": "https://host/?token=sentinel-secret-value"},
-        origin=ToolOrigin("builtin"), plan_active=False, user_intent="fetch",
+        origin=ToolOrigin("builtin"), mode=RunMode.EXECUTE, user_intent="fetch",
     ))
     assert result.allowed is False and result.source == "hard_rule"
     assert "sentinel-secret-value" not in result.reason
@@ -242,9 +418,9 @@ def test_external_secret_denied_before_judge(tmp_path):
 def test_judge_failure_uses_one_time_confirmation(tmp_path):
     judge = RecordingJudge(RuntimeError("offline"))
     manager = make_manager(tmp_path, judge, answer=True)
-    result = run(manager.authorize(
+    result = run(authorize(manager,
         "exec_command", ToolPolicy(AccessKind.REVIEW, DataFlow.DYNAMIC), {"cmd": "pytest", "additional_permissions": {"network": True}, "justification": "需要网络"},
-        origin=ToolOrigin("builtin"), plan_active=False, user_intent="test",
+        origin=ToolOrigin("builtin"), mode=RunMode.EXECUTE, user_intent="test",
     ))
     assert result.allowed is True and result.source == "user"
 
@@ -253,9 +429,9 @@ def test_judge_failure_uses_one_time_confirmation(tmp_path):
 def test_judge_ask_or_unavailable_without_confirmation_denies(tmp_path, verdict):
     judge = RecordingJudge(verdict) if verdict is not None else None
     manager = PermissionManager(str(tmp_path), judge, None, DataGuard())
-    result = run(manager.authorize(
+    result = run(authorize(manager,
         "exec_command", ToolPolicy(AccessKind.REVIEW, DataFlow.DYNAMIC), {"cmd": "pytest", "additional_permissions": {"network": True}, "justification": "需要网络"},
-        origin=ToolOrigin("builtin"), plan_active=False, user_intent="test",
+        origin=ToolOrigin("builtin"), mode=RunMode.EXECUTE, user_intent="test",
     ))
     assert result.allowed is False and result.source == "failure"
 
@@ -264,10 +440,10 @@ def test_judge_receives_shape_not_body_or_query(tmp_path):
     guard = DataGuard({"key": "sentinel-secret-value"})
     judge = RecordingJudge(JudgeVerdict("allow", "ok"))
     manager = make_manager(tmp_path, judge, guard=guard)
-    result = run(manager.authorize(
+    result = run(authorize(manager,
         "custom", ToolPolicy(AccessKind.REVIEW, DataFlow.DYNAMIC),
         {"body": "large private body", "url": "https://example.test/p?q=secret"},
-        origin=ToolOrigin("dynamic"), plan_active=False,
+        origin=ToolOrigin("dynamic"), mode=RunMode.EXECUTE,
         user_intent="use token=sentinel-secret-value",
     ))
     encoded = repr(judge.requests[0])
@@ -286,9 +462,9 @@ def test_optional_none_path_resolves_to_workdir(tmp_path):
         DataFlow.LOCAL,
         (PathArgument("path", PathRole.READ),),
     )
-    result = run(manager.authorize(
+    result = run(authorize(manager,
         "list_directory", policy, {"path": None}, origin=ToolOrigin("builtin"),
-        plan_active=False, user_intent="list",
+        mode=RunMode.EXECUTE, user_intent="list",
     ))
     assert result.allowed is True
     assert judge.requests == []
@@ -303,13 +479,13 @@ def test_large_and_special_local_reads_are_denied(tmp_path):
         DataFlow.LOCAL,
         (PathArgument("path", PathRole.READ),),
     )
-    large_result = run(manager.authorize(
+    large_result = run(authorize(manager,
         "local_reader", policy, {"path": str(large)}, origin=ToolOrigin("builtin"),
-        plan_active=False, user_intent="read",
+        mode=RunMode.EXECUTE, user_intent="read",
     ))
-    special_result = run(manager.authorize(
+    special_result = run(authorize(manager,
         "local_reader", policy, {"path": "/dev/null"}, origin=ToolOrigin("builtin"),
-        plan_active=False, user_intent="read",
+        mode=RunMode.EXECUTE, user_intent="read",
     ))
     assert large_result.allowed is False and large_result.source == "hard_rule"
     assert special_result.allowed is False and special_result.source == "hard_rule"
@@ -367,11 +543,11 @@ def test_shift_tab_toggles_plan_both_directions_and_preserves_plan_path():
 
     class Agent:
         agent_type = "main"
-        plan_active = False
+        mode = RunMode.EXECUTE
         active_plan_path = ".agent/plans/current.md"
 
-        def set_plan_active(self, active):
-            self.plan_active = active
+        def set_mode(self, mode):
+            self.mode = mode
             return True
 
     class Bus:
@@ -388,9 +564,9 @@ def test_shift_tab_toggles_plan_both_directions_and_preserves_plan_path():
         controller = PlanModeController(ui, bus)
         controller.install_shortcut(agent)
         assert ui.handler() is True
-        assert agent.plan_active is True and ui.provider() is True
+        assert agent.mode is RunMode.PLAN and ui.provider() is True
         assert ui.handler() is True
-        assert agent.plan_active is False and ui.provider() is False
+        assert agent.mode is RunMode.EXECUTE and ui.provider() is False
         await asyncio.sleep(0)
         return ui, bus, agent
 
@@ -412,7 +588,6 @@ def test_subagent_inherits_parent_plan_state(tmp_path, monkeypatch):
         )
     }
     manager.deps = SimpleNamespace(
-        tools_mgr=SimpleNamespace(resolve_subagent_tools=lambda tools: set(tools or ())),
         hooks_mgr=None,
         event_bus=None,
     )
@@ -432,7 +607,7 @@ def test_subagent_inherits_parent_plan_state(tmp_path, monkeypatch):
 
     monkeypatch.setattr(Agent, "from_manifest", classmethod(from_manifest))
     parent = SimpleNamespace(
-        plan_active=True,
+        mode=RunMode.PLAN,
         llm=SimpleNamespace(model="default"),
         enable_thinking=True,
         reasoning_effort=None,
@@ -441,7 +616,7 @@ def test_subagent_inherits_parent_plan_state(tmp_path, monkeypatch):
     )
     result = run(manager.task_delegator("worker", "work", parent_agent=parent))
     assert result == "ok"
-    assert captured["plan_active"] is True
+    assert captured["mode"] is RunMode.PLAN
 
 
 def test_tools_mgr_redacts_events_post_hook_and_artifact(tmp_path):
@@ -497,7 +672,7 @@ def test_tools_mgr_redacts_events_post_hook_and_artifact(tmp_path):
     agent = SimpleNamespace(
         uuid="agent-id",
         agent_type="main",
-        plan_active=False,
+        mode=RunMode.EXECUTE,
         history=[],
         deps=deps,
     )
@@ -581,9 +756,9 @@ def test_authorized_path_rejects_symlink_replacement(tmp_path):
         DataFlow.LOCAL,
         (PathArgument("path", PathRole.WRITE),),
     )
-    result = run(manager.authorize(
+    result = run(authorize(manager,
         "write_file", policy, {"path": "target/file.txt"},
-        origin=ToolOrigin("builtin"), plan_active=False, user_intent="write",
+        origin=ToolOrigin("builtin"), mode=RunMode.EXECUTE, user_intent="write",
     ))
     assert result.allowed
     grant = result.path_grants[0]
@@ -612,9 +787,9 @@ def test_authorized_path_rejects_symlink_replacement(tmp_path):
 )
 def test_shell_hard_deny_recognizes_wrapped_and_absolute_sudo(tmp_path, command):
     manager = make_manager(tmp_path)
-    result = run(manager.authorize(
+    result = run(authorize(manager,
         "exec_command", ToolPolicy(AccessKind.REVIEW, DataFlow.DYNAMIC), {"cmd": command},
-        origin=ToolOrigin("builtin"), plan_active=False, user_intent="run",
+        origin=ToolOrigin("builtin"), mode=RunMode.EXECUTE, user_intent="run",
     ))
     assert result.allowed is False and result.source == "hard_rule"
 
@@ -626,9 +801,9 @@ def test_shell_hard_deny_recognizes_wrapped_and_absolute_sudo(tmp_path, command)
 def test_hard_deny_does_not_block_scoped_or_readonly_text_commands(tmp_path, command):
     judge = RecordingJudge(JudgeVerdict("allow", "reviewed"))
     manager = make_manager(tmp_path, judge)
-    result = run(manager.authorize(
+    result = run(authorize(manager,
         "exec_command", ToolPolicy(AccessKind.REVIEW, DataFlow.DYNAMIC), {"cmd": command},
-        origin=ToolOrigin("builtin"), plan_active=False, user_intent="run",
+        origin=ToolOrigin("builtin"), mode=RunMode.EXECUTE, user_intent="run",
     ))
     assert result.allowed is True
 
@@ -640,11 +815,11 @@ def test_shell_judge_and_confirmation_share_body_free_summary(tmp_path):
     )
     judge = RecordingJudge(JudgeVerdict("allow", "ok"))
     manager = make_manager(tmp_path, judge)
-    result = run(manager.authorize(
+    result = run(authorize(manager,
         "exec_command", ToolPolicy(
             AccessKind.REVIEW, DataFlow.DYNAMIC, detail_template="{command}"
         ), {"cmd": command, "additional_permissions": {"network": True}, "justification": "需要网络"}, origin=ToolOrigin("builtin"),
-        plan_active=False, user_intent="request",
+        mode=RunMode.EXECUTE, user_intent="request",
     ))
     request_summary = judge.requests[0]["redacted_command"]
     assert result.safe_detail.startswith(request_summary + "\n申请权限：")
@@ -660,9 +835,9 @@ def test_judge_extracts_nested_hosts_and_bounds_shape(tmp_path):
     judge = RecordingJudge(JudgeVerdict("allow", "ok"))
     manager = make_manager(tmp_path, judge)
     nested = {"items": [{"url": "https://nested.example.test/path?q=secret"}]}
-    run(manager.authorize(
+    run(authorize(manager,
         "dynamic", ToolPolicy(AccessKind.REVIEW, DataFlow.DYNAMIC), {"payload": nested},
-        origin=ToolOrigin("dynamic"), plan_active=False, user_intent="call",
+        origin=ToolOrigin("dynamic"), mode=RunMode.EXECUTE, user_intent="call",
     ))
     request = judge.requests[0]
     assert request["network_hosts"] == ["nested.example.test"]
@@ -708,9 +883,9 @@ def test_authorization_log_carries_source_and_redacted_reason(tmp_path, caplog):
     manager = make_manager(tmp_path, judge, guard=DataGuard({"provider": secret}))
     policy = ToolPolicy(AccessKind.REVIEW, DataFlow.DYNAMIC)
     with caplog.at_level(logging.INFO, logger="src.mgr.permission_mgr"):
-        result = run(manager.authorize(
+        result = run(authorize(manager,
             "exec_command", policy, {"cmd": "python -c pass", "additional_permissions": {"network": True}, "justification": "需要网络"}, origin=ToolOrigin("builtin"),
-            plan_active=False, user_intent="do it",
+            mode=RunMode.EXECUTE, user_intent="do it",
         ))
     assert result.allowed is False
     assert result.source == "judge"
@@ -729,9 +904,9 @@ def test_local_read_of_missing_path_is_allowed_not_hard_denied(tmp_path):
         DataFlow.LOCAL,
         (PathArgument("path", PathRole.READ),),
     )
-    result = run(manager.authorize(
+    result = run(authorize(manager,
         "get_file_info", policy, {"path": str(missing)}, origin=ToolOrigin("builtin"),
-        plan_active=False, user_intent="read it",
+        mode=RunMode.EXECUTE, user_intent="read it",
     ))
     assert result.allowed is True
     assert result.source == "policy"
@@ -757,9 +932,9 @@ def test_local_read_stat_permission_error_is_hard_denied(tmp_path, monkeypatch, 
 
     monkeypatch.setattr(Path, "stat", raising_stat)
     with caplog.at_level(logging.INFO, logger="src.mgr.permission_mgr"):
-        result = run(manager.authorize(
+        result = run(authorize(manager,
             "get_file_info", policy, {"path": str(target)}, origin=ToolOrigin("builtin"),
-            plan_active=False, user_intent="read it",
+            mode=RunMode.EXECUTE, user_intent="read it",
         ))
     assert result.allowed is False
     assert result.source == "hard_rule"
@@ -771,9 +946,9 @@ def test_confirmation_dialog_logs_open_and_outcome(tmp_path, caplog):
     manager = make_manager(tmp_path, judge, answer=False)
     policy = ToolPolicy(AccessKind.REVIEW, DataFlow.DYNAMIC)
     with caplog.at_level(logging.INFO, logger="src.mgr.permission_mgr"):
-        result = run(manager.authorize(
+        result = run(authorize(manager,
             "exec_command", policy, {"cmd": "python -c pass", "additional_permissions": {"network": True}, "justification": "需要网络"}, origin=ToolOrigin("builtin"),
-            plan_active=False, user_intent="do it",
+            mode=RunMode.EXECUTE, user_intent="do it",
         ))
     assert result.allowed is False
     assert result.source == "user"
@@ -792,9 +967,9 @@ def test_deterministic_policy_allow_is_debug_only(tmp_path, caplog):
         (PathArgument("path", PathRole.READ),),
     )
     with caplog.at_level(logging.INFO, logger="src.mgr.permission_mgr"):
-        result = run(manager.authorize(
+        result = run(authorize(manager,
             "local_reader", policy, {"path": str(target)}, origin=ToolOrigin("builtin"),
-            plan_active=False, user_intent="read it",
+            mode=RunMode.EXECUTE, user_intent="read it",
         ))
     assert result.allowed is True
     assert result.source == "policy"
@@ -802,9 +977,9 @@ def test_deterministic_policy_allow_is_debug_only(tmp_path, caplog):
 
     caplog.clear()
     with caplog.at_level(logging.DEBUG, logger="src.mgr.permission_mgr"):
-        run(manager.authorize(
+        run(authorize(manager,
             "local_reader", policy, {"path": str(target)}, origin=ToolOrigin("builtin"),
-            plan_active=False, user_intent="read it",
+            mode=RunMode.EXECUTE, user_intent="read it",
         ))
     assert "授权 local_reader → allow source=policy" in caplog.text
 
@@ -864,7 +1039,7 @@ def test_deny_notice_carries_real_authorization_source(tmp_path):
     agent = SimpleNamespace(
         uuid="agent-id",
         agent_type="main",
-        plan_active=False,
+        mode=RunMode.EXECUTE,
         history=[],
         llm=SimpleNamespace(model="default"),
     )

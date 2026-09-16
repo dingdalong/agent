@@ -1,9 +1,10 @@
 """静态环境基线采集 — 一次算好、全 agent 共用的仓库客观事实。
 
-主 agent 与子 agent 的 system prompt「# 运行环境」段此前只有平台/模型/工作目录三行，
-于是每个子 agent 开局都要先 `ls -la` 摸一遍仓库长什么样。本模块把这些
+主 agent 与子 agent 需要共享仓库的静态环境事实，否则每个子 agent 开局都要先
+`ls -la` 摸一遍仓库长什么样。本模块把这些
 **整个会话不变**的客观事实一次性算好，由 `AgentApp._reset_session()` 存进
-`AgentDeps.env_baseline`，`PromptMgr._build_environment()` 只做字符串拼接。
+`AgentDeps.env_baseline`，`PromptMgr._build_environment_context()` 只做字符串拼接，
+并作为带来源标记的外部 user 上下文进入历史。
 
 两条不可违反的约束：
 
@@ -12,12 +13,9 @@
    卡住事件循环（违反 CLAUDE.md 的异步/阻塞契约）；且每个子 agent 都新建自己的
    PromptMgr，一次 plan 流程 10+ 次委派就是 10+ 次重算。本模块全是同步 I/O，
    调用方必须用 `asyncio.to_thread` 卸载。
-2. **产出必须对所有 agent 逐字节相同。** 它进 system prompt，而 Anthropic 把整个
-   system 包成单个 ephemeral 缓存断点（`src/llm/anthropic.py:_system_blocks`），
-   断点覆盖 tools+system 整个前缀。基线只要因 agent 而异，跨委派的前缀缓存命中率
-   就会崩。这是它存在 `AgentDeps`（算一次）而非 `PromptMgr`（每 agent 算一次）的
-   第二个理由，也是为什么这里只放会话内稳定的事实（分支名、HEAD、目录结构），
-   不放 `git status` 这类随时在变的输出。
+2. **产出必须对所有 agent 逐字节相同。** 这是它存在 `AgentDeps`（算一次）而非
+   `PromptMgr`（每 agent 算一次）的第二个理由，也是为什么这里只放会话内稳定的事实
+   （分支名、HEAD、目录结构），不放 `git status` 这类随时在变的输出。
 """
 
 from __future__ import annotations

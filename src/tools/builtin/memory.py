@@ -5,7 +5,8 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from src.mgr.memory_mgr import MemoryType
-from src.tools.policy import AccessKind, DataFlow, ToolPolicy
+from src.mode import RunMode
+from src.tools.policy import AccessKind, DataFlow, ToolAvailability, ToolPolicy
 from src.tools.decorator import tool
 
 
@@ -36,8 +37,7 @@ def _memory_mgr(deps: Any) -> Any:
         "不要创建近似重复记忆。"
     ),
     policy=ToolPolicy(AccessKind.INTERNAL, DataFlow.LOCAL, plan_safe=True),
-    feature="memory",
-    modes=("execute",),
+    availability=ToolAvailability(frozenset({RunMode.EXECUTE}), feature="memory"),
 )
 def save_memory(
     title: str,
@@ -59,7 +59,7 @@ def save_memory(
     model=ReadMemory,
     description="读取一条项目记忆的完整内容。",
     policy=ToolPolicy(AccessKind.INTERNAL, DataFlow.LOCAL, plan_safe=True),
-    feature="memory",
+    availability=ToolAvailability(feature="memory"),
 )
 def read_memory(title: str, deps: Any) -> str:
     memory_mgr = _memory_mgr(deps)

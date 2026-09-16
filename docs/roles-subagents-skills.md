@@ -115,7 +115,7 @@ role:
 |---|---|---|---|
 | `agent_type` | str | 文件名 `path.stem` | 子 agent 标识（委派时用）；也是 `Agent.agent_type` |
 | `description` | str | `"没有说明内容"` | 出现在主 agent 的可用子智能体提示词段 |
-| `tools` | 逗号分隔 str | 空 → `None`（全部工具） | 工具白名单；再经 `resolve_subagent_tools` 注入 `subagent=True`、排除 `subagent=False` |
+| `tools` | 逗号分隔 str | 空 → `None`（全部工具） | 执行期工具声明边界；不改变统一 schema |
 | `model` | str | `None`（解析角色 default 槽位） | 只允许 `default`、`fast`、`opus`、`sonnet`、`haiku` 或`供应商/模型ID` |
 | `startInPlanMode` | bool | `False` | 独立构造时的初始 Plan 状态；经 `task_delegator` 构造时由父 Agent 当前状态覆盖 |
 | `thinking` | bool | `None`（继承父 agent） | 是否启用思考；仅 bool 有效 |
@@ -129,17 +129,17 @@ role:
 
 1. 查表定位 `manifest`，不存在则返回错误文本（含可用列表）。
 2. 若带 `task_id`：委派前把任务标记 `in_progress` 并设 `owner`；子 agent 异常退出或返回 LLM 错误时回滚为 `pending`，正常返回不自动标 `completed`。
-3. 解析工具集：`tools_mgr.resolve_subagent_tools(manifest.tools)`。
+3. 把 `manifest.tools` 原样传入 Agent，供 `PermissionManager` 在执行期检查；schema 保持完整。
 4. 模型直接传 `manifest.model`；`None` 由 `LLMMgr` 解析 default，合法别名解析对应槽位，完整模型 ID 精确使用。
 5. `thinking` 未声明时继承父 agent。
 6. `reasoning_effort` 自身合法声明优先；否则依次继承 `parent_agent.reasoning_effort`、父 agent Provider 的 `reasoning_effort`。继承的是父 agent 已解析的有效值，与子 agent 选择 default 还是 fast 槽位无关。
-7. `features` 未声明时继承父 agent 已解析集；同时继承父 agent 当前 `plan_active`。
+7. `features` 未声明时继承父 agent 已解析集；同时继承父 agent 当前 `mode`。
 8. 用 `Agent.from_manifest(is_subagent=True, ...)` 构造完整子 agent，触发 start hook/事件，运行后在 `finally` 发 end 事件，再触发 stop hook。
 9. **上下文交接**：`run()` 前把 `ContextMgr.digest()` 拼到 `prompt` 之前（子 agent 的 history 从空开始，这是它唯一能拿到「别人已核实了什么」的通道）；`SubagentStop` hook 之后把最终 `result` 记入账本，供后续委派复用。委派时传 `shared_context="none"` 可完全隔离，用于需要独立判断的场景（如代码审查）。详见 [managers.md](managers.md#contextmgr--跨-agent-共享上下文)。
 
-> Plan 工作流工具标记 `subagent=False`，不会进入子 Agent schema；但子 Agent 继承父 Agent 当前 `plan_active`，因此授权层的 Plan 限制仍然生效。
+> 所有子 Agent 接收与主 Agent 相同的 schema。`submit_plan` 通过 `ToolAudience.MAIN_ONLY` 禁止子 Agent 执行；子 Agent 继承父 Agent 当前 `mode`，模式限制同样由授权层执行。
 
-> 共享上下文的注入点刻意选在 `task_delegator` 而非 `ReminderMgr`：后者的 provider 只收 `(plan_active, is_subagent)`，要按委派过滤就得在进程级单例上存槽位，而并行委派会互相覆盖它。
+> 共享上下文的注入点刻意选在 `task_delegator` 而非 `ReminderMgr`：后者的 provider 只收 `(mode, is_subagent)`，要按委派过滤就得在进程级单例上存槽位，而并行委派会互相覆盖它。
 
 
 ### 子智能体执行边界
@@ -175,9 +175,9 @@ onboard 专用执行器声明 `features: [file, skill]`，不继承主 agent 的
 
 ### `SKILL.md` 格式与注入
 
-- frontmatter：`name`（缺省取父目录名）、`description`（缺省 `"没有说明内容"`）。
+- frontmatter：`name`（缺省取父目录名）、`description`（缺省 `"没有说明内容"`）、`listed`（缺省 `true`；为 `false` 时可按精确名称加载但不进入通用目录）。
 - `load_full_text(name)`（`skill_mgr.py:155`）返回包装文本：`<skill name=... skill_dir=...>` + body + 目录内其他文件的 `<skill-file path=... ref=... />` 清单 + `</skill>`。技能目录内的附属文件被登记为可引用资源（`skill_mgr.py:111-117`）。
-- `prompt_section()` 生成技能名、描述与加载指导。主、子 agent 只有实际工具 schema 包含 `load_skill` 时才展示目录；正文由工具结果进入调用者历史，不注入系统提示词。
+- `prompt_section()` 生成已列出技能的名称、描述与加载指导；目录作为首次 chat 前的外部 user 上下文，正文只由 `load_skill` 工具结果进入调用者历史，二者都不进入 system/developer。Plan 控制技能使用 `listed: false`，因此普通模式目录不会泄露计划工作流名称。
 
 > 技能系统受 `skill` feature 门控——角色未启用 `skill` 时 `SkillMgr` 与 `load_skill` 工具不生效。`coding` 提供内置工作流技能；用户也可在 `~/.agent/skills/` 或项目 `.agent/skills/` 自建技能。`onboard` 生成的任务范式属于项目用户技能，重启并切回启用 `skill` 的角色后以 `user:onboard-<task-slug>` 名称加载。
 
@@ -186,6 +186,6 @@ onboard 专用执行器声明 `features: [file, skill]`，不继承主 agent 的
 
 主 agent 默认连续推进工作；需要独立上下文、输出隔离或独立核验时才选择执行器。委派正文提供目标、范围、必要输入、完整技能名与验收条件，子 agent 再调用 `load_skill`。不自动继承主 agent 已加载的技能正文。
 
-`load_skill` 使用 `subagent=True` 自动加入子 agent 工具候选，随后仍受 `skill` feature 过滤。加载技能不修改工具集、Plan 状态或委派权限；`plan-workflow`、`execute-plan` 仅供主 agent 使用，子 agent 只处理明确的局部任务。
+`load_skill` 的 availability 为 `ToolAudience.ALL` 且要求 `skill` feature，因此主、子 agent 都可执行但仍受 feature 检查。加载技能不修改工具集、模式或委派权限；`plan-workflow`、`execute-plan` 不进入通用目录，只能由已知其精确名称的控制流程加载。
 
 编码排障加载 `builtin:debugging`，普通文档同步随实现完成；米家控制、诊断和场景管理分别加载 `builtin:control-devices`、`builtin:diagnose-home`、`builtin:manage-scenes`。简单查询与命令无需额外工作流。技能不存在时返回包含可用名称的错误，不回退到其他技能。

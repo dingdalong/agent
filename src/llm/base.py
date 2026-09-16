@@ -581,7 +581,6 @@ class LLMProvider(ABC):
     def normalize_messages(
         self,
         messages: list[dict],
-        allow_developer_role: bool = False,
         allow_tool_calls: bool = True,
         strict: bool = False,
     ) -> list[dict]:
@@ -589,7 +588,6 @@ class LLMProvider(ABC):
 
         Args:
             messages: 单条消息字典或消息字典列表。
-            allow_developer_role: 是否允许 developer 角色保留在结果中。
             allow_tool_calls: 是否保留 assistant/tool 的工具调用协议字段。
             strict: 是否在发现非法消息或工具调用序列时抛出异常。
 
@@ -600,9 +598,7 @@ class LLMProvider(ABC):
             TypeError: messages 类型非法，或严格模式下消息元素类型非法。
             ValueError: 严格模式下消息字段或工具调用序列非法。
         """
-        VALID_ROLES = {"system", "user", "assistant", "tool"}
-        if allow_developer_role:
-            VALID_ROLES.add("developer")
+        VALID_ROLES = {"system", "developer", "user", "assistant", "tool"}
 
         if isinstance(messages, dict):
             raw_messages = [messages]
@@ -824,7 +820,6 @@ class LLMProvider(ABC):
         caller_uuid: str | None = None,
         enable_thinking: bool = True,
         reasoning_effort_override: str | None = None,
-        ephemeral_instruction: str | None = None,
         max_attempts_cap: int | None = None,
         phase: str = "execute",
     ) -> LLMResponse:
@@ -841,8 +836,6 @@ class LLMProvider(ABC):
             enable_thinking: 是否启用思考。
             reasoning_effort_override: 本次调用临时替换的推理力度档位；
                 None 时沿用 provider 的 reasoning_effort，不修改共享实例。
-            ephemeral_instruction: 一次性追加到消息尾部的 user 指令；
-                仅作用于本次调用，不写回调用方 messages。
             max_attempts_cap: 本次调用的最大尝试次数上限；None 时使用 provider
                 配置。有效次数取该值与 provider 配置的较小值，不修改共享实例。
             phase: 调用所属阶段，取 execute 或 plan，仅用于核账。
@@ -857,11 +850,6 @@ class LLMProvider(ABC):
             KeyboardInterrupt: 收到键盘中断时原样传播。
             SystemExit: 进程退出时原样传播。
         """
-        effective_messages = (
-            [*messages, {"role": "user", "content": ephemeral_instruction}]
-            if ephemeral_instruction
-            else messages
-        )
         if (
             max_attempts_cap is not None
             and (
@@ -888,7 +876,7 @@ class LLMProvider(ABC):
                 started_at = None
                 try:
                     started_at = await self._emit_llm_call_started(
-                        effective_messages,
+                        messages,
                         prompt,
                         tools,
                         call,
@@ -897,7 +885,7 @@ class LLMProvider(ABC):
                     call_token = _ACTIVE_LLM_CALL.set(call)
                     try:
                         response = await self._do_chat(
-                            messages=effective_messages,
+                            messages=messages,
                             prompt=prompt,
                             tools=tools,
                             temperature=temperature,

@@ -78,15 +78,14 @@ token 用量统一为 `input_tokens`、`output_tokens`、`total_tokens`、`cache
 
 `chat()`（`src/llm/base.py` 的 `chat`）是唯一公共调用入口，采用模板方法：
 
-1. 构造 `effective_messages`：`ephemeral_instruction` 非空时在尾部追加一条一次性 `user` 指令（用 `user` 角色避开 `normalize_messages` 的 developer 门控），**不改动调用方 `messages` 列表**；较“append 后回滚”更稳、天然一次性且并发安全。
-2. 计算本次调用的有效尝试次数：未传 `max_attempts_cap` 时使用 provider 配置，否则取配置值与 cap 的较小值；再按 `1..有效次数` 创建独立 `LLMCallContext`。
-3. 发出 `LLMCallStarted`，再调用子类 `_do_chat(..., reasoning_effort_override=...)`。
-4. `finish_reason=="length"` 时用 `classify_truncation(response, call)` 计算并写入 `response.truncation_kind`（其余终态不设）。
-5. 成功后补齐工具片段完成态，发出 `LLMCallCompleted` 并返回 `LLMResponse`。
-6. 异常由统一分类器转换成 `LLMErrorInfo`；不可重试或尝试耗尽时发出 `LLMCallFailed`，抛出 `LLMCallError`。
-7. 可重试时计算等待时间、发出 `LLMRetrying`、异步等待，再以全新的尝试上下文重试。
+1. 计算本次调用的有效尝试次数：未传 `max_attempts_cap` 时使用 provider 配置，否则取配置值与 cap 的较小值；再按 `1..有效次数` 创建独立 `LLMCallContext`。
+2. 发出 `LLMCallStarted`，再调用子类 `_do_chat(..., reasoning_effort_override=...)`。Agent 已在调用前把模式变化和框架提醒追加为 developer，Provider 不再接收额外提示词参数。
+3. `finish_reason=="length"` 时用 `classify_truncation(response, call)` 计算并写入 `response.truncation_kind`（其余终态不设）。
+4. 成功后补齐工具片段完成态，发出 `LLMCallCompleted` 并返回 `LLMResponse`。
+5. 异常由统一分类器转换成 `LLMErrorInfo`；不可重试或尝试耗尽时发出 `LLMCallFailed`，抛出 `LLMCallError`。
+6. 可重试时计算等待时间、发出 `LLMRetrying`、异步等待，再以全新的尝试上下文重试。
 
-`chat()` 另有三个默认 `None` 的按调用参数：`reasoning_effort_override`（临时替换本次调用档位，不改共享 Provider）、`ephemeral_instruction` 与 `max_attempts_cap`。effort 的运行时层级是：主 agent 先取角色配置覆盖后的 manifest effort（`role.<角色>.reasoning_effort` 覆盖 `role.md`），缺失才用 Provider 类默认值 `max`；default/fast 两个槽位共用这一角色级单值。子 agent 自身 frontmatter effort 合法时优先，否则继承父 agent 已解析值，父值为空时再取父 Provider effort，而不是按子 agent 模型槽位重新取一套角色 effort。
+`chat()` 另有两个默认 `None` 的按调用参数：`reasoning_effort_override`（临时替换本次调用档位，不改共享 Provider）与 `max_attempts_cap`。effort 的运行时层级是：主 agent 先取角色配置覆盖后的 manifest effort（`role.<角色>.reasoning_effort` 覆盖 `role.md`），缺失才用 Provider 类默认值 `max`；default/fast 两个槽位共用这一角色级单值。子 agent 自身 frontmatter effort 合法时优先，否则继承父 agent 已解析值，父值为空时再取父 Provider effort，而不是按子 agent 模型槽位重新取一套角色 effort。
 
 `Agent._on_llm_call` 传 `ctx.length_effort_override or self.reasoning_effort`；长度恢复会从 `self.reasoning_effort or self.llm.reasoning_effort` 起步，按 Provider 的 `next_lower_effort()` 逐级降档。智能权限使用 `StructuredVerdictRunner`，固定对单次调用传 `reasoning_effort_override="low"`、关闭 thinking 并把尝试次数封顶为 3；这不会修改按模型缓存的 Provider。当前 Web 外部读取授权路径只执行本地隐私预检，没有调用已构造的 LLM Web 审查客户端。
 
@@ -184,7 +183,7 @@ Chat Completions 风格的通用校验（`base.py:179-283`）要求：
 
 ## 6. 消息归一化与分页
 
-`normalize_messages()`（`src/llm/base.py:453-660`）规范 role、content、assistant 工具调用和 tool 响应，并校验工具往返序列：调用 ID 必须非空且唯一，紧随的 tool 消息必须逐一且只响应一次。默认模式会删除无正文的非法 assistant 工具组及其 tool 消息；有正文时降级为纯文本 assistant。`strict=True` 时直接抛出类型或值错误。
+`normalize_messages()`（`src/llm/base.py`）规范 role、content、assistant 工具调用和 tool 响应，并校验工具往返序列：调用 ID 必须非空且唯一，紧随的 tool 消息必须逐一且只响应一次。canonical 历史中的 developer 原样保留；供应商不支持该角色时只在请求构造副本中映射。默认模式会删除无正文的非法 assistant 工具组及其 tool 消息；有正文时降级为纯文本 assistant。`strict=True` 时直接抛出类型或值错误。
 
 assistant 的 provider 专属字段在判断“真正为空”之前由 `_normalize_assistant_extra()` 保存。因此 OpenAI 与 DeepSeek 的 `_response_output`、Anthropic `_anthropic_content`，以及 Ollama、Moonshot 的 reasoning-only carrier 即使正文为空也会保留；没有正文、工具调用或任何专属载体的空 assistant 才会删除。
 
@@ -204,12 +203,12 @@ assistant 的 provider 专属字段在判断“真正为空”之前由 `_normal
 
 实现要点：
 
-- Anthropic 转换 system、messages、tools 和 tool choice，合并连续同角色消息；历史 `_anthropic_content` 使用深拷贝原样往返。稳定 system 与最新消息设置缓存断点，但只向 SDK 明确允许 `cache_control` 的 block 类型写入该字段；思考结束后可从历史剥离（`src/llm/anthropic.py:231-403`）。
-- OpenAI 把 system/developer 合并为 Responses API 首条 developer input；`prompt_cache_key` 使用模型与 agent 类型构造稳定键；历史用 `_response_output` 原样往返（`src/llm/openai.py:132-259`）。
-- DeepSeek 把 system/developer 内容合并到 `instructions`，并把完整的 user/assistant/function call/function output 历史作为 `input` 发送；不使用 `previous_response_id` 或 conversation 状态。开启思考时下发 `reasoning.effort`，关闭时省略 `reasoning`。最终 `output` 通过 `_response_output` 原样往返，因而 reasoning、服务端工具和未来新增 item 都可跨轮保留；框架当前注册的 function schema 与指定工具选择会转换成 Responses 格式（检索 `_convert_to_input`、`convert_function_tools`、`convert_tool_choice`）。
+- Anthropic 的固定 prompt 留在 Messages API `system`，历史 developer 在原位置映射为带 `<framework_instruction>` 标记的 user 内容；历史 `_anthropic_content` 使用深拷贝原样往返。工具目录末尾、固定 system 和最新消息设置缓存断点；消息断点只写入 SDK 明确允许 `cache_control` 的 block 类型。
+- OpenAI 把固定 prompt 合并为 Responses API 首条 developer input，历史 developer 保持原位置；`prompt_cache_key` 使用模型与 agent 类型构造稳定键；历史用 `_response_output` 原样往返（检索 `_convert_to_input`）。
+- DeepSeek 把固定 prompt 合并到 `instructions`，历史 developer 保持在 `input` 原位置，并把完整的 user/assistant/function call/function output 历史作为 `input` 发送；不使用 `previous_response_id` 或 conversation 状态。开启思考时下发 `reasoning.effort`，关闭时省略 `reasoning`。最终 `output` 通过 `_response_output` 原样往返，因而 reasoning、服务端工具和未来新增 item 都可跨轮保留；框架当前注册的 function schema 与指定工具选择会转换成 Responses 格式（检索 `_convert_to_input`、`convert_function_tools`、`convert_tool_choice`）。
 - 原生 Web 调用与主对话隔离，不携带历史、系统提示词或 `previous_response_id`。OpenAI 用独立 Responses `web_search` 请求；Anthropic 用最多一次 server tool 的独立 Messages 请求并有限续接 `pause_turn`。它们复用 provider 并发、错误分类与重试，但不因认证、网络、限流、超时或协议错误转本地；只有 `NativeWebCapabilityError` 允许 `WebAccessMgr` 本地回退。DeepSeek 虽使用 Responses API，未声明 hosted Web 能力，故保持关闭。
-- Ollama 可把 developer 归为 system，同时兼容 `reasoning` 与 `reasoning_content`；`preserve_thinking` 控制 chat template 历史思考保留（`src/llm/ollama.py:79-147`）。
-- Moonshot/Kimi K3 保留跨轮 `reasoning_content`，带工具调用的 assistant 即使无思考正文也补空字符串；不下发 temperature，思考力度走顶层字段（`src/llm/moonshot.py:114-175,240-276`）。
+- Ollama 只在请求副本中把 developer 映射为 system，不改 canonical 历史；同时兼容 `reasoning` 与 `reasoning_content`，`preserve_thinking` 控制 chat template 历史思考保留。
+- Moonshot/Kimi K3 同样只在请求副本中把 developer 映射为 system；保留跨轮 `reasoning_content`，带工具调用的 assistant 即使无思考正文也补空字符串；不下发 temperature，思考力度走顶层字段。
 
 `enable_thinking=False` 时，Anthropic 显式 disabled，OpenAI 与 DeepSeek 不传 `reasoning`，Ollama 关闭 chat template thinking，Moonshot 不传 reasoning effort。此时各 provider 都不下发推理力度，故 `reasoning_effort_override` 对本次调用是无害 no-op；关闭思考时也不会出现思考阶段截断。
 

@@ -143,7 +143,7 @@ ConfigManager 三层合并
 | `role_mgr` | `RoleMgr \| None` | 否 | 角色发现与激活，提供 manifest |
 | `plan_mode_controller` | `Any` | 否 | 入口 Agent 的 Plan 状态与快捷键协调器，`_reset_session` 时注入 |
 | `session_context` | `list[str]` | 否 | 会话级附加上下文（SessionStart hook、resume 摘要注入） |
-| `env_baseline` | `str` | 否 | 静态环境基线（git/技术栈/目录树），`_reset_session` 采集一次，进 system prompt |
+| `env_baseline` | `str` | 否 | 静态环境基线（git/技术栈/目录树），`_reset_session` 采集一次，作为外部 user 上下文 |
 | `session_id` | `str` | 否 | 当前会话 ID，`_reset_session` 时生成 |
 | `workdir` | `Path \| None` | 否 | 用户工作目录 |
 | `global_dir` | `Path \| None` | 否 | 全局配置目录 |
@@ -184,9 +184,9 @@ ALL_FEATURES = frozenset({"task", "skill", "subagent", "file", "memory", "plan"}
 | `memory` | `MemoryMgr`（`bootstrap.py:50`），记忆工具与提示词段 |
 | `plan` | `PlanMgr`（`bootstrap.py:53`），`submit_plan` 工具，计划模式 |
 
-`create_app()` 用 `resolve_features(role_mgr.manifest.features)` 计算有效集（`bootstrap.py:49`），决定 `MemoryMgr`/`PlanMgr` 是否实例化。每个 `Agent` 在 `__post_init__` 中再次调用 `resolve_features(self.features)`（`agent.py:125-126`）解析自身 feature 集，据此过滤工具 schema、按需创建 agent 级 Manager。子 agent 的 feature 集：自身 manifest 声明则用其值，否则继承父 agent。详见 [roles-subagents-skills.md](./roles-subagents-skills.md) 与 [managers.md](./managers.md)。
+`create_app()` 用 `resolve_features(role_mgr.manifest.features)` 计算有效集，决定 `MemoryMgr`/`PlanMgr` 是否实例化。每个 `Agent` 在 `__post_init__` 中再次解析自身 feature 集，据此按需创建 agent 级 Manager。子 agent 的 feature 集：自身 manifest 声明则用其值，否则继承父 agent。详见 [roles-subagents-skills.md](./roles-subagents-skills.md) 与 [managers.md](./managers.md)。
 
-未启用的 feature 对应工具通过 `tools_mgr.excluded_tool_names(features)` 计算出 `_excluded_tools`（`agent.py:127`），在 `refresh_tools_schemas()` 中从 schema 中减去（`agent.py:228-236`），LLM 不再看到这些工具。
+`ToolsMgr.schemas()` 是所有模式和 agent 共用的完整稳定目录，不接受 feature、模式或 manifest 过滤参数。`ToolAvailability` 声明模式、feature 和调用方范围；`ToolsMgr.execute()` 把它与 `ToolCallerContext` 一并交给 `PermissionManager`，由授权层在执行期拒绝不可用工具。
 
 ---
 

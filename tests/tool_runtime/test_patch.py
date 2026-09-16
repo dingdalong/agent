@@ -1,10 +1,11 @@
 import asyncio
 import pytest
+from src.mode import RunMode
 
 
 def apply(runtime, patch):
     deps, agent = runtime
-    agent.plan_active = False
+    agent.mode = RunMode.EXECUTE
     return asyncio.run(deps.tools_mgr.execute('apply_patch', {'patch': patch}, deps=deps, agent=agent))
 
 

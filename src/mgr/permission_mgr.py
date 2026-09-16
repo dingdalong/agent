@@ -15,7 +15,16 @@ from src.mgr.sandbox import ExecutionPolicy
 from src.mgr.hard_deny import HardDenyDetector
 from src.mgr.path_resolver import PathClass, PathGrant, PathResolutionError, PathResolver, ResolvedPath
 from src.mgr.review import ReviewVerdict, StructuredVerdictRunner
-from src.tools import AccessKind, DataFlow, PathRole, ToolOrigin, ToolPolicy
+from src.mode import RunMode, plan_mode_denial_reminder
+from src.tools import (
+    AccessKind,
+    DataFlow,
+    PathRole,
+    ToolAudience,
+    ToolAvailability,
+    ToolOrigin,
+    ToolPolicy,
+)
 from src.web.privacy import WebPrivacyGuard
 
 logger = logging.getLogger(__name__)
@@ -28,7 +37,7 @@ _MAX_SHAPE_ITEMS = 128
 @dataclass(frozen=True, slots=True)
 class AuthorizationResult:
     allowed: bool
-    source: Literal["hard_rule", "plan", "policy", "judge", "web_safety", "user", "failure"]
+    source: Literal["availability", "hard_rule", "plan", "policy", "judge", "web_safety", "user", "failure"]
     reason: str
     safe_detail: str
     path_grants: tuple[PathGrant, ...] = ()
@@ -36,6 +45,28 @@ class AuthorizationResult:
     error_code: str | None = None
     error_details: dict | None = None
     recovery: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCallerContext:
+    mode: RunMode
+    agent_type: str
+    is_subagent: bool
+    features: frozenset[str]
+    declared_tools: frozenset[str] | None
+    unavailable_tools: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ToolAuthorizationRequest:
+    tool_name: str
+    policy: ToolPolicy
+    availability: ToolAvailability
+    arguments: Mapping[str, Any]
+    origin: ToolOrigin
+    caller: ToolCallerContext
+    user_intent: str
+    review_model: str | None = None
 
 
 JudgeVerdict = ReviewVerdict
@@ -98,15 +129,15 @@ class PermissionManager:
 
     async def authorize(
         self,
-        tool_name: str,
-        policy: ToolPolicy,
-        arguments: Mapping[str, Any],
-        *,
-        origin: ToolOrigin,
-        plan_active: bool,
-        user_intent: str,
-        review_model: str | None = None,
+        request: ToolAuthorizationRequest,
     ) -> AuthorizationResult:
+        tool_name = request.tool_name
+        policy = request.policy
+        arguments = request.arguments
+        origin = request.origin
+        caller = request.caller
+        user_intent = request.user_intent
+        review_model = request.review_model
         if origin.kind != "builtin" and policy.access is not AccessKind.REVIEW:
             policy = ToolPolicy(
                 AccessKind.REVIEW,
@@ -116,6 +147,9 @@ class PermissionManager:
                 policy.detail_template,
             )
         safe_detail = self._safe_detail(tool_name, policy, arguments)
+        unavailable = self._authorize_availability(request, safe_detail)
+        if unavailable is not None:
+            return unavailable
         try:
             paths = list(self.path_resolver.extract(policy, arguments))
         except PathResolutionError as exc:
@@ -132,9 +166,9 @@ class PermissionManager:
             extra = arguments.get("additional_permissions") or {}
             network = bool(extra.get("network", False))
             requested = tuple(self.path_resolver.resolve(p) for p in extra.get("writable_roots", []))
-            if plan_active and (requested or network):
-                return self._result(tool_name, False, "plan", "计划模式不能扩权", safe_detail)
-            roots = tuple(dict.fromkeys((() if plan_active else (self.workdir,)) + requested))
+            if caller.mode is RunMode.PLAN and (requested or network):
+                return self._plan_denial(tool_name, "计划模式不能扩权", safe_detail)
+            roots = tuple(dict.fromkeys((() if caller.mode is RunMode.PLAN else (self.workdir,)) + requested))
             if any(not p.is_dir() for p in requested):
                 return self._result(tool_name, False, "hard_rule", "扩权目录必须已经存在", safe_detail)
             execution = await asyncio.to_thread(ExecutionPolicy, str(arguments.get("cmd", "")), cwd, self.workdir, roots, network)
@@ -163,7 +197,7 @@ class PermissionManager:
             if reason:
                 return self._result(tool_name, False, "hard_rule", reason, safe_detail, grants)
 
-        if plan_active:
+        if caller.mode is RunMode.PLAN:
             plan_result = self._authorize_plan(tool_name, policy, paths, safe_detail, grants)
             if plan_result is not None:
                 return plan_result
@@ -204,6 +238,52 @@ class PermissionManager:
             safe_detail,
         )
 
+    def _authorize_availability(
+        self,
+        request: ToolAuthorizationRequest,
+        safe_detail: str,
+    ) -> AuthorizationResult | None:
+        availability = request.availability
+        caller = request.caller
+        reason = ""
+        details: dict[str, Any] = {
+            "mode": caller.mode.value,
+            "requested_tool": request.tool_name,
+        }
+        if caller.mode not in availability.modes:
+            details["unavailable_tools"] = list(caller.unavailable_tools)
+            unavailable = ", ".join(caller.unavailable_tools) or "无"
+            reason = (
+                f"当前为{caller.mode.display_name}，不能使用 {request.tool_name}。"
+                f"该模式不可用工具：{unavailable}"
+            )
+            if caller.mode is RunMode.PLAN:
+                reason += f"。{plan_mode_denial_reminder()}"
+        elif availability.feature and availability.feature not in caller.features:
+            details["required_feature"] = availability.feature
+            reason = f"当前 agent 未启用 {availability.feature} feature，不能使用 {request.tool_name}"
+        elif caller.is_subagent and availability.audience is ToolAudience.MAIN_ONLY:
+            details["audience"] = availability.audience.value
+            reason = f"当前子 agent 不能使用主 agent 专属工具 {request.tool_name}"
+        elif (
+            availability.audience is ToolAudience.DECLARED
+            and caller.declared_tools is not None
+            and request.tool_name not in caller.declared_tools
+        ):
+            details["declared_tools"] = sorted(caller.declared_tools)
+            reason = f"当前 agent 的工具声明不允许使用 {request.tool_name}"
+        if not reason:
+            return None
+        recovery = "根据当前模式和 agent 权限选择其他工具；不要重试不可用工具。"
+        if caller.mode is RunMode.PLAN and caller.mode not in availability.modes:
+            recovery = "保持项目与外部状态只读；仅使用允许的读取、测试或计划安全内部操作，不要重试不可用工具。"
+        return replace(
+            self._result(request.tool_name, False, "availability", reason, safe_detail),
+            error_code="tool_unavailable",
+            error_details=details,
+            recovery=recovery,
+        )
+
     def _authorize_plan(
         self,
         tool_name: str,
@@ -218,7 +298,28 @@ class PermissionManager:
             return None
         if policy.access is AccessKind.INTERNAL and policy.plan_safe:
             return None
-        return self._result(tool_name, False, "plan", "Plan 期间仅允许读取、明确安全的内部操作和计划文件写入", safe_detail, grants)
+        return self._plan_denial(tool_name, "该操作违反计划模式限制", safe_detail, grants)
+
+    def _plan_denial(
+        self,
+        tool_name: str,
+        reason: str,
+        safe_detail: str,
+        grants: tuple[PathGrant, ...] = (),
+    ) -> AuthorizationResult:
+        """返回带完整模式提醒的 Plan 确定性拒绝。"""
+        result = self._result(
+            tool_name,
+            False,
+            "plan",
+            f"{reason}。{plan_mode_denial_reminder()}",
+            safe_detail,
+            grants,
+        )
+        return replace(
+            result,
+            recovery="保持项目与外部状态只读；仅使用允许的读取、测试或计划安全内部操作。",
+        )
 
     async def _review(
         self,
@@ -484,7 +585,7 @@ class PermissionManager:
         self,
         tool_name: str,
         allowed: bool,
-        source: Literal["hard_rule", "plan", "policy", "judge", "web_safety", "user", "failure"],
+        source: Literal["availability", "hard_rule", "plan", "policy", "judge", "web_safety", "user", "failure"],
         reason: str,
         safe_detail: str,
         path_grants: tuple[PathGrant, ...] = (),

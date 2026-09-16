@@ -10,6 +10,7 @@ from src.agent.agent import Agent
 from src.app.bootstrap import _make_task_notifier
 from src.events import EventBus, TaskStateChanged
 from src.mgr.task_mgr import TaskManager
+from src.mode import RunMode
 
 
 def test_cleanup_all_completed_clears_memory_disk_and_emits_empty_snapshot(
@@ -195,7 +196,7 @@ def test_plan_mode_suppresses_task_reminders(tmp_path: Path) -> None:
     for _ in range(3):
         mgr.notify_tool_round([])
 
-    assert mgr.get_turn_start_reminder(True, False) == ""
-    assert mgr.pop_post_round_reminder(True, False) is None
-    assert mgr.get_turn_start_reminder(False, False) != ""
-    assert mgr.pop_post_round_reminder(False, False) == "更新你的任务列表。"
+    assert mgr.get_turn_start_reminder(RunMode.PLAN, False) == ""
+    assert mgr.pop_post_round_reminder(RunMode.PLAN, False) is None
+    assert mgr.get_turn_start_reminder(RunMode.EXECUTE, False) != ""
+    assert mgr.pop_post_round_reminder(RunMode.EXECUTE, False) == "更新你的任务列表。"

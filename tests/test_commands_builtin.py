@@ -433,7 +433,7 @@ def test_models_bus_without_selection_support_degrades_to_plain_listing() -> Non
 
 def _plan_agent(can_enter: bool) -> SimpleNamespace:
     agent = SimpleNamespace(agent_type="main", uuid=uuid.uuid4())
-    agent.set_plan_active = lambda active: can_enter
+    agent.set_mode = lambda mode: can_enter
     return agent
 
 

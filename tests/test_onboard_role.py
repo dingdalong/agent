@@ -10,7 +10,6 @@ import pytest
 
 import src.tools  # noqa: F401  导入触发内置工具注册
 
-from src.mgr.features import resolve_features
 from src.mgr.mcp_mgr import McpMgr
 from src.mgr.paths import builtin_root
 from src.mgr.role_mgr import AgentManifest, extract_manifest, parse_frontmatter
@@ -157,14 +156,11 @@ def test_onboard_role_declares_pipeline_agents_and_isolated_features() -> None:
         assert manifest.agent_type == manifest.path.stem
         assert manifest.features == {"file", "skill"}
         assert manifest.start_in_plan_mode is False
-        effective_tools = (
-            tools_mgr.resolve_subagent_tools(manifest.tools)
-            - tools_mgr.excluded_tool_names(resolve_features(manifest.features))
-        )
-        assert effective_tools.isdisjoint(forbidden_tools)
-        assert "load_skill" in effective_tools
+        declared_tools = manifest.tools or set()
+        assert declared_tools.isdisjoint(forbidden_tools)
+        assert tools_mgr.get("load_skill").availability.feature == "skill"
         if manifest.agent_type != "repository-map":
-            assert "mcp__codebase-memory__index_repository" not in effective_tools
+            assert "mcp__codebase-memory__index_repository" not in declared_tools
 
 
 def test_onboard_agents_declare_only_registered_tools() -> None:

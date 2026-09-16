@@ -1,7 +1,7 @@
 from __future__ import annotations
 from typing import Literal, TYPE_CHECKING
 
-from src.tools.policy import AccessKind, DataFlow, ToolPolicy
+from src.tools.policy import AccessKind, DataFlow, ToolAudience, ToolAvailability, ToolPolicy
 from src.tools.decorator import tool
 from pydantic import BaseModel, Field
 
@@ -28,8 +28,8 @@ class TaskDelegator(BaseModel):
     )
 
 @tool(model=TaskDelegator, description="委托一个任务给子智能体",
-      policy=ToolPolicy(AccessKind.INTERNAL, DataFlow.LOCAL, plan_safe=True, detail_template="委托 {agent_type}"), subagent=False,
-      feature="subagent", counts_as_work=False)
+      policy=ToolPolicy(AccessKind.INTERNAL, DataFlow.LOCAL, plan_safe=True, detail_template="委托 {agent_type}"),
+      availability=ToolAvailability(feature="subagent", audience=ToolAudience.MAIN_ONLY), counts_as_work=False)
 async def task_delegator(
     description: str,
     agent_type: str,

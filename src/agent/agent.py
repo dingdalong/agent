@@ -5,7 +5,7 @@ from uuid import UUID
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any, Callable, TYPE_CHECKING
-from src.tools import ToolDict
+from src.mode import RunMode
 from src.events.types import (
     AgentStateChanged,
     CompactDelta,
@@ -56,7 +56,7 @@ _REQUEST_LLM_ERROR_KINDS = {
     LLMErrorKind.UNPROCESSABLE,
 }
 
-# 触底/无降档阶梯时，思考截断恢复注入的一次性压缩推理指令（仅作用于下一次调用，不落历史）。
+# 触底/无降档阶梯时，思考截断恢复注入的框架指令。
 _COMPRESS_REASONING_INSTRUCTION = (
     "上一次回复在思考阶段就耗尽了输出预算，未能给出任何正式答复。"
     "请大幅压缩思考过程：只保留必要的关键推理，直接产出面向用户的答复或工具调用，"
@@ -151,10 +151,7 @@ class AgentDeps:
     data_guard: Any = None
     trust_gate: Any = None
     session_context: list[str] = field(default_factory=list)
-    # 静态环境基线（git 分支、技术栈入口、顶层目录结构）。由 AgentApp._reset_session
-    # 用 asyncio.to_thread 采集一次后写入，进 system prompt 的「# 运行环境」段。
-    # 必须对所有 agent 逐字节相同——它落在 Anthropic 的 tools+system 缓存前缀里，
-    # 因 agent 而异会让跨委派的前缀缓存全部失效。详见 src/mgr/env_baseline.py。
+    # 环境基线由 AgentApp._reset_session 采集一次，作为外部上下文消息提供。
     env_baseline: str = ""
     session_state: SessionState | None = None
     session_id: str = ""
@@ -170,7 +167,7 @@ class Agent:
         uuid: 唯一类型标识。
         agent_type: agent类型
         description: 一句话描述
-        plan_active: 本 agent 是否处于 Plan。
+        mode: 本 agent 当前运行模式。
     """
 
     uuid: UUID = field(init=False)
@@ -185,16 +182,17 @@ class Agent:
     enable_thinking: bool = field(default=True)
     reasoning_effort: str | None = field(default=None)
     features: set[str] | None = field(default=None)
-    plan_active: bool = field(default=False)
+    mode: RunMode = field(default=RunMode.EXECUTE)
     history: list[dict] = field(init=False, default_factory=list)
-    _tools_schemas: list[ToolDict] = field(init=False)
-    _excluded_tools: set[str] = field(init=False, default_factory=set)
     _task_mgr: TaskManager | None = field(init=False, repr=False)
     _compact_mgr: CompactMgr = field(init=False, repr=False)
     _skill_mgr: SkillMgr | None = field(init=False, repr=False)
     _subagent_mgr: SubAgentMgr | None = field(init=False, repr=False)
     _prompt_mgr: PromptMgr = field(init=False, repr=False)
     _reminder_mgr: ReminderMgr = field(init=False, repr=False)
+    _system_prompt: list[dict] = field(init=False, repr=False)
+    _last_injected_mode: RunMode | None = field(init=False, default=None, repr=False)
+    _initial_context_added: bool = field(init=False, default=False, repr=False)
     _pending_input: str = field(init=False, default="")
     _input_history: list[str] = field(init=False, default_factory=list)
     _handlers: dict[AgentState, Callable] = field(init=False, repr=False)
@@ -208,18 +206,17 @@ class Agent:
         self.uuid = uuid.uuid4()
         if not self.is_subagent and self.deps.session_state is not None:
             self.history[:] = self.deps.session_state.context_messages()
+            self._initial_context_added = bool(self.history)
         # 主、子 agent 均以单实例 UUID 关联生命周期、usage 与转录事件，
         # 供 AgentViewStore 汇聚成一致快照。
         self.llm = self.deps.llm_mgr.get(self.model)
         self.model = f"{self.llm.provider_name}/{self.llm.model}"
-        # 解析本 agent 启用的 feature 集，据此过滤工具、按需创建各可插拔 Manager
+        # feature 只控制能力与 Manager；所有 agent 共享同一工具 schema 目录。
         from src.mgr import resolve_features
         self.features = resolve_features(self.features)
-        self._excluded_tools = self.deps.tools_mgr.excluded_tool_names(self.features)
-        self.refresh_tools_schemas()
         self._compact_mgr = self._build_compact_mgr(self.llm)
         workdir = self.deps.workdir
-        # 可插拔 Manager：仅启用对应 feature 时创建，否则为 None（其工具已从 schema 排除）
+        # 可插拔 Manager：仅启用对应 feature 时创建，否则为 None。
         self._skill_mgr = (
             SkillMgr(workdir, global_dir=self.deps.global_dir, plugin_mgr=self.deps.plugin_mgr, role_mgr=self.deps.role_mgr)
             if "skill" in self.features else None
@@ -228,7 +225,7 @@ class Agent:
             SubAgentMgr(workdir, self.deps, global_dir=self.deps.global_dir)
             if "subagent" in self.features else None
         )
-        self._prompt_mgr = PromptMgr(agent=self, model=self.llm.model, workdir=workdir, global_dir=self.deps.global_dir, role_prompt=self.role_prompt)
+        self._prompt_mgr = PromptMgr(agent=self, workdir=workdir, global_dir=self.deps.global_dir, role_prompt=self.role_prompt)
         # 主 agent：持久化到磁盘；子 agent：纯内存模式，独立实例。
         if "task" in self.features:
             tasks_dir = None
@@ -239,11 +236,9 @@ class Agent:
         else:
             self._task_mgr = None
         self._reminder_mgr = ReminderMgr()
-        if self.plan_active and self.deps.plan_mgr is not None:
-            self.plan_active = False
-            self.deps.plan_mgr.enter_mode(self)
         if self._task_mgr is not None:
             self._reminder_mgr.register(self._task_mgr)
+        self._system_prompt = self._prompt_mgr.build()
         self._handlers = {
             AgentState.REQUEST_INPUT:    self._on_request_input,
             AgentState.CHECK_COMPACT:    self._on_check_compact,
@@ -293,8 +288,6 @@ class Agent:
         self.reasoning_effort = effort
         self.llm = new_llm
         self._compact_mgr = new_compact_mgr
-        self._prompt_mgr.model = new_llm.model
-        self._prompt_mgr.invalidate_cache()
 
     @classmethod
     def from_manifest(
@@ -338,7 +331,7 @@ class Agent:
             is_subagent=is_subagent,
             memory=_resolve_memory_scope(manifest.memory, is_subagent),
             model=manifest.model,
-            plan_active=manifest.start_in_plan_mode,
+            mode=RunMode.PLAN if manifest.start_in_plan_mode else RunMode.EXECUTE,
             enable_thinking=(
                 manifest.enable_thinking
                 if manifest.enable_thinking is not None
@@ -350,25 +343,16 @@ class Agent:
         kwargs.update(overrides)
         return cls(**kwargs)
 
-    def refresh_tools_schemas(self) -> None:
-        """刷新工具 schema 列表（减去被禁用 feature 的工具）。"""
-        names = self.tools if self.tools is not None else self.deps.tools_mgr.all_tool_names()
-        names = names - self._excluded_tools
-        self._tools_schemas = self.deps.tools_mgr.get_schemas(names, plan_active=self.plan_active)
-        if hasattr(self, "_prompt_mgr"):
-            self._prompt_mgr.invalidate_cache()
-
-    def set_plan_active(self, active: bool) -> bool:
-        """切换 Plan 状态并同步 PlanMgr 提醒生命周期。"""
-        plan_mgr = self.deps.plan_mgr
-        if active == self.plan_active:
+    def set_mode(self, mode: RunMode) -> bool:
+        """切换运行模式。"""
+        plan_mgr = getattr(self.deps, "plan_mgr", None)
+        if mode is self.mode:
             return False
-        if active and plan_mgr is not None:
+        if mode is RunMode.PLAN and plan_mgr is not None:
             return plan_mgr.enter_mode(self)
-        if not active and plan_mgr is not None:
+        if mode is RunMode.EXECUTE and plan_mgr is not None:
             return plan_mgr.exit_mode(self)
-        self.plan_active = active
-        self.refresh_tools_schemas()
+        self.mode = mode
         return True
 
     async def run(self, input: str | None = None) -> RunResult:
@@ -388,14 +372,13 @@ class Agent:
             data_guard = getattr(self.deps, "data_guard", None)
             if data_guard is not None:
                 input = str(data_guard.redact(input))
+            self._append_initial_context_messages()
             ctx = RunContext(
                 messages=self.history,
                 turn_start_messages=list(self.history),
                 round_start_idx=len(self.history),
             )
-            turn_instr = self._reminder_mgr.build_turn_start_instructions(self.plan_active, self.is_subagent)
-            if turn_instr:
-                input = f"{turn_instr}\n\n{input}"
+            self._reminder_mgr.queue_turn_start(self.mode, self.is_subagent)
             self._append_message(self.history, {"role": "user", "content": input})
             ctx.user_input = input
             result = await self._run_single_turn(ctx, AgentState.CHECK_COMPACT)
@@ -510,7 +493,7 @@ class Agent:
         ctx.pause_turn_message_idx = None
         ctx.pause_turn_continuations = 0
         ctx.length_effort_override = None
-        ctx.length_ephemeral_instruction = None
+        ctx.pending_framework_instructions.clear()
 
     async def _fail_response_recovery(
         self,
@@ -623,17 +606,17 @@ class Agent:
                 await self.deps.event_bus.request_output(f"{reason}\n", markdown=True)
                 return AgentState.REQUEST_INPUT
             if hook_result.additional_context:
-                user_input = user_input + "\n\n" + "\n\n".join(
-                    str(item) for item in hook_result.additional_context
+                external = "\n\n".join(str(item) for item in hook_result.additional_context)
+                user_input = (
+                    f"{user_input}\n\n<external_context source=\"UserPromptSubmit hook\">\n"
+                    f"{external}\n</external_context>"
                 )
-
-        turn_instr = self._reminder_mgr.build_turn_start_instructions(self.plan_active, self.is_subagent)
-        if turn_instr:
-            user_input = f"{turn_instr}\n\n{user_input}"
 
         data_guard = getattr(self.deps, "data_guard", None)
         if data_guard is not None:
             user_input = str(data_guard.redact(user_input))
+        self._append_initial_context_messages()
+        self._reminder_mgr.queue_turn_start(self.mode, self.is_subagent)
         ctx.turn_start_messages = list(self.history)
         ctx.round_start_idx = len(self.history)
         self._append_message(
@@ -664,7 +647,10 @@ class Agent:
         Returns:
             下一状态：继续调用 LLM、执行 compact，或进入退出总结。
         """
-        ctx.prompt = self._prompt_mgr.build()
+        ctx.prompt = getattr(self, "_system_prompt", None)
+        if ctx.prompt is None:
+            ctx.prompt = self._prompt_mgr.build()
+            self._system_prompt = ctx.prompt
         if self._compact_mgr.auto_compact_size <= 0:
             ctx.compact_streak = 0
             ctx.auto_compact_before_tokens = None
@@ -676,12 +662,12 @@ class Agent:
             self.llm.estimate_tokens,
             ctx.messages,
             ctx.prompt,
-            self._tools_schemas,
+            self.deps.tools_mgr.schemas(),
         )
         needs_compact = self._compact_mgr.is_need_compact(
             ctx.messages,
             ctx.prompt,
-            self._tools_schemas,
+            self.deps.tools_mgr.schemas(),
             estimated_tokens=estimated_tokens,
         )
 
@@ -763,6 +749,7 @@ class Agent:
         ))
         result = await self._compact_mgr.compact_history(ctx.messages)
         self._replace_messages(ctx.messages, result.messages)
+        self._last_injected_mode = None
         ctx.auto_compact_summarized_message_count = result.summarized_message_count
         ctx.auto_compact_has_summary = bool(result.summary.strip())
         if result.transcript_path:
@@ -789,6 +776,7 @@ class Agent:
         Raises:
             LLMCallError: 调用不可继续时交由单轮状态机边界收口。
         """
+        self._append_pending_framework_message(ctx)
         self._replace_messages(
             ctx.messages,
             self.llm.normalize_messages(ctx.messages),
@@ -797,13 +785,12 @@ class Agent:
         ctx.response = await self.llm.chat(
             prompt=ctx.prompt,
             messages=ctx.messages,
-            tools=self._tools_schemas,
+            tools=self.deps.tools_mgr.schemas(),
             caller_agent_type=self.agent_type,
             caller_uuid=str(self.uuid),
             enable_thinking=self.enable_thinking,
             reasoning_effort_override=ctx.length_effort_override or self.reasoning_effort,
-            ephemeral_instruction=ctx.length_ephemeral_instruction,
-            phase="plan" if self.plan_active else "execute",
+            phase=self.mode.value,
         )
         return AgentState.PROCESS_RESPONSE
 
@@ -832,7 +819,7 @@ class Agent:
         ctx.pause_turn_message_idx = None
         ctx.pause_turn_continuations = 0
         ctx.length_effort_override = None
-        ctx.length_ephemeral_instruction = None
+        ctx.pending_framework_instructions.clear()
         self._append_message(
             ctx.messages,
             response.assistant_message,
@@ -911,10 +898,9 @@ class Agent:
             lower = self.llm.next_lower_effort(current_effort)
             if lower:
                 ctx.length_effort_override = lower
-                ctx.length_ephemeral_instruction = None
                 strategy, effort = "regenerate-lower-effort", lower
             else:
-                ctx.length_ephemeral_instruction = _COMPRESS_REASONING_INSTRUCTION
+                ctx.pending_framework_instructions.append(_COMPRESS_REASONING_INSTRUCTION)
                 strategy, effort = "regenerate-compress", current_effort
         else:
             if is_tool_call:
@@ -925,12 +911,7 @@ class Agent:
                 )
             else:
                 retry_instruction = "输出达到长度上限。请从中断处直接继续，不要回顾、不要重复，必要时可以从半句话接续。"
-            self._append_message(ctx.messages, {"role": "user", "content": retry_instruction})
-            self._replace_messages(
-                ctx.messages,
-                self.llm.normalize_messages(ctx.messages),
-                preserve_positions=True,
-            )
+            ctx.pending_framework_instructions.append(retry_instruction)
             strategy = "continue"
             effort = ctx.length_effort_override or self._base_reasoning_effort()
 
@@ -1070,9 +1051,6 @@ class Agent:
 
         async def run_one(tc):
             name, ident = tc["name"], tc["id"]
-            if name in self._excluded_tools or (self.tools is not None and name not in self.tools):
-                completed[ident] = ToolResult.failure("unknown_tool", f"当前角色不可用：{name}")
-                return
             try:
                 args = json.loads(tc["arguments"])
                 if not isinstance(args, dict):
@@ -1092,7 +1070,7 @@ class Agent:
             if tc["name"] != "exec_command":
                 return tool.parallel
             # Plan 沙箱不能写工作区；实际权限仍由工具入口独立授权。
-            return self.plan_active
+            return self.mode is RunMode.PLAN
 
         async def flush(batch):
             tasks = [asyncio.create_task(run_one(tc)) for tc in batch]
@@ -1139,14 +1117,17 @@ class Agent:
                 reason = stop_hook.block_reason or "Stop hook blocked"
                 self._append_message(ctx.messages, {
                     "role": "user",
-                    "content": f"<reminder>{reason}</reminder>",
-                })
+                    "content": (
+                        "<external_context source=\"Stop hook\">\n"
+                        f"{reason}\n"
+                        "</external_context>"
+                    ),
+                }, kind="external_context")
                 return AgentState.CHECK_COMPACT
         return AgentState.DONE
 
     async def _on_post_round(self, ctx: RunContext) -> AgentState:
-        for msg in self._reminder_mgr.collect_post_round_messages(self.plan_active, self.is_subagent):
-            self._append_message(ctx.messages, msg)
+        self._reminder_mgr.queue_post_round(self.mode, self.is_subagent)
 
         if ctx.manual_compact:
             caller_agent_type, caller_uuid = caller_identity(self)
@@ -1161,6 +1142,7 @@ class Agent:
                 ctx.messages, focus=ctx.compact_focus,
             )
             self._replace_messages(ctx.messages, result.messages)
+            self._last_injected_mode = None
             if result.transcript_path:
                 await self.deps.event_bus.request_output(f"[transcript saved: {result.transcript_path}]\n")
 
@@ -1178,23 +1160,25 @@ class Agent:
         Raises:
             LLMCallError: 总结调用失败时交由单轮状态机边界收口。
         """
-        summary_instruction = {
-            "role": "user",
-            "content": "由于对话上下文过长且多次压缩仍无法继续，请你基于当前已完成的工作做一个总结："
-            "1) 已经完成了什么；2) 还有什么未完成；3) 给出后续建议。",
-        }
-        summary_messages = self.llm.normalize_messages([
-            *ctx.messages,
-            summary_instruction,
-        ])
-        response = await self.llm.chat(
-            prompt=ctx.prompt,
-            messages=summary_messages,
-            tools=[],
-            caller_agent_type=self.agent_type,
-            caller_uuid=str(self.uuid),
-            enable_thinking=False,
+        summary_start_idx = len(ctx.messages)
+        ctx.pending_framework_instructions.append(
+            "由于对话上下文过长且多次压缩仍无法继续，请基于当前已完成的工作总结："
+            "1) 已经完成了什么；2) 还有什么未完成；3) 给出后续建议。"
         )
+        self._append_pending_framework_message(ctx)
+        summary_messages = self.llm.normalize_messages(ctx.messages)
+        try:
+            response = await self.llm.chat(
+                prompt=ctx.prompt,
+                messages=summary_messages,
+                tools=[],
+                caller_agent_type=self.agent_type,
+                caller_uuid=str(self.uuid),
+                enable_thinking=False,
+            )
+        except LLMCallError:
+            self._truncate_messages(ctx.messages, summary_start_idx)
+            raise
         if response.content:
             ctx.final_text = response.content
         self._replace_messages(ctx.messages, summary_messages)
@@ -1245,6 +1229,51 @@ class Agent:
         return AgentState.DONE
 
     # ---- helpers ----
+
+    def _append_initial_context_messages(self) -> None:
+        """在首条真实输入之前追加一次外部上下文，不污染固定 system。"""
+        if getattr(self, "_initial_context_added", False):
+            return
+        prompt_mgr = getattr(self, "_prompt_mgr", None)
+        if prompt_mgr is not None:
+            build = getattr(prompt_mgr, "build_initial_context_messages", None)
+            if build is not None:
+                for message in build():
+                    self._append_message(self.history, message, kind="external_context")
+        self._initial_context_added = True
+
+    def _append_pending_framework_message(self, ctx: RunContext) -> None:
+        """在 chat 前把模式变化和框架提醒合并成最多一条 developer 消息。"""
+        sections: list[str] = []
+        mode = getattr(self, "mode", RunMode.EXECUTE)
+        if getattr(self, "_last_injected_mode", None) is not mode:
+            prompt_mgr = getattr(self, "_prompt_mgr", None)
+            build_mode = getattr(prompt_mgr, "build_mode_instructions", None)
+            mode_text = build_mode() if build_mode is not None else ""
+            if mode_text:
+                sections.append(
+                    f"<collaboration_mode>\n{mode_text}\n</collaboration_mode>"
+                )
+            self._last_injected_mode = mode
+
+        reminders = list(ctx.pending_framework_instructions)
+        ctx.pending_framework_instructions.clear()
+        reminder_mgr = getattr(self, "_reminder_mgr", None)
+        pop_pending = getattr(reminder_mgr, "pop_pending", None)
+        if pop_pending is not None:
+            reminders.extend(pop_pending())
+        seen: set[str] = set()
+        for reminder in reminders:
+            if reminder and reminder not in seen:
+                sections.append(f"<reminder>\n{reminder}\n</reminder>")
+                seen.add(reminder)
+
+        if sections:
+            self._append_message(
+                ctx.messages,
+                {"role": "developer", "content": "\n\n".join(sections)},
+                kind="framework",
+            )
 
     def _safe_history_value(self, value: Any) -> Any:
         data_guard = getattr(getattr(self, "deps", None), "data_guard", None)
@@ -1325,7 +1354,7 @@ class Agent:
             return
         session_mgr = self.deps.session_mgr
         has_history = bool(self.history)
-        plan_active = self.plan_active
+        mode = self.mode
 
         def save() -> None:
             session_mgr.save_state(session_id, state)
@@ -1335,7 +1364,7 @@ class Agent:
                     session_id,
                     is_new=is_new,
                     topic=user_input if is_new else "",
-                    plan_active=plan_active,
+                    mode=mode,
                 )
 
         await asyncio.to_thread(save)

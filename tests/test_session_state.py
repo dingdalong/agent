@@ -23,6 +23,7 @@ from src.interfaces.output_router import OutputRouter
 from src.mgr.session_mgr import SessionMgr
 from src.mgr.session_mgr import ResumeResult
 from src.mgr.session_state import SessionState
+from src.mode import RunMode
 
 
 class _UI:
@@ -445,21 +446,19 @@ def test_app_resume_switches_state_inside_gates_and_resets_transient_store() -> 
     )
     app = AgentApp(deps, AgentViewStore(), router)  # type: ignore[arg-type]
     app._install_plan_mode_controller = lambda: None  # type: ignore[method-assign]
-    prompt = SimpleNamespace(invalidate_cache=lambda: None)
     fake_agent = SimpleNamespace(
         uuid="new-main",
         agent_type="main",
         llm=SimpleNamespace(model="model", reasoning_effort="medium"),
         reasoning_effort=None,
-        plan_active=True,
+        mode=RunMode.PLAN,
         _task_mgr=None,
-        _prompt_mgr=prompt,
         get_input_history=target.input_history,
     )
     result = ResumeResult(
         session_id="target",
         state=target,
-        metadata={"topic": "主题", "plan_active": True},
+        metadata={"topic": "主题", "mode": "plan"},
     )
 
     async def scenario() -> None:
