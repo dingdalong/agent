@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from src.mgr.data_guard import DataGuard
+    from src.common.data_guard import DataGuard
 
 
 _MAX_FILE_BYTES = 2 * 1024 * 1024

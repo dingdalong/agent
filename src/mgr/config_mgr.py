@@ -15,8 +15,8 @@ from typing import Any, Literal, Mapping
 import yaml
 from dotenv import dotenv_values, set_key
 
-from src.mgr.paths import builtin_root
-from src.mgr.secure_io import atomic_write_text
+from src.common.paths import builtin_root
+from src.common.secure_io import atomic_write_text
 
 logger = logging.getLogger(__name__)
 

@@ -2,7 +2,7 @@
 
 设计要点：builtin 工具的扫描是**延迟**的（PEP 562 __getattr__），仅在首次访问
 ToolDict / ToolEntry / tool / _registry 时才执行。原因：policy 是独立的轻量子模块，
-被 src.mgr.path_resolver 等基础模块引用；若 import policy 时就 eagerly 扫描 builtin，
+被 src.common.path_resolver 等基础模块引用；若 import policy 时就 eagerly 扫描 builtin，
 而 builtin 工具又反向引用 src.mgr.*，就会在「先拉 src.mgr」的导入路径上形成
 src.mgr/__init__ ↔ src.tools/__init__ 的包级循环导入。延迟扫描让 policy 保持轻量、
 可被任意模块安全导入，从而切断该传递性循环。

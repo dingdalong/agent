@@ -25,7 +25,7 @@ import os
 import subprocess
 from pathlib import Path
 
-from src.mgr.frozen import clean_env
+from src.common.frozen import clean_env
 
 logger = logging.getLogger(__name__)
 

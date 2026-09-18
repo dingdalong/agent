@@ -14,7 +14,7 @@ import pytest
 from src.agent.agent import Agent
 from src.agent.states import RunResult
 from src.app.app import AgentApp
-from src.mgr.session_state import SessionState
+from src.common.session_state import SessionState
 from src.events.types import SubagentLifecycle
 from src.interfaces.agent_view_store import AgentViewStore
 from src.mode import RunMode

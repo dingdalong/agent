@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 import tempfile
 
-from src.mgr.path_resolver import PathResolver, ResolvedPath
+from src.common.path_resolver import PathResolver, ResolvedPath
 from src.tools.policy import PathRole
 from src.tools.display import ToolResult, ToolDisplay, build_file_diff, format_result
 

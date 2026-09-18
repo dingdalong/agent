@@ -14,9 +14,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from src.mgr.secure_io import atomic_write_text
+from src.common.secure_io import atomic_write_text
 from src.mode import RunMode
-from src.mgr.session_state import SessionState
+from src.common.session_state import SessionState
 
 logger = logging.getLogger(__name__)
 

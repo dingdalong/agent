@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from src.mgr.env_baseline import (
+from src.common.env_baseline import (
     _MAX_TOTAL_CHARS,
     _MAX_TREE_LINES,
     collect_env_baseline,

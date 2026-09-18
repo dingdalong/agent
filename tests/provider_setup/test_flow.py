@@ -31,7 +31,7 @@ from src.llm import LLMConfigurationError
 from src.llm.deepseek import DeepSeekProvider
 from src.llm.ollama import OllamaProvider
 from src.mgr.config_mgr import ConfigManager
-from src.mgr.paths import builtin_root
+from src.common.paths import builtin_root
 from src.mgr.role_mgr import DEFAULT_ROLE, RoleMgr
 
 
@@ -891,7 +891,7 @@ def _patch_bootstrap_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Pat
     monkeypatch.setattr(bootstrap, "global_data_dir", lambda: global_dir)
     monkeypatch.setattr(bootstrap, "resolve_workdir", lambda override=None: work_dir)
     monkeypatch.setattr(
-        bootstrap.ProjectTrustGate,
+        bootstrap.ProjectTrustMgr,
         "ensure_trusted",
         staticmethod(fake_ensure_trusted),
     )
@@ -946,7 +946,7 @@ def test_create_app_continues_after_setup_returns(tmp_path, monkeypatch):
 
     monkeypatch.setattr(bootstrap, "maybe_run_provider_setup", fake_setup)
     monkeypatch.setattr(
-        "src.mgr.sandbox.SandboxBackend.prepare",
+        "src.common.sandbox.SandboxBackend.prepare",
         lambda *_args, **_kwargs: nullcontext(),
     )
 

@@ -24,7 +24,7 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, Callable
 
-from src.mgr.paths import project_data_dir
+from src.common.paths import project_data_dir
 
 if TYPE_CHECKING:
     from src.agent.states import RunContext

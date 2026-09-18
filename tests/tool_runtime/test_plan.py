@@ -5,7 +5,7 @@ import pytest
 
 from src.mgr.hooks_mgr import HookRunResult
 from src.mgr.plan_mgr import PlanMgr
-from src.mgr.session_state import SessionState
+from src.common.session_state import SessionState
 from src.mgr.reminder_mgr import ReminderMgr
 from src.mode import RunMode
 

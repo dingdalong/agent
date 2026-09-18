@@ -22,7 +22,7 @@
 
 **Agent 状态机层** — `src/agent/agent.py` 的 `Agent` 是由 `_handlers: dict[AgentState, Callable]` 驱动的有限状态机（`agent.py:236-249`），枚举定义在 `src/agent/states.py:42-55`。每轮的可变状态封装在 `RunContext`（`states.py:58-106`）中；终态 LLM 错误由 `LLM_FAILURE` 承接，上下文超限仍进入 `CONTEXT_OVERFLOW`。
 
-**Manager 服务层** — `src/mgr/` 下各 Manager 各司其职（`RoleMgr`、`LLMMgr`、`ToolsMgr`、`PermissionManager`、`CompactMgr`、`PromptMgr`、`SubAgentMgr`、`SkillMgr` 等）。部分 Manager 受 feature 门控，未启用时在 `create_app()` 注入 `None`。
+**Manager 服务层** — `src/mgr/` 下各 Manager 各司其职（`RoleMgr`、`LLMMgr`、`ToolsMgr`、`PermissionManager`、`CompactMgr`、`PromptMgr`、`SubAgentMgr`、`SkillMgr` 等）。部分 Manager 受 feature 门控，未启用时在 `create_app()` 注入 `None`。跨 Manager 的 `ReviewVerdict` 协议位于 `src/mgr/common/`；被 app、agent、interfaces、tools、llm 或 web 直接复用的基础能力位于 `src/common/`，公共层不得反向依赖 Manager。
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -70,7 +70,7 @@
 | 步骤 | 构造对象 | 说明 |
 |---|---|---|
 | 1 | `global_dir` / `work_dir` | 解析并规范化全局目录与工作目录 |
-| 2 | `ProjectTrustGate` | 在任何项目可执行配置加载前确认工作目录信任 |
+| 2 | `ProjectTrustMgr` | 在任何项目可执行配置加载前确认工作目录信任 |
 | 3 | `ConfigManager` | 按信任结果加载三层配置与有效环境 |
 | 4 | 首次 Provider 配置向导 | 无显式配置时运行 `SetupApp` 并持久化（见下）；失败抛 `LLMConfigurationError` 干净退出 |
 | 5 | `DataGuard` / `RoleMgr` / `EventBus` / UI | 登记秘密；`RoleMgr` 发现角色并把缺省或不存在的配置角色解析为 `coding` |
@@ -156,7 +156,7 @@ ConfigManager 三层合并
 
 ## 4. feature 门控机制
 
-feature 门控是角色控制"启用哪些可插拔能力"的开关系统，实现在 `src/mgr/features.py`。
+feature 门控是角色控制"启用哪些可插拔能力"的开关系统，实现在 `src/common/features.py`。
 
 **合法名单**（`features.py:15`）：
 
@@ -198,7 +198,7 @@ ALL_FEATURES = frozenset({"task", "skill", "subagent", "file", "memory", "plan"}
 
 ## 6. 目录与路径解析
 
-所有路径解析集中在 `src/mgr/paths.py`，统一管理三层目录体系（内置 → 全局 → 项目）。
+所有路径解析集中在 `src/common/paths.py`，统一管理三层目录体系（内置 → 全局 → 项目）。
 
 | 函数 | 返回 | 来源/规则 | 源码 |
 |---|---|---|---|

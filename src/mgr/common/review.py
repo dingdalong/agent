@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
-from src.mgr.data_guard import DataGuard
+from src.common.data_guard import DataGuard
 from src.tools import ToolDict
 
 

@@ -6,8 +6,8 @@ import sys
 
 import pytest
 
-from src.mgr.sandbox import ExecutionPolicy
-from src.mgr.path_resolver import PathResolver
+from src.common.sandbox import ExecutionPolicy
+from src.common.path_resolver import PathResolver
 
 
 @pytest.mark.integration

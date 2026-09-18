@@ -12,7 +12,7 @@ import yaml
 from dotenv import dotenv_values
 
 from src.mgr.config_mgr import ConfigManager
-from src.mgr.paths import builtin_root
+from src.common.paths import builtin_root
 
 
 def _builtin_provider_names() -> list[str]:

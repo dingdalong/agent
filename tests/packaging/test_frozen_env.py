@@ -1,4 +1,4 @@
-"""src.mgr.frozen 的冻结态适配测试。
+"""src.common.frozen 的冻结态适配测试。
 
 clean_env 的两条分支都容易写错且不易察觉：整体删除会误删用户自己设的变量，
 不删又会让子进程加载包内动态库。这里把两种改写方式分别钉住。
@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from src.mgr import frozen
+from src.common import frozen
 
 
 @pytest.fixture

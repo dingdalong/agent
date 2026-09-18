@@ -17,8 +17,8 @@ from src.agent.agent import Agent, AgentDeps
 from src.agent.states import RunContext
 from src.llm.base import LLMResponse
 from src.mode import RunMode
-from src.mgr.data_guard import DataGuard
-from src.mgr.features import resolve_features
+from src.common.data_guard import DataGuard
+from src.common.features import resolve_features
 from src.mgr.hooks_mgr import HookRunResult
 from src.mgr.permission_mgr import JudgeVerdict, PermissionManager
 from src.mgr.role_mgr import RoleMgr

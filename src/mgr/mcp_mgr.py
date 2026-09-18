@@ -20,7 +20,7 @@ from typing import Any, TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict
 
-from src.mgr.frozen import clean_env
+from src.common.frozen import clean_env
 from src.tools import AccessKind, DataFlow, ToolOrigin, ToolPolicy
 from src.tools.decorator import ToolEntry
 

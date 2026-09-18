@@ -41,7 +41,7 @@ from src.events.menu import (
 )
 
 if TYPE_CHECKING:
-    from src.mgr.session_state import SessionState
+    from src.common.session_state import SessionState
 
 
 class UserInterface(ABC):

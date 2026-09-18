@@ -6,7 +6,7 @@ import sys
 
 from src.app.bootstrap import create_app
 from src.llm import LLMConfigurationError
-from src.mgr.frozen import setup_tiktoken_cache
+from src.common.frozen import setup_tiktoken_cache
 
 
 def parse_args() -> argparse.Namespace:

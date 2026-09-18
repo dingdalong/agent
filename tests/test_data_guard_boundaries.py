@@ -11,14 +11,14 @@ import pytest
 
 from src.agent import Agent
 from src.mgr.compact_mgr import CompactMgr
-from src.mgr.data_guard import DataGuard, REDACTED
+from src.common.data_guard import DataGuard, REDACTED
 from src.mgr.hooks_mgr import HookRunResult, HooksMgr
 from src.mgr.memory_mgr import MemoryMgr
 from src.mgr.session_mgr import SessionMgr
-from src.mgr.session_state import SessionState
+from src.common.session_state import SessionState
 from src.mgr.task_mgr import TaskManager
 from src.mgr.process_mgr import ProcessMgr
-from src.mgr.sandbox import ExecutionPolicy
+from src.common.sandbox import ExecutionPolicy
 
 
 SECRET = "sentinel-secret-value"

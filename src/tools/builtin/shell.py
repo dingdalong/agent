@@ -4,7 +4,7 @@ import uuid
 
 from pydantic import BaseModel, Field
 
-from src.mgr.frozen import clean_env
+from src.common.frozen import clean_env
 from src.tools.decorator import tool
 from src.tools.display import ToolResult
 from src.tools.policy import AccessKind, DataFlow, PathArgument, PathRole, ToolPolicy

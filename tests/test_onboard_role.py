@@ -11,7 +11,7 @@ import pytest
 import src.tools  # noqa: F401  导入触发内置工具注册
 
 from src.mgr.mcp_mgr import McpMgr
-from src.mgr.paths import builtin_root
+from src.common.paths import builtin_root
 from src.mgr.role_mgr import AgentManifest, extract_manifest, parse_frontmatter
 from src.mgr.tools_mgr import ToolsMgr
 

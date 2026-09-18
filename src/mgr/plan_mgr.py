@@ -47,7 +47,7 @@ class PlanMgr:
 
     def save(self, content: str, previous: dict) -> Path:
         """只保存到受控目录；模型不提供目标路径。"""
-        from src.mgr.path_resolver import PathResolver, PathClass
+        from src.common.path_resolver import PathResolver, PathClass
         resolver = PathResolver(self.workdir)
         directory = resolver.resolve(self._plan_dir)
         if directory != self.workdir.resolve() / ".agent" / "plans":

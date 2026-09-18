@@ -9,14 +9,14 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from src.mgr.secure_io import atomic_write_text
+from src.common.secure_io import atomic_write_text
 
 
 TrustConfirmation = Callable[[str], Awaitable[bool]]
 
 
 @dataclass
-class ProjectTrustGate:
+class ProjectTrustMgr:
     workdir: Path
     global_dir: Path
 

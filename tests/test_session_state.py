@@ -22,7 +22,7 @@ from src.interfaces.agent_view_store import AgentViewStore
 from src.interfaces.output_router import OutputRouter
 from src.mgr.session_mgr import SessionMgr
 from src.mgr.session_mgr import ResumeResult
-from src.mgr.session_state import SessionState
+from src.common.session_state import SessionState
 from src.mode import RunMode
 
 

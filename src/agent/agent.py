@@ -38,7 +38,7 @@ if TYPE_CHECKING:
     from src.mgr.plan_mgr import PlanMgr
     from src.mgr.plugin_mgr import PluginMgr
     from src.mgr.session_mgr import SessionMgr
-    from src.mgr.session_state import SessionState
+    from src.common.session_state import SessionState
     from src.mgr.mcp_mgr import McpMgr
     from src.mgr.role_mgr import RoleMgr, AgentManifest
     from src.interfaces.turn_clock import TurnClock
@@ -225,7 +225,7 @@ class Agent:
         self.llm = self.deps.llm_mgr.get(self.model)
         self.model = f"{self.llm.provider_name}/{self.llm.model}"
         # feature 只控制能力与 Manager；所有 agent 共享同一工具 schema 目录。
-        from src.mgr import resolve_features
+        from src.common.features import resolve_features
         self.features = resolve_features(self.features)
         tools_mgr = getattr(self.deps, "tools_mgr", None)
         validate_tools = getattr(tools_mgr, "validate_declared_tools", None)

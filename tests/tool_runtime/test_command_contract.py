@@ -7,8 +7,8 @@ import subprocess
 import pytest
 
 from src.mode import RunMode
-from src.mgr.path_resolver import PathResolver
-from src.mgr.sandbox import ExecutionPolicy
+from src.common.path_resolver import PathResolver
+from src.common.sandbox import ExecutionPolicy
 
 
 @pytest.mark.integration
@@ -33,7 +33,7 @@ def test_pipeline_output_and_exit_match_shell(runtime, tmp_path, cmd):
     (tmp_path / 'child').mkdir()
     (tmp_path / 'child' / 'b.txt').write_text('child\n')
     # 使用相同 shell 与 rg 比较输出和退出码。
-    from src.mgr.ripgrep import resolve_rg
+    from src.common.ripgrep import resolve_rg
     import shlex
     compare_cmd = cmd.replace('rg ', shlex.quote(resolve_rg()) + ' ')
     expected = subprocess.run([runtime[0].process_mgr.sandbox.shell, '-c', compare_cmd], cwd=tmp_path, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)

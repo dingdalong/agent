@@ -22,7 +22,7 @@ from textual.containers import VerticalScroll
 from textual.widget import Widget
 from textual.widgets import ListItem, ListView, OptionList, Static, TextArea
 
-from src.mgr.frozen import clean_env
+from src.common.frozen import clean_env
 
 
 _SELECT_AUTO_SCROLL_FPS = 20

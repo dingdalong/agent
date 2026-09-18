@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from src.agent import Agent
 from src.agent.states import RunContext
 from src.llm.base import LLMResponse
-from src.mgr.workspace_access import WorkspaceAccess
+from src.mgr.process_mgr import WorkspaceAccess
 from src.mgr.reminder_mgr import ReminderMgr
 from src.mode import RunMode
 from src.tools.decorator import ToolEntry

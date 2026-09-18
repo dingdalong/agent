@@ -72,7 +72,7 @@ def protected_paths(policy: ExecutionPolicy) -> tuple[Path, ...]:
              Path.home() / '.aws', Path.home() / '.kube'}
     for root in roots:
         paths.update(root / name for name in PROTECTED_NAMES)
-        from src.mgr.path_resolver import PathResolver
+        from src.common.path_resolver import PathResolver
         for directory, dirs, files in os.walk(root, followlinks=False):
             for name in dirs[:]:
                 candidate = Path(directory) / name
@@ -175,7 +175,7 @@ class SandboxBackend:
                        PYTHONPYCACHEPREFIX=str(scratch / 'pycache'), TMPPREFIX=str(scratch / 'zsh'), GIT_OPTIONAL_LOCKS='0',
                        GIT_PAGER='cat', PAGER='cat')
             # 只把随包 rg 放进专用 bin，不把整个冻结资源目录放进 PATH。
-            from src.mgr.ripgrep import resolve_rg
+            from src.common.ripgrep import resolve_rg
             rg = resolve_rg()
             if rg:
                 bin_dir = scratch / 'bin'

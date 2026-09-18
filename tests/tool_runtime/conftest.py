@@ -1,11 +1,11 @@
 from types import SimpleNamespace
 import pytest
 
-from src.mgr.data_guard import DataGuard
+from src.common.data_guard import DataGuard
 from src.mgr.permission_mgr import PermissionManager
 from src.mgr.process_mgr import ProcessMgr
 from src.mgr.tools_mgr import ToolsMgr
-from src.mgr.features import ALL_FEATURES
+from src.common.features import ALL_FEATURES
 from src.mode import RunMode
 
 

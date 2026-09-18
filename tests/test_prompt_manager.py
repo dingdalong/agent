@@ -9,7 +9,7 @@ import pytest
 
 import src.tools  # noqa: F401  先完成内置工具注册，避免 mgr 聚合包初始化循环
 from src.mode import RunMode
-from src.mgr.paths import builtin_root
+from src.common.paths import builtin_root
 from src.mgr.prompt_mgr import PromptMgr
 from src.mgr.tools_mgr import ToolsMgr
 from src.mgr.role_mgr import RoleMgr, extract_manifest, parse_frontmatter

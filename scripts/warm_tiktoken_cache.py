@@ -2,7 +2,7 @@
 
 tiktoken 在缓存未命中时会从 openaipublic.blob.core.windows.net 下载编码文件。
 本脚本把运行时可能用到的编码全部下载进 TIKTOKEN_CACHE_DIR，由 agent.spec 打进
-产物的 _internal/tiktoken_cache/，运行时经 src.mgr.frozen.setup_tiktoken_cache
+产物的 _internal/tiktoken_cache/，运行时经 src.common.frozen.setup_tiktoken_cache
 指过去。
 
 缓存文件按 sha1(下载地址) 命名，与 tiktoken 版本无关；但 tiktoken 会用编译进代码

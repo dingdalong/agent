@@ -29,7 +29,7 @@ TIKTOKEN_CACHE = ROOT / "build" / "tiktoken_cache"
 def _ripgrep_binary():
     """构建和运行复用相同的 rg 定位规则，系统包也须随产物分发。"""
     sys.path.insert(0, str(ROOT))
-    from src.mgr.ripgrep import resolve_rg
+    from src.common.ripgrep import resolve_rg
     path = resolve_rg()
     if not path:
         raise SystemExit("构建需要 ripgrep；请安装 Python wheel 或系统 rg")
@@ -48,7 +48,7 @@ datas = [
     (str(ROOT / "src" / "interfaces" / "tui" / "agent.tcss"), "src/interfaces/tui"),
     (str(ROOT / "src" / "llm" / "tokenizer"), "src/llm/tokenizer"),
     (str(ROOT / "src" / "roles"), "src/roles"),
-    # 预热的 BPE 缓存，由 src.mgr.frozen.setup_tiktoken_cache 在启动时指向
+    # 预热的 BPE 缓存，由 src.common.frozen.setup_tiktoken_cache 在启动时指向
     (str(TIKTOKEN_CACHE), "tiktoken_cache"),
 ]
 datas += copy_metadata("mcp")       # mcp 多处调 importlib.metadata.version("mcp")

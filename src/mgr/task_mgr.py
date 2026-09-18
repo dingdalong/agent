@@ -12,7 +12,7 @@ from typing import Any, Literal
 
 from src.mode import RunMode
 
-from src.mgr.secure_io import atomic_write_text
+from src.common.secure_io import atomic_write_text
 
 
 @dataclass

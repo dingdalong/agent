@@ -1,6 +1,6 @@
 # 配置总参考（Configuration Reference）
 
-本文档面向**运维者与开发者**，是本框架所有配置项的权威参考。全部默认值、键名以源码为准：运行配置见 `src/config.yaml`，合并逻辑见 `src/mgr/config_mgr.py`，路径解析见 `src/mgr/paths.py`，各键的消费点在本文逐一标注。
+本文档面向**运维者与开发者**，是本框架所有配置项的权威参考。全部默认值、键名以源码为准：运行配置见 `src/config.yaml`，合并逻辑见 `src/mgr/config_mgr.py`，路径解析见 `src/common/paths.py`，各键的消费点在本文逐一标注。
 
 术语约定：
 
@@ -24,7 +24,7 @@
 
 ### 三层来源
 
-每类配置从低到高优先级叠加三层（`src/mgr/config_mgr.py`、`src/mgr/paths.py`）：
+每类配置从低到高优先级叠加三层（`src/mgr/config_mgr.py`、`src/common/paths.py`）：
 
 1. **内置** — `src/`（`builtin_root()`，即安装后的包目录）。仅 `config.yaml` 有内置层。
 2. **全局** — `~/.agent/`（`global_data_dir()`）。可用环境变量 `$AGENT_HOME` 改写此目录（`paths.py:42`）。
@@ -39,7 +39,7 @@
 | `mcp_servers.json` | 角色层 `src/roles/<role>/mcp_servers.json` | `~/.agent/mcp_servers.json` | `{workdir}/.agent/mcp_servers.json` | 按 server 名深合并，项目覆盖全局；角色层最低优先级 | 只读（框架不写回） | 是，`/clear` 重新检查信任后重连 |
 | `.env` | 无 | `~/.agent/.env` | `{workdir}/.env` 与 `{workdir}/.agent/.env` | `dotenv_values()` 读入私有有效环境，后覆盖前，不修改 `os.environ` | 全局：手工或首次 Provider 向导 / `ConfigManager.set_global_env`；项目层：手工 | 是（`load_config()` 重跑） |
 
-项目 `.env`、Provider/LLM 配置、项目 Hook 和项目 MCP 只有通过 `ProjectTrustGate` 后才加载；项目信任确认被拒绝、取消、失败或运行于非 TTY 时进入受限模式。此时项目层 `llm_provider`、`llm` 会整体剥离；`role.default` 仍可选择已发现的非项目角色，但每个 `role.<角色>.model` 与 `role.<角色>.reasoning_effort` 会剥离，模型与 effort 只能来自内置或全局层。`/models` 因固定写项目层而直接拒绝执行，不写配置也不热切模型。
+项目 `.env`、Provider/LLM 配置、项目 Hook 和项目 MCP 只有通过 `ProjectTrustMgr` 后才加载；项目信任确认被拒绝、取消、失败或运行于非 TTY 时进入受限模式。此时项目层 `llm_provider`、`llm` 会整体剥离；`role.default` 仍可选择已发现的非项目角色，但每个 `role.<角色>.model` 与 `role.<角色>.reasoning_effort` 会剥离，模型与 effort 只能来自内置或全局层。`/models` 因固定写项目层而直接拒绝执行，不写配置也不热切模型。
 
 首次启动未完成 LLM 配置时（缺少 Provider 凭据，或激活角色 `role.<有效角色>.model` 的 `default`/`fast` 槽位；判定与流程见 [architecture.md](architecture.md)「首次 LLM Provider 配置向导」），向导自动把 `{PROVIDER}_API_URL` / `{PROVIDER}_API_KEY` 写入全局 `.env`，并把 `role.<有效角色>.model` 的 `default`/`fast` mapping 写入全局 `config.yaml`；配置角色不存在时与 `RoleMgr` 一样回退 `coding`。已有 Provider 凭据时向导预填对应 `base_url`/`api_key`。项目层 `.env` 始终手工维护。写入均为单文件原子更新，`.env` 只改目标变量并保留其他原文。
 

@@ -14,14 +14,14 @@ from src.interfaces import AgentViewStore, OutputRouter, TextualInterface, TurnC
 from src.interfaces.tui.plain import LineReader, read_console_line
 from src.events import EventBus, EventLevel
 from src.events.types import TaskStateChanged
-from src.mgr import ConfigManager, ContextMgr, HooksMgr, LLMMgr, McpMgr, MemoryMgr, PermissionManager, PlanMgr, PluginMgr, RoleMgr, SessionMgr, ToolsMgr, WebAccessMgr, resolve_features
-from src.mgr.data_guard import DataGuard, register_runtime_secrets
-from src.mgr.frozen import clean_env
-from src.mgr.session_state import SessionState
+from src.mgr import ConfigManager, ContextMgr, HooksMgr, LLMMgr, McpMgr, MemoryMgr, PermissionManager, PlanMgr, PluginMgr, ProjectTrustMgr, RoleMgr, SessionMgr, ToolsMgr, WebAccessMgr
+from src.common.features import resolve_features
+from src.common.data_guard import DataGuard, register_runtime_secrets
+from src.common.frozen import clean_env
+from src.common.session_state import SessionState
 from src.mgr.permission_mgr import LLMJudgeClient
 from src.mgr.web_safety_mgr import LLMWebSafetyClient
-from src.mgr.project_trust import ProjectTrustGate
-from src.mgr.paths import global_data_dir, workdir as resolve_workdir
+from src.common.paths import global_data_dir, workdir as resolve_workdir
 from src.agent import AgentDeps
 from src.commands import CommandMgr
 from src.app.app import AgentApp
@@ -83,7 +83,7 @@ async def create_app(
     global_dir.mkdir(parents=True, exist_ok=True)
     work_dir = resolve_workdir(workdir_override)
 
-    trust_gate = ProjectTrustGate(workdir=work_dir, global_dir=global_dir)
+    trust_gate = ProjectTrustMgr(workdir=work_dir, global_dir=global_dir)
     project_trusted = await trust_gate.ensure_trusted(_confirm_project_trust)
     config_mgr = ConfigManager(
         global_dir=global_dir,
@@ -97,7 +97,7 @@ async def create_app(
     await maybe_run_provider_setup(config_mgr)
 
     # 启动阶段确认沙箱可用，必要时由系统弹出授权/提示；不可用则阻止进入 REPL。
-    from src.mgr.sandbox import ExecutionPolicy, SandboxBackend, SandboxError
+    from src.common.sandbox import ExecutionPolicy, SandboxBackend, SandboxError
     sandbox_backend = SandboxBackend(**(config_mgr.get_config("shell") or {}))
     try:
         with sandbox_backend.prepare(ExecutionPolicy("exit 0", work_dir, work_dir), clean_env()):
@@ -150,7 +150,7 @@ async def create_app(
     )
     tools_mgr = ToolsMgr(output_config=config_mgr.get_config("tool"))
     from src.mgr.process_mgr import ProcessMgr
-    from src.mgr.sandbox import SandboxBackend
+    from src.common.sandbox import SandboxBackend
     process_mgr = ProcessMgr(sandbox=sandbox_backend)
     memory_mgr = MemoryMgr(work_dir, data_guard=data_guard) if "memory" in feats else None
     # 共享上下文挂在 subagent feature 上而非新增 feature：它的价值完全依附于子 agent

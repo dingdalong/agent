@@ -8,7 +8,7 @@
 # 布局：payload 落到 ~/.local/share/agent/<版本>/，再软链 ~/.local/bin/agent 指向其中的 agent。
 # onedir 产物的 agent 必须与同级 _internal/ 在一起，所以不能只把二进制拷进 ~/.local/bin。
 #
-# ~/.local/bin 不在冻结包的 _internal 之下，因此 src/mgr/frozen.py 的 clean_env() 不会把它从
+# ~/.local/bin 不在冻结包的 _internal 之下，因此 src/common/frozen.py 的 clean_env() 不会把它从
 # 子进程 PATH 里剥掉 —— hook 与 MCP server 里能调到 agent 正是靠这一点，不要去"修"那段逻辑。
 #
 # 全流程非交互：curl | sh 时 stdin 就是脚本本身，读 stdin 会吃掉未执行的脚本正文。

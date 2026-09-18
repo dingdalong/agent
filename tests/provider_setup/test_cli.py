@@ -15,7 +15,7 @@ import yaml
 import main as main_module
 from src.app.provider_setup import maybe_run_provider_setup
 from src.mgr.config_mgr import ConfigManager
-from src.mgr.paths import builtin_root
+from src.common.paths import builtin_root
 
 
 class _FakeStream:

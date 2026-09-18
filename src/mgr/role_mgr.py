@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 
 import yaml
 
-from src.mgr.paths import builtin_root, common_role_dir
+from src.common.paths import builtin_root, common_role_dir
 
 if TYPE_CHECKING:
     from src.mgr.config_mgr import ConfigManager

@@ -5,8 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, TYPE_CHECKING
 
-from src.mgr.data_guard import DataGuard
-from src.mgr.review import ReviewVerdict, StructuredVerdictRunner
+from src.common.data_guard import DataGuard
+from src.mgr.common.review import ReviewVerdict, StructuredVerdictRunner
 
 if TYPE_CHECKING:
     from src.mgr.llm_mgr import LLMMgr

@@ -12,7 +12,7 @@
 
 `resume_session()` 使用同一组 UI/EventBus gate：保存源状态后绑定目标 `.state.json`，清空旧 metrics 和瞬态 UI，按目标 session 重建任务与 Plan，并从隐藏的 `subagent` view 投影恢复 `/agents` 只读记录，再从其他 `SessionRecord.view` 水合聊天。旧子 agent 不会继续运行。`/resume` 是 app 层命令，不能在 Agent 状态机内直接替换共享状态。
 
-主会话只有一个状态权威写入点 `SessionState`（`src/mgr/session_state.py`）：
+主会话只有一个状态权威写入点 `SessionState`（`src/common/session_state.py`）：
 
 ```text
 SessionState.records

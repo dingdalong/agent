@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Literal
 from urllib.parse import parse_qsl, urlsplit
 
-from src.mgr.data_guard import DataGuard
+from src.common.data_guard import DataGuard
 
 
 _EMAIL = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)

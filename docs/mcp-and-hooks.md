@@ -13,7 +13,7 @@ MCP server 连接配置写在 `mcp_servers.json`，格式为 `{"mcpServers": {"<
 | 角色 | `role_mgr.mcp_servers_path()` | 激活角色目录下的 `mcp_servers.json` |
 | 全局 + 项目 | `config_mgr.load_mcp_servers()` | `~/.agent/mcp_servers.json` → `<项目>/.agent/mcp_servers.json`（project 覆盖 global） |
 
-合并后经 `_apply_server_policy()` 过滤（见下）。若没有任何 server 或未安装 `mcp` 包，整体跳过且不影响主流程。项目层和项目角色层 server 只有通过 `ProjectTrustGate` 才会加载。
+合并后经 `_apply_server_policy()` 过滤（见下）。若没有任何 server 或未安装 `mcp` 包，整体跳过且不影响主流程。项目层和项目角色层 server 只有通过 `ProjectTrustMgr` 才会加载。
 
 ### 连接模型
 

@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, TYPE_CHECKING
 
-from src.mgr.frozen import clean_env
+from src.common.frozen import clean_env
 
 if TYPE_CHECKING:
     from src.mgr.plugin_mgr import PluginMgr

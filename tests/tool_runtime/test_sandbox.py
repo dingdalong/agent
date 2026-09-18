@@ -9,9 +9,9 @@ import tempfile
 
 import pytest
 
-from src.mgr.sandbox import ExecutionPolicy, SandboxBackend, SandboxError
+from src.common.sandbox import ExecutionPolicy, SandboxBackend, SandboxError
 from src.mgr.process_mgr import ProcessMgr
-from src.mgr.features import ALL_FEATURES
+from src.common.features import ALL_FEATURES
 from src.mgr.permission_mgr import ToolAuthorizationRequest, ToolCallerContext
 from src.mode import RunMode
 from src.tools import AccessKind, DataFlow, ToolOrigin, ToolPolicy

@@ -15,11 +15,11 @@ from src.interfaces.output_router import OutputRouter
 from src.interfaces.agent_view_store import AgentViewStore
 from src.app.plan_mode_controller import PlanModeController
 from src.events.types import InterruptRequested
-from src.mgr.data_guard import register_runtime_secrets
-from src.mgr.env_baseline import collect_env_baseline
-from src.mgr.features import resolve_features
+from src.common.data_guard import register_runtime_secrets
+from src.common.env_baseline import collect_env_baseline
+from src.common.features import resolve_features
 from src.mgr.session_mgr import ResumeResult
-from src.mgr.session_state import SessionState
+from src.common.session_state import SessionState
 from src.mode import RunMode
 from src.prompt_tags import ExternalContextItem
 

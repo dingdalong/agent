@@ -5,9 +5,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from src.mgr.sandbox import ExecutionPolicy
+from src.common.sandbox import ExecutionPolicy
 
-from src.mgr.tool_output import ToolOutput
+from src.mgr.tools_mgr import ToolOutput
 from src.tools.display import ToolResult
 
 

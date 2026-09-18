@@ -48,7 +48,7 @@ from src.interfaces.tui.widgets import (
     SelectionScreen,
     SelectionStatic,
 )
-from src.mgr.session_state import SessionState
+from src.common.session_state import SessionState
 
 
 def _app(

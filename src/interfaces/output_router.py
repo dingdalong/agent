@@ -27,7 +27,7 @@ from src.events.types import (
 )
 from src.interfaces.agent_view_store import AgentViewStore
 from src.interfaces.base import UserInterface
-from src.mgr.session_state import SessionState
+from src.common.session_state import SessionState
 
 
 class OutputRouter:

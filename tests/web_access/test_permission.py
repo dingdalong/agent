@@ -8,11 +8,11 @@ from pydantic import BaseModel
 
 from src.tools import AccessKind, DataFlow, ToolOrigin, ToolPolicy
 from src.events.types import ToolCallCompleted
-from src.mgr.data_guard import DataGuard
+from src.common.data_guard import DataGuard
 from src.mgr.permission_mgr import JudgeVerdict, PermissionManager
 from src.mgr.permission_mgr import ToolAuthorizationRequest, ToolCallerContext
 from src.mgr.tools_mgr import ToolsMgr
-from src.mgr.features import ALL_FEATURES
+from src.common.features import ALL_FEATURES
 from src.mode import RunMode
 from src.tools.decorator import ToolEntry
 from src.tools.policy import DEFAULT_AVAILABILITY

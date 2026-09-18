@@ -6,7 +6,7 @@ from pathlib import Path
 import shutil
 import sys
 
-from src.mgr.frozen import bundled_path
+from src.common.frozen import bundled_path
 
 
 @lru_cache(maxsize=1)

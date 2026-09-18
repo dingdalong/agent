@@ -9,7 +9,7 @@ from typing import Any, Literal, get_args
 
 import yaml
 
-from src.mgr.secure_io import atomic_write_text
+from src.common.secure_io import atomic_write_text
 
 logger = logging.getLogger(__name__)
 

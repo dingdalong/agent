@@ -51,7 +51,7 @@ from src.interfaces.tui.dialogs import InlineWidget, InteractionCoordinator
 from src.interfaces.tui.history_log import HistoryEntry, HistoryLog
 from src.interfaces.tui.history_journal import PlainHistoryJournal
 from src.interfaces.tui.render_policy import TuiRenderPolicy
-from src.mgr.session_state import SessionRecord
+from src.common.session_state import SessionRecord
 from src.interfaces.tui.widgets import (
 
     AgentList,

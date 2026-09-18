@@ -35,11 +35,11 @@ from src.tools.display import permission_line
 from src.interfaces.tui.dialogs import PendingInteractions
 from src.interfaces.tui.history_journal import PlainHistoryJournal
 from src.interfaces.tui.render_policy import TuiRenderPolicy
-from src.mgr.session_state import SessionState
+from src.common.session_state import SessionState
 from src.interfaces.tui.plain import PlainFrontend, normalize_line_input
 
 if TYPE_CHECKING:
-    from src.mgr.data_guard import DataGuard
+    from src.common.data_guard import DataGuard
 
 
 @dataclass(slots=True)

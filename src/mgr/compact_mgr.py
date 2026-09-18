@@ -10,8 +10,8 @@ from pathlib import Path
 from typing import Any
 
 from src.llm.base import LLMProvider
-from src.mgr.paths import project_data_dir
-from src.mgr.secure_io import atomic_write_text
+from src.common.paths import project_data_dir
+from src.common.secure_io import atomic_write_text
 from src.prompt_tags import (
     PromptConsumer,
     PromptTag,

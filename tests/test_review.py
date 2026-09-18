@@ -7,7 +7,7 @@ import json
 from types import SimpleNamespace
 from typing import Any
 
-from src.mgr.data_guard import DataGuard
+from src.common.data_guard import DataGuard
 from src.mgr.permission_mgr import LLMJudgeClient
 from src.mgr.web_safety_mgr import LLMWebSafetyClient
 

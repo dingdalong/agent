@@ -45,6 +45,8 @@ REQUEST_INPUT → CHECK_COMPACT → [COMPACT →] LLM_CALL → PROCESS_RESPONSE
 
 **Manager 服务层** — `src/mgr/` 下的各 Manager 类各司其职：`RoleMgr`（角色发现与激活）、`LLMMgr`（模型管理）、`ToolsMgr`（工具注册与执行）、`PermissionManager`（单入口授权）、`CompactMgr`（上下文压缩）、`PromptMgr`（固定 system、模式指令与初始上下文构建）、`SubAgentMgr`（子智能体调度）、`SkillMgr`（技能加载）、`ContextMgr`（跨 agent 共享上下文账本）等。部分 Manager 受 feature 门控（见下）：未启用对应 feature 时在 `bootstrap.create_app()` 注入 `None`（如 `MemoryMgr`/`PlanMgr`），相关提示词段省略，工具执行由 `PermissionManager` 拒绝；所有模式和 agent 始终共享 `ToolsMgr.schemas()` 的完整 schema 目录。
 
+`src/mgr/common/` 只放跨 Manager 的协议；`src/common/` 放被非 Manager 层直接复用的基础能力（路径、沙箱、会话状态、数据保护等）。`src/common` 不得依赖 `src.mgr`，公共模块不再从 `src.mgr` 导出。
+
 ### 角色系统（Roles）
 
 **统一执行与协作** — PromptMgr 为所有角色注入主/子 agent 的执行责任；主 agent 默认直接推进并负责验收交付。SubAgentMgr 的协作段只在主 agent 实际可委派时注入，统一说明独立任务、上下文隔离和独立核验的委派条件。角色/技能只定义领域职责、产物和必要的独立核验，不复制通用分工策略；子 agent 描述只表达能力。TaskManager 只管理进度与依赖。调度仍为等待式，同轮独立调用并行、全部返回后继续主循环。
@@ -62,7 +64,7 @@ REQUEST_INPUT → CHECK_COMPACT → [COMPACT →] LLM_CALL → PROCESS_RESPONSE
 
 ### feature 门控
 
-角色在 `role.md` frontmatter 声明 `features` 列表，决定启用哪些**可插拔 Manager**及其工具、提示词段。合法名单见 `src/mgr/features.py` 的 `ALL_FEATURES`：`task`、`skill`、`subagent`、`file`、`memory`、`plan`。语义：
+角色在 `role.md` frontmatter 声明 `features` 列表，决定启用哪些**可插拔 Manager**及其工具、提示词段。合法名单见 `src/common/features.py` 的 `ALL_FEATURES`：`task`、`skill`、`subagent`、`file`、`memory`、`plan`。语义：
 - 未声明（`None`）→ 全部启用（向后兼容）；声明 → 取与 `ALL_FEATURES` 的交集（未知名告警丢弃）。
 - **依赖校验**：`plan` 依赖 `file`，缺 `file` 时丢弃 `plan` 并告警。
 - `bootstrap.create_app()` 用 `resolve_features(role_mgr.manifest.features)` 计算有效集，据此决定 `MemoryMgr`/`PlanMgr` 等是否实例化（未启用注入 `None`）。
@@ -87,11 +89,11 @@ MCP server 连接配置在独立的 `mcp_servers.json`（角色 `src/roles/<role
 **可冻结性（必须遵守）** — 项目以 PyInstaller 打包成可执行分发包（`agent.spec` + `scripts/build_exe.py`）。冻结后**文件系统里不存在 `.py` 源文件**，因此：
   - **禁止**用目录 glob 扫 `*.py` 来发现模块。内置工具（`src/tools/__init__.py`）与内置 slash 命令（`src/commands/mgr.py`）一律用 `pkgutil.iter_modules(<包>.__path__)`；用户层的外部 `.py` 才用 `spec_from_file_location` 按路径加载。新增这类插件式子模块时，须在 `agent.spec` 的 `collect_submodules` 里覆盖到。
   - 内置命令的注册发生在**模块执行期**，已在 `sys.modules` 里时必须 `importlib.reload`，否则 `CommandMgr` 重建或 `/clear` 走 `reload()` 后命令全空。
-  - **禁止**用 cwd 相对路径读随包资源，一律走 `builtin_root()`（`src/mgr/paths.py`）。新增随包资源须加进 `agent.spec` 的 `datas`。
+  - **禁止**用 cwd 相对路径读随包资源，一律走 `builtin_root()`（`src/common/paths.py`）。新增随包资源须加进 `agent.spec` 的 `datas`。
   - 要落在产物**顶层**（与 `agent` 同级、而非 `_internal/` 内）的文件走 `scripts/build_exe.py` 的 `stage_installer()`：`agent.spec` 的 `datas` 一律进 `_internal/`。安装脚本与 `VERSION` 即属此类。
   - 惰性 import 的模块（如按 transport 分支的 `mcp.client.*`）静态分析看不到，须列入 `agent.spec` 的 `hiddenimports`。
   - 运行时读自身版本（`importlib.metadata`）的包须列入 `copy_metadata`。
-  - **所有 spawn 子进程的地方**都要用 `clean_env()`（`src/mgr/frozen.py`）构造环境：冻结产物的动态库搜索路径被引导器改写过，直接继承会让子进程加载错动态库（MCP server 常常本身就是另一个 Python 程序，后果最严重）。
+  - **所有 spawn 子进程的地方**都要用 `clean_env()`（`src/common/frozen.py`）构造环境：冻结产物的动态库搜索路径被引导器改写过，直接继承会让子进程加载错动态库（MCP server 常常本身就是另一个 Python 程序，后果最严重）。
   - 以上失效**都是静默的**——应用照常启动，只是工具、命令或编码悄悄不见。改动相关机制后必须跑 `make build && make check`，仅跑源码测试发现不了。
 
 **异步/阻塞契约（必须遵守）** — 整个框架跑在单线程 asyncio 事件循环上（UI 状态条按 100ms 重绘、事件分发、Agent 轮次共用同一循环）。事件循环只在 `await` 真异步原语时让出控制权；任何在事件循环上运行的 `async def` 一旦做*同步阻塞*工作（同步网络、文件 I/O、`socket.getaddrinfo`、CPU 密集循环）且不 `await`，就会冻结 UI 并停滞事件分发。因此每个工具 / Manager 方法只能是两类之一：

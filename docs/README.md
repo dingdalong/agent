@@ -33,6 +33,8 @@ uv run pytest                            # 运行全部测试
 
 **角色（Role）是框架的顶层组织单位**——一套角色决定主 agent 的身份提示词、可用子 agent、技能、MCP server 与启用的 feature 集（见 roles-subagents-skills.md）。
 
+目录边界：`src/mgr/` 顶层只放 Manager；多个 Manager 共用的协议放在 `src/mgr/common/`；被 app、agent、interfaces、tools、llm 或 web 直接使用的基础能力放在 `src/common/`。公共模块不反向依赖 Manager，也不通过 `src.mgr` 兼容导出。
+
 ## 文档导航
 
 | 文档 | 内容 |

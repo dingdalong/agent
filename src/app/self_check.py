@@ -47,7 +47,7 @@ def _check_commands(workdir: Path) -> dict[str, Any]:
 
 def _check_resources() -> dict[str, Any]:
     """builtin_root() 相对定位的随包资源是否都在。"""
-    from src.mgr.paths import builtin_root
+    from src.common.paths import builtin_root
 
     root = builtin_root()
     targets = {
@@ -76,8 +76,8 @@ def _check_ripgrep() -> dict[str, Any]:
     """rg 是否定位得到；冻结产物应命中随包副本而非宿主 PATH。"""
     import os
 
-    from src.mgr.ripgrep import resolve_rg
-    from src.mgr.frozen import bundle_root
+    from src.common.ripgrep import resolve_rg
+    from src.common.frozen import bundle_root
 
     path = resolve_rg()
     root = bundle_root()
@@ -115,8 +115,8 @@ def _check_tiktoken() -> dict[str, Any]:
 
 def _check_sandbox(workdir: Path) -> dict[str, Any]:
     """在产物内真实安装策略；不把依赖存在误报为隔离可用。"""
-    from src.mgr.frozen import clean_env
-    from src.mgr.sandbox import ExecutionPolicy, SandboxBackend, SandboxError
+    from src.common.frozen import clean_env
+    from src.common.sandbox import ExecutionPolicy, SandboxBackend, SandboxError
     backend = SandboxBackend()
     workdir = workdir.resolve()
     if backend.system not in {'Darwin', 'Linux'}:
@@ -135,7 +135,7 @@ def run_self_check() -> int:
     Returns:
         全部通过返回 0，否则返回 1。
     """
-    from src.mgr.frozen import is_frozen
+    from src.common.frozen import is_frozen
 
     with tempfile.TemporaryDirectory() as tmp:
         workdir = Path(tmp)

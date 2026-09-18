@@ -5,8 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import src.tools  # noqa: F401  导入触发内置工具注册到 _registry
-from src.mgr.features import ALL_FEATURES, resolve_features
-from src.mgr.paths import builtin_root
+from src.common.features import ALL_FEATURES, resolve_features
+from src.common.paths import builtin_root
 from src.mgr.role_mgr import AgentManifest, extract_manifest, parse_frontmatter
 from src.mgr.tools_mgr import ToolsMgr
 from src.tools.decorator import _registry

@@ -13,16 +13,16 @@ from pydantic import BaseModel
 from src.app.plan_mode_controller import PlanModeController
 from src.agent import Agent
 from src.events.types import PermissionNotice, ToolCallCompleted, ToolCallStarted
-from src.mgr.data_guard import DataGuard, REDACTED
+from src.common.data_guard import DataGuard, REDACTED
 from src.mgr.hooks_mgr import HookRunResult
 from src.mgr.mcp_mgr import McpMgr
-from src.mgr.path_resolver import PathClass, PathResolutionError, PathResolver
+from src.common.path_resolver import PathClass, PathResolutionError, PathResolver
 from src.mgr.permission_mgr import JudgeVerdict, PermissionManager
 from src.mgr.permission_mgr import ToolAuthorizationRequest, ToolCallerContext
 from src.mgr.role_mgr import AgentManifest
 from src.mgr.subagent_mgr import SubAgentMgr
 from src.mode import RunMode
-from src.mgr.features import ALL_FEATURES
+from src.common.features import ALL_FEATURES
 from src.tools import (
     AccessKind,
     DataFlow,

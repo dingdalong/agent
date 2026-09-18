@@ -21,9 +21,9 @@ from src.app.app import AgentApp
 from src.app.bootstrap import _confirm_project_trust
 from src.interfaces.agent_view_store import AgentViewStore
 from src.mgr.config_mgr import ConfigManager
-from src.mgr.data_guard import DataGuard, REDACTED, register_runtime_secrets
+from src.common.data_guard import DataGuard, REDACTED, register_runtime_secrets
 from src.mgr.llm_mgr import LLMMgr
-from src.mgr.project_trust import ProjectTrustGate
+from src.mgr.project_trust_mgr import ProjectTrustMgr
 from src.mgr.role_mgr import RoleMgr
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -34,7 +34,7 @@ def test_known_workdir_is_trusted_without_prompt(tmp_path):
     global_dir = tmp_path / "global"
     workdir.mkdir()
     global_dir.mkdir()
-    gate = ProjectTrustGate(workdir, global_dir)
+    gate = ProjectTrustMgr(workdir, global_dir)
     gate.store_path.write_text(json.dumps([str(workdir.resolve())]))
     os.chmod(gate.store_path, 0o600)
     prompts = []
@@ -51,7 +51,7 @@ def test_non_tty_unknown_project_is_restricted(tmp_path, monkeypatch):
     workdir = tmp_path / "work"
     global_dir = tmp_path / "global"
     workdir.mkdir()
-    gate = ProjectTrustGate(workdir, global_dir)
+    gate = ProjectTrustMgr(workdir, global_dir)
     monkeypatch.setattr("sys.stdin.isatty", lambda: False)
     assert asyncio.run(gate.ensure_trusted()) is False
     assert not gate.store_path.exists()
@@ -61,7 +61,7 @@ def test_trusted_workdir_ignores_project_changes_and_store_is_owner_only(tmp_pat
     workdir = tmp_path / "work"
     global_dir = tmp_path / "global"
     (workdir / ".agent").mkdir(parents=True)
-    gate = ProjectTrustGate(workdir, global_dir)
+    gate = ProjectTrustMgr(workdir, global_dir)
     prompts = []
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     monkeypatch.setattr("sys.stdout.isatty", lambda: True)
@@ -90,7 +90,7 @@ def test_invalid_or_legacy_store_requires_confirmation(tmp_path, monkeypatch, st
     global_dir = tmp_path / "global"
     workdir.mkdir()
     global_dir.mkdir()
-    gate = ProjectTrustGate(workdir, global_dir)
+    gate = ProjectTrustMgr(workdir, global_dir)
     gate.store_path.write_text(stored(workdir))
     prompts = []
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
@@ -129,7 +129,7 @@ def test_confirmation_failure_is_restricted_without_writing(tmp_path, monkeypatc
     workdir = tmp_path / "work"
     global_dir = tmp_path / "global"
     workdir.mkdir()
-    gate = ProjectTrustGate(workdir, global_dir)
+    gate = ProjectTrustMgr(workdir, global_dir)
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     monkeypatch.setattr("sys.stdout.isatty", lambda: True)
 
@@ -145,7 +145,7 @@ def test_rejected_confirmation_does_not_write(tmp_path, monkeypatch, accepted):
     workdir = tmp_path / "work"
     global_dir = tmp_path / "global"
     workdir.mkdir()
-    gate = ProjectTrustGate(workdir, global_dir)
+    gate = ProjectTrustMgr(workdir, global_dir)
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     monkeypatch.setattr("sys.stdout.isatty", lambda: True)
 
@@ -160,7 +160,7 @@ def test_unknown_project_without_confirmation_is_restricted(tmp_path, monkeypatc
     workdir = tmp_path / "work"
     global_dir = tmp_path / "global"
     workdir.mkdir()
-    gate = ProjectTrustGate(workdir, global_dir)
+    gate = ProjectTrustMgr(workdir, global_dir)
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     monkeypatch.setattr("sys.stdout.isatty", lambda: True)
 
@@ -172,7 +172,7 @@ def test_task_cancellation_during_confirmation_propagates(tmp_path, monkeypatch)
     workdir = tmp_path / "work"
     global_dir = tmp_path / "global"
     workdir.mkdir()
-    gate = ProjectTrustGate(workdir, global_dir)
+    gate = ProjectTrustMgr(workdir, global_dir)
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     monkeypatch.setattr("sys.stdout.isatty", lambda: True)
 
@@ -198,7 +198,7 @@ def test_cancelled_confirmation_without_task_cancellation_is_restricted(tmp_path
     workdir = tmp_path / "work"
     global_dir = tmp_path / "global"
     workdir.mkdir()
-    gate = ProjectTrustGate(workdir, global_dir)
+    gate = ProjectTrustMgr(workdir, global_dir)
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     monkeypatch.setattr("sys.stdout.isatty", lambda: True)
 
@@ -213,7 +213,7 @@ def test_process_exit_during_confirmation_propagates(tmp_path, monkeypatch):
     workdir = tmp_path / "work"
     global_dir = tmp_path / "global"
     workdir.mkdir()
-    gate = ProjectTrustGate(workdir, global_dir)
+    gate = ProjectTrustMgr(workdir, global_dir)
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     monkeypatch.setattr("sys.stdout.isatty", lambda: True)
 
@@ -229,7 +229,7 @@ def test_clear_uses_choice_before_reset_gate_and_defaults_to_restricted(tmp_path
     workdir = tmp_path / "work"
     global_dir = tmp_path / "global"
     workdir.mkdir()
-    trust_gate = ProjectTrustGate(workdir, global_dir)
+    trust_gate = ProjectTrustMgr(workdir, global_dir)
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     monkeypatch.setattr("sys.stdout.isatty", lambda: True)
     monkeypatch.setattr(

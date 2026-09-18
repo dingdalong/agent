@@ -1,6 +1,6 @@
 # Manager 服务层完整参考
 
-本文档面向开发者与运维者，逐一说明 `src/mgr/` 下的各 Manager 类：单一职责、消费的配置/文件、公共方法、是否受 feature 门控、是否实现 `reload()`、持有的关键状态。所有事实以源码为准，方法名/字段名/配置键均保留英文。
+本文档面向开发者与运维者，逐一说明 `src/mgr/` 下的各 Manager 类：单一职责、消费的配置/文件、公共方法、是否受 feature 门控、是否实现 `reload()`、持有的关键状态。跨 Manager 的协议放在 `src/mgr/common/`，非 Manager 层直接复用的基础能力放在 `src/common/`；这些模块不作为 Manager API 导出。所有事实以源码为准，方法名/字段名/配置键均保留英文。
 
 术语沿用四层架构中的约定（详见 [architecture.md](architecture.md)）：四层架构、feature 门控和 `PermissionManager.authorize()` 单一授权入口。安全顺序见 [permissions.md](permissions.md)。
 
@@ -17,7 +17,7 @@ Manager 分两批被构造：
 
 ### feature 门控哪些 Manager
 
-角色在 `role.md` frontmatter 声明 `features` 列表，`resolve_features()`（`src/mgr/features.py`）解析为有效启用集（合法名单：`task`、`skill`、`subagent`、`file`、`memory`、`plan`）。据此：
+角色在 `role.md` frontmatter 声明 `features` 列表，`resolve_features()`（`src/common/features.py`）解析为有效启用集（合法名单：`task`、`skill`、`subagent`、`file`、`memory`、`plan`）。据此：
 
 - deps 层：`MemoryMgr`（`memory`）、`PlanMgr`（`plan`）、`ContextMgr`（`subagent`）未启用时在 `bootstrap.create_app()` 注入 `None`。
 - 每 agent 层：`SkillMgr`（`skill`）、`SubAgentMgr`（`subagent`）、`TaskManager`（`task`）未启用时在 `Agent.__post_init__` 置 `None`；`file` 直接门控 `apply_patch` 工具。
@@ -33,6 +33,7 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 
 | Manager | 职责一句话 | feature 门控 | reload |
 |---|---|---|---|
+| `ProjectTrustMgr` (`project_trust_mgr.py`) | 在加载项目可执行配置前确认并持久化工作区信任 | 否 | 无 |
 | `RoleMgr` (`role_mgr.py`) | 按信任状态发现并激活角色，暴露角色资产路径 | 否 | 有 |
 | `LLMMgr` (`llm_mgr.py`) | 按模型名/别名返回可用的 LLMProvider | 否 | 无 |
 | `ToolsMgr` (`tools_mgr.py`) | 工具注册、执行、有界临时日志 | 否 | 无 |
@@ -52,8 +53,8 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 | `ConfigManager` (`config_mgr.py`) | 三层配置/settings/.env 合并 | 否 | 有 |
 | `PluginMgr` (`plugin_mgr.py`) | 三层扫描插件目录 | 否 | 有 |
 | `ReminderMgr` (`reminder_mgr.py`) | 中介，统一收集各源的提醒注入 | 否 | 无 |
-| `features.py` / `paths.py` | feature 名单解析 / 三层目录路径 | — | — |
-| `env_baseline.py` | 静态环境基线采集（纯函数，无状态） | — | — |
+| `src/common/features.py` / `src/common/paths.py` | feature 名单解析 / 三层目录路径 | — | — |
+| `src/common/env_baseline.py` | 静态环境基线采集（纯函数，无状态） | — | — |
 
 ---
 
@@ -88,6 +89,18 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 **feature 门控**：否。**reload**：有；按当前信任与配置重新发现、激活和解析角色。**关键状态**：`_role_path`、`_manifest`、`_all_roles`。
 
 角色结构与配置示例见 [roles-subagents-skills.md](roles-subagents-skills.md) 和 [configuration-reference.md](configuration-reference.md)。
+
+---
+
+## ProjectTrustMgr — 项目信任
+
+`src/mgr/project_trust_mgr.py`
+
+**单一职责**：在加载项目层配置、Hook、Plugin 和 MCP 前确认工作目录是否可信，并把确认结果原子写入全局信任库。未知目录、非交互环境、取消或确认异常均按拒绝处理；信任状态由 `ProjectTrustMgr` 写入，调用方只消费 `ensure_trusted()` 的布尔结果。
+
+**公共方法**：`ensure_trusted(confirm)`。
+
+**依赖边界**：信任库的原子 I/O 使用 `src/common/secure_io.py`；Manager 不向公共模块反向提供业务依赖。
 
 ---
 
@@ -388,7 +401,7 @@ MCP 连接配置和授权边界见 [mcp-and-hooks.md](mcp-and-hooks.md)。
 
 `PlanMgr` 管理模式切换、当前指令正文与受控计划保存。正文由 PromptMgr 生成，并在下一次 chat 前作为 developer 消息追加；模式切换本身不改历史。`save(content, previous)` 原子写入 `.agent/plans/`，审核状态和路径保存在 `SessionState.plan`。自动批准后 `submit_plan` 通过 `Agent.queue_user_action()` 排队固定执行请求并结束当前 turn，下一轮由 `_on_request_input()` 复用正常 Hook、持久化和 user 消息链路。`agent.mode` 是模式状态权威，授权由 PermissionManager 执行。
 
-文件发现、搜索和读取由 `exec_command` 在真实受限 Shell 中执行；随包 ripgrep 的定位由 `ripgrep.resolve_rg()` 负责。补丁文本计算与提交在 `patch.py`；进程生命周期与工作区读写租约在 `ProcessMgr`；一次输出整理及临时日志归 `ToolOutput`。流程与接口见 [tools.md](tools.md)。
+文件发现、搜索和读取由 `exec_command` 在真实受限 Shell 中执行；随包 ripgrep 的定位由 `src/common/ripgrep.py` 的 `resolve_rg()` 负责。补丁文本计算与提交在 `src/common/patch.py`；进程生命周期与工作区读写租约在 `ProcessMgr`；一次输出整理及临时日志归 `ToolsMgr` 内的 `ToolOutput`。流程与接口见 [tools.md](tools.md)。
 
 ---
 
@@ -569,8 +582,8 @@ hook 协议、JSON 字段与插件 `CLAUDE_PLUGIN_ROOT` 环境变量见 [mcp-and
 
 ---
 
-## features.py / paths.py — 支撑模块
+## 公共支撑模块
 
-`src/mgr/features.py` — feature 合法名单与解析。`ALL_FEATURES = {task, skill, subagent, file, memory, plan}`；`resolve_features(declared)`：`None`→全开，否则取与合法名单交集（未知名告警丢弃）并校验依赖（`plan` 依赖 `file`，缺则丢 `plan` 并告警）。被 `bootstrap` 与 `Agent` 共同引用。语义详见 [architecture.md](architecture.md#feature-门控)。
+`src/common/features.py` — feature 合法名单与解析。`ALL_FEATURES = {task, skill, subagent, file, memory, plan}`；`resolve_features(declared)`：`None`→全开，否则取与合法名单交集（未知名告警丢弃）并校验依赖（`plan` 依赖 `file`，缺则丢 `plan` 并告警）。被 `bootstrap` 与 `Agent` 共同引用。语义详见 [architecture.md](architecture.md#feature-门控)。
 
-`src/mgr/paths.py` — 三层目录路径解析：`builtin_root()`（内置资源根，debug 指向 `src/`）、`common_role_dir()`（`src/roles/common/`）、`global_data_dir()`（`$AGENT_HOME` 或 `~/.agent/`）、`project_data_dir(workdir)`（`{workdir}/.agent/`）、`workdir(override)`（override → `$AGENT_WORKDIR` → cwd）。三层目录体系详见 [architecture.md](architecture.md)。
+`src/common/paths.py` — 三层目录路径解析：`builtin_root()`（内置资源根，debug 指向 `src/`）、`common_role_dir()`（`src/roles/common/`）、`global_data_dir()`（`$AGENT_HOME` 或 `~/.agent/`）、`project_data_dir(workdir)`（`{workdir}/.agent/`）、`workdir(override)`（override → `$AGENT_WORKDIR` → cwd）。三层目录体系详见 [architecture.md](architecture.md)。
