@@ -18,6 +18,12 @@ from src.events import NoEventSubscribers, emit_telemetry_safely
 from src.llm.base import TruncationKind, classify_truncation
 from src.llm.errors import LLMCallError, LLMErrorInfo, LLMErrorKind
 from src.mgr import TaskManager, CompactMgr, CompactResult, PromptMgr, SkillMgr, SubAgentMgr, ReminderMgr
+from src.prompt_tags import (
+    ExternalContextItem,
+    PromptTag,
+    render_external_context,
+    render_prompt_tag,
+)
 
 if TYPE_CHECKING:
     from src.mgr.llm_mgr import LLMMgr
@@ -150,7 +156,7 @@ class AgentDeps:
     plan_mode_controller: Any = None
     data_guard: Any = None
     trust_gate: Any = None
-    session_context: list[str] = field(default_factory=list)
+    session_context: list[ExternalContextItem] = field(default_factory=list)
     # 环境基线由 AgentApp._reset_session 采集一次，作为外部上下文消息提供。
     env_baseline: str = ""
     session_state: SessionState | None = None
@@ -193,7 +199,10 @@ class Agent:
     _system_prompt: list[dict] = field(init=False, repr=False)
     _last_injected_mode: RunMode | None = field(init=False, default=None, repr=False)
     _initial_context_added: bool = field(init=False, default=False, repr=False)
+    _initial_context_message_count: int = field(init=False, default=0, repr=False)
+    _manager_guidance_injected: bool = field(init=False, default=False, repr=False)
     _pending_input: str = field(init=False, default="")
+    _queued_user_action: str = field(init=False, default="", repr=False)
     _input_history: list[str] = field(init=False, default_factory=list)
     _handlers: dict[AgentState, Callable] = field(init=False, repr=False)
 
@@ -207,6 +216,8 @@ class Agent:
         if not self.is_subagent and self.deps.session_state is not None:
             self.history[:] = self.deps.session_state.context_messages()
             self._initial_context_added = bool(self.history)
+            self._initial_context_message_count = 1 if self.history else 0
+            self._manager_guidance_injected = bool(self.history)
         # 主、子 agent 均以单实例 UUID 关联生命周期、usage 与转录事件，
         # 供 AgentViewStore 汇聚成一致快照。
         self.llm = self.deps.llm_mgr.get(self.model)
@@ -355,6 +366,12 @@ class Agent:
         self.mode = mode
         return True
 
+    def queue_user_action(self, content: str) -> None:
+        """排队一条由框架生成、在下一用户轮次处理的 action。"""
+        if self._queued_user_action:
+            raise RuntimeError("已有待处理的框架用户 action")
+        self._queued_user_action = content
+
     async def run(self, input: str | None = None) -> RunResult:
         """运行 agent 对话。
 
@@ -379,6 +396,7 @@ class Agent:
                 round_start_idx=len(self.history),
             )
             self._reminder_mgr.queue_turn_start(self.mode, self.is_subagent)
+            self._append_pending_framework_message(ctx)
             self._append_message(self.history, {"role": "user", "content": input})
             ctx.user_input = input
             result = await self._run_single_turn(ctx, AgentState.CHECK_COMPACT)
@@ -556,18 +574,23 @@ class Agent:
         Returns:
             下一个状态：DONE（退出/命令）、REQUEST_INPUT（hook 阻断）或 CHECK_COMPACT。
         """
-        try:
-            user_input = await self.deps.event_bus.request_input(
-                "\n\n你: ",
-                default=self._pending_input,
-            )
-        except (asyncio.CancelledError, KeyboardInterrupt, NoEventSubscribers):
-            ctx.exit_requested = True
-            current_task = asyncio.current_task()
-            if current_task is not None:
-                while current_task.cancelling():
-                    current_task.uncancel()
-            return AgentState.DONE
+        queued_action = getattr(self, "_queued_user_action", "")
+        if queued_action:
+            user_input = queued_action
+            self._queued_user_action = ""
+        else:
+            try:
+                user_input = await self.deps.event_bus.request_input(
+                    "\n\n你: ",
+                    default=self._pending_input,
+                )
+            except (asyncio.CancelledError, KeyboardInterrupt, NoEventSubscribers):
+                ctx.exit_requested = True
+                current_task = asyncio.current_task()
+                if current_task is not None:
+                    while current_task.cancelling():
+                        current_task.uncancel()
+                return AgentState.DONE
 
         self._pending_input = ""
         ctx.user_input = user_input
@@ -608,8 +631,10 @@ class Agent:
             if hook_result.additional_context:
                 external = "\n\n".join(str(item) for item in hook_result.additional_context)
                 user_input = (
-                    f"{user_input}\n\n<external_context source=\"UserPromptSubmit hook\">\n"
-                    f"{external}\n</external_context>"
+                    f"{user_input}\n\n"
+                    + render_external_context(ExternalContextItem(
+                        "UserPromptSubmit hook", external,
+                    ))
                 )
 
         data_guard = getattr(self.deps, "data_guard", None)
@@ -619,6 +644,7 @@ class Agent:
         self._reminder_mgr.queue_turn_start(self.mode, self.is_subagent)
         ctx.turn_start_messages = list(self.history)
         ctx.round_start_idx = len(self.history)
+        self._append_pending_framework_message(ctx)
         self._append_message(
             self.history,
             {"role": "user", "content": user_input},
@@ -747,9 +773,14 @@ class Agent:
             caller_agent_type=caller_agent_type,
             caller_uuid=caller_uuid,
         ))
-        result = await self._compact_mgr.compact_history(ctx.messages)
+        result = await self._compact_mgr.compact_history(
+            ctx.messages,
+            bootstrap_message_count=getattr(
+                self, "_initial_context_message_count", 0,
+            ),
+        )
         self._replace_messages(ctx.messages, result.messages)
-        self._last_injected_mode = None
+        ctx.loaded_skills.clear()
         ctx.auto_compact_summarized_message_count = result.summarized_message_count
         ctx.auto_compact_has_summary = bool(result.summary.strip())
         if result.transcript_path:
@@ -1056,12 +1087,12 @@ class Agent:
                 if not isinstance(args, dict):
                     raise ValueError("工具参数必须为 JSON 对象")
             except (ValueError, TypeError):
-                completed[ident] = await self.deps.tools_mgr.execute(name, tc["arguments"], current_tool_call_id=ident, deps=self.deps, agent=self)
+                completed[ident] = await self.deps.tools_mgr.execute(name, tc["arguments"], current_tool_call_id=ident, deps=self.deps, agent=self, run_context=ctx)
                 return
             if name == "compact":
                 ctx.manual_compact = True
                 ctx.compact_focus = args.get("focus")
-            completed[ident] = await self.deps.tools_mgr.execute(name, args, current_tool_call_id=ident, deps=self.deps, agent=self)
+            completed[ident] = await self.deps.tools_mgr.execute(name, args, current_tool_call_id=ident, deps=self.deps, agent=self, run_context=ctx)
 
         async def parallel(tc):
             tool = self.deps.tools_mgr.get(tc["name"])
@@ -1117,10 +1148,8 @@ class Agent:
                 reason = stop_hook.block_reason or "Stop hook blocked"
                 self._append_message(ctx.messages, {
                     "role": "user",
-                    "content": (
-                        "<external_context source=\"Stop hook\">\n"
-                        f"{reason}\n"
-                        "</external_context>"
+                    "content": render_external_context(
+                        ExternalContextItem("Stop hook", reason)
                     ),
                 }, kind="external_context")
                 return AgentState.CHECK_COMPACT
@@ -1139,10 +1168,14 @@ class Agent:
                 caller_uuid=caller_uuid,
             ))
             result = await self._compact_mgr.compact_history(
-                ctx.messages, focus=ctx.compact_focus,
+                ctx.messages,
+                focus=ctx.compact_focus,
+                bootstrap_message_count=getattr(
+                    self, "_initial_context_message_count", 0,
+                ),
             )
             self._replace_messages(ctx.messages, result.messages)
-            self._last_injected_mode = None
+            ctx.loaded_skills.clear()
             if result.transcript_path:
                 await self.deps.event_bus.request_output(f"[transcript saved: {result.transcript_path}]\n")
 
@@ -1238,22 +1271,32 @@ class Agent:
         if prompt_mgr is not None:
             build = getattr(prompt_mgr, "build_initial_context_messages", None)
             if build is not None:
-                for message in build():
+                messages = build()
+                for message in messages:
                     self._append_message(self.history, message, kind="external_context")
+                self._initial_context_message_count = len(messages)
         self._initial_context_added = True
 
     def _append_pending_framework_message(self, ctx: RunContext) -> None:
         """在 chat 前把模式变化和框架提醒合并成最多一条 developer 消息。"""
         sections: list[str] = []
+        if not getattr(self, "_manager_guidance_injected", False):
+            prompt_mgr = getattr(self, "_prompt_mgr", None)
+            build_manager = getattr(prompt_mgr, "build_manager_instructions", None)
+            manager_text = build_manager() if build_manager is not None else ""
+            if manager_text:
+                sections.append(manager_text)
+            self._manager_guidance_injected = True
+
         mode = getattr(self, "mode", RunMode.EXECUTE)
         if getattr(self, "_last_injected_mode", None) is not mode:
             prompt_mgr = getattr(self, "_prompt_mgr", None)
             build_mode = getattr(prompt_mgr, "build_mode_instructions", None)
             mode_text = build_mode() if build_mode is not None else ""
             if mode_text:
-                sections.append(
-                    f"<collaboration_mode>\n{mode_text}\n</collaboration_mode>"
-                )
+                sections.append(render_prompt_tag(
+                    PromptTag.COLLABORATION_MODE, mode_text,
+                ))
             self._last_injected_mode = mode
 
         reminders = list(ctx.pending_framework_instructions)
@@ -1265,7 +1308,7 @@ class Agent:
         seen: set[str] = set()
         for reminder in reminders:
             if reminder and reminder not in seen:
-                sections.append(f"<reminder>\n{reminder}\n</reminder>")
+                sections.append(render_prompt_tag(PromptTag.REMINDER, reminder))
                 seen.add(reminder)
 
         if sections:

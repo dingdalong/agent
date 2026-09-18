@@ -10,11 +10,13 @@
 
 主 agent 持续负责目标理解、关键决策、执行、验收和交付。PromptMgr 注入统一执行原则，SubAgentMgr 在可委派时注入协作规则；TaskManager 只管理任务进度与依赖。自定义角色同样获得这些指引，无需复制策略。
 
+`role.md` body 是被框架激活的固定身份来源；各层 `AGENTS.md` 是带 `source`/`layer` 的外部 user 上下文，不进入固定 system。AGENTS 可提供项目规则和偏好，但不覆盖框架指令、用户授权或工具权限。提示词分层见 [prompting.md](prompting.md)。
+
 角色定义领域职责和能力边界，技能定义步骤、产物和验收；只有明确的上下文隔离或独立核验需求才指定委派步骤。子 agent 的 description 说明能力与输入输出，不要求主 agent 优先委派。主 agent 已掌握上下文、步骤紧密关联或下一步被阻塞时直接推进；独立任务、大量中间输出和独立核验按需委派。
 
 task_delegator 等待结果返回，同轮独立调用可以并行，全部结束后主 agent 继续推理。每次创建新子 agent，必要上下文通过任务正文与共享摘要传入；需要用户裁决时返回具体缺口，主 agent 沟通后发起新的完整委派。独立审核传 shared_context="none"，主 agent 按实际产物和证据验收。
 
-coding 的 plan-workflow 在主对话形成方案，execute-plan 接续计划并连续实现与验证；mijia 的设备操作与用户确认由主 agent 连续负责。任务跟踪按可验收结果建立，不按子 agent 数量机械拆分。
+coding 的计划流程由 Plan 模式 developer 指令统一提供，批准后按新的用户轮次进入通用执行规则；mijia 的设备操作与用户确认由主 agent 连续负责。任务跟踪按可验收结果建立，不按子 agent 数量机械拆分。
 
 **一套角色决定了主 agent 的身份提示词、可用子 agent、技能、MCP server 与启用的 feature 集**——它是框架的顶层组织单位。由 `RoleMgr`（`src/mgr/role_mgr.py`）管理。
 
@@ -48,7 +50,7 @@ role:
 
 | 方法 | 资产 | 用途 |
 |---|---|---|
-| `agent_md_path()` | `AGENTS.md` | 激活角色内主/子 agent 共用的行为准则 |
+| `agent_md_path()` | `AGENTS.md` | 激活角色内主/子 agent 共用的外部项目规则 |
 | `agents_dir()` | `agents/*.md` | 角色专属子 agent |
 | `skills_dir()` | `skills/*/SKILL.md` | 角色专属技能 |
 | `plugins_dir()` | `plugins/` | 角色专属插件 |
@@ -176,8 +178,8 @@ onboard 专用执行器声明 `features: [file, skill]`，不继承主 agent 的
 ### `SKILL.md` 格式与注入
 
 - frontmatter：`name`（缺省取父目录名）、`description`（缺省 `"没有说明内容"`）、`listed`（缺省 `true`；为 `false` 时可按精确名称加载但不进入通用目录）。
-- `load_full_text(name)`（`skill_mgr.py:155`）返回包装文本：`<skill name=... skill_dir=...>` + body + 目录内其他文件的 `<skill-file path=... ref=... />` 清单 + `</skill>`。技能目录内的附属文件被登记为可引用资源（`skill_mgr.py:111-117`）。
-- `prompt_section()` 生成已列出技能的名称、描述与加载指导；目录作为首次 chat 前的外部 user 上下文，正文只由 `load_skill` 工具结果进入调用者历史，二者都不进入 system/developer。Plan 控制技能使用 `listed: false`，因此普通模式目录不会泄露计划工作流名称。
+- `load_full_text(name)` 返回 `<skill name=... skill_dir=...>` 包装的正文；目录内其他文件以 `## 附属文件` Markdown 清单列出相对名称和可访问路径，不再使用额外结构标签。
+- `describe()` 生成已列出技能的名称和描述；目录作为首次 chat 前的外部 user 上下文，正文只由 `load_skill` 工具结果进入调用者历史，二者都不进入 system/developer。
 
 > 技能系统受 `skill` feature 门控——角色未启用 `skill` 时 `SkillMgr` 与 `load_skill` 工具不生效。`coding` 提供内置工作流技能；用户也可在 `~/.agent/skills/` 或项目 `.agent/skills/` 自建技能。`onboard` 生成的任务范式属于项目用户技能，重启并切回启用 `skill` 的角色后以 `user:onboard-<task-slug>` 名称加载。
 
@@ -186,6 +188,6 @@ onboard 专用执行器声明 `features: [file, skill]`，不继承主 agent 的
 
 主 agent 默认连续推进工作；需要独立上下文、输出隔离或独立核验时才选择执行器。委派正文提供目标、范围、必要输入、完整技能名与验收条件，子 agent 再调用 `load_skill`。不自动继承主 agent 已加载的技能正文。
 
-`load_skill` 的 availability 为 `ToolAudience.ALL` 且要求 `skill` feature，因此主、子 agent 都可执行但仍受 feature 检查。加载技能不修改工具集、模式或委派权限；`plan-workflow`、`execute-plan` 不进入通用目录，只能由已知其精确名称的控制流程加载。
+`load_skill` 的 availability 为 `ToolAudience.ALL` 且要求 `skill` feature，因此主、子 agent 都可执行但仍受 feature 检查。加载技能不修改工具集、模式或委派权限。同一用户轮次按技能名去重，新的用户轮次可以再次加载；compact 可能移除正文，因此会清除本轮去重集合。
 
 编码排障加载 `builtin:debugging`，普通文档同步随实现完成；米家控制、诊断和场景管理分别加载 `builtin:control-devices`、`builtin:diagnose-home`、`builtin:manage-scenes`。简单查询与命令无需额外工作流。技能不存在时返回包含可用名称的错误，不回退到其他技能。

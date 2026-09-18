@@ -21,6 +21,7 @@ from src.mgr.features import resolve_features
 from src.mgr.session_mgr import ResumeResult
 from src.mgr.session_state import SessionState
 from src.mode import RunMode
+from src.prompt_tags import ExternalContextItem
 
 logger = logging.getLogger(__name__)
 
@@ -393,8 +394,11 @@ class AgentApp:
 
                 topic = result.metadata.get("topic", "")
                 self.deps.session_context.append(
-                    f"当前会话已从历史会话恢复（session {result.session_id[:8]}...）。"
-                    f"会话主题: \"{topic}\"。请基于恢复的上下文继续对话。"
+                    ExternalContextItem(
+                        "session_resume",
+                        f"当前会话已从历史会话恢复（session {result.session_id[:8]}...）。"
+                        f"会话主题: \"{topic}\"。请基于恢复的上下文继续对话。",
+                    )
                 )
                 task_info = ""
                 if agent._task_mgr is not None and agent._task_mgr.has_open_items():
@@ -482,7 +486,11 @@ class AgentApp:
             "SessionStart", source, {"source": source},
             session_id=self.deps.session_id,
         )
-        self.deps.session_context.extend(result.additional_context)
+        self.deps.session_context.extend(
+            ExternalContextItem("SessionStart hook", str(item))
+            for item in result.additional_context
+            if item
+        )
 
     def _startup_banner(self) -> Text:
         """生成包含当前会话信息的中文 Rich 启动卡。

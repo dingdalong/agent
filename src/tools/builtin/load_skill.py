@@ -6,7 +6,7 @@ from src.tools.decorator import tool
 from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
-    from src.agent import Agent
+    from src.agent import Agent, RunContext
 
 class LoadSkill(BaseModel):
     name: str = Field(..., description="要加载的技能")
@@ -14,8 +14,12 @@ class LoadSkill(BaseModel):
 @tool(model=LoadSkill, description="将指定技能的完整内容加载到当前上下文中。",
       policy=ToolPolicy(AccessKind.INTERNAL, DataFlow.LOCAL, plan_safe=True),
       availability=ToolAvailability(feature="skill", audience=ToolAudience.ALL))
-async def load_skill(name: str, agent: Agent) -> str:
+async def load_skill(name: str, agent: Agent, run_context: RunContext | None = None) -> str:
     from src.tools.display import ToolResult
     if not agent._skill_mgr.check_skill(name):
         return ToolResult.failure("skill_not_found", f"不存在的技能：{name}")
+    if run_context is not None and name in run_context.loaded_skills:
+        return f"技能已在当前用户轮次加载，无需重复加载：{name}"
+    if run_context is not None:
+        run_context.loaded_skills.add(name)
     return agent._skill_mgr.load_full_text(name)

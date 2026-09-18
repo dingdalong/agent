@@ -87,7 +87,7 @@ token 用量统一为 `input_tokens`、`output_tokens`、`total_tokens`、`cache
 
 `chat()` 另有两个默认 `None` 的按调用参数：`reasoning_effort_override`（临时替换本次调用档位，不改共享 Provider）与 `max_attempts_cap`。effort 的运行时层级是：主 agent 先取角色配置覆盖后的 manifest effort（`role.<角色>.reasoning_effort` 覆盖 `role.md`），缺失才用 Provider 类默认值 `max`；default/fast 两个槽位共用这一角色级单值。子 agent 自身 frontmatter effort 合法时优先，否则继承父 agent 已解析值，父值为空时再取父 Provider effort，而不是按子 agent 模型槽位重新取一套角色 effort。
 
-`Agent._on_llm_call` 传 `ctx.length_effort_override or self.reasoning_effort`；长度恢复会从 `self.reasoning_effort or self.llm.reasoning_effort` 起步，按 Provider 的 `next_lower_effort()` 逐级降档。智能权限使用 `StructuredVerdictRunner`，固定对单次调用传 `reasoning_effort_override="low"`、关闭 thinking 并把尝试次数封顶为 3；这不会修改按模型缓存的 Provider。当前 Web 外部读取授权路径只执行本地隐私预检，没有调用已构造的 LLM Web 审查客户端。
+`Agent._on_llm_call` 传 `ctx.length_effort_override or self.reasoning_effort`；长度恢复会从 `self.reasoning_effort or self.llm.reasoning_effort` 起步，按 Provider 的 `next_lower_effort()` 逐级降档。CompactMgr 复用所属 Agent 的 Provider，但以压缩专用固定 system 和动态 user 数据发起独立调用，不携带工作 Agent prompt 或历史。智能权限使用 `StructuredVerdictRunner`，固定对单次调用传 `reasoning_effort_override="low"`、关闭 thinking 并把尝试次数封顶为 3；它也只使用裁决专用 system、脱敏 JSON 和唯一工具 schema。这些调用不会修改按模型缓存的 Provider。当前 Web 外部读取授权路径只执行本地隐私预检，没有调用已构造的 LLM Web 审查客户端。
 
 `CancelledError`、`KeyboardInterrupt`、`SystemExit` 始终原样传播。事件发布调用 `emit_telemetry_safely()`，普通遥测发布故障不会改变 LLM 调用结果，控制流异常仍传播（`src/events/bus.py:36-65`）。
 
@@ -203,7 +203,7 @@ assistant 的 provider 专属字段在判断“真正为空”之前由 `_normal
 
 实现要点：
 
-- Anthropic 的固定 prompt 留在 Messages API `system`，历史 developer 在原位置映射为带 `<framework_instruction>` 标记的 user 内容；历史 `_anthropic_content` 使用深拷贝原样往返。工具目录末尾、固定 system 和最新消息设置缓存断点；消息断点只写入 SDK 明确允许 `cache_control` 的 block 类型。
+- Anthropic 的固定 prompt 留在 Messages API `system`，历史 developer 在原位置映射为由集中标签注册表渲染的 `<framework_instruction>` user 内容；历史 `_anthropic_content` 使用深拷贝原样往返。工具目录末尾、固定 system 和最新消息设置缓存断点；消息断点只写入 SDK 明确允许 `cache_control` 的 block 类型。消息与标签职责见 [prompting.md](prompting.md)。
 - OpenAI 把固定 prompt 合并为 Responses API 首条 developer input，历史 developer 保持原位置；`prompt_cache_key` 使用模型与 agent 类型构造稳定键；历史用 `_response_output` 原样往返（检索 `_convert_to_input`）。
 - DeepSeek 把固定 prompt 合并到 `instructions`，历史 developer 保持在 `input` 原位置，并把完整的 user/assistant/function call/function output 历史作为 `input` 发送；不使用 `previous_response_id` 或 conversation 状态。开启思考时下发 `reasoning.effort`，关闭时省略 `reasoning`。最终 `output` 通过 `_response_output` 原样往返，因而 reasoning、服务端工具和未来新增 item 都可跨轮保留；框架当前注册的 function schema 与指定工具选择会转换成 Responses 格式（检索 `_convert_to_input`、`convert_function_tools`、`convert_tool_choice`）。
 - 原生 Web 调用与主对话隔离，不携带历史、系统提示词或 `previous_response_id`。OpenAI 用独立 Responses `web_search` 请求；Anthropic 用最多一次 server tool 的独立 Messages 请求并有限续接 `pause_turn`。它们复用 provider 并发、错误分类与重试，但不因认证、网络、限流、超时或协议错误转本地；只有 `NativeWebCapabilityError` 允许 `WebAccessMgr` 本地回退。DeepSeek 虽使用 Responses API，未声明 hosted Web 能力，故保持关闭。

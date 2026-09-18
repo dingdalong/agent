@@ -22,7 +22,7 @@ class WebAccessMgr:
         self.llm_mgr = llm_mgr
 
     @staticmethod
-    def describe() -> str:
+    def system_guidance() -> str:
         return (
             "# Web 访问安全\n"
             "web_search 和 web_fetch 仅用于公开资料；查询或 URL 会发送给配置选择的本地搜索服务或模型 provider。"

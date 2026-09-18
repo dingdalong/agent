@@ -21,6 +21,8 @@ def runtime(tmp_path, request):
         permission_mgr=PermissionManager(str(tmp_path), None, None, guard))
     agent = SimpleNamespace(uuid='main', agent_type='main', is_subagent=False,
         mode=RunMode.PLAN, features=set(ALL_FEATURES), tools=None, history=[], deps=deps,
-        llm=SimpleNamespace(estimate_tokens=lambda messages: sum(len(m.get('content','').encode()) for m in messages)))
+        llm=SimpleNamespace(estimate_tokens=lambda messages: sum(len(m.get('content','').encode()) for m in messages)),
+        _queued_user_action='')
+    agent.queue_user_action = lambda content: setattr(agent, '_queued_user_action', content)
     yield deps, agent
     deps.tools_mgr.reload()

@@ -26,7 +26,7 @@ make install                         # 构建并把产物装到 ~/.local/bin（�
 
 ## 深入参考
 
-`docs/` 目录是本框架面向人的完整技术参考；本文件只保留精简工作指引。权限入口、工具策略、路径与数据安全见 `permissions.md`，装配与状态机见 `architecture.md` 和 `agent-runtime.md`，其余主题索引见 `docs/README.md`。
+`docs/` 目录是本框架面向人的完整技术参考；本文件只保留精简工作指引。权限入口、工具策略、路径与数据安全见 `permissions.md`，提示词分层与标签注册见 `prompting.md`，装配与状态机见 `architecture.md` 和 `agent-runtime.md`，其余主题索引见 `docs/README.md`。
 
 ## 架构概述
 
@@ -53,7 +53,7 @@ REQUEST_INPUT → CHECK_COMPACT → [COMPACT →] LLM_CALL → PROCESS_RESPONSE
 
 每个角色目录 `src/roles/<role>/` 结构：
 - `role.md` — 角色定义文件（YAML frontmatter + body，与子 agent 的 `*.md` 同格式）。body 成为主 agent 的核心身份与主控职责提示词；frontmatter 的 `features` 声明启用能力，`startInPlanMode` 声明初始 Plan 状态，`reasoning_effort` 声明推理力度，`agent_type` 固定视为 `main`。
-- `AGENTS.md` — 激活角色内主 agent 与所有子 agent 共用的行为准则，进入“# 行为准则”段；不得放入仅属于主 agent 的身份或总控职责。
+- `AGENTS.md` — 激活角色内主 agent 与所有子 agent 共用的外部项目规则；以带来源的 user 上下文注入，不进入固定 system。不得放入仅属于主 agent 的身份或总控职责。
 - `agents/*.md` — 角色专属子 agent 定义。
 - `skills/*/SKILL.md` — 角色专属技能。
 - `plugins/`、`mcp_servers.json` — 角色专属插件与 MCP server 配置。
@@ -101,11 +101,13 @@ MCP server 连接配置在独立的 `mcp_servers.json`（角色 `src/roles/<role
 
 **子智能体** — 定义为 `*.md`（YAML frontmatter 声明 `agent_type`、`tools`、`model`、`memory`、`startInPlanMode`、`thinking`、`reasoning_effort`、`features` 等 + body 作提示词），由 `SubAgentMgr` 四层扫描加载。主 Agent 通过 `task_delegator` 调度子智能体；子智能体继承父 Agent 当前的 `mode`，并共享 `AgentDeps`。manifest 的 `tools` 是执行期声明边界，不改变发给模型的 schema。
 
-**跨 agent 共享上下文** — 子 agent 的 `history` 从空开始，唯一输入是委派 prompt，因此天然会重复探索。`ContextMgr`（`src/mgr/context_mgr.py`，deps 层单例，挂 `subagent` feature）维护会话级「已核实事实」账本：`SubAgentMgr.task_delegator` 在 `run()` 前把 `digest()` 拼到 prompt 之前，在 `SubagentStop` hook 后把子 agent 的返回报告自动记账；`note_context` 工具供 agent 显式记录对话中确认的决策。改这块前必须知道三条约束：**(1)** 动态内容绝不能进固定 system 或框架 developer 消息，只能作为带来源标记的 user/tool 外部内容；**(2)** 注入点必须是 `task_delegator` 而非 `ReminderMgr`——后者的 provider 拿不到本次委派信息，按委派过滤就得在进程级单例存槽位，而并行委派会互相覆盖；**(3)** 落盘必须由 `ContextMgr` 直接写，改用 `apply_patch` 会因 `.agent/context/**` 属 `PathClass.PROTECTED` 而在 Plan 模式下必然被拒。静态环境基线（git/技术栈/目录树）由 `collect_env_baseline()` 在 `AgentApp._reset_session` 中经 `to_thread` 采集一次存 `deps.env_baseline`，并在首次 chat 前作为外部 user 上下文追加。
+**跨 agent 共享上下文** — 子 agent 的 `history` 从空开始，唯一输入是委派 prompt，因此天然会重复探索。`ContextMgr`（`src/mgr/context_mgr.py`，deps 层单例，挂 `subagent` feature）维护会话级「已核实事实」账本：`SubAgentMgr.task_delegator` 在 `run()` 前把 `digest()` 拼到 prompt 之前，在 `SubagentStop` hook 后把子 agent 的返回报告自动记账；`note_context` 工具供 agent 显式记录对话中确认的决策。改这块前必须知道三条约束：**(1)** AGENTS.md、环境、记忆、目录、Hook 和其他动态内容绝不能进固定 system 或框架 developer 消息，只能作为带来源标记的 user/tool 外部内容；**(2)** 注入点必须是 `task_delegator` 而非 `ReminderMgr`——后者的 provider 拿不到本次委派信息，按委派过滤就得在进程级单例存槽位，而并行委派会互相覆盖；**(3)** 落盘必须由 `ContextMgr` 直接写，改用 `apply_patch` 会因 `.agent/context/**` 属 `PathClass.PROTECTED` 而在 Plan 模式下必然被拒。静态环境基线（git/技术栈/目录树）由 `collect_env_baseline()` 在 `AgentApp._reset_session` 中经 `to_thread` 采集一次存 `deps.env_baseline`，并在首次 chat 前作为外部 user 上下文追加。新增结构标签必须先登记到 `src/prompt_tags.py`，不得在生产者中手写标签。
 
 **统一授权与 Plan** — `PermissionManager.authorize(ToolAuthorizationRequest)` 是唯一授权入口；先按 `ToolAvailability` 检查 `Agent.mode`、feature、主/子身份和 manifest 声明，再进入路径与风险策略。模式拒绝返回当前模式、目标工具和该模式完整禁用列表，不调用智能权限；因 Plan 导致的拒绝还必须重申 Plan 限制。工具声明冻结的 `ToolPolicy`，不从用户配置提升权限。`Agent.mode` 是状态权威，Shift+Tab 可双向切换；下一次 chat 前追加的 Plan developer 消息先明确当前处于计划模式及完整限制，只允许经验证的只读命令、本地/隐私预检后的外部读取、在只读项目沙箱内运行的现有测试与明确安全的内部工具；临时输出只能写框架专用临时目录，计划文件仅由 submit_plan 内部写入。
 
-**技能系统** — `SkillMgr` 四层扫描 `SKILL.md`（共享 → 角色 → 全局 → 项目，插件技能穿插其间），同名后者覆盖；主、子 agent 实际具备 `load_skill` 时均在外部 user 上下文中展示技能目录，正文只通过 `load_skill` 工具结果按需进入调用者历史。技能提供方法，不扩大授权、模式或工具范围；主控技能仅供主 agent 使用。
+**独立 LLM 调用** — CompactMgr 和智能权限只复用 Provider，不把 PromptMgr 或工作 Agent 历史直接作为各自的调用历史。压缩调用使用自己的固定 system 与序列化的动态 user 数据；智能权限使用裁决专用 system、脱敏 JSON 与唯一输出 schema。工作 Agent 的初始化外部 user、首个真实 user 及其前置 developer 在压缩时原文保留，中段旧 developer 不进摘要，最新模式 developer 随近期原文保留。标签注册表按实际读取者区分工作 Agent 标签和压缩调用私有标签；压缩后回灌历史中的摘要边界标签归工作 Agent 消费。
+
+**技能系统** — `SkillMgr` 四层扫描 `SKILL.md`（共享 → 角色 → 全局 → 项目，插件技能穿插其间），同名后者覆盖；主、子 agent 实际具备 `load_skill` 时均在外部 user 上下文中展示技能目录，正文只通过 `load_skill` 工具结果按需进入调用者历史。同一用户轮次按技能名去重，后续轮次可以重新加载；compact 后清除本轮去重状态，允许恢复正文。技能提供方法，不扩大授权、模式或工具范围；主控技能仅供主 agent 使用。
 
 **Hooks** — 8 种生命周期钩子事件（`PreToolUse`、`PostToolUse`、`UserPromptSubmit`、`Stop`、`SessionStart`、`SessionEnd`、`SubagentStart`、`SubagentStop`），通过 shell 命令执行，支持 JSON stdin/stdout 协议。
 

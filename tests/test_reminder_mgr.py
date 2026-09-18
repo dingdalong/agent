@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from src.mgr.plan_mgr import _PLAN_SKILL_KEY, PlanMgr
+from src.mgr.plan_mgr import PlanMgr
 from src.mgr.reminder_mgr import ReminderMgr
 from src.mgr.task_mgr import TaskManager
 from src.mode import RunMode

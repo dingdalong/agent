@@ -2,7 +2,7 @@
 from types import SimpleNamespace
 import pytest
 from src.mode import RunMode
-from src.mgr.plan_mgr import PlanMgr, _PLAN_SKILL_KEY
+from src.mgr.plan_mgr import PlanMgr
 from src.mgr.reminder_mgr import ReminderMgr
 
 
@@ -18,9 +18,11 @@ def test_main_and_child_instructions(tmp_path):
         assert '禁止创建、编辑、删除或移动项目文件' in prompt
         assert '禁止申请额外写权限或网络权限' in prompt
     assert 'submit_plan' in main
-    assert '不提交计划' in child
+    assert '# 规划流程' in main
+    assert '状态权威写入者' in main
+    assert '立即调用 submit_plan' in main
+    assert '不提交完整计划' in child
     assert 'submit_plan' not in child
-    assert _PLAN_SKILL_KEY not in child
     assert 'write_file' not in main
 
 
@@ -58,11 +60,12 @@ def test_current_mode_prompt_survives_rebuild_without_history_injection(tmp_path
     first = agent._prompt_mgr.build_mode_instructions()
     second = agent._prompt_mgr.build_mode_instructions()
     assert first == second
-    assert _PLAN_SKILL_KEY in first
+    assert '# 规划流程' in first
+    assert 'load_skill' not in first
     assert '每次新增工具调用必须解决' not in first
     assert agent._prompt_mgr.build() == system
     agent.set_mode(RunMode.EXECUTE)
-    assert _PLAN_SKILL_KEY not in agent._prompt_mgr.build_mode_instructions()
+    assert '# 规划流程' not in agent._prompt_mgr.build_mode_instructions()
     assert agent._prompt_mgr.build() == system
     assert agent.history == before
 

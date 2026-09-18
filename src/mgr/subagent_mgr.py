@@ -117,13 +117,10 @@ class SubAgentMgr:
             lines.append(f"- {manifest.agent_type}: {manifest.description}")
         return "\n".join(lines)
 
-    def prompt_section(self) -> str:
-        """返回子智能体列表提示词段，无子智能体时返回空串。"""
-        describe = self.describe()
-        if not describe:
-            return ""
+    def system_guidance(self) -> str:
+        """返回主 agent 使用子智能体的固定工作流。"""
         return (
-            "# 子智能体协作\n"
+            "## 子智能体协作\n"
             "只有独立工作能获得并行收益、需要隔离大量中间输出或需要独立核验时才委派；存在匹配子 agent 本身不是委派理由。\n"
             "决定委派后按能力选择专用或通用子 agent。写清目标、范围、必要背景、已确认约束和验收方式。\n"
             "需要专业方法时，在委派正文中给出技能完整名、输入与产物路径，由执行器加载；技能匹配本身不构成委派理由。\n"
@@ -131,8 +128,7 @@ class SubAgentMgr:
             "task_delegator 等待任务结束才返回；同轮独立调用可并行，全部返回后你才能继续推理。并行修改需划分不重叠的写入范围，不重复执行已委派工作。\n"
             "返回后核对实际产物和验证证据，再整合结果；需要澄清时由你与用户沟通，再发起包含完整输入的新委派。\n"
             "已有任务需跟踪时传 task_id：框架自动标记 in_progress 并设置 owner，异常或 LLM 错误回滚为无负责人的 pending；正常返回不自动完成。\n"
-            "验收后由你标记 completed；未完成的部分可直接补齐或按上述条件重新委派。任务 ID 通过参数传入，不要求子 agent 管理父任务。\n\n"
-            "# 可用子智能体\n" + describe
+            "验收后由你用同一任务 ID 标记 completed；未完成的部分可直接补齐或按上述条件重新委派。"
         )
 
     async def task_delegator(

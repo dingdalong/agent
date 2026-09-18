@@ -72,6 +72,8 @@ LOCAL_READ 可以读取工作区外的普通文件或目录，但拒绝设备、
 
 `StructuredVerdictRunner` 对这次裁决固定传 `reasoning_effort_override="low"`，同时关闭 thinking、温度设为 0，并强制通过唯一的 `record_verdict` 工具返回 allow、deny 或 ask。low 只是本次调用覆盖，不写回角色配置，也不修改按模型缓存的 Provider。调用最长 15 秒，`max_attempts_cap=3` 使结构化裁决最多尝试三次；全局 `llm.retry.max_attempts` 更低时采用更低值。
 
+该裁决是独立 LLM 调用：只发送 `_JUDGE_SYSTEM_PROMPT`、一条脱敏 JSON user 消息和 `record_verdict` schema，不使用 PromptMgr、工作 Agent system、会话历史或结构标签说明。
+
 智能权限请求只包含：工具名和来源、动作类别、数据流、规范化路径分类、网络主机、参数类型与长度、风险标志、最多 2 KiB 的脱敏用户意图。Shell 额外发送最多 8 KiB 的脱敏命令。文件正文、待写内容、完整 body、header、cookie、环境变量和值、完整 URL query 都不会进入请求。参数摘要在系统提示词中明确标记为不可信数据。
 
 智能权限 allow/deny 直接成为本次裁决；ask、异常、超时、缺失或无效输出进入一次性确认。确认只接受 yes/no，不产生任何后续调用权限。

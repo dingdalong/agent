@@ -30,11 +30,11 @@ description: 新增客户端协议时加载。
 
     skill_mgr = SkillMgr(workdir=tmp_path)
 
-    prompt = skill_mgr.prompt_section()
-    assert prompt is not None
-    assert "user:onboard-add-client-proto" in prompt
-    assert "新增客户端协议时加载。" in prompt
-    assert "仅按需加载的实施步骤" not in prompt
+    description = skill_mgr.describe()
+    assert description is not None
+    assert "user:onboard-add-client-proto" in description
+    assert "新增客户端协议时加载。" in description
+    assert "仅按需加载的实施步骤" not in description
 
     loaded = skill_mgr.load_full_text("user:onboard-add-client-proto")
     assert "仅按需加载的实施步骤" in loaded

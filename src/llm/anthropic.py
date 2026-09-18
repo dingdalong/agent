@@ -17,6 +17,7 @@ from src.llm.base import (
     validate_chat_completion_stream,
 )
 from src.llm.errors import LLMStreamResponseError
+from src.prompt_tags import PromptTag, render_prompt_tag
 from src.web.types import WebFetchResponse, WebSearchResponse, WebSource
 
 if TYPE_CHECKING:
@@ -487,10 +488,8 @@ class AnthropicProvider(LLMProvider):
                 if content:
                     claude_messages.append({
                         "role": "user",
-                        "content": (
-                            "<framework_instruction>\n"
-                            f"{content}\n"
-                            "</framework_instruction>"
+                        "content": render_prompt_tag(
+                            PromptTag.FRAMEWORK_INSTRUCTION, content,
                         ),
                     })
 

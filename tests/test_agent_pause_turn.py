@@ -1294,15 +1294,21 @@ def test_subagent_run_restores_automatic_snapshot_after_compact_pause_cancel() -
                 and estimated_tokens > self.auto_compact_size
             )
 
-        async def compact_history(self, messages: list[dict]) -> SimpleNamespace:
+        async def compact_history(
+            self,
+            messages: list[dict],
+            bootstrap_message_count: int = 0,
+        ) -> SimpleNamespace:
             """用摘要和当前用户消息替换历史。
 
             Args:
                 messages: compact 前的完整消息。
+                bootstrap_message_count: 初始化前缀消息数。
 
             Returns:
                 可供 Agent 消费的 compact 结果。
             """
+            del bootstrap_message_count
             self.auto_compact_size = 10
 
             def estimate_compacted_tokens(

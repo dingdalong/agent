@@ -243,6 +243,7 @@ class ToolsMgr:
         current_tool_call_id: str = "",
         deps: Any = None,
         agent: Any = None,
+        run_context: Any = None,
     ) -> ToolResult:
         """执行工具调用，返回明确的结果状态。
 
@@ -254,6 +255,7 @@ class ToolsMgr:
             current_tool_call_id: 当前工具调用的 ID。
             deps: AgentDeps 依赖对象。
             agent: 当前 Agent 实例。
+            run_context: 当前用户轮次状态；仅供需要轮次级状态的内置工具使用。
 
         Returns:
             ToolResult，失败通过 status/error_code 表达。
@@ -373,6 +375,7 @@ class ToolsMgr:
             "deps": deps,
             "agent": agent,
             "authorization": authorization,
+            "run_context": run_context,
         }
         # 叶子工具执行期间计入回合「活跃计算」，供状态栏耗时判定是否处于纯人工等待（暂停）。
         # 委派型/纯人工等待型工具（counts_as_work=False）不计，避免其嵌套的人工等待被误判为在计算。
@@ -401,13 +404,15 @@ class ToolsMgr:
                 **hook_kwargs,
             )
             if post_hook_result.blocked:
+                end_turn = result.end_turn
                 result = ToolResult.failure("hook_blocked", str(data_guard.redact(post_hook_result.block_reason or "hook blocked")))
+                result.end_turn = end_turn
             elif post_hook_result.additional_context:
                 result.annotations += "\n\n".join(str(data_guard.redact(item)) for item in post_hook_result.additional_context)
         result.output_budget = effective_budget
         return result
 
-    async def execute(self, tool_name, arguments, *, current_tool_call_id="", deps=None, agent=None):
+    async def execute(self, tool_name, arguments, *, current_tool_call_id="", deps=None, agent=None, run_context=None):
         started = time.time()
         requested = arguments.get("max_output_tokens") if isinstance(arguments, dict) else None
         budget_error = None
@@ -424,9 +429,9 @@ class ToolsMgr:
             elif processes and tool_name not in {"exec_command", "write_stdin"} and tool and tool.policy.access in {AccessKind.LOCAL_READ, AccessKind.WORKSPACE_WRITE}:
                 lease = processes.workspace_lock.read() if tool.policy.access is AccessKind.LOCAL_READ else processes.workspace_lock
                 async with lease:
-                    result = await self._execute(tool_name, arguments, current_tool_call_id=current_tool_call_id, deps=deps, agent=agent)
+                    result = await self._execute(tool_name, arguments, current_tool_call_id=current_tool_call_id, deps=deps, agent=agent, run_context=run_context)
             else:
-                result = await self._execute(tool_name, arguments, current_tool_call_id=current_tool_call_id, deps=deps, agent=agent)
+                result = await self._execute(tool_name, arguments, current_tool_call_id=current_tool_call_id, deps=deps, agent=agent, run_context=run_context)
         except asyncio.CancelledError:
             result = ToolResult('工具调用已取消', status='cancelled', error_code='cancelled')
             if tool:
@@ -451,6 +456,10 @@ class ToolsMgr:
             # 临时日志不能在会话清理结束后又由后台线程写回来。
             await asyncio.gather(worker, return_exceptions=True)
             raise
+        if tool_name == "load_skill" and run_context is not None and result.status != "success":
+            skill_name = arguments.get("name") if isinstance(arguments, dict) else None
+            if isinstance(skill_name, str):
+                run_context.loaded_skills.discard(skill_name)
         tool = self._tools.get(tool_name)
         if tool:
             await self._emit_tool_completed(deps, agent, tool, current_tool_call_id, result.status,

@@ -403,12 +403,14 @@ def test_auto_and_manual_compact_failures_are_caught_at_turn_boundary(
             self,
             messages: list[dict],
             focus: str | None = None,
+            bootstrap_message_count: int = 0,
         ) -> object:
             """抛出预设终态错误。
 
             Args:
                 messages: 待压缩消息。
                 focus: 可选压缩重点。
+                bootstrap_message_count: 初始化前缀消息数。
 
             Returns:
                 不返回。
@@ -416,7 +418,7 @@ def test_auto_and_manual_compact_failures_are_caught_at_turn_boundary(
             Raises:
                 LLMCallError: 固定终态错误。
             """
-            del messages, focus
+            del messages, focus, bootstrap_message_count
             raise error
 
     agent = _runtime_agent(SequenceLLM([]))
@@ -440,6 +442,42 @@ def test_auto_and_manual_compact_failures_are_caught_at_turn_boundary(
     assert result.llm_error is error.info
     assert error.info.message in result.final_text
     assert all(message.get("role") != "assistant" for message in ctx.messages)
+
+
+@pytest.mark.parametrize("state_name", ["COMPACT", "POST_ROUND"])
+def test_compact_clears_loaded_skill_deduplication(state_name: str) -> None:
+    """压缩可能移除 Skill 正文，因此自动和手动路径都允许重新加载。"""
+
+    class SuccessfulCompact:
+        auto_compact_size = 1
+
+        async def compact_history(
+            self,
+            messages: list[dict],
+            focus: str | None = None,
+            bootstrap_message_count: int = 0,
+        ) -> SimpleNamespace:
+            del focus, bootstrap_message_count
+            return SimpleNamespace(
+                messages=list(messages), transcript_path=None,
+                summarized_message_count=1, summary="摘要",
+            )
+
+    agent = _runtime_agent(SequenceLLM([]))
+    agent._compact_mgr = SuccessfulCompact()
+    ctx = RunContext(
+        messages=[{"role": "user", "content": "压缩"}],
+        loaded_skills={"builtin:debugging"},
+        manual_compact=state_name == "POST_ROUND",
+    )
+
+    if state_name == "COMPACT":
+        next_state = asyncio.run(agent._on_compact(ctx))
+    else:
+        next_state = asyncio.run(agent._on_post_round(ctx))
+
+    assert next_state is AgentState.CHECK_COMPACT
+    assert ctx.loaded_skills == set()
 
 
 def test_paginated_compact_summary_failure_reaches_turn_boundary(tmp_path: Path) -> None:
@@ -585,6 +623,20 @@ def test_request_input_snapshots_history_immediately_before_user_message() -> No
         *original_messages,
         {"role": "user", "content": "当前问题"},
     ]
+
+
+def test_queued_user_action_starts_next_turn_without_requesting_input() -> None:
+    """框架排队的 action 复用正常用户消息链路，但不打开输入 UI。"""
+    agent = _runtime_agent(SequenceLLM([]), event_bus=RecordingEventBus())
+    agent.queue_user_action("执行已批准的计划。")
+    ctx = RunContext(messages=agent.history)
+
+    state = asyncio.run(agent._on_request_input(ctx))
+
+    assert state is AgentState.CHECK_COMPACT
+    assert agent._queued_user_action == ""
+    assert ctx.user_input == "执行已批准的计划。"
+    assert agent.history == [{"role": "user", "content": "执行已批准的计划。"}]
 
 
 @pytest.mark.parametrize(

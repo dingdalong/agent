@@ -133,7 +133,7 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 | `all_tool_names` | — | `set[str]` | 全部工具名 |
 | `schemas` | — | `list[ToolDict]` | 所有已注册工具的稳定 OpenAI function-calling schema 目录 |
 | `unavailable_in_mode` | `mode: RunMode` | `tuple[str, ...]` | 当前模式不能执行的完整工具名列表 |
-| `execute` (async) | `tool_name`, `arguments`, `current_tool_call_id`, `deps`, `agent` | `ToolResult` | 执行工具全流程（见下） |
+| `execute` (async) | `tool_name`, `arguments`, `current_tool_call_id`, `deps`, `agent`, `run_context` | `ToolResult` | 执行工具全流程；`run_context` 供工具访问当前用户轮次状态（见下） |
 
 **`execute()` 完整流程**：Pydantic 校验 → PreToolUse Hook → 修改后重校验 → `authorize()` → 脱敏的 `ToolCallStarted`（含 `ToolDisplay`） → 调用工具 → 提取 `ToolResult` → 立即脱敏和限长 → PostToolUse → 再次脱敏 → 一次输出整理 → `ToolCallCompleted`（含 `ToolDisplay`） → 历史。临时日志、Hook payload 和事件预览都只接收脱敏数据。
 
@@ -186,16 +186,18 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 | `is_need_compact` | `messages`, `prompt`, `tools`, `estimated_tokens` | `bool` | 判断完整 provider 输入估算是否超 `auto_compact_size`；可复用调用方估算，非正阈值直接返回 `False` |
 | `track_recent_file` (async) | `path: str` | `None` | 维护最近文件列表（上限 5，去重后置尾） |
 | `write_transcript` (async) | `messages: list` | `Path` | 在线程中以 UTF-8/Unicode JSONL 写入 `.agent/transcripts/transcript_{time_ns}.jsonl`，排他创建避免并发覆盖 |
-| `split_history_for_compaction` | `messages: list` | `CompactionPartition` | 切分为必须原文保留、待摘要、预算内近期原文；assistant 及紧随其后的 tool 结果不可拆散 |
+| `split_history_for_compaction` | `messages`, `bootstrap_message_count` | `CompactionPartition` | 切分为初始化及首个真实轮次前缀、待摘要中段和预算内近期原文 |
 | `summarize_history` (async) | `preserved_messages`, `messages_to_summarize`, `recent_messages`, `focus` | `str` | 完整输入不超过上下文 95% 时一次摘要；超限则按原子块滚动摘要，单块仍超限时无损分页 |
-| `build_compacted_context_prefix` | `preserved_messages`, `summary`, `recent_files_hint` | `str` | 拼装“原始需求 + 摘要 + 近期文件提示”前缀 |
-| `compact_history` (async) | `messages`, `focus` | `CompactResult` | 端到端压缩；返回消息、transcript、摘要消息数及摘要正文，无可摘要消息或空摘要时保留原历史 |
+| `build_compacted_context_prefix` | `summary`, `recent_files_hint` | `str` | 拼装摘要和近期文件提示消息 |
+| `compact_history` (async) | `messages`, `focus`, `bootstrap_message_count` | `CompactResult` | 端到端压缩；返回消息、transcript、摘要消息数及摘要正文，无可摘要消息或空摘要时保留原历史 |
 
 **feature 门控**：否。 **reload**：无（随新 Agent 重建）。
 
-最近 N 个用户轮次只是优先保留范围：如果其完整原文超过硬预算，切分点会继续向后移动；被移出近期原文的首条用户消息和当前用户消息仍以原文进入压缩前缀，其余旧消息进入摘要。序列化、token 计算、分页与 transcript 文件 I/O 均卸载到线程，且不做字符截断。
+Agent 显式传入初始化消息数量，CompactMgr 原文保留该 bootstrap、首个真实 user 及其前置 developer，并至少保留当前用户轮次。最近 N 个用户轮次超过硬预算时向当前轮收缩，但不会摘要这些强制前缀。中段旧 developer 不进入摘要；最新 `<collaboration_mode>` 若落在中段，会原样移动到近期后缀之前，保证压缩后的当前模式仍明确。序列化、token 计算、分页与 transcript 文件 I/O 均卸载到线程，且不做字符截断。
 
 **持有的关键状态**：`recent_files`（最近文件路径，上限 5）、`has_compacted`（是否已完成过有效压缩）。
+
+摘要调用使用 CompactMgr 自己的固定 system，包含压缩职责和仅供压缩模型读取的标签说明；待压缩历史、原文参照、重点和滚动摘要作为动态 user 消息。token 预算按同一份 system + user 请求估算。它只复用所属 Agent 的 Provider 和事件归属标识，不读取 `PromptMgr` 的固定 system 或工作历史。压缩结果中的摘要边界标签随后作为 user 历史回灌工作 Agent。
 
 压缩在状态机的 `CHECK_COMPACT`/`COMPACT`/`CONTEXT_OVERFLOW` 阶段驱动，见 [agent-runtime.md](agent-runtime.md)。
 
@@ -205,24 +207,28 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 
 `src/mgr/prompt_mgr.py`
 
-**职责**：构建 Agent 生命周期内固定不变的一条 system；另行生成模式 developer 指令和首次 chat 前的外部 user 上下文。模式切换、模型切换和工具轮都不重建 system。
+**职责**：构建 Agent 生命周期内固定不变的一条 system；另行生成 Manager/模式 developer 指令和首次 chat 前的外部 user 上下文。模式切换、模型切换和工具轮都不重建 system。
 
 **固定 system 顺序**（`_build_static_prompt`）：
-1. **核心身份与通用工具规则**——`role_prompt` 非空时用之，否则默认身份（`_build_core`）；不包含任何模式流程或模式专属工具；
-2. **行为准则**——`AGENTS.md` 四层叠加：共享 `roles/common/AGENTS.md` → 角色 `AGENTS.md` → 全局 `~/.agent/AGENTS.md` → 项目 `AGENTS.md`（`_build_agent_md`）；激活角色层会注入该角色的主 agent 与所有子 agent；
-3. **固定 Web 安全规则与当前日期**。
+1. **身份与通用原则**——`role_prompt` 非空时用之，否则使用默认身份；按主/子 agent 注入固定责任、证据、推进和验收原则；
+2. **工具协议**——schema 是参数契约的唯一权威；
+3. **消息来源与标签**——由 `src/prompt_tags.py` 注册表生成当前 Agent 会看到的标签说明和信任边界；
+4. **固定 Web 安全规则**。system 不包含 Manager 工作流、模式流程、当前日期、AGENTS.md、能力目录或其他运行期数据。
 
-**初始外部上下文**（`build_initial_context_messages`）：运行平台、工作目录、`deps.env_baseline`、项目记忆、会话上下文、子智能体目录和技能目录合并为一条带 `<external_context>` 标记的 user 消息。它们属于环境或扩展数据，不能进入 system/developer。环境基线由 `collect_env_baseline()` 在 `AgentApp._reset_session` 中经 `asyncio.to_thread` 采集一次，PromptMgr 只拼接已有结果。
+**初始外部上下文**（`build_initial_context_messages`）：子智能体目录、技能目录、四层 AGENTS.md、项目记忆、结构化会话上下文、运行环境依次渲染为带 `source` 的 `<external_context>`，再合并为一条 user 消息。AGENTS.md 保持共享 → 角色 → 全局 → 项目顺序，运行环境固定为最后一段；所有外部正文经集中渲染器中和保留标签边界。环境基线由 `collect_env_baseline()` 在 `AgentApp._reset_session` 中经 `asyncio.to_thread` 采集一次。
 
-**模式指令**（`build_mode_instructions`）：普通模式包含主/子执行原则、任务指导与执行工具指导，且不得提及计划流程、计划模式或 `submit_plan`；Plan 模式由 `PlanMgr.instructions()` 明确当前模式、只读边界、测试例外与禁止事项，并要求主 agent 通过 `load_skill(name="builtin:plan-workflow")` 加载流程。Skill 正文仍是工具结果，不提升为框架指令。
+**Manager 与模式指令**：`build_manager_instructions()` 返回当前 Agent 实际具备的 Task/SubAgent/Skill/Memory 工作流，只在首个真实用户请求前注入一次；随后是当前模式及 turn-start 提醒，同一条 developer 中保持 Manager → 模式 → 提醒顺序。模式变化在下一条真实 user 前注入，post-round 提醒仍在下一次 chat 前追加。
 
-`Agent._append_pending_framework_message()` 是唯一落点：每次 `llm.chat()` 前检查最终模式，将模式变化、turn-start/post-round 提醒和恢复指令去重合并为最多一条 developer 消息。工具执行中途只排队，不修改消息。
+**模式指令**（`build_mode_instructions`）：普通模式只包含简短的当前执行状态，不得提及计划流程、计划模式或 `submit_plan`；Plan 模式由 `PlanMgr.instructions()` 明确当前模式、只读边界、测试例外、禁止事项以及完整规划和提交流程。Plan 流程不是 Skill，不经过 `load_skill` 或工具结果注入。
+
+`Agent._append_pending_framework_message()` 是唯一落点：真实用户轮次在追加 user 前先收集 Manager、最终模式和 turn-start 提醒；工具轮之间只在下一次 `llm.chat()` 前追加 post-round 或恢复指令。工具执行中途只排队，不修改消息。
 
 **公共方法**：
 
 | 方法 | 关键参数 | 返回 | 作用 |
 |---|---|---|---|
 | `build` | — | `list` | 返回一条固定 system 消息 |
+| `build_manager_instructions` | — | `str` | 返回首个真实用户请求前追加的 Manager 工作流 |
 | `build_mode_instructions` | — | `str` | 返回当前最终模式的框架指令 |
 | `build_initial_context_messages` | — | `list[dict]` | 返回首次 chat 前追加的外部 user 上下文 |
 
@@ -245,7 +251,7 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 - 其他字符串必须采用 `供应商/模型ID`，不查询模型候选列表；
 - 非法值抛 `LLMConfigurationError`，消息包含 manifest 路径和合法格式。没有 `best`、`inherit`、子串匹配或静默回退。
 
-**公共方法**：`describe()` 返回按 type 排序的列表，`prompt_section()` 生成可用子智能体段，`task_delegator(agent_type, prompt, parent_agent, task_id, description, shared_context)` 执行委派。
+**公共方法**：`describe()` 只返回按 type 排序的外部能力目录，`system_guidance()` 返回不含目录数据的固定协作工作流，`task_delegator(agent_type, prompt, parent_agent, task_id, description, shared_context)` 执行委派。
 
 **`task_delegator` 关键行为**：
 - 未知 `agent_type` 返回错误并列出已知；带 `task_id` 时先置 `in_progress` 并设 owner，异常或 `RunResult.llm_error` 时回滚为无 owner 的 `pending`，正常返回不自动 completed；
@@ -267,7 +273,7 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 
 `src/mgr/skill_mgr.py`
 
-**单一职责**：多层扫描 `SKILL.md` 并以 `namespace:name` 注册，暴露技能列表提示词段，按需返回技能全文（含 `<skill-file>` 引用）供主、子 agent 的 `load_skill` 工具加载。
+**单一职责**：多层扫描 `SKILL.md` 并以 `namespace:name` 注册，暴露外部技能目录和固定加载工作流，按需返回 `<skill>` 包裹的技能全文与附属文件 Markdown 索引。
 
 **消费的配置或文件**：多层扫描（低→高优先级，同名后者覆盖，`_load_all` `skill_mgr.py:44-88`）：共享 `roles/common/skills/` → 角色 `skills/`（命名空间为角色名）→ 全局插件 `plugins/*`（命名空间为插件名）→ 全局 `~/.agent/skills`（`user`）→ 项目插件 → 项目 `.agent/skills`（`user`）。每目录递归 `rglob("SKILL.md")`。
 
@@ -276,9 +282,9 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 | 方法 | 关键参数 | 返回 | 作用 |
 |---|---|---|---|
 | `describe` | — | `str \| None` | 技能列表（`- [name]: description`，排序） |
-| `prompt_section` | — | `str` | `# 可用技能` 段（含使用流程说明），无则空串 |
+| `system_guidance` | — | `str` | 目录匹配、`load_skill` 加载与权限边界工作流 |
 | `check_skill` | `name: str` | `bool` | 技能是否存在 |
-| `load_full_text` | `name: str` | `str` | 技能全文（`<skill>` 包裹 body + 同目录文件的 `<skill-file>` 引用），不存在则错误信息 |
+| `load_full_text` | `name: str` | `str` | 技能全文（`<skill>` 包裹 body 和附属文件索引），不存在则错误信息 |
 
 **feature 门控**：`skill`。 **reload**：无（随新 Agent 重建）。
 
@@ -319,7 +325,7 @@ MCP 连接配置和授权边界见 [mcp-and-hooks.md](mcp-and-hooks.md)。
 
 `src/mgr/memory_mgr.py`
 
-**单一职责**：加载、构建提示词、读取与保存项目记忆条目。
+**单一职责**：加载、构建外部记忆简报、读取与保存项目记忆条目，并提供固定的读写工作流。
 
 **消费的配置或文件**：`{workdir}/.agent/memory/*.md`（`__post_init__` `memory_mgr.py:33-37`）。每文件为 frontmatter（必填 `title`/`description`/`type`/`update_at`）+ body。`type` 合法值：`user`/`feedback`/`project`/`reference`（`MEMORY_TYPES`）。条目按 `(update_at, title)` 降序排序。
 
@@ -328,7 +334,8 @@ MCP 连接配置和授权边界见 [mcp-and-hooks.md](mcp-and-hooks.md)。
 | 方法 | 关键参数 | 返回 | 作用 |
 |---|---|---|---|
 | `reload` | — | `None` | 重新扫描 memory 目录 |
-| `build_prompt` | — | `str` | `# 项目记忆` 段（使用指引 + 按 type 分组的简报，上限 `max_prompt_entries`=50），无记忆则空串 |
+| `system_guidance` | — | `str` | 简报定位、读取正文和同标题合并覆盖工作流 |
+| `build_context` | — | `str` | 按 type 分组的外部记忆简报（上限 `max_prompt_entries`=50），无记忆则空串 |
 | `save` | `title`, `description`, `type`, `body` | `str` | 校验后写入 `{slug(title)}.md`，返回 title 或错误信息 |
 | `read` | `title` | `str` | 返回指定标题记忆全文，不存在则错误信息 |
 
@@ -379,7 +386,7 @@ MCP 连接配置和授权边界见 [mcp-and-hooks.md](mcp-and-hooks.md)。
 
 ## PlanMgr 与工具运行时
 
-`PlanMgr` 管理模式切换、当前指令正文与受控计划保存。正文由 PromptMgr 生成，并在下一次 chat 前作为 developer 消息追加；模式切换本身不改历史。`save(content, previous)` 原子写入 `.agent/plans/`，审核状态和路径保存在 `SessionState.plan`。`agent.mode` 是模式状态权威，授权由 PermissionManager 执行。
+`PlanMgr` 管理模式切换、当前指令正文与受控计划保存。正文由 PromptMgr 生成，并在下一次 chat 前作为 developer 消息追加；模式切换本身不改历史。`save(content, previous)` 原子写入 `.agent/plans/`，审核状态和路径保存在 `SessionState.plan`。自动批准后 `submit_plan` 通过 `Agent.queue_user_action()` 排队固定执行请求并结束当前 turn，下一轮由 `_on_request_input()` 复用正常 Hook、持久化和 user 消息链路。`agent.mode` 是模式状态权威，授权由 PermissionManager 执行。
 
 文件发现、搜索和读取由 `exec_command` 在真实受限 Shell 中执行；随包 ripgrep 的定位由 `ripgrep.resolve_rg()` 负责。补丁文本计算与提交在 `patch.py`；进程生命周期与工作区读写租约在 `ProcessMgr`；一次输出整理及临时日志归 `ToolOutput`。流程与接口见 [tools.md](tools.md)。
 
@@ -404,7 +411,7 @@ MCP 连接配置和授权边界见 [mcp-and-hooks.md](mcp-and-hooks.md)。
 | `list_tasks` | — | `dict` | 任务摘要列表（`blocked_by` 仅列未完成项，过滤 `_internal`） |
 | `get_task` | `task_id` | `dict` | 单任务完整详情（不存在抛 `ValueError`） |
 | `has_open_items` | — | `bool` | 是否有未完成任务 |
-| `describe` | — | `str` | 主/子 agent 共用的任务进度与依赖提示词 |
+| `system_guidance` | — | `str` | 创建返回 ID、更新/委派传递 ID 及验收状态流转工作流 |
 | `get_turn_start_reminder` | `mode, is_subagent` | `str` | 未完成且连续 ≥3 轮未用任务工具时注入任务列表；Plan 模式静默 |
 | `notify_tool_round` | `tool_names` | `None` | 含任意 `task_*` 工具则重置计数，否则 +1 |
 | `pop_post_round_reminder` | `mode, is_subagent` | `str \| None` | 同条件下提示“更新你的任务列表”；Plan 模式静默 |

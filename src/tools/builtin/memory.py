@@ -30,12 +30,7 @@ def _memory_mgr(deps: Any) -> Any:
 
 @tool(
     model=SaveMemory,
-    description=(
-        "保存一条新的项目记忆。只保存长期有用的偏好、反馈、项目约定和参考；"
-        "不要保存秘密、临时状态或可从代码读取的信息。同标题记忆会被全量覆盖。"
-        "保存前必须检查已知记忆；如果语义相近，复用已有标题，合并新旧内容后覆盖，"
-        "不要创建近似重复记忆。"
-    ),
+    description="保存或全量覆盖一条项目记忆。",
     policy=ToolPolicy(AccessKind.INTERNAL, DataFlow.LOCAL, plan_safe=True),
     availability=ToolAvailability(frozenset({RunMode.EXECUTE}), feature="memory"),
 )

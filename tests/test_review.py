@@ -54,6 +54,15 @@ def test_permission_judge_caps_structured_review_at_three_attempts() -> None:
     assert llm_mgr.models == ["fast"]
     assert provider.calls[0]["max_attempts_cap"] == 3
     assert provider.calls[0]["tool_choice"] == "required"
+    system = provider.calls[0]["prompt"][0]["content"]
+    request = json.loads(provider.calls[0]["messages"][0]["content"])
+    assert "权限风险分类器" in system
+    assert "# 身份与责任" not in system
+    assert "# 消息来源与标签" not in system
+    assert request == {"tool": "shell"}
+    assert [tool["function"]["name"] for tool in provider.calls[0]["tools"]] == [
+        "record_verdict"
+    ]
 
 
 def test_web_safety_caps_structured_review_at_three_attempts() -> None:
@@ -68,3 +77,9 @@ def test_web_safety_caps_structured_review_at_three_attempts() -> None:
     assert llm_mgr.models == ["current"]
     assert provider.calls[0]["max_attempts_cap"] == 3
     assert provider.calls[0]["tool_choice"] == "required"
+    system = provider.calls[0]["prompt"][0]["content"]
+    request = json.loads(provider.calls[0]["messages"][0]["content"])
+    assert "Web 外部读取" in system
+    assert "# 身份与责任" not in system
+    assert "# 消息来源与标签" not in system
+    assert request == {"url": "https://example.test"}

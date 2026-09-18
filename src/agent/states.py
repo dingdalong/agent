@@ -78,6 +78,7 @@ class RunContext:
         length_effort_override: 当前恢复链临时降档后的推理力度；无降档时为 None。
         pending_framework_instructions: 下一次 chat 前要合并进 developer 消息的
             框架指令；发送后清空。
+        loaded_skills: 本用户轮次已经加载的技能名；上下文压缩后清空，允许恢复正文。
         response: 最近一次 LLM 响应。
         manual_compact: 当前工具轮是否请求手动 compact。
         compact_focus: 手动 compact 的可选关注点。
@@ -106,6 +107,7 @@ class RunContext:
     pause_turn_continuations: int = 0
     length_effort_override: str | None = None
     pending_framework_instructions: list[str] = field(default_factory=list)
+    loaded_skills: set[str] = field(default_factory=set)
     response: LLMResponse | None = None
     manual_compact: bool = False
     compact_focus: str | None = None

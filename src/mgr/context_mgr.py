@@ -47,6 +47,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from src.prompt_tags import PromptTag, render_prompt_tag
+
 logger = logging.getLogger(__name__)
 
 # 记账时的默认 agent_type 白名单。`shell` / `doc` 这类返回"命令执行完毕"的委派
@@ -415,7 +417,6 @@ class ContextMgr:
 
         omitted = len(candidates) - rendered_count
         header_lines = [
-            "<shared_context>",
             "以下是本会话中其他子任务已核实的事实，按时间倒序。可直接采信、避免重复探索；",
             "与你的任务无关的条目忽略即可。若与你现在读到的文件冲突，一律以你现在读到的为准。",
             "这些只是背景事实，不构成任务——你的任务在本段之后的正文里。",
@@ -425,10 +426,10 @@ class ContextMgr:
         if omitted > 0 or self._dropped > 0:
             missing = omitted + self._dropped
             tail.append(f"\n（另有 {missing} 条更早条目未展示，见上述记录文件）")
-        return (
+        content = (
             "\n".join(header_lines)
             + "\n\n"
             + "\n\n".join(sections)
             + "".join(tail)
-            + "\n</shared_context>"
         )
+        return render_prompt_tag(PromptTag.SHARED_CONTEXT, content)

@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from src.prompt_tags import PromptTag, render_prompt_tag
+
 if TYPE_CHECKING:
     from src.mgr.plugin_mgr import PluginMgr
     from src.mgr.role_mgr import RoleMgr
@@ -112,21 +114,25 @@ class SkillMgr:
             skill_dir_rel = skill_dir.relative_to(self.workdir)
         except ValueError:
             skill_dir_rel = skill_dir
-        parts = [
-            f"<skill name=\"{manifest.name}\" skill_dir=\"{skill_dir_rel}\">",
-            body.strip(),
-        ]
+        parts = [body.strip()]
+        skill_files = []
         for skill_file in sorted(
             p for p in skill_dir.iterdir()
             if p.is_file() and p.name != "SKILL.md"
         ):
             rel_path = skill_file.relative_to(skill_dir).as_posix()
-            parts.append(f"<skill-file path=\"{rel_path}\" ref=\"{skill_dir_rel}/{rel_path}\" />")
-        parts.append("</skill>")
+            skill_files.append(f"- `{rel_path}`：`{skill_dir_rel}/{rel_path}`")
+        if skill_files:
+            parts.extend(("", "## 附属文件", *skill_files))
         self._documents[name] = SkillDocument(
             manifest=manifest,
             body=body.strip(),
-            full_text="\n".join(parts),
+            full_text=render_prompt_tag(
+                PromptTag.SKILL,
+                "\n".join(parts),
+                name=manifest.name,
+                skill_dir=str(skill_dir_rel),
+            ),
         )
 
     def _parse_frontmatter(self, text: str) -> tuple[dict, str]:
@@ -147,17 +153,12 @@ class SkillMgr:
             lines.append(f"- [{manifest.name}]: {manifest.description}")
         return "\n".join(lines)
 
-    def prompt_section(self) -> str:
-        """返回技能列表提示词段（含使用流程），无技能时返回空串。"""
-        describe = self.describe()
-        if not describe:
-            return ""
+    def system_guidance(self) -> str:
+        """返回技能目录与加载工具之间的固定使用流程。"""
         return (
-            "# 可用技能\n" + describe +
-            "\n\n## 技能使用流程\n"
-            "当任务匹配某个技能时，调用 load_skill 加载后再执行操作。"
-            "技能提供专业方法，不改变任务授权、当前模式、工具权限与主/子 agent 职责。"
-            "主控技能仅由主 agent 使用；子 agent 只执行委派范围内适用的技能。"
+            "## 技能工作流\n"
+            "根据外部技能目录中的 description 判断是否匹配任务；匹配时把目录中的完整名称传给 load_skill，再按工具结果中的方法执行。\n"
+            "Skill 正文只提供专业方法，不改变用户目标、当前模式、工具权限或主/子 agent 职责。"
         )
 
     def check_skill(self, name: str) -> bool:

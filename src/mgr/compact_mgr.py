@@ -12,6 +12,12 @@ from typing import Any
 from src.llm.base import LLMProvider
 from src.mgr.paths import project_data_dir
 from src.mgr.secure_io import atomic_write_text
+from src.prompt_tags import (
+    PromptConsumer,
+    PromptTag,
+    render_prompt_tag,
+    render_tag_guide,
+)
 
 
 @dataclass
@@ -26,16 +32,16 @@ class CompactResult:
 class CompactionPartition:
     """源对话消息的无损分区。"""
 
-    preserved_messages: list[dict]
+    prefix_messages: list[dict]
     messages_to_summarize: list[dict]
     recent_messages: list[dict]
 
 
 @dataclass(frozen=True)
 class _SummaryRequest:
-    """已完整渲染的摘要请求及其输入量估算。"""
+    """已渲染的动态摘要输入及完整请求输入量估算。"""
 
-    prompt: str
+    user_content: str
     estimated_tokens: int
 
 
@@ -70,6 +76,26 @@ def _atomic_message_spans(messages: list[dict]) -> list[tuple[int, int]]:
                 index += 1
         spans.append((start, index))
     return spans
+
+
+def _leading_developer_start(
+    messages: list[dict],
+    user_index: int,
+    floor: int = 0,
+) -> int:
+    """返回与用户消息相邻的前置 developer 消息起点。"""
+    start = user_index
+    while start > floor and messages[start - 1].get("role") == "developer":
+        start -= 1
+    return start
+
+
+def _contains_prompt_tag(message: dict, tag: PromptTag) -> bool:
+    """判断框架 developer 消息是否包含指定注册标签。"""
+    if message.get("role") != "developer":
+        return False
+    content = message.get("content", "")
+    return isinstance(content, str) and f"<{tag.value}>" in content
 
 
 def _validate_and_materialize_pages(
@@ -119,22 +145,19 @@ def _bisect_fragment_at(fragments: list[str], fragment_index: int) -> bool:
     return True
 
 
-def _message_content_text(message: dict) -> str:
-    """在不转义 Unicode 文本的前提下渲染一条消息的内容。
-
-    Args:
-        message: 待渲染内容的消息。
-
-    Returns:
-        字符串原文；结构化内容则返回完整 JSON。
-    """
-    content = message.get("content", "")
-    if isinstance(content, str):
-        return content
-    return _serialize_json(content)
+_COMPACTOR_SYSTEM_PROMPT = "\n\n".join((
+    "# 压缩职责\n"
+    "生成简洁、具体、可执行的压缩历史摘要，供后续工作继续。\n"
+    "只总结待压缩历史。保留原文和近期原文仅作上下文参照，不得复述、改写或重复总结；"
+    "近期原文是当前状态的权威依据，发生冲突时以近期原文为准。\n"
+    "保留仍有效的用户要求与约束、设计决策、完成结果、未解决问题、风险、待办、"
+    "重要文件与命令、测试与错误证据，以及已有摘要中仍有效的信息。删除已被取代的尝试、"
+    "寒暄、重复确认和低价值过程。直接输出完整摘要正文，不要输出 XML 标签、JSON 原文或解释。",
+    render_tag_guide(PromptConsumer.COMPACTOR),
+))
 
 
-def _build_summary_prompt(
+def _build_summary_input(
     preserved_reference: str,
     history_text: str,
     recent_reference: str,
@@ -142,7 +165,7 @@ def _build_summary_prompt(
     prior_summary: str,
     is_serialized_page: bool,
 ) -> str:
-    """构建一条具体的滚动摘要提示词。
+    """构建一条包含本批动态数据的滚动摘要 user 消息。
 
     Args:
         preserved_reference: 序列化后的完整保留原文消息。
@@ -153,49 +176,54 @@ def _build_summary_prompt(
         is_serialized_page: history_text 是否为原子消息块的一页。
 
     Returns:
-        要求生成完整更新版滚动摘要的提示词。
+        本次压缩调用的动态 user 消息正文。
     """
-    focus_section = ""
+    sections = []
     if focus:
-        focus_section = (
+        sections.append(
             "重点保留提示：\n"
-            f"<compaction_focus>\n{focus}\n</compaction_focus>\n\n"
+            + render_prompt_tag(PromptTag.COMPACTION_FOCUS, focus)
         )
-    prior_section = ""
     if prior_summary:
-        prior_section = (
+        sections.append(
             "这是此前各批历史的完整滚动摘要。把本批新增信息合并进去，输出更新后的完整摘要，"
             "不要只输出增量：\n"
-            f"<prior_rolling_summary>\n{prior_summary}\n</prior_rolling_summary>\n\n"
+            + render_prompt_tag(
+                PromptTag.PRIOR_COMPACTION_SUMMARY, prior_summary,
+            )
         )
     if is_serialized_page:
         history_instruction = (
             "下面是一个过大原子消息块的连续无损序列化分页。只总结本页新增信息；"
             "即使本页不是独立 JSON，也必须按原始文本理解："
         )
-        history_tag = "serialized_history_page_to_summarize"
+        history_format = "serialized_page"
     else:
         history_instruction = "下面是本批待压缩历史："
-        history_tag = "history_chunk_to_summarize"
+        history_format = "message_batch"
 
-    return (
-        "请生成一份简洁、具体、可执行的压缩历史摘要，供后续工作继续。\n"
-        "只总结待压缩历史。保留原文和近期原文仅作上下文参照，不得复述、改写或重复总结；"
-        "近期原文是当前状态的权威依据，发生冲突时以近期原文为准。\n"
-        "保留仍有效的用户要求与约束、设计决策、完成结果、未解决问题、风险、待办、"
-        "重要文件与命令、测试与错误证据，以及已有摘要中仍有效的信息。删除已被取代的尝试、"
-        "寒暄、重复确认和低价值过程。直接输出完整摘要正文，不要输出 XML 标签、JSON 原文或解释。\n\n"
-        f"{focus_section}"
-        f"{prior_section}"
+    sections.extend((
         "以下原文保留消息只供参照，不要总结：\n"
-        f"<preserved_messages_reference>\n{preserved_reference}\n"
-        "</preserved_messages_reference>\n\n"
-        f"{history_instruction}\n"
-        f"<{history_tag}>\n{history_text}\n</{history_tag}>\n\n"
+        + render_prompt_tag(
+            PromptTag.HISTORY_REFERENCE,
+            preserved_reference,
+            kind="preserved",
+        ),
+        history_instruction
+        + "\n"
+        + render_prompt_tag(
+            PromptTag.HISTORY_TO_SUMMARIZE,
+            history_text,
+            format=history_format,
+        ),
         "以下近期原文只供参照，不要总结；它对当前状态具有权威性：\n"
-        f"<recent_raw_messages_reference>\n{recent_reference}\n"
-        "</recent_raw_messages_reference>"
-    )
+        + render_prompt_tag(
+            PromptTag.HISTORY_REFERENCE,
+            recent_reference,
+            kind="recent",
+        ),
+    ))
+    return "\n\n".join(sections)
 
 
 @dataclass
@@ -295,78 +323,109 @@ class CompactMgr:
     def split_history_for_compaction(
         self,
         messages: list[dict],
+        bootstrap_message_count: int = 0,
     ) -> CompactionPartition:
-        """在不拆分助手消息与工具结果原子块的前提下划分历史。
+        """划分不可压缩前缀、待摘要中段和近期原文后缀。
 
-        最后 ``keep_recent_user_turns`` 个用户轮次定义优先保留原文的后缀。
-        后缀未超出限制时从该位置准确开始；后缀过大时按原子块向后裁剪。
-        该配置为零时不保留用户轮次后缀。没有用户消息时，保留符合限制的
-        最大原子后缀。
+        初始化上下文和首个真实用户轮次始终原文保留。developer 与其后紧邻的
+        user 视为同一轮；近期后缀至少保留当前用户轮次，并受配置扩展。中段旧
+        developer 属于过期框架控制信息，不进入摘要；最新模式 developer 若落在
+        中段则移动到近期后缀之前。
 
         Args:
             messages: 按原始顺序排列的源对话消息。
+            bootstrap_message_count: 开头不可压缩的初始化外部消息数量。
 
         Returns:
-            必须保留的消息、可摘要历史和受 token 限制的近期后缀。
+            不可压缩前缀、可摘要历史和受 token 限制的近期后缀。
         """
+        bootstrap_count = max(0, min(bootstrap_message_count, len(messages)))
+        bootstrap_messages = messages[:bootstrap_count]
+        conversation = messages[bootstrap_count:]
         user_indices = [
-            idx for idx, message in enumerate(messages)
+            idx for idx, message in enumerate(conversation)
             if message.get("role") == "user"
         ]
-        if user_indices and self.keep_recent_user_turns <= 0:
-            recent_start = len(messages)
-        else:
-            if user_indices:
-                preferred_turn_count = min(
-                    self.keep_recent_user_turns,
-                    len(user_indices),
+        if not user_indices:
+            return CompactionPartition(
+                prefix_messages=bootstrap_messages,
+                messages_to_summarize=[
+                    message for message in conversation
+                    if message.get("role") != "developer"
+                ],
+                recent_messages=[],
+            )
+
+        first_user_index = user_indices[0]
+        first_turn_end = first_user_index + 1
+        preferred_turn_count = min(
+            max(self.keep_recent_user_turns, 1),
+            len(user_indices),
+        )
+        preferred_user_position = len(user_indices) - preferred_turn_count
+        recent_start = _leading_developer_start(
+            conversation,
+            user_indices[preferred_user_position],
+            first_turn_end,
+        )
+
+        if (
+            self.llm.estimate_tokens(conversation[recent_start:])
+            > self.recent_messages_token_limit
+        ):
+            recent_start = _leading_developer_start(
+                conversation,
+                user_indices[-1],
+                first_turn_end,
+            )
+            for position in range(preferred_user_position + 1, len(user_indices)):
+                candidate_start = _leading_developer_start(
+                    conversation,
+                    user_indices[position],
+                    first_turn_end,
                 )
-                preferred_start = user_indices[-preferred_turn_count]
-            else:
-                preferred_start = 0
+                if (
+                    self.llm.estimate_tokens(conversation[candidate_start:])
+                    <= self.recent_messages_token_limit
+                ):
+                    recent_start = candidate_start
+                    break
 
-            preferred_messages = messages[preferred_start:]
-            if (
-                not preferred_messages
-                or self.llm.estimate_tokens(preferred_messages)
-                <= self.recent_messages_token_limit
-            ):
-                recent_start = preferred_start
-            else:
-                recent_start = len(messages)
-                for start, _ in reversed(_atomic_message_spans(messages)):
-                    if start < preferred_start:
-                        break
-                    candidate = messages[start:]
-                    if (
-                        self.llm.estimate_tokens(candidate)
-                        > self.recent_messages_token_limit
-                    ):
-                        break
-                    recent_start = start
+        if recent_start <= first_user_index:
+            return CompactionPartition(
+                prefix_messages=bootstrap_messages,
+                messages_to_summarize=[],
+                recent_messages=conversation,
+            )
 
-        required_user_indices: list[int] = []
-        if user_indices:
-            required_user_indices.append(user_indices[0])
-            if user_indices[-1] != user_indices[0]:
-                required_user_indices.append(user_indices[-1])
-        preserved_indices = {
-            index for index in required_user_indices if index < recent_start
-        }
-        preserved_messages = [
-            message
-            for index, message in enumerate(messages[:recent_start])
-            if index in preserved_indices
-        ]
+        prefix_messages = bootstrap_messages + conversation[:first_turn_end]
+        middle = conversation[first_turn_end:recent_start]
+        recent_messages = list(conversation[recent_start:])
+
+        latest_mode_index = next(
+            (
+                index
+                for index in range(len(conversation) - 1, -1, -1)
+                if _contains_prompt_tag(
+                    conversation[index], PromptTag.COLLABORATION_MODE,
+                )
+            ),
+            None,
+        )
+        if (
+            latest_mode_index is not None
+            and first_turn_end <= latest_mode_index < recent_start
+        ):
+            recent_messages.insert(0, conversation[latest_mode_index])
+
         messages_to_summarize = [
-            message
-            for index, message in enumerate(messages[:recent_start])
-            if index not in preserved_indices
+            message for message in middle
+            if message.get("role") != "developer"
         ]
         return CompactionPartition(
-            preserved_messages=preserved_messages,
+            prefix_messages=prefix_messages,
             messages_to_summarize=messages_to_summarize,
-            recent_messages=messages[recent_start:],
+            recent_messages=recent_messages,
         )
 
     def _create_summary_request(
@@ -389,9 +448,9 @@ class CompactMgr:
             is_serialized_page: history_text 是否为一页不完整的 JSON。
 
         Returns:
-            渲染后的提示词和提供方估算的输入 token 数量。
+            动态 user 正文和包含压缩 system 的输入 token 估算。
         """
-        prompt = _build_summary_prompt(
+        user_content = _build_summary_input(
             preserved_reference=preserved_reference,
             history_text=history_text,
             recent_reference=recent_reference,
@@ -399,11 +458,16 @@ class CompactMgr:
             prior_summary=prior_summary,
             is_serialized_page=is_serialized_page,
         )
-        estimated_tokens = self.llm.estimate_tokens([{
+        messages = [{
             "role": "user",
-            "content": prompt,
-        }])
-        return _SummaryRequest(prompt=prompt, estimated_tokens=estimated_tokens)
+            "content": user_content,
+        }]
+        system_prompt = [{"role": "system", "content": _COMPACTOR_SYSTEM_PROMPT}]
+        estimated_tokens = self.llm.estimate_tokens(messages, system_prompt)
+        return _SummaryRequest(
+            user_content=user_content,
+            estimated_tokens=estimated_tokens,
+        )
 
     def _largest_fitting_atomic_chunk(
         self,
@@ -459,7 +523,8 @@ class CompactMgr:
             去除首尾空白的摘要正文；响应为空时返回空字符串。
         """
         response = await self.llm.chat(
-            messages=[{"role": "user", "content": request.prompt}],
+            prompt=[{"role": "system", "content": _COMPACTOR_SYSTEM_PROMPT}],
+            messages=[{"role": "user", "content": request.user_content}],
             caller_agent_type=self.caller_agent_type,
             caller_uuid=self.caller_uuid,
             enable_thinking=False,
@@ -624,64 +689,38 @@ class CompactMgr:
 
     def build_compacted_context_prefix(
         self,
-        preserved_messages: list[dict],
         summary: str,
         recent_files_hint: str = "",
     ) -> str:
-        """根据原文参照和摘要构建压缩后的用户消息前缀。
+        """构建放在原文前缀与近期原文之间的摘要消息。
 
         Args:
-            preserved_messages: 近期历史之外必须保留的用户原文消息。
             summary: 压缩历史的非空摘要。
             recent_files_hint: 后续可能重新打开的可选文件路径提示。
 
         Returns:
             放置在权威近期原文历史之前的用户消息内容。
         """
-        preserved_users = [
-            message for message in preserved_messages
-            if message.get("role") == "user"
-        ]
-        preserved_sections: list[str] = []
-        for index, message in enumerate(preserved_users):
-            if len(preserved_users) == 1:
-                tag = "preserved_user_message"
-            elif index == 0:
-                tag = "first_user_message"
-            elif index == len(preserved_users) - 1:
-                tag = "current_user_message"
-            else:
-                tag = "preserved_user_message"
-            preserved_sections.append(
-                f"<{tag}>\n{_message_content_text(message)}\n</{tag}>"
-            )
-
-        preserved_reference = ""
-        if preserved_sections:
-            preserved_reference = (
-                "以下是压缩时必须保留的用户原文；各条用途由标签区分。\n"
-                f"{'\n\n'.join(preserved_sections)}\n\n"
-            )
-
         return (
-            f"{preserved_reference}"
             "以下是已压缩历史摘要，用于衔接原始用户需求和后续未压缩近期原文。\n"
             "这不是完整对话；摘要之后的未压缩近期原文应优先作为当前状态依据。\n"
             "如果摘要与后续原文冲突，以后续原文为准。\n\n"
-            f"<compacted_history_summary>\n{summary}\n</compacted_history_summary>"
-            f"{recent_files_hint}"
+            + render_prompt_tag(PromptTag.COMPACTED_HISTORY_SUMMARY, summary)
+            + recent_files_hint
         )
 
     async def compact_history(
         self,
         messages: list[dict],
         focus: str | None = None,
+        bootstrap_message_count: int = 0,
     ) -> CompactResult:
         """持久化、划分、摘要并安全压缩对话历史。
 
         Args:
             messages: 源对话消息。
             focus: 用户可选提供的摘要重点。
+            bootstrap_message_count: 开头不可压缩的初始化外部消息数量。
 
         Returns:
             包含压缩后消息、对话记录路径、尝试摘要的消息数和摘要结果的对象。
@@ -693,6 +732,7 @@ class CompactMgr:
         partition = await asyncio.to_thread(
             self.split_history_for_compaction,
             messages,
+            bootstrap_message_count,
         )
         attempted_count = len(partition.messages_to_summarize)
         if attempted_count == 0:
@@ -702,7 +742,7 @@ class CompactMgr:
             )
 
         summary = await self.summarize_history(
-            preserved_messages=partition.preserved_messages,
+            preserved_messages=partition.prefix_messages,
             messages_to_summarize=partition.messages_to_summarize,
             recent_messages=partition.recent_messages,
             focus=focus,
@@ -722,31 +762,11 @@ class CompactMgr:
         self.has_compacted = True
         context_prefix = await asyncio.to_thread(
             self.build_compacted_context_prefix,
-            partition.preserved_messages,
             summary,
             recent_files_hint,
         )
-        if (
-            partition.recent_messages
-            and partition.recent_messages[0].get("role") == "user"
-        ):
-            first_recent = dict(partition.recent_messages[0])
-            first_recent["content"] = (
-                f"{context_prefix}\n\n"
-                "以下是未压缩近期原文中的第一条用户消息，之后的历史消息保持原始顺序。\n"
-                "<uncompressed_recent_user_message>\n"
-                f"{first_recent.get('content', '')}\n"
-                "</uncompressed_recent_user_message>"
-            )
-            return CompactResult(
-                messages=[first_recent] + partition.recent_messages[1:],
-                transcript_path=transcript_path,
-                summarized_message_count=attempted_count,
-                summary=summary,
-            )
-
         return CompactResult(
-            messages=[{
+            messages=partition.prefix_messages + [{
                 "role": "user",
                 "content": context_prefix,
             }] + partition.recent_messages,

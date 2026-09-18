@@ -129,8 +129,39 @@ def test_turn_start_instructions_remain_separate_from_task() -> None:
 
     asyncio.run(agent.run("任务正文"))
 
-    assert agent.history == [{"role": "user", "content": "任务正文"}]
-    assert reminder.pop_pending() == ["只读"]
+    assert [message["role"] for message in agent.history] == ["developer", "user"]
+    assert "只读" in agent.history[0]["content"]
+    assert agent.history[1] == {"role": "user", "content": "任务正文"}
+    assert reminder.pop_pending() == []
+
+
+def test_first_framework_message_precedes_real_user_request() -> None:
+    """Manager 工作流、模式和提醒在首个真实 user 之前合并。"""
+    agent, reminder = _agent(is_subagent=False, mode=RunMode.PLAN)
+    agent._prompt_mgr = SimpleNamespace(
+        build_initial_context_messages=lambda: [{
+            "role": "user",
+            "content": "CATALOGS\nAGENTS\nENVIRONMENT",
+        }],
+        build_manager_instructions=lambda: "MANAGER_WORKFLOW",
+        build_mode_instructions=lambda: "MODE_PLAN",
+    )
+    reminder.pending.append("TURN_REMINDER")
+
+    asyncio.run(agent.run("REAL_USER_REQUEST"))
+
+    assert [message["role"] for message in agent.history] == [
+        "user", "developer", "user",
+    ]
+    assert agent.history[0]["content"] == "CATALOGS\nAGENTS\nENVIRONMENT"
+    developer = agent.history[1]["content"]
+    positions = [
+        developer.index(marker)
+        for marker in ("MANAGER_WORKFLOW", "MODE_PLAN", "TURN_REMINDER")
+    ]
+    assert positions == sorted(positions)
+    assert agent.history[2]["content"] == "REAL_USER_REQUEST"
+    assert agent._initial_context_message_count == 1
 
 
 def test_chat_boundary_combines_mode_and_reminders_into_one_developer() -> None:

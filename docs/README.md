@@ -47,6 +47,7 @@ uv run pytest                            # 运行全部测试
 | [mcp-and-hooks.md](mcp-and-hooks.md) | MCP 三层合并/三种 transport/工具命名/server 开关；Hooks 8 事件/配置格式/JSON 协议/退出码 |
 | [events-and-ui.md](events-and-ui.md) | `EventBus` API、`EventLevel` 门控、事件目录表、`UserInterface`/`TextualInterface`、多 Agent 路由、流式 Markdown、响应式布局与交互协调 |
 | [configuration-reference.md](configuration-reference.md) | 配置总参考：三层合并规则、`config.yaml`/`settings.json`/`mcp_servers.json` 完整 schema、环境变量、目录布局 |
+| [prompting.md](prompting.md) | 固定 system、模式 developer、外部 user 的职责边界，标签注册与 Provider 适配契约 |
 
 ## 按主题跳转
 
@@ -55,3 +56,4 @@ uv run pytest                            # 运行全部测试
 - **想加角色/子 agent/技能**：[roles-subagents-skills.md](roles-subagents-skills.md)。
 - **想懂运行流程**：[agent-runtime.md](agent-runtime.md)（状态机）+ [architecture.md](architecture.md)（装配）+ [events-and-ui.md](events-and-ui.md)（I/O）。
 - **想接外部 server / 生命周期钩子**：[mcp-and-hooks.md](mcp-and-hooks.md)。
+- **想改提示词或新增结构标签**：[prompting.md](prompting.md)。

@@ -19,6 +19,7 @@ from src.llm.base import LLMResponse
 from src.mode import RunMode
 from src.mgr.data_guard import DataGuard
 from src.mgr.features import resolve_features
+from src.mgr.hooks_mgr import HookRunResult
 from src.mgr.permission_mgr import JudgeVerdict, PermissionManager
 from src.mgr.role_mgr import RoleMgr
 from src.mgr.skill_mgr import SkillMgr
@@ -97,8 +98,50 @@ def _call(agent: Agent, name: str, arguments: dict) -> str:
     return agent.history[-1]["content"]
 
 
+def test_skill_loading_deduplicates_per_turn_and_resets_with_new_context(tmp_path: Path) -> None:
+    """同一用户轮次只注入一次正文；新轮次可再次加载。"""
+    parent = _main(tmp_path, "coding")
+    first_context = RunContext(messages=parent.history)
+
+    async def load(context: RunContext) -> str:
+        result = await parent.deps.tools_mgr.execute(
+            "load_skill", {"name": "builtin:debugging"},
+            deps=parent.deps, agent=parent, run_context=context,
+        )
+        return str(result)
+
+    first = asyncio.run(load(first_context))
+    duplicate = asyncio.run(load(first_context))
+    next_turn = asyncio.run(load(RunContext(messages=parent.history)))
+
+    assert '<skill name="builtin:debugging"' in first
+    assert "无需重复加载" in duplicate
+    assert '<skill name="builtin:debugging"' in next_turn
+
+
+def test_blocked_skill_result_does_not_consume_turn_deduplication(tmp_path: Path) -> None:
+    """正文未进入历史时，本轮仍可重新加载该技能。"""
+    parent = _main(tmp_path, "coding")
+    context = RunContext(messages=parent.history)
+
+    class Hooks:
+        async def run_event(self, event, tool, payload, **kwargs):
+            if event == "PostToolUse":
+                return HookRunResult(blocked=True, block_reason="blocked")
+            return HookRunResult()
+
+    parent.deps.hooks_mgr = Hooks()
+    result = asyncio.run(parent.deps.tools_mgr.execute(
+        "load_skill", {"name": "builtin:debugging"},
+        deps=parent.deps, agent=parent, run_context=context,
+    ))
+
+    assert result.error_code == "hook_blocked"
+    assert context.loaded_skills == set()
+
+
 @pytest.mark.parametrize(("role_name", "exclusive", "skills"), [
-    ("coding", {"coder", "review"}, {"plan-workflow", "execute-plan", "debugging"}),
+    ("coding", {"coder", "review"}, {"debugging"}),
     ("mijia", set(), {"control-devices", "diagnose-home", "manage-scenes"}),
     ("onboard", {"repository-map", "evidence-analyst", "evidence-reviewer"}, {
         "onboard-analyze-module", "onboard-resolve-relations", "onboard-classify-evidence",

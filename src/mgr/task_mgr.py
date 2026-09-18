@@ -591,17 +591,15 @@ class TaskManager:
         if not task.metadata:
             task.metadata = None
 
-    def describe(self) -> str:
-        """返回与执行分工无关的任务进度及依赖指导。"""
+    def system_guidance(self) -> str:
+        """返回任务工具之间的固定生命周期指导。"""
         return (
-            "# 任务管理\n\n"
+            "## 进度跟踪工作流\n"
             "复杂工作需要跟踪进度或依赖时使用 task_*，按可验收结果组织任务；简单工作直接执行。\n"
             "复用已有相关任务，不按用户步骤或子 agent 数量机械拆分。\n"
-            "subject 使用简短祈使句；description 写清目标、范围和验证方式；active_form 可提供进行时描述。\n"
-            "先用 task_create 获得任务 ID，再用 task_update 的 add_blocked_by / add_blocks 声明依赖。\n"
+            "task_create 返回的任务 ID 传给后续 task_update；需要委派已有任务时，同一 ID 继续传给 task_delegator。\n"
             "优先推进无未完成依赖的任务；实际执行前标记 in_progress，完全完成并验收后标记 completed。\n"
             "遇到错误或阻碍时不标完成，尝试解决；无法解决时说明未完成项和具体原因。\n"
-            "仅在任务取消、合并或创建有误时设 deleted；已完成任务保持 completed。\n"
             "本轮正常结束且全部任务完成时，框架自动清空任务列表。"
         )
 

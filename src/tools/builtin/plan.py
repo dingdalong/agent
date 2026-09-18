@@ -11,10 +11,10 @@ from src.tools.policy import AccessKind, DataFlow, ToolAudience, ToolAvailabilit
 
 class SubmitPlan(BaseModel):
     title: str = Field(..., min_length=1, max_length=200)
-    content: str = Field(..., min_length=1, description='完整自包含计划正文；修订时提交完整替换内容')
+    content: str = Field(..., min_length=1, description='完整自包含计划正文')
 
 
-@tool(model=SubmitPlan, description='一次提交完整计划。框架保存、展示、审核；不要另写文件、登记路径或重复输出计划。', policy=ToolPolicy(AccessKind.INTERNAL, DataFlow.LOCAL, plan_safe=True), availability=ToolAvailability(frozenset({RunMode.PLAN}), feature='plan', audience=ToolAudience.MAIN_ONLY), counts_as_work=False)
+@tool(model=SubmitPlan, description='提交计划，由框架保存、展示并发起审核。', policy=ToolPolicy(AccessKind.INTERNAL, DataFlow.LOCAL, plan_safe=True), availability=ToolAvailability(frozenset({RunMode.PLAN}), feature='plan', audience=ToolAudience.MAIN_ONLY), counts_as_work=False)
 async def submit_plan(title, content, agent, deps, authorization):
     if not authorization.allowed or agent.mode is not RunMode.PLAN or deps.plan_mgr is None:
         return ToolResult.failure('invalid_plan_state', '仅计划模式下可提交计划')
@@ -46,5 +46,6 @@ async def submit_plan(title, content, agent, deps, authorization):
     if feedback.strip():
         return ToolResult(f'修改意见：{feedback.strip()}\n请修订后再次 submit_plan；路径：{path}')
     if choice == 'auto':
-        return ToolResult(f'已批准计划：{path}。已退出计划模式，加载 builtin:execute-plan 并实施；正文已在当前对话中，不要重复读取。')
+        agent.queue_user_action('执行已批准的计划。')
+        return ToolResult(f'已批准计划：{path}。已退出计划模式，将在下一用户轮次开始实施。', end_turn=True)
     return ToolResult(f'计划已保存：{path}。' + ('用户选择手动执行。' if choice == 'manual' else '审核已取消，保持计划模式。'), end_turn=True)

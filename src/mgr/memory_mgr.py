@@ -56,8 +56,17 @@ class MemoryMgr:
     def reload(self) -> None:
         self._load_all()
 
-    def build_prompt(self) -> str:
-        """构建项目记忆提示词段。无记忆时返回空字符串。"""
+    def system_guidance(self) -> str:
+        """返回项目记忆读取与覆盖保存的固定工作流。"""
+        return (
+            "## 项目记忆工作流\n"
+            "记忆简报只用于定位可能相关的长期信息；采用前读取当前项目状态，冲突时以当前证据为准。\n"
+            "需要正文时把简报标题传给 read_memory。保存同一主题时复用该标题，必要时先读取旧正文，合并后再用 save_memory 全量覆盖；"
+            "只为主题、范围或用途明显不同的长期信息创建新标题。"
+        )
+
+    def build_context(self) -> str:
+        """构建项目记忆简报。无记忆时返回空字符串。"""
         entries = list(self.entries.values())
         selected = entries[: self.max_prompt_entries]
 
@@ -66,16 +75,7 @@ class MemoryMgr:
 
         parts = [
             "# 项目记忆",
-            "使用记忆的方式：",
-            "1. 先把 memory 当作方向提示。",
-            "2. 再去读当前文件、当前资源、当前配置。",
-            "3. 如果冲突，优先相信你刚观察到的真实状态。",
-            "保存记忆前，先检查已知记忆简报。",
-            "如果新信息和已有记忆语义相近，属于同一主题、同一偏好、同一约束或同一类反馈，"
-            "不要创建新标题；复用已有记忆的原标题，必要时用 read_memory 读取旧正文，"
-            "合并新旧内容后调用 save_memory 用同一标题全量覆盖。",
-            "只有主题、适用范围或用途明显不同，才创建新的记忆标题。",
-            "## 已知记忆（简报）：",
+            "## 已知记忆（简报）",
         ]
 
         for memory_type in MEMORY_TYPES:
@@ -95,9 +95,7 @@ class MemoryMgr:
                     )
                 )
 
-        rendered = "\n".join(parts)
-        rendered += "\n当需要了解某个记忆的详细内容时，使用 read_memory 加载。"
-        return rendered
+        return "\n".join(parts)
 
     def save(
         self,

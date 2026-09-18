@@ -878,7 +878,7 @@ def test_compact_summary_events_keep_agent_identity_and_reach_foreground(
     )
 
     summary = asyncio.run(manager._call_summary_request(
-        _SummaryRequest(prompt="请摘要", estimated_tokens=2),
+        _SummaryRequest(user_content="请摘要", estimated_tokens=2),
     ))
 
     assert summary == "摘要"

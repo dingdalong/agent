@@ -179,7 +179,7 @@ handler 映射在 `Agent.__post_init__` 建立（`src/agent/agent.py:236-250`）
 
 如果 compact 的内部摘要调用或退出总结调用失败，`LLMCallError` 都由 `_run_single_turn()` 捕获。失败的总结 developer 指令不会留在 `ctx.messages`；原用户历史保持可继续使用。上下文类别进入 `CONTEXT_OVERFLOW`，其他类别进入 `LLM_FAILURE`。
 
-`CompactMgr._call_summary_request()` 透传所属 Agent 的 `caller_agent_type` / `caller_uuid`（`src/mgr/compact_mgr.py:454-469`），因此压缩调用的开始、重试、失败和流增量都进入正确 agent 的 Store 视图。
+`CompactMgr._call_summary_request()` 使用独立的压缩 system 和动态 user 数据，不携带 PromptMgr system 或工作 Agent 历史；token 估算使用相同请求结构。调用仍透传所属 Agent 的 `caller_agent_type` / `caller_uuid`，因此开始、重试、失败和流增量进入正确 agent 的 Store 视图。成功摘要以带边界标签的 user 历史回灌工作 Agent。
 
 ## 8. 主 Agent 与子 Agent
 
@@ -200,6 +200,6 @@ handler 映射在 `Agent.__post_init__` 建立（`src/agent/agent.py:236-250`）
 
 ## 规划指令的生命周期
 
-`Agent.mode` 是模式权威，PlanMgr 管理切换和计划持久化。PromptMgr 的 `build()` 只返回 Agent 生命周期内固定的一条 system；普通/Plan 指令由 `build_mode_instructions()` 生成，在下一次 chat 前作为 developer 追加。普通模式不提计划流程、Plan 控制技能或 `submit_plan`；Plan 模式先明确当前模式及完整限制，再要求通过 `load_skill(name="builtin:plan-workflow")` 加载流程。Skill 正文是工具结果，不能进入 system/developer。模式切换不刷新工具 schema，也不即时改消息；compact 后会在下一次 chat 重申当前模式。
+`Agent.mode` 是模式权威，PlanMgr 管理切换、计划模式完整流程和计划持久化。PromptMgr 的 `build()` 只返回 Agent 生命周期内固定的一条 system，其中包含身份、通用原则、工具协议和标签说明。能力目录、AGENTS.md、记忆、会话上下文和环境按该顺序组成首条外部 user；随后 Manager 工作流、当前模式及提醒作为 developer 加在首个真实 user 之前。普通模式差量不提计划流程或 `submit_plan`；Plan 模式先明确当前模式及完整限制，再给出调查、决策收敛和提交流程，不通过 Skill 注入。模式切换不刷新工具 schema，也不即时改消息；CompactMgr 原文保留初始化前缀和首个真实轮次，并把最新模式 developer 带入近期后缀。完整边界见 [prompting.md](prompting.md)。
 
-规划严格按三阶段收敛：先核实环境事实，再只确认无法从环境推导且会改变方案的用户意图，最后补齐接口、数据流、失败路径和验收。首次独立读取同轮并行；已核实的路径、符号和区段不重复访问。计划允许沙箱内受限验证；关键决策完整后立即 `submit_plan`，不做习惯性的最后复查。
+规划严格按三阶段收敛：先核实环境事实，再只确认无法从环境推导且会改变方案的用户意图，最后补齐接口、数据流、失败路径和验收。首次独立读取同轮并行；已核实的路径、符号和区段不重复访问。计划允许沙箱内受限验证；关键决策完整后立即 `submit_plan`，不做习惯性的最后复查。自动批准时 `submit_plan` 退出计划模式、结束当前 turn，并排队一条框架生成的 user action；下一轮沿正常输入、Hook、持久化和模式 developer 链路开始执行，工具执行中途不修改消息。
