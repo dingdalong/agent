@@ -7,6 +7,7 @@ from pathlib import Path
 from dataclasses import dataclass, field
 
 from src.mode import RunMode
+from src.tools import ToolAudience
 from src.prompt_tags import (
     ExternalContextItem,
     PromptConsumer,
@@ -157,6 +158,65 @@ class PromptMgr:
         if not guidance:
             return ""
         return "# Manager 工作流\n" + "\n\n".join(guidance)
+
+    def build_capability_instructions(self) -> str:
+        """生成当前 agent 的框架能力边界说明。
+
+        工具参数仍以完整 schema 为准；此处只说明当前 agent 可以执行哪些
+        工具，以及 manifest、mode、feature 和主/子 agent 范围造成的限制。
+        """
+        tools_mgr = getattr(getattr(self.agent, "deps", None), "tools_mgr", None)
+        declared = getattr(self.agent, "tools", None)
+        features = set(getattr(self.agent, "features", set()) or ())
+        mode = getattr(self.agent, "mode", RunMode.EXECUTE)
+        is_subagent = bool(getattr(self.agent, "is_subagent", False))
+
+        if tools_mgr is None:
+            allowed = sorted(declared) if declared is not None else []
+            blocked: list[str] = []
+        else:
+            names = tools_mgr.all_tool_names()
+            candidates = names if declared is None else set(declared)
+            allowed = []
+            blocked = []
+            for name in sorted(candidates):
+                entry = tools_mgr.get(name)
+                if entry is None:
+                    # 动态 MCP 工具可能在 manifest 扫描后才注册；明确显示为
+                    # 暂不可用，避免模型把声明名称误认为当前可调用 schema。
+                    blocked.append(name)
+                    continue
+                unavailable = mode not in entry.availability.modes
+                unavailable = unavailable or (
+                    entry.availability.feature is not None
+                    and entry.availability.feature not in features
+                )
+                unavailable = unavailable or (
+                    is_subagent
+                    and entry.availability.audience is ToolAudience.MAIN_ONLY
+                )
+                (blocked if unavailable else allowed).append(name)
+
+        lines = [
+            "# 当前 Agent 能力边界",
+            f"当前 agent：{getattr(self.agent, 'agent_type', 'agent')}",
+            f"当前模式：{mode.display_name}",
+        ]
+        if allowed:
+            lines.append("允许执行的工具：" + ", ".join(f"`{name}`" for name in allowed))
+        else:
+            lines.append("允许执行的工具：无")
+        if blocked:
+            lines.append("已声明但当前不可执行（mode、feature、agent 范围或尚未注册）工具：" + ", ".join(
+                f"`{name}`" for name in blocked
+            ))
+        if declared is None:
+            lines.append("未声明 agent 级工具白名单；schema 中的工具均按当前授权策略处理。")
+        else:
+            lines.append("未列出的已注册工具不属于当前 agent 的执行白名单。")
+        if features:
+            lines.append("已启用 feature：" + ", ".join(f"`{name}`" for name in sorted(features)))
+        return "\n".join(lines)
 
     def _build_static_prompt(self) -> str:
         """组装 Agent 生命周期内固定不变的 system prompt。

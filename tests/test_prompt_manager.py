@@ -11,6 +11,7 @@ import src.tools  # noqa: F401  先完成内置工具注册，避免 mgr 聚合�
 from src.mode import RunMode
 from src.mgr.paths import builtin_root
 from src.mgr.prompt_mgr import PromptMgr
+from src.mgr.tools_mgr import ToolsMgr
 from src.mgr.role_mgr import RoleMgr, extract_manifest, parse_frontmatter
 
 
@@ -452,6 +453,36 @@ def test_static_prompt_excludes_external_and_schema_owned_content(tmp_path: Path
     for schema_field in ("subject", "description", "active_form", "add_blocks"):
         assert schema_field not in system
     assert "# 执行工具" not in system
+
+
+def test_capability_instructions_render_effective_declared_tools(tmp_path: Path) -> None:
+    """能力提示根据 manifest、mode 和 feature 给出可执行工具边界。"""
+    agent = SimpleNamespace(
+        agent_type="coder",
+        mode=RunMode.PLAN,
+        is_subagent=True,
+        tools={"exec_command", "apply_patch"},
+        features={"file"},
+        deps=SimpleNamespace(tools_mgr=ToolsMgr()),
+    )
+    manager = PromptMgr(agent=agent, workdir=tmp_path)
+
+    content = manager.build_capability_instructions()
+
+    assert "当前 agent：coder" in content
+    assert "允许执行的工具：`exec_command`" in content
+    assert "`apply_patch`" in content
+    assert "未列出的已注册工具不属于当前 agent 的执行白名单" in content
+
+
+def test_builtin_subagent_prompts_do_not_duplicate_tool_boundaries() -> None:
+    """内置子 agent 正文不再重复声明由框架生成的工具边界。"""
+    agent_files = sorted((builtin_root() / "roles").glob("*/agents/*.md"))
+    agent_files.extend(sorted((builtin_root() / "roles" / "common" / "agents").glob("*.md")))
+
+    assert agent_files
+    for path in agent_files:
+        assert "## 工具边界" not in path.read_text(), path
 
 
 def test_initial_context_orders_catalogs_agents_and_environment(tmp_path: Path) -> None:

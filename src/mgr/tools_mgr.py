@@ -96,6 +96,33 @@ class ToolsMgr:
         """返回所有已注册工具名的集合。"""
         return set(self._tools.keys())
 
+    def validate_declared_tools(
+        self,
+        declared_tools: set[str] | frozenset[str] | None,
+        *,
+        source: str = "",
+        defer_dynamic: bool = False,
+    ) -> None:
+        """校验 manifest 声明的工具均已注册。
+
+        ``None`` 表示不声明 agent 级白名单，不需要校验。显式声明中的未知
+        名称属于配置错误，不能静默过滤，否则能力提示、schema 和执行授权会
+        使用不同的工具集合。MCP 工具可以在 manifest 扫描后才注册；调用方显式
+        传入 ``defer_dynamic=True`` 时仅延迟 ``mcp__`` 名称，实际执行仍只能
+        命中已经注册的 schema。
+        """
+        if declared_tools is None:
+            return
+        unknown = set(declared_tools) - self._tools.keys()
+        if defer_dynamic:
+            unknown = {name for name in unknown if not name.startswith("mcp__")}
+        if not unknown:
+            return
+        prefix = f"{source}：" if source else ""
+        raise ValueError(
+            f"{prefix}tools 配置包含未注册工具：{', '.join(sorted(unknown))}"
+        )
+
     def schemas(self) -> list[ToolDict]:
         """返回所有已注册工具的稳定 schema 目录。"""
         if self._schemas is None:

@@ -11,12 +11,14 @@ from types import SimpleNamespace
 
 import pytest
 import yaml
+import src.tools  # noqa: F401 触发内置工具注册
 
 from src.agent import Agent
 from src.llm.errors import LLMConfigurationError
 from src.mgr.llm_mgr import MODEL_ALIASES
 from src.mgr.role_mgr import AgentManifest
 from src.mgr.subagent_mgr import SubAgentMgr
+from src.mgr.tools_mgr import ToolsMgr
 from src.mode import RunMode
 
 _MODEL_REFERENCE = "anthropic/claude-opus-5"
@@ -29,7 +31,12 @@ class _LLMMgrStub:
         raise AssertionError("子 agent 加载不得查询模型候选列表")
 
 
-def _write_subagent(workdir: Path, name: str, model: str | None = None) -> Path:
+def _write_subagent(
+    workdir: Path,
+    name: str,
+    model: str | None = None,
+    tools: str | None = None,
+) -> Path:
     """在项目层 agents 目录写入一个子 agent 定义文件。
 
     Args:
@@ -46,6 +53,8 @@ def _write_subagent(workdir: Path, name: str, model: str | None = None) -> Path:
     lines = ["---", f"agent_type: {name}", "description: 测试子 agent"]
     if model is not None:
         lines.append(f"model: {model}")
+    if tools is not None:
+        lines.append(f"tools: {tools}")
     lines += ["---", "子 agent 提示词。", ""]
     path.write_text("\n".join(lines))
     return path
@@ -82,7 +91,10 @@ def _write_subagent_with_raw_model(
 
 
 
-def _deps(llm_mgr: _LLMMgrStub | None = None) -> SimpleNamespace:
+def _deps(
+    llm_mgr: _LLMMgrStub | None = None,
+    tools_mgr: ToolsMgr | None = None,
+) -> SimpleNamespace:
     """构造 SubAgentMgr 加载期所需的最小依赖。
 
     Args:
@@ -91,7 +103,19 @@ def _deps(llm_mgr: _LLMMgrStub | None = None) -> SimpleNamespace:
     Returns:
         仅含 role_mgr 与 llm_mgr 的依赖对象。
     """
-    return SimpleNamespace(role_mgr=None, llm_mgr=llm_mgr)
+    return SimpleNamespace(role_mgr=None, llm_mgr=llm_mgr, tools_mgr=tools_mgr)
+
+
+def test_unknown_declared_tool_fails_manifest_loading(tmp_path: Path) -> None:
+    """manifest 不得声明未注册工具，错误需包含定义文件和工具名。"""
+    path = _write_subagent(tmp_path, "worker", tools="exec_command, missing_tool")
+
+    with pytest.raises(LLMConfigurationError) as exc_info:
+        SubAgentMgr(tmp_path, _deps(tools_mgr=ToolsMgr()))
+
+    message = exc_info.value.info.message
+    assert str(path) in message
+    assert "missing_tool" in message
 
 
 @pytest.mark.parametrize("bad_model", ["best", "inherit", "gpt-9", "claude-opus-6"])

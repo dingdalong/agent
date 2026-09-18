@@ -16,7 +16,7 @@ from src.events.types import (
 from src.agent.states import AgentState, RunContext, RunResult, parse_command
 from src.events import NoEventSubscribers, emit_telemetry_safely
 from src.llm.base import TruncationKind, classify_truncation
-from src.llm.errors import LLMCallError, LLMErrorInfo, LLMErrorKind
+from src.llm.errors import LLMCallError, LLMConfigurationError, LLMErrorInfo, LLMErrorKind
 from src.mgr import TaskManager, CompactMgr, CompactResult, PromptMgr, SkillMgr, SubAgentMgr, ReminderMgr
 from src.prompt_tags import (
     ExternalContextItem,
@@ -198,6 +198,7 @@ class Agent:
     _reminder_mgr: ReminderMgr = field(init=False, repr=False)
     _system_prompt: list[dict] = field(init=False, repr=False)
     _last_injected_mode: RunMode | None = field(init=False, default=None, repr=False)
+    _last_capability_mode: RunMode | None = field(init=False, default=None, repr=False)
     _initial_context_added: bool = field(init=False, default=False, repr=False)
     _initial_context_message_count: int = field(init=False, default=0, repr=False)
     _manager_guidance_injected: bool = field(init=False, default=False, repr=False)
@@ -218,6 +219,7 @@ class Agent:
             self._initial_context_added = bool(self.history)
             self._initial_context_message_count = 1 if self.history else 0
             self._manager_guidance_injected = bool(self.history)
+            self._last_capability_mode = self.mode if self.history else None
         # 主、子 agent 均以单实例 UUID 关联生命周期、usage 与转录事件，
         # 供 AgentViewStore 汇聚成一致快照。
         self.llm = self.deps.llm_mgr.get(self.model)
@@ -225,6 +227,17 @@ class Agent:
         # feature 只控制能力与 Manager；所有 agent 共享同一工具 schema 目录。
         from src.mgr import resolve_features
         self.features = resolve_features(self.features)
+        tools_mgr = getattr(self.deps, "tools_mgr", None)
+        validate_tools = getattr(tools_mgr, "validate_declared_tools", None)
+        if callable(validate_tools):
+            try:
+                validate_tools(
+                    self.tools,
+                    source=f"Agent {self.agent_type}",
+                    defer_dynamic=True,
+                )
+            except ValueError as exc:
+                raise LLMConfigurationError(str(exc)) from exc
         self._compact_mgr = self._build_compact_mgr(self.llm)
         workdir = self.deps.workdir
         # 可插拔 Manager：仅启用对应 feature 时创建，否则为 None。
@@ -1253,6 +1266,14 @@ class Agent:
     def _append_pending_framework_message(self, ctx: RunContext) -> None:
         """在 chat 前把模式变化和框架提醒合并成最多一条 developer 消息。"""
         sections: list[str] = []
+        mode = getattr(self, "mode", RunMode.EXECUTE)
+        if getattr(self, "_last_capability_mode", None) is not mode:
+            prompt_mgr = getattr(self, "_prompt_mgr", None)
+            build_capability = getattr(prompt_mgr, "build_capability_instructions", None)
+            capability_text = build_capability() if build_capability is not None else ""
+            if capability_text:
+                sections.append(capability_text)
+            self._last_capability_mode = mode
         if not getattr(self, "_manager_guidance_injected", False):
             prompt_mgr = getattr(self, "_prompt_mgr", None)
             build_manager = getattr(prompt_mgr, "build_manager_instructions", None)
@@ -1261,7 +1282,6 @@ class Agent:
                 sections.append(manager_text)
             self._manager_guidance_injected = True
 
-        mode = getattr(self, "mode", RunMode.EXECUTE)
         if getattr(self, "_last_injected_mode", None) is not mode:
             prompt_mgr = getattr(self, "_prompt_mgr", None)
             build_mode = getattr(prompt_mgr, "build_mode_instructions", None)

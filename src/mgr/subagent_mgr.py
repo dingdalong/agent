@@ -71,6 +71,16 @@ class SubAgentMgr:
                 meta, prompt = parse_frontmatter(path.read_text())
                 self._validate_raw_model(meta, path)
                 manifest = extract_manifest(meta, path, prompt=prompt)
+                tools_mgr = getattr(self.deps, "tools_mgr", None)
+                if tools_mgr is not None:
+                    try:
+                        tools_mgr.validate_declared_tools(
+                            manifest.tools,
+                            source=f"子 agent 定义 {path}",
+                            defer_dynamic=True,
+                        )
+                    except ValueError as exc:
+                        raise LLMConfigurationError(str(exc)) from exc
                 self._documents[manifest.agent_type] = manifest
 
     @staticmethod
@@ -112,9 +122,24 @@ class SubAgentMgr:
     def describe(self) -> str | None:
         if not self._documents:
             return
+        tools_mgr = getattr(self.deps, "tools_mgr", None)
+        registered = tools_mgr.all_tool_names() if tools_mgr is not None else set()
         lines = []
         for manifest in sorted(self._documents.values(), key=lambda m: m.agent_type):
-            lines.append(f"- {manifest.agent_type}: {manifest.description}")
+            if manifest.tools is None:
+                tool_text = "全部已注册工具"
+            else:
+                declared = sorted(manifest.tools)
+                tool_text = ", ".join(
+                    name
+                    if tools_mgr is None or name in registered
+                    else f"{name}（待动态注册）"
+                    for name in declared
+                ) or "无"
+            lines.append(
+                f"- {manifest.agent_type}: {manifest.description}；"
+                f"允许工具：{tool_text}"
+            )
         return "\n".join(lines)
 
     def system_guidance(self) -> str:
@@ -228,6 +253,16 @@ class SubAgentMgr:
                 features = getattr(parent_agent, "features", None)
 
             from src.agent import Agent
+            tools_mgr = getattr(self.deps, "tools_mgr", None)
+            if tools_mgr is not None:
+                try:
+                    tools_mgr.validate_declared_tools(
+                        manifest.tools,
+                        source=f"子 agent 定义 {manifest.path}",
+                        defer_dynamic=True,
+                    )
+                except ValueError as exc:
+                    raise LLMConfigurationError(str(exc)) from exc
             agent = Agent.from_manifest(
                 manifest=manifest,
                 deps=self.deps,

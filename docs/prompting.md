@@ -7,13 +7,13 @@
 | 载体 | 内容 | 生命周期 |
 |---|---|---|
 | 固定 `system` | `role.md` 身份、通用执行原则、工具协议、标签说明和安全边界 | Agent 创建时构建一次，模式切换和工具轮不改变 |
-| 历史 `developer` | Manager 工作流、当前模式及模式流程、临时框架提醒 | 首轮在真实用户请求前追加；后续按模式变化或对应事件追加 |
+| 历史 `developer` | 当前 Agent 能力边界、Manager 工作流、当前模式及模式流程、临时框架提醒 | 首轮在真实用户请求前追加；能力和模式变化或对应事件发生时，在下一次 chat 前追加 |
 | 外部 `user` | 能力目录、AGENTS.md、记忆简报、会话数据、环境、日期和 Hook 内容 | 首次 chat 或对应事件发生时追加 |
 | 原始 `user` | 用户输入或框架排队的明确 user action | 按正常输入链路追加 |
 | `tool` | 工具结果和按需加载的 Skill 正文 | 对应工具调用后追加 |
 | tool schema | 工具参数、类型、枚举、默认值和单次调用契约 | 所有模式和 Agent 使用同一完整目录 |
 
-`PromptMgr` 只负责组合这些来源。工具 schema 是参数契约的唯一权威；Manager 的 `system_guidance()` 只描述何时使用能力以及 ID、状态或产物如何跨调用流转，不复制字段手册。
+`PromptMgr` 只负责组合这些来源。首次 chat 前的框架 developer 消息还会自动追加当前 Agent 的能力边界：它根据 manifest 工具声明、mode、feature 和主/子 agent 范围列出当前可执行工具；模式变化时在下一次 chat 前重新追加。工具 schema 是参数契约的唯一权威；Manager 的 `system_guidance()` 只描述何时使用能力以及 ID、状态或产物如何跨调用流转，不复制字段手册。能力摘要不改变 schema，也不替代 `PermissionManager` 的执行期校验。
 
 ## 独立 LLM 调用
 

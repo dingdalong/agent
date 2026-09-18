@@ -143,6 +143,7 @@ def test_first_framework_message_precedes_real_user_request() -> None:
             "role": "user",
             "content": "CATALOGS\nAGENTS\nENVIRONMENT",
         }],
+        build_capability_instructions=lambda: "CAPABILITY_BOUNDARY",
         build_manager_instructions=lambda: "MANAGER_WORKFLOW",
         build_mode_instructions=lambda: "MODE_PLAN",
     )
@@ -157,7 +158,12 @@ def test_first_framework_message_precedes_real_user_request() -> None:
     developer = agent.history[1]["content"]
     positions = [
         developer.index(marker)
-        for marker in ("MANAGER_WORKFLOW", "MODE_PLAN", "TURN_REMINDER")
+        for marker in (
+            "CAPABILITY_BOUNDARY",
+            "MANAGER_WORKFLOW",
+            "MODE_PLAN",
+            "TURN_REMINDER",
+        )
     ]
     assert positions == sorted(positions)
     assert agent.history[2]["content"] == "REAL_USER_REQUEST"
@@ -192,6 +198,29 @@ def test_chat_boundary_combines_mode_and_reminders_into_one_developer() -> None:
 
     agent._append_pending_framework_message(ctx)
     assert len(agent.history) == 2
+
+
+def test_capability_guidance_refreshes_after_mode_change() -> None:
+    """能力摘要在模式切换后的下一个 chat 边界重新追加。"""
+    agent = object.__new__(Agent)
+    agent.history = []
+    agent.mode = RunMode.EXECUTE
+    agent.is_subagent = True
+    agent.deps = SimpleNamespace(data_guard=None, session_state=None)
+    agent._prompt_mgr = SimpleNamespace(
+        build_capability_instructions=lambda: f"CAPABILITY-{agent.mode.value}",
+        build_mode_instructions=lambda: f"MODE-{agent.mode.value}",
+    )
+    agent._reminder_mgr = ReminderMgr()
+
+    ctx = RunContext(messages=agent.history)
+    agent._append_pending_framework_message(ctx)
+    assert "CAPABILITY-execute" in agent.history[-1]["content"]
+
+    agent.mode = RunMode.PLAN
+    ctx = RunContext(messages=agent.history)
+    agent._append_pending_framework_message(ctx)
+    assert "CAPABILITY-plan" in agent.history[-1]["content"]
 
 
 def test_mode_injection_uses_final_mode_at_next_chat_boundary() -> None:

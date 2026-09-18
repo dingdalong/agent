@@ -251,11 +251,11 @@ Agent 显式传入初始化消息数量，CompactMgr 原文保留该 bootstrap�
 - 其他字符串必须采用 `供应商/模型ID`，不查询模型候选列表；
 - 非法值抛 `LLMConfigurationError`，消息包含 manifest 路径和合法格式。没有 `best`、`inherit`、子串匹配或静默回退。
 
-**公共方法**：`describe()` 只返回按 type 排序的外部能力目录，`system_guidance()` 返回不含目录数据的固定协作工作流，`task_delegator(agent_type, prompt, parent_agent, task_id, description, shared_context)` 执行委派。
+**公共方法**：`describe()` 只返回按 type 排序的外部能力目录（同时显示每个子 agent 的工具边界），`system_guidance()` 返回不含目录数据的固定协作工作流，`task_delegator(agent_type, prompt, parent_agent, task_id, description, shared_context)` 执行委派。
 
 **`task_delegator` 关键行为**：
 - 未知 `agent_type` 返回错误并列出已知；带 `task_id` 时先置 `in_progress` 并设 owner，异常或 `RunResult.llm_error` 时回滚为无 owner 的 `pending`，正常返回不自动 completed；
-- manifest 工具声明原样传给 Agent，作为执行期授权边界；所有子 agent 仍接收统一 schema。模型原样传 manifest：`None`、槽位别名、兼容别名或完整 ID 最终都由 `LLMMgr.get()` 解析；
+- manifest 工具声明在加载期和委派/Agent 构造期校验静态工具均已注册；`mcp__` 动态名称允许等待 MCP 生命周期完成，但实际执行仍必须命中已注册 schema。声明原样传给 Agent，作为执行期授权边界。首次 chat 前由 PromptMgr 追加 developer 能力摘要，说明当前有效工具；所有子 agent 仍接收统一 schema，参数细节不在摘要中复制。模型原样传 manifest：`None`、槽位别名、兼容别名或完整 ID 最终都由 `LLMMgr.get()` 解析；
 - `thinking` 自身未声明时继承父 agent；`reasoning_effort` 自身合法声明优先，否则继承 `parent_agent.reasoning_effort`，父值仍为空时继承父 Provider 的 effort；该 effort 继承与子 agent 选择哪个模型槽位相互独立；
 - `features` 未声明时继承父 agent 已解析集，同时继承父 agent 当前 `mode`；
 - 用 `Agent.from_manifest(is_subagent=True, ...)` 构造实例，触发 `SubagentStart`/`SubagentStop` hook 与 start/end 生命周期事件，异常和取消路径也发 end；

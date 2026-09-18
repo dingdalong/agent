@@ -117,7 +117,7 @@ role:
 |---|---|---|---|
 | `agent_type` | str | 文件名 `path.stem` | 子 agent 标识（委派时用）；也是 `Agent.agent_type` |
 | `description` | str | `"没有说明内容"` | 出现在主 agent 的可用子智能体提示词段 |
-| `tools` | 逗号分隔 str | 空 → `None`（全部工具） | 执行期工具声明边界；不改变统一 schema |
+| `tools` | 逗号分隔 str | 空 → `None`（全部工具） | 执行期工具声明边界；不改变统一 schema。静态工具名称必须已在 `ToolsMgr` 注册；`mcp__` 名称允许等待 MCP 注册，但实际调用前必须已出现在 schema |
 | `model` | str | `None`（解析角色 default 槽位） | 只允许 `default`、`fast`、`opus`、`sonnet`、`haiku` 或`供应商/模型ID` |
 | `startInPlanMode` | bool | `False` | 独立构造时的初始 Plan 状态；经 `task_delegator` 构造时由父 Agent 当前状态覆盖 |
 | `thinking` | bool | `None`（继承父 agent） | 是否启用思考；仅 bool 有效 |
@@ -131,7 +131,7 @@ role:
 
 1. 查表定位 `manifest`，不存在则返回错误文本（含可用列表）。
 2. 若带 `task_id`：委派前把任务标记 `in_progress` 并设 `owner`；子 agent 异常退出或返回 LLM 错误时回滚为 `pending`，正常返回不自动标 `completed`。
-3. 把 `manifest.tools` 原样传入 Agent，供 `PermissionManager` 在执行期检查；schema 保持完整。
+3. 把 `manifest.tools` 原样传入 Agent。首次 chat 前，框架自动追加一条 developer 能力说明，列出该子 agent 在当前 mode、feature 和主/子范围下实际可执行的已声明工具；`PermissionManager` 只在执行期做最终兜底。schema 始终保持完整。
 4. 模型直接传 `manifest.model`；`None` 由 `LLMMgr` 解析 default，合法别名解析对应槽位，完整模型 ID 精确使用。
 5. `thinking` 未声明时继承父 agent。
 6. `reasoning_effort` 自身合法声明优先；否则依次继承 `parent_agent.reasoning_effort`、父 agent Provider 的 `reasoning_effort`。继承的是父 agent 已解析的有效值，与子 agent 选择 default 还是 fast 槽位无关。
@@ -139,7 +139,7 @@ role:
 8. 用 `Agent.from_manifest(is_subagent=True, ...)` 构造完整子 agent，触发 start hook/事件，运行后在 `finally` 发 end 事件，再触发 stop hook。
 9. **上下文交接**：`run()` 前把 `ContextMgr.digest()` 拼到 `prompt` 之前（子 agent 的 history 从空开始，这是它唯一能拿到「别人已核实了什么」的通道）；`SubagentStop` hook 之后把最终 `result` 记入账本，供后续委派复用。委派时传 `shared_context="none"` 可完全隔离，用于需要独立判断的场景（如代码审查）。详见 [managers.md](managers.md#contextmgr--跨-agent-共享上下文)。
 
-> 所有子 Agent 接收与主 Agent 相同的 schema。`submit_plan` 通过 `ToolAudience.MAIN_ONLY` 禁止子 Agent 执行；子 Agent 继承父 Agent 当前 `mode`，模式限制同样由授权层执行。
+> 所有子 Agent 接收与主 Agent 相同的 schema。能力说明只表达执行白名单和当前有效边界，不复制 schema 参数；参数、类型和枚举以 schema 为准。`submit_plan` 通过 `ToolAudience.MAIN_ONLY` 禁止子 Agent 执行；子 Agent 继承父 Agent 当前 `mode`，模式限制同样由授权层执行。未列出的静态 manifest 工具属于配置错误，不能静默过滤；未注册的动态 MCP 工具只能等待注册，不能被执行。
 
 > 共享上下文的注入点刻意选在 `task_delegator` 而非 `ReminderMgr`：后者的 provider 只收 `(mode, is_subagent)`，要按委派过滤就得在进程级单例上存槽位，而并行委派会互相覆盖它。
 
