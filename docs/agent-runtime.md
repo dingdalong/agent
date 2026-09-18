@@ -74,7 +74,7 @@ LLM_CALL → PROCESS_RESPONSE ──length────→ LENGTH_RETRY ──可
     └─ 其他类别      → LLM_FAILURE      → DONE
 ```
 
-因此自动/手动 compact、退出总结和普通对话调用都遵循同一错误收口，不在各 handler 内复制异常判断。
+因此自动 compact、退出总结和普通对话调用都遵循同一错误收口，不在各 handler 内复制异常判断。
 
 ## 3. `RunContext` 与 `RunResult`
 
@@ -84,7 +84,7 @@ LLM_CALL → PROCESS_RESPONSE ──length────→ LENGTH_RETRY ──可
 |---|---|
 | 消息与输出 | `messages`、`prompt`、`final_text`、`response` |
 | 轮次回滚 | `turn_start_messages`（追加本轮 user 前的浅快照）、`round_start_idx`（无快照上下文的兼容回退） |
-| 轮次与工具 | `has_tool_calls`、`manual_compact`、`compact_focus` |
+| 轮次与工具 | `has_tool_calls` |
 | 自动压缩 | `compact_streak`、`max_compact_streak=3`、压缩前 token、摘要消息数、摘要是否非空 |
 | 响应恢复 | `length_recoveries`、`max_length_recoveries=3`、`response_recovery_start_idx`、`response_recovery_response_count`、`pause_turn_message_idx`、`pause_turn_continuations`、`length_effort_override`（思考截断重生成时的临时降档 effort）、`pending_framework_instructions`（下一次 chat 前合并为 developer，发送后清空） |
 | 交互终态 | `user_input`、`user_record_id`、`command`、`exit_requested`、`stop_hook_used` |
@@ -130,7 +130,7 @@ handler 映射在 `Agent.__post_init__` 建立（`src/agent/agent.py:236-250`）
 
 ### 压缩检查
 
-`_on_check_compact()`（`agent.py:705-792`）构建当前系统提示词，并在线程中按 provider 的真实请求形态估算 `messages + prompt + tools`。超阈值转 `COMPACT`；压缩后立即复检：摘要消息数为 0、摘要为空、token 未下降都视为无进展并转 `SUMMARIZE_EXIT`；token 下降但连续三次仍超阈值也转退出总结。
+`_on_check_compact()` 构建当前系统提示词，并在线程中按 provider 的真实请求形态估算 `messages + prompt + tools`。新 turn 首次采样前达到阈值时进入 `COMPACT`；工具或 Stop hook 需要继续当前 turn 时回到同一检查点，只有再次达到阈值才压缩。压缩后立即复检：摘要消息数为 0、摘要为空、token 未下降都视为无进展并转 `SUMMARIZE_EXIT`；token 下降但连续三次仍超阈值也转退出总结。
 
 `_on_compact()`（`agent.py:794-817`）发 `CompactDelta`，调用当前 Agent 独占的 `CompactMgr`，替换历史并保存压缩进展信号。LLM 摘要调用携当前 Agent 的类型和 UUID，事件仍归属正确调用方。
 
@@ -142,7 +142,7 @@ handler 映射在 `Agent.__post_init__` 建立（`src/agent/agent.py:236-250`）
 
 ### 工具与 Stop hook
 
-`_on_execute_tools()`（`agent.py:991-1051`）用 `asyncio.gather` 并行执行同一回复的所有工具调用，结果按原顺序追加为 tool 消息。禁用/未知工具与执行异常都转换为对应工具结果文本。`POST_ROUND` 注入提醒；如本轮调用 `compact` 工具，则执行带 focus 的手动压缩，再回 `CHECK_COMPACT`（`agent.py:1073-1093`）。
+`_on_execute_tools()` 用 `asyncio.gather` 并行执行同一回复的所有工具调用，结果按原顺序追加为 tool 消息。禁用/未知工具与执行异常都转换为对应工具结果文本；工具结果需要模型继续时进入 `POST_ROUND`，再回 `CHECK_COMPACT` 进行自动阈值检查。
 
 `_on_check_stop()`（`agent.py` 的 `_on_check_stop`）只允许 Stop hook 阻断一次；阻断原因作为带来源标记的外部 user 上下文追加并回 `CHECK_COMPACT`，否则结束本轮。
 

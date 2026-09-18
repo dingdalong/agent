@@ -387,12 +387,9 @@ def test_length_continuation_failure_rolls_back_recovery_artifacts() -> None:
     assert agent.history == [{"role": "user", "content": "生成长篇报告"}]
 
 
-@pytest.mark.parametrize("state_name", ["COMPACT", "POST_ROUND"])
-def test_auto_and_manual_compact_failures_are_caught_at_turn_boundary(
-    state_name: str,
-) -> None:
-    """自动和手动 compact 的 LLM 失败均由单轮状态机统一收口。"""
-    error = _terminal_error(LLMErrorKind.SERVICE, f"{state_name} 摘要失败")
+def test_auto_compact_failure_is_caught_at_turn_boundary() -> None:
+    """自动 compact 的 LLM 失败由单轮状态机统一收口。"""
+    error = _terminal_error(LLMErrorKind.SERVICE, "摘要失败")
 
     class FailingCompact:
         """始终抛出终态错误的 compact manager。"""
@@ -402,14 +399,12 @@ def test_auto_and_manual_compact_failures_are_caught_at_turn_boundary(
         async def compact_history(
             self,
             messages: list[dict],
-            focus: str | None = None,
             bootstrap_message_count: int = 0,
         ) -> object:
             """抛出预设终态错误。
 
             Args:
                 messages: 待压缩消息。
-                focus: 可选压缩重点。
                 bootstrap_message_count: 初始化前缀消息数。
 
             Returns:
@@ -418,23 +413,14 @@ def test_auto_and_manual_compact_failures_are_caught_at_turn_boundary(
             Raises:
                 LLMCallError: 固定终态错误。
             """
-            del messages, focus, bootstrap_message_count
+            del messages, bootstrap_message_count
             raise error
 
     agent = _runtime_agent(SequenceLLM([]))
     agent._compact_mgr = FailingCompact()
-    if state_name == "COMPACT":
-        start_state = AgentState.COMPACT
-        handler = agent._on_compact
-        ctx = RunContext(messages=[{"role": "user", "content": "自动压缩"}])
-    else:
-        start_state = AgentState.POST_ROUND
-        handler = agent._on_post_round
-        ctx = RunContext(
-            messages=[{"role": "user", "content": "手动压缩"}],
-            manual_compact=True,
-            compact_focus="重点",
-        )
+    start_state = AgentState.COMPACT
+    handler = agent._on_compact
+    ctx = RunContext(messages=[{"role": "user", "content": "自动压缩"}])
     agent._handlers[start_state] = handler
 
     result = asyncio.run(agent._run_single_turn(ctx, start_state))
@@ -444,9 +430,8 @@ def test_auto_and_manual_compact_failures_are_caught_at_turn_boundary(
     assert all(message.get("role") != "assistant" for message in ctx.messages)
 
 
-@pytest.mark.parametrize("state_name", ["COMPACT", "POST_ROUND"])
-def test_compact_clears_loaded_skill_deduplication(state_name: str) -> None:
-    """压缩可能移除 Skill 正文，因此自动和手动路径都允许重新加载。"""
+def test_compact_clears_loaded_skill_deduplication() -> None:
+    """自动压缩可能移除 Skill 正文，因此允许重新加载。"""
 
     class SuccessfulCompact:
         auto_compact_size = 1
@@ -454,10 +439,9 @@ def test_compact_clears_loaded_skill_deduplication(state_name: str) -> None:
         async def compact_history(
             self,
             messages: list[dict],
-            focus: str | None = None,
             bootstrap_message_count: int = 0,
         ) -> SimpleNamespace:
-            del focus, bootstrap_message_count
+            del bootstrap_message_count
             return SimpleNamespace(
                 messages=list(messages), transcript_path=None,
                 summarized_message_count=1, summary="摘要",
@@ -468,13 +452,8 @@ def test_compact_clears_loaded_skill_deduplication(state_name: str) -> None:
     ctx = RunContext(
         messages=[{"role": "user", "content": "压缩"}],
         loaded_skills={"builtin:debugging"},
-        manual_compact=state_name == "POST_ROUND",
     )
-
-    if state_name == "COMPACT":
-        next_state = asyncio.run(agent._on_compact(ctx))
-    else:
-        next_state = asyncio.run(agent._on_post_round(ctx))
+    next_state = asyncio.run(agent._on_compact(ctx))
 
     assert next_state is AgentState.CHECK_COMPACT
     assert ctx.loaded_skills == set()

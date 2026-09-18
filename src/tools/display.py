@@ -102,7 +102,6 @@ TOOL_TITLES: dict[str, str] = {
     "task_get": "获取任务",
     "task_list": "任务列表",
     # 工具类
-    "compact": "压缩上下文",
     # 实用工具
 }
 
@@ -208,11 +207,6 @@ def format_params(tool_name: str, args: dict[str, Any],
     if tool_name == "read_memory":
         return args.get("title", "")
 
-    if tool_name == "compact":
-        focus = args.get("focus", "")
-        if len(focus) > 80:
-            focus = focus[:80] + "…"
-        return focus
 
 
     # 任务工具

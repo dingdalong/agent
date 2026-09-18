@@ -80,8 +80,6 @@ class RunContext:
             框架指令；发送后清空。
         loaded_skills: 本用户轮次已经加载的技能名；上下文压缩后清空，允许恢复正文。
         response: 最近一次 LLM 响应。
-        manual_compact: 当前工具轮是否请求手动 compact。
-        compact_focus: 手动 compact 的可选关注点。
         user_input: 本轮用户原始输入。
         command: app 层斜杠命令（由 CommandMgr defer 挂上，主循环二次 dispatch）。
         exit_requested: 用户是否请求退出。
@@ -109,8 +107,6 @@ class RunContext:
     pending_framework_instructions: list[str] = field(default_factory=list)
     loaded_skills: set[str] = field(default_factory=set)
     response: LLMResponse | None = None
-    manual_compact: bool = False
-    compact_focus: str | None = None
     user_input: str = ""
     user_record_id: str | None = None
     command: tuple[str, list[str]] | None = None

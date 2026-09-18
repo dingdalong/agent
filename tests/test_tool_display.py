@@ -41,10 +41,6 @@ def test_tool_title_task_tools():
     assert tool_title("task_get") == "获取任务"
 
 
-def test_tool_title_utility_tools():
-    assert tool_title("compact") == "压缩上下文"
-
-
 def test_tool_title_unknown_fallback():
     assert tool_title("unknown_mcp_tool") == "调用 unknown_mcp_tool"
 
@@ -158,19 +154,6 @@ def test_format_params_load_skill():
 def test_format_params_memory_tools():
     assert format_params("save_memory", {"title": "项目约定"}) == "项目约定"
     assert format_params("read_memory", {"title": "编码风格"}) == "编码风格"
-
-
-
-
-
-def test_format_params_compact():
-    assert format_params("compact", {"focus": "保留测试用例"}) == "保留测试用例"
-
-
-def test_format_params_compact_truncate():
-    long_focus = "保留" * 100
-    result = format_params("compact", {"focus": long_focus})
-    assert result.endswith("…")
 
 
 

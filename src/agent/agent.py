@@ -665,7 +665,7 @@ class Agent:
         return list(getattr(self, "_input_history", []))
 
     async def _on_check_compact(self, ctx: RunContext) -> AgentState:
-        """估算完整输入并推进自动 compact 状态。
+        """估算完整输入并推进 PreTurn/MidTurn 自动 compact 状态。
 
         Args:
             ctx: 当前运行上下文，保存自动 compact 的进展信号。
@@ -1074,8 +1074,6 @@ class Agent:
         """并发独立读取；修改和交互形成屏障。取消保留已完成调用结果。"""
         from src.tools.display import ToolResult
         ctx.has_tool_calls = True
-        ctx.manual_compact = False
-        ctx.compact_focus = None
         calls = list(ctx.response.tool_calls.values())
         completed = {}
         end_turn = False
@@ -1089,9 +1087,6 @@ class Agent:
             except (ValueError, TypeError):
                 completed[ident] = await self.deps.tools_mgr.execute(name, tc["arguments"], current_tool_call_id=ident, deps=self.deps, agent=self, run_context=ctx)
                 return
-            if name == "compact":
-                ctx.manual_compact = True
-                ctx.compact_focus = args.get("focus")
             completed[ident] = await self.deps.tools_mgr.execute(name, args, current_tool_call_id=ident, deps=self.deps, agent=self, run_context=ctx)
 
         async def parallel(tc):
@@ -1157,28 +1152,6 @@ class Agent:
 
     async def _on_post_round(self, ctx: RunContext) -> AgentState:
         self._reminder_mgr.queue_post_round(self.mode, self.is_subagent)
-
-        if ctx.manual_compact:
-            caller_agent_type, caller_uuid = caller_identity(self)
-            await self.deps.event_bus.emit(CompactDelta(
-                timestamp=time.time(),
-                source=self.agent_type,
-                content="llm manual",
-                caller_agent_type=caller_agent_type,
-                caller_uuid=caller_uuid,
-            ))
-            result = await self._compact_mgr.compact_history(
-                ctx.messages,
-                focus=ctx.compact_focus,
-                bootstrap_message_count=getattr(
-                    self, "_initial_context_message_count", 0,
-                ),
-            )
-            self._replace_messages(ctx.messages, result.messages)
-            ctx.loaded_skills.clear()
-            if result.transcript_path:
-                await self.deps.event_bus.request_output(f"[transcript saved: {result.transcript_path}]\n")
-
         return AgentState.CHECK_COMPACT
 
     async def _on_summarize_exit(self, ctx: RunContext) -> AgentState:

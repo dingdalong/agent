@@ -66,7 +66,7 @@ def test_tag_guides_only_include_tags_visible_to_each_model_call() -> None:
     assert "`<external_context>`" in agent_guide
     assert "`<compacted_history_summary>`" in agent_guide
     assert "`<compaction_focus>`" not in agent_guide
-    assert "`<compaction_focus>`" in compact_guide
+    assert "`<compaction_focus>`" not in compact_guide
     assert "`<compacted_history_summary>`" not in compact_guide
     assert "`<collaboration_mode>`" not in compact_guide
     assert PROMPT_TAGS[PromptTag.EXTERNAL_CONTEXT].trust is PromptTrust.EXTERNAL
@@ -95,7 +95,6 @@ def test_compactor_uses_its_own_fixed_system_and_dynamic_user_input(tmp_path) ->
         preserved_reference="保留原文",
         history_text="DYNAMIC_HISTORY_SENTINEL",
         recent_reference="近期原文",
-        focus="重点",
         prior_summary="旧摘要",
         is_serialized_page=False,
     )

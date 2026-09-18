@@ -10,7 +10,7 @@
 
 所有模式、主 agent 和子 agent 都接收 `ToolsMgr.schemas()` 返回的同一份完整 schema 目录；模式切换不重建 schema。执行期由 `PermissionManager` 按 `ToolAvailability`、agent feature 与 manifest 声明拒绝不可用工具。模式拒绝使用 `tool_unavailable`，并携带当前模式、目标工具和该模式完整禁用列表。注册名称冲突直接报错。Pydantic schema 同时用于 JSON 参数验证，嵌套参数拒绝未声明字段，显式字典保留其键空间。
 
-工具分工：exec_command 通过真实 Shell 做文件发现、内容搜索、已知区段读取和命令执行，apply_patch 修改文本，write_stdin 操作已有进程；web_search 发现网页，web_fetch 获取已知 URL；submit_plan 提交审核方案，task_* 管理执行进度，note_context 记录当前协作事实，记忆工具保存跨会话信息，compact 压缩上下文。通用计算通过执行阶段命令完成。
+工具分工：exec_command 通过真实 Shell 做文件发现、内容搜索、已知区段读取和命令执行，apply_patch 修改文本，write_stdin 操作已有进程；web_search 发现网页，web_fetch 获取已知 URL；submit_plan 提交审核方案，task_* 管理执行进度，note_context 记录当前协作事实，记忆工具保存跨会话信息。上下文压缩由 Agent 在采样边界按阈值自动处理，不作为模型工具提供。通用计算通过执行阶段命令完成。
 
 ## 工具接口
 

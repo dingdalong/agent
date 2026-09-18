@@ -187,9 +187,9 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 | `track_recent_file` (async) | `path: str` | `None` | 维护最近文件列表（上限 5，去重后置尾） |
 | `write_transcript` (async) | `messages: list` | `Path` | 在线程中以 UTF-8/Unicode JSONL 写入 `.agent/transcripts/transcript_{time_ns}.jsonl`，排他创建避免并发覆盖 |
 | `split_history_for_compaction` | `messages`, `bootstrap_message_count` | `CompactionPartition` | 切分为初始化及首个真实轮次前缀、待摘要中段和预算内近期原文 |
-| `summarize_history` (async) | `preserved_messages`, `messages_to_summarize`, `recent_messages`, `focus` | `str` | 完整输入不超过上下文 95% 时一次摘要；超限则按原子块滚动摘要，单块仍超限时无损分页 |
+| `summarize_history` (async) | `preserved_messages`, `messages_to_summarize`, `recent_messages` | `str` | 完整输入不超过上下文 95% 时一次摘要；超限则按原子块滚动摘要，单块仍超限时无损分页 |
 | `build_compacted_context_prefix` | `summary`, `recent_files_hint` | `str` | 拼装摘要和近期文件提示消息 |
-| `compact_history` (async) | `messages`, `focus`, `bootstrap_message_count` | `CompactResult` | 端到端压缩；返回消息、transcript、摘要消息数及摘要正文，无可摘要消息或空摘要时保留原历史 |
+| `compact_history` (async) | `messages`, `bootstrap_message_count` | `CompactResult` | 端到端自动压缩；返回消息、transcript、摘要消息数及摘要正文，无可摘要消息或空摘要时保留原历史 |
 
 **feature 门控**：否。 **reload**：无（随新 Agent 重建）。
 

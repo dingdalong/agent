@@ -32,7 +32,6 @@ class PromptTag(StrEnum):
     SKILL = "skill"
     SHARED_CONTEXT = "shared_context"
     COMPACTED_HISTORY_SUMMARY = "compacted_history_summary"
-    COMPACTION_FOCUS = "compaction_focus"
     PRIOR_COMPACTION_SUMMARY = "prior_compaction_summary"
     HISTORY_REFERENCE = "history_reference"
     HISTORY_TO_SUMMARIZE = "history_to_summarize"
@@ -88,12 +87,6 @@ PROMPT_TAGS: dict[PromptTag, PromptTagSpec] = {
         "user",
         PromptTrust.SUMMARY,
         frozenset({PromptConsumer.WORKING_AGENT}),
-    ),
-    PromptTag.COMPACTION_FOCUS: PromptTagSpec(
-        "本次压缩需要优先保留的用户指定重点。",
-        "user",
-        PromptTrust.EXTERNAL,
-        frozenset({PromptConsumer.COMPACTOR}),
     ),
     PromptTag.PRIOR_COMPACTION_SUMMARY: PromptTagSpec(
         "需要与本批历史合并的上一版滚动摘要。",

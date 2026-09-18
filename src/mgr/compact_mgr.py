@@ -161,7 +161,6 @@ def _build_summary_input(
     preserved_reference: str,
     history_text: str,
     recent_reference: str,
-    focus: str | None,
     prior_summary: str,
     is_serialized_page: bool,
 ) -> str:
@@ -171,7 +170,6 @@ def _build_summary_input(
         preserved_reference: 序列化后的完整保留原文消息。
         history_text: 序列化后的完整消息块或无损分页。
         recent_reference: 序列化后的完整权威近期消息。
-        focus: 用户可选提供的压缩重点。
         prior_summary: 上一次请求生成的完整摘要。
         is_serialized_page: history_text 是否为原子消息块的一页。
 
@@ -179,11 +177,6 @@ def _build_summary_input(
         本次压缩调用的动态 user 消息正文。
     """
     sections = []
-    if focus:
-        sections.append(
-            "重点保留提示：\n"
-            + render_prompt_tag(PromptTag.COMPACTION_FOCUS, focus)
-        )
     if prior_summary:
         sections.append(
             "这是此前各批历史的完整滚动摘要。把本批新增信息合并进去，输出更新后的完整摘要，"
@@ -433,7 +426,6 @@ class CompactMgr:
         preserved_reference: str,
         history_text: str,
         recent_reference: str,
-        focus: str | None,
         prior_summary: str,
         is_serialized_page: bool,
     ) -> _SummaryRequest:
@@ -443,7 +435,6 @@ class CompactMgr:
             preserved_reference: 序列化后的保留原文消息。
             history_text: 序列化后的原子消息块或无损分页文本。
             recent_reference: 序列化后的权威近期消息。
-            focus: 用户可选提供的压缩重点。
             prior_summary: 上一次调用生成的完整滚动摘要。
             is_serialized_page: history_text 是否为一页不完整的 JSON。
 
@@ -454,7 +445,6 @@ class CompactMgr:
             preserved_reference=preserved_reference,
             history_text=history_text,
             recent_reference=recent_reference,
-            focus=focus,
             prior_summary=prior_summary,
             is_serialized_page=is_serialized_page,
         )
@@ -476,7 +466,6 @@ class CompactMgr:
         start_block: int,
         preserved_reference: str,
         recent_reference: str,
-        focus: str | None,
         prior_summary: str,
         request_budget: int,
     ) -> tuple[int, _SummaryRequest] | None:
@@ -488,7 +477,6 @@ class CompactMgr:
             start_block: 第一个未摘要原子块的索引。
             preserved_reference: 序列化后的保留原文消息。
             recent_reference: 序列化后的权威近期消息。
-            focus: 用户可选提供的压缩重点。
             prior_summary: 上一次调用生成的完整滚动摘要。
             request_budget: 每次请求允许的最大输入 token 估算值。
 
@@ -504,7 +492,6 @@ class CompactMgr:
                 preserved_reference=preserved_reference,
                 history_text=history_text,
                 recent_reference=recent_reference,
-                focus=focus,
                 prior_summary=prior_summary,
                 is_serialized_page=False,
             )
@@ -536,7 +523,6 @@ class CompactMgr:
         serialized_block: str,
         preserved_reference: str,
         recent_reference: str,
-        focus: str | None,
         prior_summary: str,
         request_budget: int,
     ) -> str | None:
@@ -546,7 +532,6 @@ class CompactMgr:
             serialized_block: 一个原子块序列化后的完整文本。
             preserved_reference: 序列化后的保留原文消息。
             recent_reference: 序列化后的权威近期消息。
-            focus: 用户可选提供的压缩重点。
             prior_summary: 上一次调用生成的完整滚动摘要。
             request_budget: 每次请求允许的最大输入 token 估算值。
 
@@ -573,7 +558,6 @@ class CompactMgr:
                 preserved_reference,
                 fragment,
                 recent_reference,
-                focus,
                 rolling_summary,
                 True,
             )
@@ -598,7 +582,6 @@ class CompactMgr:
         preserved_messages: list[dict] | None = None,
         messages_to_summarize: list[dict] | None = None,
         recent_messages: list[dict] | None = None,
-        focus: str | None = None,
     ) -> str:
         """在提供方输入预算内完整摘要历史。
 
@@ -606,7 +589,6 @@ class CompactMgr:
             preserved_messages: 仅用作参照且必须保留的原文消息。
             messages_to_summarize: 按原始顺序摘要的源消息。
             recent_messages: 用作参照的权威近期原文消息。
-            focus: 用户可选提供的压缩重点。
 
         Returns:
             最终滚动摘要；摘要失败时返回空字符串。
@@ -618,7 +600,6 @@ class CompactMgr:
             preserved_messages = self.data_guard.redact(preserved_messages)
             messages_to_summarize = self.data_guard.redact(messages_to_summarize)
             recent_messages = self.data_guard.redact(recent_messages)
-            focus = str(self.data_guard.redact(focus)) if focus is not None else None
         if not messages_to_summarize:
             return ""
 
@@ -632,7 +613,6 @@ class CompactMgr:
             preserved_reference,
             full_history_text,
             recent_reference,
-            focus,
             "",
             False,
         )
@@ -657,7 +637,6 @@ class CompactMgr:
                 block_index,
                 preserved_reference,
                 recent_reference,
-                focus,
                 rolling_summary,
                 request_budget,
             )
@@ -677,7 +656,6 @@ class CompactMgr:
                 serialized_block=serialized_block,
                 preserved_reference=preserved_reference,
                 recent_reference=recent_reference,
-                focus=focus,
                 prior_summary=rolling_summary,
                 request_budget=request_budget,
             )
@@ -712,14 +690,12 @@ class CompactMgr:
     async def compact_history(
         self,
         messages: list[dict],
-        focus: str | None = None,
         bootstrap_message_count: int = 0,
     ) -> CompactResult:
         """持久化、划分、摘要并安全压缩对话历史。
 
         Args:
             messages: 源对话消息。
-            focus: 用户可选提供的摘要重点。
             bootstrap_message_count: 开头不可压缩的初始化外部消息数量。
 
         Returns:
@@ -727,7 +703,6 @@ class CompactMgr:
         """
         if self.data_guard is not None:
             messages = self.data_guard.redact(messages)
-            focus = str(self.data_guard.redact(focus)) if focus is not None else None
         transcript_path = await self.write_transcript(messages)
         partition = await asyncio.to_thread(
             self.split_history_for_compaction,
@@ -745,7 +720,6 @@ class CompactMgr:
             preserved_messages=partition.prefix_messages,
             messages_to_summarize=partition.messages_to_summarize,
             recent_messages=partition.recent_messages,
-            focus=focus,
         )
         summary = summary.strip()
         if not summary:

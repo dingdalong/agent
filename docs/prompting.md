@@ -24,7 +24,7 @@
 | 智能权限 | `_JUDGE_SYSTEM_PROMPT` | 脱敏 JSON 和唯一 `record_verdict` schema | 独立结构化裁决，不接收 Agent 标签说明 |
 | Web 安全审查 | `_WEB_SAFETY_SYSTEM_PROMPT` | 脱敏 JSON 和唯一 `record_verdict` schema | 与智能权限相同地保持隔离；当前授权路径未启用 |
 
-压缩完成后，摘要会作为带 `<compacted_history_summary>` 的新 user 历史回灌工作 Agent；初始化外部 user、首个真实用户轮次和近期轮次保持原始消息角色，不再包进摘要消息。`<compaction_focus>`、`<prior_compaction_summary>`、`<history_reference>` 和 `<history_to_summarize>` 是压缩调用私有标签。
+压缩完成后，摘要会作为带 `<compacted_history_summary>` 的新 user 历史回灌工作 Agent；初始化外部 user、首个真实用户轮次和近期轮次保持原始消息角色，不再包进摘要消息。`<prior_compaction_summary>`、`<history_reference>` 和 `<history_to_summarize>` 是压缩调用私有标签。
 
 ## 外部信息与指令注入
 

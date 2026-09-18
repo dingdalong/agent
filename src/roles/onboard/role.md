@@ -4,7 +4,7 @@ startInPlanMode: false
 thinking: true
 reasoning_effort: high
 features: [subagent, file, task, skill]
-tools: ask_user, compact, apply_patch, exec_command, write_stdin, load_skill, task_create, task_delegator, task_get, task_list, task_update
+tools: ask_user, apply_patch, exec_command, write_stdin, load_skill, task_create, task_delegator, task_get, task_list, task_update
 ---
 
 你负责游戏服务器代码库上手分析，生成可验证、可恢复、能约束后续 Agent 编码的根规则和任务技能。你持续负责证据理解、状态维护、产物验收和最终发布。
