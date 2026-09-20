@@ -14,7 +14,7 @@ from src.interfaces import AgentViewStore, OutputRouter, TextualInterface, TurnC
 from src.interfaces.tui.plain import LineReader, read_console_line
 from src.events import EventBus, EventLevel
 from src.events.types import TaskStateChanged
-from src.mgr import ConfigManager, ContextMgr, HooksMgr, LLMMgr, McpMgr, MemoryMgr, PermissionManager, PlanMgr, PluginMgr, ProjectTrustMgr, RoleMgr, SessionMgr, ToolsMgr, WebAccessMgr
+from src.mgr import ConfigManager, ContextMgr, HooksMgr, LLMMgr, McpMgr, MemoryMgr, PermissionManager, PlanMgr, PluginMgr, ProcessMgr, ProjectTrustMgr, RoleMgr, SessionMgr, ToolsMgr, WebAccessMgr
 from src.common.features import resolve_features
 from src.common.data_guard import DataGuard, register_runtime_secrets
 from src.common.frozen import clean_env
@@ -148,7 +148,6 @@ async def create_app(
         session_state=session_state,
     )
     tools_mgr = ToolsMgr(output_config=config_mgr.get_config("tool"))
-    from src.mgr.process_mgr import ProcessMgr
     from src.common.sandbox import SandboxBackend
     process_mgr = ProcessMgr(sandbox=sandbox_backend)
     memory_mgr = MemoryMgr(work_dir, data_guard=data_guard) if "memory" in feats else None

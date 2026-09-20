@@ -348,15 +348,9 @@ class ContextMgr:
 
     # —— 读取 ——
 
-    def entry_ids(self) -> list[str]:
-        """返回当前全部条目 id，按登记顺序。"""
-        return [entry.id for entry in self._entries]
-
     def digest(
         self,
         *,
-        char_budget: int | None = None,
-        include_ids: Sequence[str] | None = None,
         now: float | None = None,
     ) -> str:
         """渲染注入子 agent 首条消息的 `<shared_context>` 文本。
@@ -365,8 +359,6 @@ class ContextMgr:
         且越不容易过时。
 
         Args:
-            char_budget: 总字符预算；None 时用 inject_char_budget。
-            include_ids: 只渲染指定 id 的条目；None 表示全部。
             now: 计算相对时间的基准时刻，仅供测试注入固定时钟。
 
         Returns:
@@ -374,13 +366,10 @@ class ContextMgr:
         """
         if not self.enabled or not self._entries:
             return ""
-        budget = self.inject_char_budget if char_budget is None else char_budget
+        budget = self.inject_char_budget
         current = time.time() if now is None else now
 
         candidates = list(reversed(self._entries))
-        if include_ids is not None:
-            wanted = set(include_ids)
-            candidates = [entry for entry in candidates if entry.id in wanted]
         if not candidates:
             return ""
 

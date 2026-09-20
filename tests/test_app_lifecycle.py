@@ -285,7 +285,7 @@ def test_reset_session_refreshes_env_baseline_and_rebinds_ledger(tmp_path) -> No
 
     assert app.deps.env_baseline
     assert ledger.session_id == app.deps.session_id
-    assert ledger.entry_ids() == []
+    assert ledger._entries == []
     assert ledger.digest() == ""
 
 

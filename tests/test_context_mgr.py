@@ -69,7 +69,7 @@ def test_short_content_is_not_recorded(tmp_path: Path) -> None:
     mgr = _mgr(tmp_path)
 
     assert mgr.add(kind="delegation", topic="t", content="已完成", author="shell") is None
-    assert mgr.entry_ids() == []
+    assert mgr.digest() == ""
 
 
 @pytest.mark.parametrize(
@@ -144,7 +144,7 @@ def test_entry_cap_evicts_oldest(tmp_path: Path) -> None:
     for index in range(6):
         mgr.add(kind="note", topic=f"t{index}", content=_LONG, author="explore")
 
-    assert mgr.entry_ids() == ["c4", "c5", "c6"]
+    assert [entry.id for entry in mgr._entries] == ["c4", "c5", "c6"]
     assert mgr._dropped == 3
 
 
@@ -199,18 +199,6 @@ def test_digest_header_states_facts_are_not_the_task(tmp_path: Path) -> None:
     assert text.endswith("</shared_context>")
     assert "以你现在读到的为准" in text
     assert "不构成任务" in text
-
-
-def test_digest_include_ids_filters(tmp_path: Path) -> None:
-    """指定 id 时只渲染选中的条目。"""
-    mgr = _mgr(tmp_path)
-    mgr.add(kind="note", topic="要的", content=_LONG, author="explore")
-    mgr.add(kind="note", topic="不要的", content=_LONG, author="plan")
-
-    text = mgr.digest(include_ids=["c1"])
-
-    assert "要的" in text
-    assert "不要的" not in text
 
 
 def test_relative_age_is_rendered(tmp_path: Path) -> None:
@@ -360,7 +348,7 @@ def test_record_survives_disk_failure(
 
     mgr = asyncio.run(_run())
 
-    assert mgr.entry_ids() == ["c1"]
+    assert [entry.id for entry in mgr._entries] == ["c1"]
     assert "[c1]" in mgr.digest()
 
 
@@ -377,7 +365,7 @@ def test_reload_clears_memory_but_keeps_file(tmp_path: Path) -> None:
 
     mgr, path = asyncio.run(_run())
 
-    assert mgr.entry_ids() == []
+    assert mgr._entries == []
     assert mgr.digest() == ""
     assert path.exists()
     assert mgr.add(kind="note", topic="t", content=_LONG, author="x").id == "c1"

@@ -38,6 +38,7 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 | `LLMMgr` (`llm_mgr.py`) | 按模型名/别名返回可用的 LLMProvider | 否 | 无 |
 | `ToolsMgr` (`tools_mgr.py`) | 工具注册、执行、有界临时日志 | 否 | 无 |
 | `PermissionManager` (`permission_mgr.py`) | 路径解析、代码硬拒绝、Plan 约束、智能权限和一次性确认 | 否 | 无 |
+| `ProcessMgr` (`process_mgr.py`) | 进程会话与工作区读写租约的唯一所有者 | 否 | 无（进程不跨重启） |
 | `WebAccessMgr` (`web_access_mgr.py`) | 按当前模型和统一配置路由本地或 provider 原生 Web 能力 | 否 | 无 |
 | `CompactMgr` (`compact_mgr.py`) | 上下文压缩与 transcript 落盘 | 否 | 无 |
 | `PromptMgr` (`prompt_mgr.py`) | 构建固定 system、模式指令与初始外部上下文 | 否 | 无 |
@@ -84,7 +85,7 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 | `parse_frontmatter` | 从 `.md` 文本分离 YAML frontmatter 与 body |
 | `extract_manifest` | 从 frontmatter 与 body 构造 `AgentManifest`，由角色和子 agent 共用 |
 
-**公共属性与资产方法**：`active`、`manifest`、`role_name`；`agents_dir()`、`skills_dir()`、`plugins_dir()`、`agent_md_path()`、`mcp_servers_path()`；以及 `common_dir()`、`common_agents_dir()`、`common_skills_dir()`、`common_agent_md_path()`。
+**公共属性与资产方法**：`active`、`manifest`、`role_name`；`agents_dir()`、`skills_dir()`、`plugins_dir()`、`agent_md_path()`、`mcp_servers_path()`；以及 `common_agents_dir()`、`common_skills_dir()`、`common_agent_md_path()`。
 
 **feature 门控**：否。**reload**：有；按当前信任与配置重新发现、激活和解析角色。**关键状态**：`_role_path`、`_manifest`、`_all_roles`。
 
@@ -141,8 +142,6 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 |---|---|---|---|
 | `register` | `tool: ToolEntry` | `None` | 注册工具（重名跳过并告警） |
 | `get` | `name: str` | `ToolEntry \| None` | 按名取工具 |
-| `has` | `name: str` | `bool` | 是否已注册 |
-| `list_entries` | — | `list[ToolEntry]` | 全部工具（只读优先排序） |
 | `all_tool_names` | — | `set[str]` | 全部工具名 |
 | `schemas` | — | `list[ToolDict]` | 所有已注册工具的稳定 OpenAI function-calling schema 目录 |
 | `unavailable_in_mode` | `mode: RunMode` | `tuple[str, ...]` | 当前模式不能执行的完整工具名列表 |
@@ -377,9 +376,8 @@ MCP 连接配置和授权边界见 [mcp-and-hooks.md](mcp-and-hooks.md)。
 | `note_path` | — | `Path` | 当前会话的落盘路径 |
 | `add` | `kind`, `topic`, `content`, `author`, `refs` | `ContextEntry \| None` | 同步纯内存登记（脱敏、截断、超限淘汰） |
 | `record` | 同 `add` | `ContextEntry \| None` | `add()` + 追加落盘（`to_thread` + `asyncio.Lock`） |
-| `digest` | `char_budget`, `include_ids`, `now` | `str` | 渲染 `<shared_context>` 注入块，倒序、按预算裁剪 |
+| `digest` | `now`（仅供测试注入固定时钟） | `str` | 渲染 `<shared_context>` 注入块，倒序、按 `inject_char_budget` 裁剪 |
 | `mark_stale` | `paths` | `int` | 把提及这些文件的条目标为可能过时 |
-| `entry_ids` | — | `list[str]` | 当前全部条目 id |
 
 **条目类型**（`ContextEntry.kind`）：`delegation`（子 agent 返回报告，框架自动记）、`note`（agent 经 `note_context` 工具显式记）、`decision`（预留给用户决策）。
 
@@ -520,9 +518,7 @@ hook 协议、JSON 字段与插件 `CLAUDE_PLUGIN_ROOT` 环境变量见 [mcp-and
 | `get_config_parts` | `parts`（原样路径段 tuple） | `Any` | 取含点号等动态 mapping key 下的配置值（缺失抛 `KeyError`） |
 | `get_user_setting` | `key`（点路径） | `Any` | 取设置值（缺失返回空 dict） |
 | `set_project_trusted` | `trusted` | `None` | 更新信任状态并重载配置 |
-| `set_config` | `key`, `value`, `scope`（`"global"`/`"project"`） | `None` | 原子写单个点路径到指定配置层（YAML 规范化输出，不保留原注释格式）；写后需 `reload()` 或重启才生效 |
-| `set_configs` | `values`, `scope` | `None` | 原子批量写多个点路径到同一配置层 |
-| `set_config_parts` / `set_configs_parts` | 原样路径段、值、scope | `None` | 原子写入动态 mapping key；路径段内部的点不会被拆分 |
+| `set_config_parts` / `set_configs_parts` | 原样路径段、值、scope（`"global"`/`"project"`） | `None` | 原子写单个/多个值到指定配置层（YAML 规范化输出，不保留原注释格式）；路径段内部的点不会被拆分；写后需 `reload()` 或重启才生效 |
 | `set_global_env` | `values` | `None` | 批量原子写全局 `.env`（`global_dir/.env`）：只改目标变量、保留注释与无关原文，目录 0700/文件 0600，不修改 `os.environ`；写后需 `reload()` 或重启才生效 |
 | `has_explicit_provider_config` | — | `bool` | 用户层是否已有显式 Provider 配置（有效环境含内置 `{NAME}_API_KEY`/`{NAME}_API_URL` 键、全局或 trusted 项目非空 `llm_provider`）；首次 Provider 向导据此决定是否跳过 |
 
@@ -568,7 +564,6 @@ hook 协议、JSON 字段与插件 `CLAUDE_PLUGIN_ROOT` 环境变量见 [mcp-and
 | 方法 | 关键参数 | 返回 | 作用 |
 |---|---|---|---|
 | `register` | `provider` | `None` | 注册提醒源（重复注册忽略） |
-| `unregister` | `provider` | `None` | 注销（不存在静默跳过） |
 | `queue_turn_start` | `mode, is_subagent` | `None` | turn 开始：收集各源 `get_turn_start_reminder(mode, is_subagent)` 并排队 |
 | `notify_tool_round` | `tool_names` | `None` | 工具轮后：调各源 `notify_tool_round(tool_names)` |
 | `queue_post_round` | `mode, is_subagent` | `None` | POST_ROUND：收集各源 `pop_post_round_reminder(mode, is_subagent)` 并排队 |

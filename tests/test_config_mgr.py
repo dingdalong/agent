@@ -16,14 +16,14 @@ def _manager(tmp_path: Path, *, project_trusted: bool = False) -> ConfigManager:
     )
 
 
-def test_set_config_writes_only_global_override_layer_after_reload(tmp_path):
+def test_set_config_parts_writes_only_global_override_layer_after_reload(tmp_path):
     global_path = tmp_path / "global" / "config.yaml"
     global_path.parent.mkdir()
     global_path.write_text("llm:\n  concurrency: 2\n")
     manager = _manager(tmp_path)
     previous_user_agent = manager.get_config("llm.user_agent")
 
-    manager.set_config("llm.user_agent", "global-agent", "global")
+    manager.set_config_parts(("llm", "user_agent"), "global-agent", "global")
 
     assert manager.get_config("llm.user_agent") == previous_user_agent
     assert yaml.safe_load(global_path.read_text()) == {
@@ -35,49 +35,39 @@ def test_set_config_writes_only_global_override_layer_after_reload(tmp_path):
     assert manager.get_config("llm.user_agent") == "global-agent"
 
 
-def test_set_config_writes_project_layer_without_project_trust(tmp_path):
+def test_set_config_parts_writes_project_layer_without_project_trust(tmp_path):
     manager = _manager(tmp_path, project_trusted=False)
     project_path = tmp_path / "work" / ".agent" / "config.yaml"
 
-    manager.set_config("events.level", "trace", "project")
+    manager.set_config_parts(("events", "level"), "trace", "project")
 
     assert yaml.safe_load(project_path.read_text()) == {"events": {"level": "trace"}}
     assert not (tmp_path / "global" / "config.yaml").exists()
 
 
 @pytest.mark.parametrize("content", ["llm: [\n", "- not-a-mapping\n"])
-def test_set_config_rejects_invalid_writable_yaml_without_overwrite(tmp_path, content):
+def test_set_config_parts_rejects_invalid_writable_yaml_without_overwrite(tmp_path, content):
     global_path = tmp_path / "global" / "config.yaml"
     global_path.parent.mkdir()
     global_path.write_text(content)
     manager = _manager(tmp_path)
 
     with pytest.raises(ValueError):
-        manager.set_config("llm.default", "replacement", "global")
+        manager.set_config_parts(("llm", "default"), "replacement", "global")
 
     assert global_path.read_text() == content
 
 
-@pytest.mark.parametrize("key", ["", ".llm", "llm.", "llm..default"])
-def test_set_config_rejects_invalid_key_without_creating_file(tmp_path, key):
-    manager = _manager(tmp_path)
-
-    with pytest.raises(ValueError):
-        manager.set_config(key, "value", "global")
-
-    assert not (tmp_path / "global" / "config.yaml").exists()
-
-
-def test_set_config_rejects_invalid_scope_and_scalar_intermediate_node(tmp_path):
+def test_set_config_parts_rejects_invalid_scope_and_scalar_intermediate_node(tmp_path):
     global_path = tmp_path / "global" / "config.yaml"
     global_path.parent.mkdir()
     global_path.write_text("llm: scalar\n")
     manager = _manager(tmp_path)
 
     with pytest.raises(ValueError):
-        manager.set_config("llm.default", "replacement", "global")
+        manager.set_config_parts(("llm", "default"), "replacement", "global")
     with pytest.raises(ValueError):
-        manager.set_config("llm.default", "replacement", "builtin")
+        manager.set_config_parts(("llm", "default"), "replacement", "builtin")
 
     assert global_path.read_text() == "llm: scalar\n"
 

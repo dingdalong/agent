@@ -7,7 +7,10 @@
 
 from __future__ import annotations
 
-from src.agent.agent import _resolve_memory_scope
+from unittest.mock import patch
+
+from src.agent.agent import Agent, _resolve_memory_scope
+from src.mode import RunMode
 
 
 def test_main_agent_defaults_to_project_memory():
@@ -24,3 +27,23 @@ def test_explicit_memory_is_passed_through():
     """显式声明的 memory 无论主/子 agent 均透传。"""
     assert _resolve_memory_scope("session", is_subagent=False) == "session"
     assert _resolve_memory_scope("project", is_subagent=True) == "project"
+
+
+def test_from_manifest_without_manifest_still_applies_overrides():
+    """manifest 为 None 的回退分支同样应用 overrides，不静默丢弃。"""
+    deps = object()
+    with patch.object(Agent, "__post_init__", lambda self: None):
+        agent = Agent.from_manifest(
+            None,
+            deps,
+            model="provider/model",
+            features={"task"},
+            mode=RunMode.PLAN,
+        )
+
+    assert agent.agent_type == "agent"
+    assert agent.deps is deps
+    assert agent.memory == "project"
+    assert agent.model == "provider/model"
+    assert agent.features == {"task"}
+    assert agent.mode is RunMode.PLAN

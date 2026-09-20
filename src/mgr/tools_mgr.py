@@ -202,14 +202,6 @@ class ToolsMgr:
     def reload(self) -> None:
         self.output.clear()
 
-    def has(self, name: str) -> bool:
-        """检查工具是否已注册。"""
-        return name in self._tools
-
-    def list_entries(self) -> list[ToolEntry]:
-        """返回所有已注册的工具列表。"""
-        return sorted(self._tools.values(), key=_tool_sort_key)
-
     def all_tool_names(self) -> set[str]:
         """返回所有已注册工具名的集合。"""
         return set(self._tools.keys())

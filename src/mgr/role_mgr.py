@@ -488,11 +488,6 @@ class RoleMgr:
 
     # —— 共享资源路径（不依赖角色激活状态）——————————————————————————————
 
-    def common_dir(self) -> Path | None:
-        """共享资源目录（所有角色可用）。"""
-        p = common_role_dir()
-        return p if p.exists() else None
-
     def common_agents_dir(self) -> Path | None:
         """共享子 agent 定义目录。"""
         p = common_role_dir() / "agents"

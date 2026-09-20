@@ -226,7 +226,7 @@ def test_successful_delegation_is_recorded(
         "explore", "去查", parent_agent=_parent(), description="定位注入点",
     ))
 
-    assert ledger.entry_ids() == ["c1"]
+    assert [entry.id for entry in ledger._entries] == ["c1"]
     entry = ledger._entries[0]
     assert entry.kind == "delegation"
     assert entry.topic == "定位注入点"
@@ -258,7 +258,7 @@ def test_llm_error_is_not_recorded(
 
     asyncio.run(mgr.task_delegator("explore", "去查", parent_agent=_parent()))
 
-    assert ledger.entry_ids() == []
+    assert ledger._entries == []
 
 
 def test_agent_type_outside_whitelist_is_not_recorded(
@@ -272,7 +272,7 @@ def test_agent_type_outside_whitelist_is_not_recorded(
 
     asyncio.run(mgr.task_delegator("shell", "跑测试", parent_agent=_parent()))
 
-    assert ledger.entry_ids() == []
+    assert ledger._entries == []
 
 
 def test_trivial_report_is_not_recorded(
@@ -284,7 +284,7 @@ def test_trivial_report_is_not_recorded(
 
     asyncio.run(mgr.task_delegator("explore", "去查", parent_agent=_parent()))
 
-    assert ledger.entry_ids() == []
+    assert ledger._entries == []
 
 
 def test_child_exception_is_not_recorded(
@@ -303,7 +303,7 @@ def test_child_exception_is_not_recorded(
     with pytest.raises(RuntimeError):
         asyncio.run(mgr.task_delegator("explore", "去查", parent_agent=_parent()))
 
-    assert ledger.entry_ids() == []
+    assert ledger._entries == []
 
 
 def test_unknown_agent_type_is_not_recorded(
@@ -316,7 +316,7 @@ def test_unknown_agent_type_is_not_recorded(
     result = asyncio.run(mgr.task_delegator("nope", "去查", parent_agent=_parent()))
 
     assert result.startswith("错误")
-    assert ledger.entry_ids() == []
+    assert ledger._entries == []
 
 
 def test_recorded_content_includes_stop_hook_additions(
@@ -406,7 +406,7 @@ def test_parallel_delegations_are_isolated(
 
     # 两个委派开始时账本都还是空的，谁都不该看到对方的任务正文
     assert sorted(prompts) == ["任务乙", "任务甲"]
-    assert len(ledger.entry_ids()) == 2
+    assert len(ledger._entries) == 2
     assert {entry.topic for entry in ledger._entries} == {"甲", "乙"}
 
 

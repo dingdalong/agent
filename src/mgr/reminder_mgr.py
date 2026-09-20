@@ -1,6 +1,6 @@
 """提醒注入管理器 — 收集待在下一次 chat 前发送的框架提醒。
 
-通过 register() 注册提醒源（如 PlanMgr、TaskManager），
+通过 register() 注册提醒源（当前唯一注册者是 Agent 装配的 TaskManager），
 提醒源只返回框架自身的固定指令，不得返回用户、工具或外部读取内容。ReminderMgr
 只排队纯文本；消息角色和历史追加由 Agent 在 chat 前统一处理。
 
@@ -37,17 +37,6 @@ class ReminderMgr:
         """
         if provider not in self._providers:
             self._providers.append(provider)
-
-    def unregister(self, provider: Any) -> None:
-        """注销提醒源。provider 不存在时静默跳过。
-
-        Args:
-            provider: 要注销的提醒源对象。
-        """
-        try:
-            self._providers.remove(provider)
-        except ValueError:
-            pass
 
     def queue_turn_start(
         self, mode: RunMode, is_subagent: bool,

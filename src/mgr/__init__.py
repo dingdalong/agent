@@ -17,6 +17,7 @@ from src.mgr.reminder_mgr import ReminderMgr
 from src.mgr.session_mgr import SessionMgr, ResumeResult
 from src.mgr.mcp_mgr import McpMgr
 from src.mgr.role_mgr import RoleMgr
+from src.mgr.process_mgr import ProcessMgr
 from src.mgr.project_trust_mgr import ProjectTrustMgr
 
-__all__ = ["CompactMgr", "CompactResult", "TaskManager", "ToolsMgr", "PromptMgr", "SkillMgr", "SubAgentMgr", "PermissionManager", "WebAccessMgr", "ConfigManager", "ContextEntry", "ContextMgr", "MemoryMgr", "HooksMgr", "LLMMgr", "PlanMgr", "PluginMgr", "PluginInfo", "PluginLayer", "ReminderMgr", "SessionMgr", "ResumeResult", "McpMgr", "RoleMgr", "ProjectTrustMgr"]
+__all__ = ["CompactMgr", "CompactResult", "TaskManager", "ToolsMgr", "PromptMgr", "SkillMgr", "SubAgentMgr", "PermissionManager", "WebAccessMgr", "ConfigManager", "ContextEntry", "ContextMgr", "MemoryMgr", "HooksMgr", "LLMMgr", "PlanMgr", "PluginMgr", "PluginInfo", "PluginLayer", "ReminderMgr", "SessionMgr", "ResumeResult", "McpMgr", "RoleMgr", "ProcessMgr", "ProjectTrustMgr"]

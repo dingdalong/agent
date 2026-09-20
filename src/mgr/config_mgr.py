@@ -162,7 +162,7 @@ class ConfigManager:
         self.project_trusted = project_trusted
         self.global_config_path = self.global_dir / "config.yaml"
         self.project_config_path = self.project_dir / "config.yaml"
-        # settings.json 写入位置固定为项目级
+        # settings.json 由用户手工维护，框架只读
         self.settings_path = self.project_dir / "settings.json"
         self._lock = threading.RLock()
         self._environment: dict[str, str] = {}
@@ -384,22 +384,6 @@ class ConfigManager:
             return self.project_config_path
         raise ValueError(f"不支持的配置层: {scope!r}")
 
-    def set_config(self, key: str, value: Any, scope: ConfigScope) -> None:
-        """将 YAML 可序列化值写入指定配置层的点路径。
-
-        写入只修改目标层自身，不会写入内置配置或合并后的有效配置。
-        新值在下次 ``reload()`` 或重启后生效。
-
-        Args:
-            key: 非空点分隔配置路径，如 ``"llm.user_agent"``。
-            value: YAML 可序列化的配置值。
-            scope: 目标配置层，仅支持 ``"global"`` 或 ``"project"``。
-        """
-        if not isinstance(key, str) or not key or any(not part for part in key.split(".")):
-            raise ValueError(f"无效配置路径: {key!r}")
-
-        self.set_config_parts(tuple(key.split(".")), value, scope)
-
     def set_config_parts(
         self,
         parts: ConfigPath,
@@ -408,19 +392,6 @@ class ConfigManager:
     ) -> None:
         """将值写入原样路径段，段内的点不会被解释为分隔符。"""
         self.set_configs_parts({parts: value}, scope)
-
-    def set_configs(self, values: Mapping[str, Any], scope: ConfigScope) -> None:
-        """原子地将多个 YAML 值写入同一配置层。"""
-        if not values:
-            return
-        for key in values:
-            if not isinstance(key, str) or not key or any(not part for part in key.split(".")):
-                raise ValueError(f"无效配置路径: {key!r}")
-
-        self.set_configs_parts(
-            {tuple(key.split(".")): value for key, value in values.items()},
-            scope,
-        )
 
     def set_configs_parts(
         self,
@@ -462,7 +433,7 @@ class ConfigManager:
           staging 文件上依次应用目标变量，最后一次性 ``atomic_write_text`` 原子替换
           目标（目录 0700、文件 0600）。异常时原目标不变且 staging 清理。
         - 不修改 os.environ，不自动 reload，新值在下次 ``reload()`` 或重启后生效
-          （与 set_configs 契约一致）。
+          （与 set_configs_parts 契约一致）。
 
         Args:
             values: 目标环境变量 mapping，键为 env key，值为 str。
@@ -505,14 +476,3 @@ class ConfigManager:
         """
         with self._lock:
             return self._get_value(self._user_settings, key, default={})
-
-    def _save_user_settings(self, settings: dict[str, Any]) -> None:
-        """原子写入项目级 settings.json。
-
-        Args:
-            settings: 要写入的完整设置 dict。
-        """
-        with self._lock:
-            content = json.dumps(settings, ensure_ascii=False, indent=2) + "\n"
-            atomic_write_text(self.settings_path, content)
-            self._user_settings = settings

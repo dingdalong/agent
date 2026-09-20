@@ -190,6 +190,7 @@ class Agent:
     features: set[str] | None = field(default=None)
     mode: RunMode = field(default=RunMode.EXECUTE)
     history: list[dict] = field(init=False, default_factory=list)
+    llm: Any = field(init=False, repr=False)
     _task_mgr: TaskManager | None = field(init=False, repr=False)
     _compact_mgr: CompactMgr = field(init=False, repr=False)
     _skill_mgr: SkillMgr | None = field(init=False, repr=False)
@@ -204,7 +205,6 @@ class Agent:
     _manager_guidance_injected: bool = field(init=False, default=False, repr=False)
     _pending_input: str = field(init=False, default="")
     _queued_user_action: str = field(init=False, default="", repr=False)
-    _input_history: list[str] = field(init=False, default_factory=list)
     _handlers: dict[AgentState, Callable] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -338,7 +338,7 @@ class Agent:
             Agent 实例。
         """
         if manifest is None:
-            return cls(
+            kwargs: dict[str, Any] = dict(
                 agent_type="agent",
                 description="",
                 deps=deps,
@@ -346,24 +346,25 @@ class Agent:
                 is_subagent=is_subagent,
                 memory=_resolve_memory_scope(None, is_subagent),
             )
-        kwargs: dict[str, Any] = dict(
-            agent_type=manifest.agent_type,
-            description=manifest.description,
-            deps=deps,
-            role_prompt=manifest.prompt,
-            tools=manifest.tools,
-            is_subagent=is_subagent,
-            memory=_resolve_memory_scope(manifest.memory, is_subagent),
-            model=manifest.model,
-            mode=RunMode.PLAN if manifest.start_in_plan_mode else RunMode.EXECUTE,
-            enable_thinking=(
-                manifest.enable_thinking
-                if manifest.enable_thinking is not None
-                else True
-            ),
-            reasoning_effort=manifest.reasoning_effort,
-            features=manifest.features,
-        )
+        else:
+            kwargs = dict(
+                agent_type=manifest.agent_type,
+                description=manifest.description,
+                deps=deps,
+                role_prompt=manifest.prompt,
+                tools=manifest.tools,
+                is_subagent=is_subagent,
+                memory=_resolve_memory_scope(manifest.memory, is_subagent),
+                model=manifest.model,
+                mode=RunMode.PLAN if manifest.start_in_plan_mode else RunMode.EXECUTE,
+                enable_thinking=(
+                    manifest.enable_thinking
+                    if manifest.enable_thinking is not None
+                    else True
+                ),
+                reasoning_effort=manifest.reasoning_effort,
+                features=manifest.features,
+            )
         kwargs.update(overrides)
         return cls(**kwargs)
 
@@ -670,12 +671,12 @@ class Agent:
     def get_input_history(self) -> list[str]:
         """返回当前会话输入栏历史副本（时间正序）。
 
-        测试可能用 object.__new__ 绕过 dataclass 初始化，故防御缺省。
+        子 agent 没有会话状态，返回空列表。
         """
         state = self._session_state()
         if state is not None:
             return state.input_history()
-        return list(getattr(self, "_input_history", []))
+        return []
 
     async def _on_check_compact(self, ctx: RunContext) -> AgentState:
         """估算完整输入并推进 PreTurn/MidTurn 自动 compact 状态。

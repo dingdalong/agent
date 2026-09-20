@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -31,16 +32,16 @@ def test_switch_model_rebinds_model_state_without_replacing_history(tmp_path: Pa
     agent.reasoning_effort = "high"
     agent.llm = old_llm
     agent.history = [{"role": "user", "content": "保留历史"}]
-    agent._input_history = ["保留输入"]
     agent._prompt_mgr = SimpleNamespace()
+    input_history = ["保留输入"]
     agent.deps = SimpleNamespace(
         llm_mgr=SimpleNamespace(get=lambda model: new_llm if model == "new-model" else old_llm),
         config_mgr=ConfigStub(),
         workdir=tmp_path,
         data_guard=None,
+        session_state=SimpleNamespace(input_history=lambda: input_history),
     )
     history = agent.history
-    input_history = agent._input_history
     agent_uuid = agent.uuid
     agent._compact_mgr = agent._build_compact_mgr(old_llm)
     agent._compact_mgr.recent_files = ["src/old.py"]
@@ -50,7 +51,7 @@ def test_switch_model_rebinds_model_state_without_replacing_history(tmp_path: Pa
 
     assert agent.uuid == agent_uuid
     assert agent.history is history
-    assert agent._input_history is input_history
+    assert agent.get_input_history() is input_history
     assert agent.history == [{"role": "user", "content": "保留历史"}]
     assert agent.llm is new_llm
     assert agent.model == "anthropic/new-model"
@@ -69,10 +70,10 @@ def test_model_role_overrides_are_written_together(tmp_path: Path) -> None:
         project_trusted=True,
     )
 
-    manager.set_configs(
+    manager.set_configs_parts(
         {
-            "role.coding.model": {"default": "new-model", "fast": "fast-model"},
-            "role.coding.reasoning_effort": "xhigh",
+            ("role", "coding", "model"): {"default": "new-model", "fast": "fast-model"},
+            ("role", "coding", "reasoning_effort"): "xhigh",
         },
         "project",
     )
@@ -99,10 +100,10 @@ def test_model_slots_mapping_overwrites_legacy_scalar_model(tmp_path: Path) -> N
         "role:\n  coding:\n    model: old-model\n    reasoning_effort: high\n"
     )
 
-    manager.set_configs(
+    manager.set_configs_parts(
         {
-            "role.coding.model": {"default": "new-model", "fast": "fast-model"},
-            "role.coding.reasoning_effort": "max",
+            ("role", "coding", "model"): {"default": "new-model", "fast": "fast-model"},
+            ("role", "coding", "reasoning_effort"): "max",
         },
         "project",
     )
@@ -128,12 +129,17 @@ def test_model_role_override_failure_preserves_project_config(tmp_path: Path) ->
     manager.project_config_path.write_text(original)
 
     with pytest.raises(ValueError):
-        manager.set_configs(
+        manager.set_configs_parts(
             {
-                "role.coding.model": "new-model",
-                "role.coding.reasoning_effort": "xhigh",
+                ("role", "coding", "model"): "new-model",
+                ("role", "coding", "reasoning_effort"): "xhigh",
             },
             "project",
         )
 
     assert manager.project_config_path.read_text() == original
+
+
+def test_agent_declares_llm_as_dataclass_field() -> None:
+    """llm 是声明的 dataclass 字段，静态可见，不再是动态挂载属性。"""
+    assert "llm" in {item.name for item in dataclasses.fields(Agent)}
