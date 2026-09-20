@@ -481,7 +481,6 @@ class ToolsMgr:
             origin=tool.origin,
             caller=caller,
             user_intent=user_intent,
-            review_model=getattr(getattr(agent, "llm", None), "model", None),
         ))
         if not authorization.allowed:
             event_bus = getattr(deps, "event_bus", None) if deps is not None else None

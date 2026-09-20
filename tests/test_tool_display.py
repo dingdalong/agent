@@ -61,7 +61,7 @@ def test_permission_line_maps_all_sources():
     assert permission_line("deny", "x", "r", "plan").startswith("✘ 计划模式 ·")
     assert permission_line("deny", "x", "r", "policy").startswith("✘ 策略放行 ·")
     assert permission_line("allow", "x", "r", "judge").startswith("✔ 智能权限 ·")
-    assert permission_line("allow", "x", "r", "web_safety").startswith("✔ 网页安全 ·")
+    assert permission_line("allow", "x", "r", "web_privacy").startswith("✔ 网页隐私 ·")
     assert permission_line("deny", "x", "r", "user").startswith("✘ 用户 ·")
     assert permission_line("deny", "x", "r", "failure").startswith("✘ 授权失败 ·")
 

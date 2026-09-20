@@ -77,7 +77,7 @@
 | 6 | `ToolsMgr` / feature Managers / Hooks | 注册内置工具；项目 Hook 仅在受信任时加载 |
 | 7 | `McpMgr.start()` | 按信任和连接开关启动 server；动态工具强制 `REVIEW + EXTERNAL` |
 | 8 | `SessionMgr` / `LLMMgr` | 以 `LLMMgr(config_mgr, role_mgr, event_bus)` 构造，仅加载本地配置，模型引用明确指定供应商 |
-| 9 | `PermissionManager` / `WebAccessMgr` | 注入 fast 槽位智能权限、一次性确认回调与 Web 路由依赖；Web LLM 安全审查客户端虽被构造，但当前授权路径未调用 |
+| 9 | `PermissionManager` / `WebAccessMgr` | 注入 fast 槽位智能权限、一次性确认回调与 Web 路由依赖；Web 外部读取由本地隐私预检授权 |
 | 10 | `AgentDeps` / `AgentApp` | 组装共享依赖并返回应用实例 |
 
 ### 首次 LLM Provider 配置向导

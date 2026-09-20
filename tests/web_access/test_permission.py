@@ -9,23 +9,13 @@ from pydantic import BaseModel
 from src.tools import AccessKind, DataFlow, ToolOrigin, ToolPolicy
 from src.events.types import ToolCallCompleted
 from src.common.data_guard import DataGuard
-from src.mgr.permission_mgr import JudgeVerdict, PermissionManager
+from src.mgr.permission_mgr import PermissionManager
 from src.mgr.permission_mgr import ToolAuthorizationRequest, ToolCallerContext
 from src.mgr.tools_mgr import ToolsMgr
 from src.common.features import ALL_FEATURES
 from src.mode import RunMode
 from src.tools.decorator import ToolEntry
 from src.tools.policy import DEFAULT_AVAILABILITY
-
-
-class WebReviewer:
-    def __init__(self, verdict=JudgeVerdict("allow", "ok")) -> None:
-        self.verdict = verdict
-        self.calls = []
-
-    async def review(self, request, *, model):
-        self.calls.append((dict(request), model))
-        return self.verdict
 
 
 def run(coro):
@@ -43,7 +33,6 @@ def authorize(
     *,
     mode: RunMode,
     user_intent: str,
-    review_model: str | None = None,
 ):
     return manager.authorize(ToolAuthorizationRequest(
         tool_name=tool_name,
@@ -60,94 +49,69 @@ def authorize(
             unavailable_tools=(),
         ),
         user_intent=user_intent,
-        review_model=review_model,
     ))
 
 
 def test_safe_web_fetch_is_allowed_by_privacy_precheck(tmp_path: Path):
-    """隐私预检通过的安全 URL 应直接放行，不调用 LLM 审查。"""
-    reviewer = WebReviewer()
-    manager = PermissionManager(
-        str(tmp_path), None, None, DataGuard(), web_safety_client=reviewer
-    )
+    """隐私预检通过的安全 URL 应直接放行。"""
+    manager = PermissionManager(str(tmp_path), None, None, DataGuard())
     result = run(authorize(
         manager,
         "web_fetch",
         {"url": "https://example.test/doc?lang=zh"},
         mode=RunMode.PLAN,
         user_intent="读取这份公开文档",
-        review_model="current-model",
     ))
-    assert result.allowed and result.source == "web_safety"
-    assert reviewer.calls == []
+    assert result.allowed and result.source == "web_privacy"
 
 
-def test_personal_search_skips_llm_and_asks_once(tmp_path: Path):
-    reviewer = WebReviewer()
+def test_personal_search_asks_once(tmp_path: Path):
     confirmations = []
 
     async def confirm(tool_name: str, detail: str, reason: str = "") -> bool:
         confirmations.append((tool_name, detail))
         return True
 
-    manager = PermissionManager(
-        str(tmp_path), None, confirm, DataGuard(), web_safety_client=reviewer
-    )
+    manager = PermissionManager(str(tmp_path), None, confirm, DataGuard())
     result = run(authorize(
         manager,
         "web_search",
         {"query": "alice@example.com recent profile", "max_results": 5},
         mode=RunMode.PLAN,
         user_intent="search",
-        review_model="current-model",
     ))
     assert result.allowed and result.source == "user"
-    assert reviewer.calls == []
     assert confirmations == [("web_search", "搜索网页：<query:length=32>")]
 
 
-def test_secret_is_denied_before_web_reviewer(tmp_path: Path):
+def test_secret_is_denied_by_privacy_precheck(tmp_path: Path):
     secret = "sk-this-is-a-secret-value"
-    reviewer = WebReviewer()
-    manager = PermissionManager(
-        str(tmp_path), None, None, DataGuard(), web_safety_client=reviewer
-    )
+    manager = PermissionManager(str(tmp_path), None, None, DataGuard())
     result = run(authorize(
         manager,
         "web_search",
         {"query": secret, "max_results": 5},
         mode=RunMode.EXECUTE,
         user_intent="search",
-        review_model="current-model",
     ))
     assert not result.allowed and result.source == "hard_rule"
     assert secret not in result.reason
-    assert reviewer.calls == []
 
 
 def test_normal_long_search_does_not_trigger_false_private_identifier(tmp_path: Path):
-    reviewer = WebReviewer()
-    manager = PermissionManager(
-        str(tmp_path), None, None, DataGuard(), web_safety_client=reviewer
-    )
+    manager = PermissionManager(str(tmp_path), None, None, DataGuard())
     result = run(authorize(
         manager,
         "web_search",
         {"query": "OpenAI Responses API web search documentation", "max_results": 5},
         mode=RunMode.EXECUTE,
         user_intent="research",
-        review_model="current-model",
     ))
     assert result.allowed
-    # 隐私预检通过直接放行，不调用 LLM 审查
-    assert reviewer.calls == []
 
 
-def test_invalid_or_private_fetch_is_denied_before_web_reviewer(tmp_path: Path):
-    reviewer = WebReviewer()
-    manager = PermissionManager(
-        str(tmp_path), None, None, DataGuard(), web_safety_client=reviewer
-    )
+def test_invalid_or_private_fetch_is_denied_by_privacy_precheck(tmp_path: Path):
+    manager = PermissionManager(str(tmp_path), None, None, DataGuard())
     for url in ("file:///etc/passwd", "http://127.0.0.1/", "https://example.test:8443/"):
         result = run(authorize(
             manager,
@@ -155,13 +119,11 @@ def test_invalid_or_private_fetch_is_denied_before_web_reviewer(tmp_path: Path):
             {"url": url},
             mode=RunMode.EXECUTE,
             user_intent="fetch",
-            review_model="current-model",
         ))
         assert not result.allowed and result.source == "hard_rule"
-    assert reviewer.calls == []
 
 
-def test_tools_mgr_passes_current_model_and_omits_web_result_preview(tmp_path: Path):
+def test_tools_mgr_omits_web_result_preview(tmp_path: Path):
     class Args(BaseModel):
         query: str
 
@@ -175,11 +137,8 @@ def test_tools_mgr_passes_current_model_and_omits_web_result_preview(tmp_path: P
     async def search(query: str) -> str:
         return f"private web content for {query}"
 
-    reviewer = WebReviewer()
     guard = DataGuard()
-    permission_mgr = PermissionManager(
-        str(tmp_path), None, None, guard, web_safety_client=reviewer
-    )
+    permission_mgr = PermissionManager(str(tmp_path), None, None, guard)
     tools_mgr = ToolsMgr(load_registered=False)
     tools_mgr.register(ToolEntry(
         name="web_search",
@@ -213,7 +172,5 @@ def test_tools_mgr_passes_current_model_and_omits_web_result_preview(tmp_path: P
     ))
     completed = next(event for event in bus.events if isinstance(event, ToolCallCompleted))
     assert "private web content" in result.text
-    # 隐私预检通过直接放行，不调用 LLM 审查
-    assert reviewer.calls == []
     assert completed.result_preview.startswith("status=success, length=")
     assert "private web content" not in completed.result_preview

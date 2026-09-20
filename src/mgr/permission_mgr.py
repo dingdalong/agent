@@ -38,7 +38,7 @@ _MAX_SHAPE_ITEMS = 128
 @dataclass(frozen=True, slots=True)
 class AuthorizationResult:
     allowed: bool
-    source: Literal["availability", "hard_rule", "plan", "policy", "judge", "web_safety", "user", "failure"]
+    source: Literal["availability", "hard_rule", "plan", "policy", "judge", "web_privacy", "user", "failure"]
     reason: str
     safe_detail: str
     path_grants: tuple[PathGrant, ...] = ()
@@ -67,7 +67,6 @@ class ToolAuthorizationRequest:
     origin: ToolOrigin
     caller: ToolCallerContext
     user_intent: str
-    review_model: str | None = None
 
 
 JudgeVerdict = ReviewVerdict
@@ -76,16 +75,6 @@ JudgeVerdict = ReviewVerdict
 class JudgeClient(Protocol):
     async def judge(self, request: Mapping[str, Any]) -> JudgeVerdict:
         """返回一次无缓存的结构化裁决。"""
-
-
-class WebSafetyClient(Protocol):
-    async def review(
-        self,
-        request: Mapping[str, Any],
-        *,
-        model: str | None,
-    ) -> ReviewVerdict:
-        """使用当前 Agent 模型审查最小化的 Web 请求。"""
 
 
 ConfirmCallback = Callable[[str, str, str], Awaitable[bool]]
@@ -117,7 +106,6 @@ class PermissionManager:
         judge_client: JudgeClient | None,
         confirm: ConfirmCallback | None,
         data_guard: DataGuard,
-        web_safety_client: WebSafetyClient | None = None,
     ) -> None:
         self.path_resolver = PathResolver(workdir)
         self.workdir = self.path_resolver.workdir
@@ -125,7 +113,6 @@ class PermissionManager:
         self.confirm = confirm
         self.data_guard = data_guard
         self.hard_deny = HardDenyDetector(data_guard)
-        self.web_safety_client = web_safety_client
         self.web_privacy = WebPrivacyGuard(data_guard)
 
     async def authorize(
@@ -138,7 +125,6 @@ class PermissionManager:
         origin = request.origin
         caller = request.caller
         user_intent = request.user_intent
-        review_model = request.review_model
         if origin.kind != "builtin" and policy.access is not AccessKind.REVIEW:
             policy = ToolPolicy(
                 AccessKind.REVIEW,
@@ -220,13 +206,9 @@ class PermissionManager:
         if policy.access is AccessKind.EXTERNAL_READ:
             return await self._review_web(
                 tool_name,
-                policy,
                 arguments,
-                origin,
                 paths,
-                user_intent,
                 safe_detail,
-                review_model,
             )
 
         return await self._review(
@@ -340,20 +322,14 @@ class PermissionManager:
             tuple(self.path_resolver.grant(item) for item in paths),
             reviewer,
             request,
-            source="judge",
-            unavailable_reason="智能权限不可用",
         )
 
     async def _review_web(
         self,
         tool_name: str,
-        policy: ToolPolicy,
         arguments: Mapping[str, Any],
-        origin: ToolOrigin,
         paths: Sequence[ResolvedPath],
-        user_intent: str,
         safe_detail: str,
-        review_model: str | None,
     ) -> AuthorizationResult:
         grants = tuple(self.path_resolver.grant(item) for item in paths)
         privacy = self.web_privacy.assess(tool_name, arguments)
@@ -363,7 +339,7 @@ class PermissionManager:
         if privacy.decision == "ask":
             return await self._confirm_once(tool_name, safe_detail, privacy.reason, grants)
         # 本地预检通过即放行
-        return self._result(tool_name, True, "web_safety", "本地隐私预检通过", safe_detail, grants)
+        return self._result(tool_name, True, "web_privacy", "本地隐私预检通过", safe_detail, grants)
 
     async def _resolve_review(
         self,
@@ -372,12 +348,9 @@ class PermissionManager:
         grants: tuple[PathGrant, ...],
         reviewer: Callable[[Mapping[str, Any]], Awaitable[ReviewVerdict]] | None,
         request: Mapping[str, Any],
-        *,
-        source: Literal["judge", "web_safety"],
-        unavailable_reason: str,
     ) -> AuthorizationResult:
         verdict: ReviewVerdict | None = None
-        failure_reason = unavailable_reason
+        failure_reason = "智能权限不可用"
         if reviewer is not None:
             try:
                 verdict = await asyncio.wait_for(reviewer(request), timeout=15.0)
@@ -387,20 +360,20 @@ class PermissionManager:
                 raise
             except Exception as exc:
                 failure_reason = str(self.data_guard.redact(exc))[:300]
-                logger.warning("%s 失败，转一次性人工确认：%s", source, failure_reason)
+                logger.warning("judge 失败，转一次性人工确认：%s", failure_reason)
 
         if verdict is not None:
             logger.info(
-                "%s 裁决 %s → %s（%s）",
-                source, tool_name, verdict.decision, self.data_guard.redact(verdict.reason),
+                "judge 裁决 %s → %s（%s）",
+                tool_name, verdict.decision, self.data_guard.redact(verdict.reason),
             )
         else:
-            logger.info("%s 裁决 %s → 无结果（%s）", source, tool_name, failure_reason)
+            logger.info("judge 裁决 %s → 无结果（%s）", tool_name, failure_reason)
 
         if verdict is not None and verdict.decision == "allow":
-            return self._result(tool_name, True, source, verdict.reason or "安全审查允许", safe_detail, grants)
+            return self._result(tool_name, True, "judge", verdict.reason or "安全审查允许", safe_detail, grants)
         if verdict is not None and verdict.decision == "deny":
-            return self._result(tool_name, False, source, verdict.reason or "安全审查拒绝", safe_detail)
+            return self._result(tool_name, False, "judge", verdict.reason or "安全审查拒绝", safe_detail)
         return await self._confirm_once(
             tool_name,
             safe_detail,
@@ -451,24 +424,6 @@ class PermissionManager:
             request["redacted_command"] = self.data_guard.shell_summary(str(command))
             request["additional_permissions"] = self.data_guard.redact(arguments.get("additional_permissions") or {})
             request["justification"] = str(self.data_guard.redact(arguments.get("justification") or ""))[:2048]
-        return request
-
-    def _web_review_request(
-        self,
-        tool_name: str,
-        policy: ToolPolicy,
-        arguments: Mapping[str, Any],
-        origin: ToolOrigin,
-        paths: Sequence[ResolvedPath],
-        user_intent: str,
-    ) -> dict[str, Any]:
-        request = self._review_request_base(
-            tool_name, policy, arguments, origin, paths, user_intent
-        )
-        if tool_name == "web_search":
-            request["query"] = str(self.data_guard.redact(arguments.get("query", "")))[:2048]
-        elif tool_name == "web_fetch":
-            request["url"] = self.data_guard.url_summary(str(arguments.get("url", "")))
         return request
 
     def _review_request_base(
@@ -586,7 +541,7 @@ class PermissionManager:
         self,
         tool_name: str,
         allowed: bool,
-        source: Literal["availability", "hard_rule", "plan", "policy", "judge", "web_safety", "user", "failure"],
+        source: Literal["availability", "hard_rule", "plan", "policy", "judge", "web_privacy", "user", "failure"],
         reason: str,
         safe_detail: str,
         path_grants: tuple[PathGrant, ...] = (),

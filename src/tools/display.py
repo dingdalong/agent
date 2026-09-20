@@ -122,7 +122,7 @@ PERMISSION_SOURCES: dict[str, str] = {
     "plan": "计划模式",
     "policy": "策略放行",
     "judge": "智能权限",
-    "web_safety": "网页安全",
+    "web_privacy": "网页隐私",
     "user": "用户",
     "failure": "授权失败",
 }

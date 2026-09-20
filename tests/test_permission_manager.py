@@ -80,7 +80,6 @@ def authorize(
     features: set[str] | frozenset[str] = ALL_FEATURES,
     declared_tools: set[str] | frozenset[str] | None = None,
     unavailable_tools: tuple[str, ...] = (),
-    review_model: str | None = None,
 ):
     """构造统一授权请求，保持各测试只突出自身风险输入。"""
     return manager.authorize(ToolAuthorizationRequest(
@@ -100,7 +99,6 @@ def authorize(
             unavailable_tools=unavailable_tools,
         ),
         user_intent=user_intent,
-        review_model=review_model,
     ))
 
 

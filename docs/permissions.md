@@ -35,7 +35,7 @@ MCP 工具固定为 `REVIEW + EXTERNAL`。上游 annotation（包括 `readOnlyHi
 11. 其余调用交通用 LLM 智能权限审查；返回 ask、异常、超时或无效响应时，只进行一次 yes/no 人工确认，无 TTY、取消或拒绝均为 deny。
 12. 工具执行结果立即经 DataGuard 脱敏和限长，再进入 PostToolUse、事件、输出预算和 Agent 历史。
 
-`AuthorizationResult.source` 标明裁决来源：`availability`、`hard_rule`、`plan`、`policy`、`judge`、`web_safety`、`user` 或 `failure`。当前 EXTERNAL_READ 本地隐私预检通过时仍使用 `source="web_safety"`，该来源名不表示已调用 LLM Web 审查。`reason` 和 `safe_detail` 在返回前再次脱敏并限长。允许结果还包含冻结的 `path_grants`，只记录参数名、角色、授权时规范路径和分类；工具在实际 I/O 前按自身契约复检路径。
+`AuthorizationResult.source` 标明裁决来源：`availability`、`hard_rule`、`plan`、`policy`、`judge`、`web_privacy`、`user` 或 `failure`。EXTERNAL_READ 本地隐私预检通过时使用 `source="web_privacy"`。`reason` 和 `safe_detail` 在返回前再次脱敏并限长。允许结果还包含冻结的 `path_grants`，只记录参数名、角色、授权时规范路径和分类；工具在实际 I/O 前按自身契约复检路径。
 
 ## 路径解析
 
@@ -80,7 +80,7 @@ LOCAL_READ 可以读取工作区外的普通文件或目录，但拒绝设备、
 
 权限裁决会以一行提示展示给用户，格式 `{标记} {来源} · {中文工具名} · {结论}(理由)`（组装见 `src/tools/display.py` 的 `permission_line`）。标记 `✘`/`✔`/`?` 分别对应拒绝/放行/需确认；来源标签由 `AuthorizationResult.source` 决定。所有拒绝都发 `PermissionNotice`，放行仅 `source="judge"` 的智能权限裁决提示；确定性策略放行不打断输出。ask 走 `PermissionMenu`，理由在确认弹窗之前显示。
 
-Web 外部读取走另一条路径：`WebPrivacyGuard` 本地预检拒绝秘密、URL userinfo 和认证/签名 query；疑似个人信息、源代码、专有文本或高熵私有标识符直接进入一次性人工确认；其余请求本地放行。`LLMWebSafetyClient` 虽在 `bootstrap.create_app()` 中构造并注入，但当前 `PermissionManager._review_web()` 没有调用它，`review_model` 参数也未被消费；因此不要把 Web LLM 安全审查视为已启用。原生 `web_search`/`web_fetch` 的 Provider 路由仍使用发起调用的 Agent 自己的 Provider，与授权预检是两件事。
+Web 外部读取走另一条路径：`WebPrivacyGuard` 本地预检拒绝秘密、URL userinfo 和认证/签名 query；疑似个人信息、源代码、专有文本或高熵私有标识符直接进入一次性人工确认；其余请求本地放行。该路径不调用 LLM 审查。原生 `web_search`/`web_fetch` 的 Provider 路由仍使用发起调用的 Agent 自己的 Provider，与授权预检是两件事。
 
 ## DataGuard
 
@@ -121,7 +121,7 @@ Plan 激活时只允许：
 - `judge 裁决 <工具> → allow/deny/ask（理由）` 与 `judge 失败，转一次性人工确认：…` —— 当前启用的智能权限阶段裁决，先于漏斗行。
 - `转人工确认 <工具>（理由）` —— 一次性确认弹窗开启；与紧随的漏斗行的时间差即用户思考时长，进程被杀导致弹窗未结束时只有此行而无结果行。
 
-级别约定：所有拒绝与非确定性放行（judge/plan/web_safety/user/failure）为 info；`source=policy` 的确定性放行（每次本地读取都会命中）为 debug，避免刷屏，调 `config.yaml` 的 `logging.level` 到 `debug` 才记录全量。写入的 reason 已过 `DataGuard.redact`，与展示给用户的同源。
+级别约定：所有拒绝，以及来源为 judge/plan/web_privacy/user/failure 的放行结果为 info；`source=policy` 的确定性放行（每次本地读取都会命中）为 debug，避免刷屏，调 `config.yaml` 的 `logging.level` 到 `debug` 才记录全量。写入的 reason 已过 `DataGuard.redact`，与展示给用户的同源。
 
 ## 安全边界
 

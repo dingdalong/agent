@@ -20,7 +20,6 @@ from src.common.data_guard import DataGuard, register_runtime_secrets
 from src.common.frozen import clean_env
 from src.common.session_state import SessionState
 from src.mgr.permission_mgr import LLMJudgeClient
-from src.mgr.web_safety_mgr import LLMWebSafetyClient
 from src.common.paths import global_data_dir, workdir as resolve_workdir
 from src.agent import AgentDeps
 from src.commands import CommandMgr
@@ -210,7 +209,6 @@ async def create_app(
         judge_client=LLMJudgeClient(llm_mgr, data_guard),
         confirm=confirm_once,
         data_guard=data_guard,
-        web_safety_client=LLMWebSafetyClient(llm_mgr, data_guard),
     )
     web_access_mgr = WebAccessMgr(llm_mgr)
     deps = AgentDeps(

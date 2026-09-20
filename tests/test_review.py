@@ -9,7 +9,6 @@ from typing import Any
 
 from src.common.data_guard import DataGuard
 from src.mgr.permission_mgr import LLMJudgeClient
-from src.mgr.web_safety_mgr import LLMWebSafetyClient
 
 
 class RecordingProvider:
@@ -63,23 +62,3 @@ def test_permission_judge_caps_structured_review_at_three_attempts() -> None:
     assert [tool["function"]["name"] for tool in provider.calls[0]["tools"]] == [
         "record_verdict"
     ]
-
-
-def test_web_safety_caps_structured_review_at_three_attempts() -> None:
-    """Web 安全审查应保留当前模型并限制为最多三次。"""
-    provider = RecordingProvider()
-    llm_mgr = RecordingLLMMgr(provider)
-    client = LLMWebSafetyClient(llm_mgr, DataGuard())
-
-    verdict = asyncio.run(client.review({"url": "https://example.test"}, model="current"))
-
-    assert verdict.decision == "allow"
-    assert llm_mgr.models == ["current"]
-    assert provider.calls[0]["max_attempts_cap"] == 3
-    assert provider.calls[0]["tool_choice"] == "required"
-    system = provider.calls[0]["prompt"][0]["content"]
-    request = json.loads(provider.calls[0]["messages"][0]["content"])
-    assert "Web 外部读取" in system
-    assert "# 身份与责任" not in system
-    assert "# 消息来源与标签" not in system
-    assert request == {"url": "https://example.test"}

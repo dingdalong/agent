@@ -174,7 +174,7 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 |---|---|---|---|
 | `authorize` (async) | `request: ToolAuthorizationRequest` | `AuthorizationResult` | 按 `ToolCallerContext` 检查 mode、feature、主/子身份和 manifest，再独立裁决风险；不缓存、不创建后续放行 |
 
-**关键协作者**：`PathResolver` 统一规范化和分类路径，`HardDenyDetector` 处理不可覆盖的高危动作，`LLMJudgeClient` 每次通过 `llm_mgr.get("fast")` 现读激活角色的 fast 槽位，`StructuredVerdictRunner` 对该次结构化裁决覆盖 `reasoning_effort="low"`（并关闭 thinking、最多尝试三次），不修改缓存 Provider。fast 缺失或格式非法是配置错误；候选列表不限制调用，实际调用错误不触发 default 回退。`WebPrivacyGuard` 负责 Web 外部读取的本地隐私预检；`LLMWebSafetyClient` 虽在装配时注入，但当前 `_review_web()` 路径未调用，不应视为已启用的 LLM Web 审查。`DataGuard` 保证裁决请求、原因和展示详情不含原始秘密。**feature 门控**：否。**reload**：无。
+**关键协作者**：`PathResolver` 统一规范化和分类路径，`HardDenyDetector` 处理不可覆盖的高危动作，`LLMJudgeClient` 每次通过 `llm_mgr.get("fast")` 现读激活角色的 fast 槽位，`StructuredVerdictRunner` 对该次结构化裁决覆盖 `reasoning_effort="low"`（并关闭 thinking、最多尝试三次），不修改缓存 Provider。fast 缺失或格式非法是配置错误；候选列表不限制调用，实际调用错误不触发 default 回退。`WebPrivacyGuard` 负责 Web 外部读取的本地隐私预检，该路径不调用 LLM 审查。`DataGuard` 保证裁决请求、原因和展示详情不含原始秘密。**feature 门控**：否。**reload**：无。
 
 ---
 
