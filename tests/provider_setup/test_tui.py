@@ -12,9 +12,9 @@ import pytest
 from textual.containers import Vertical
 from textual.widgets import Input
 
-from src.app.provider_setup import ProviderOption
-from src.llm.models import ModelDiscovery
 from src.llm.errors import classify_llm_error
+from src.llm.models import ModelDiscovery
+from src.llm.setup_contract import ProviderOption
 from src.interfaces.tui.provider_setup import SetupApp
 from src.interfaces.tui.widgets import KeyboardOptionList, SelectionStatic
 

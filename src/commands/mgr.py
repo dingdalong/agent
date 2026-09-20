@@ -1,8 +1,8 @@
 """斜杠命令管理器 — 三层加载（内置 → 全局 → 项目），同名覆盖；统一分发。
 
 发现机制镜像 tools 系统：import 各层的 <name>.py 触发 @command 装饰器把 CommandEntry
-登记到模块级 _COMMAND_REGISTRY，再按层收集。命令的声明（装饰器元数据）与执行体（被
-装饰的 async 函数）内聚于单个 .py 文件。
+登记到 src/commands/registry.py 的 _COMMAND_REGISTRY，再按层收集。命令的声明
+（装饰器元数据）与执行体（被装饰的 async 函数）内聚于单个 .py 文件。
 
 内置层按包内模块枚举（pkgutil），用户层与项目层扫描环境里的外部目录并按文件路径
 加载——两者的加载方式不同，但登记与覆盖逻辑共用。
@@ -22,8 +22,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Awaitable, Callable
+from typing import TYPE_CHECKING, Callable
 
+from src.commands.registry import _COMMAND_REGISTRY, CommandEntry
 from src.common.paths import project_data_dir
 
 if TYPE_CHECKING:
@@ -31,10 +32,6 @@ if TYPE_CHECKING:
     from src.commands.context import CommandContext
 
 logger = logging.getLogger(__name__)
-
-
-# 命令 handler 统一签名：async def <name>(ctx, args) -> CommandResult | None
-CommandRunner = Callable[["CommandContext", list[str]], Awaitable[object]]
 
 
 class CommandSignal(Enum):
@@ -55,35 +52,6 @@ class CommandOutcome:
 
     signal: CommandSignal
     new_agent: "object | None" = None
-
-
-@dataclass
-class CommandEntry:
-    """一条已注册的斜杠命令。
-
-    Attributes:
-        name: 命令名（小写，不含 / 前缀）。
-        description: 简述；补全与 /help 展示。
-        path: 来源 .py 文件路径（调试用）。
-        namespace: 来源层（builtin | user | project）；装饰器置空，由 CommandMgr 填充。
-        run: 执行体（被 @command 装饰的 async 函数）。
-        usage: 用法行，缺省 "/<name>"。
-        aliases: 别名列表，注册到同一 entry。
-        layer: agent(默认) | app；app = 需主循环上下文（reset 会话等）。
-        feature: 所属可插拔 feature（对齐 ALL_FEATURES）；未启用时不可用且不出现。
-        hidden: True 时可执行但不进补全与 /help 列表。
-    """
-
-    name: str
-    description: str
-    run: CommandRunner
-    path: Path | None = None
-    namespace: str = ""
-    usage: str = ""
-    aliases: tuple[str, ...] = ()
-    layer: str = "agent"
-    feature: str | None = None
-    hidden: bool = False
 
 
 @dataclass
@@ -112,8 +80,6 @@ class CommandMgr:
 
     def _load_all(self) -> None:
         """按低→高优先级分层加载，import 触发装饰器登记，后者同名覆盖前者。"""
-        from src.commands.decorator import _COMMAND_REGISTRY
-
         layers: list[tuple[str, list[Callable[[], object | None]]]] = [
             ("builtin", self._builtin_loaders()),
         ]

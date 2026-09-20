@@ -14,16 +14,16 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, field
+from collections.abc import Mapping
 from functools import partial
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from src.llm import LLMConfigurationError
 from src.llm.models import (
     MODEL_DISCOVERY_TIMEOUT_SECONDS, ModelDiscovery, discover_models,
     normalize_provider_configs, split_model_reference,
 )
+from src.llm.setup_contract import DiscoverFunc, ProviderOption, SetupResult
 from src.mgr.role_mgr import (
     active_role_name,
     discover_roles,
@@ -34,40 +34,6 @@ from src.mgr.role_mgr import (
 
 if TYPE_CHECKING:
     from src.mgr.config_mgr import ConfigManager
-
-
-
-
-@dataclass(frozen=True, slots=True)
-class ProviderOption:
-    """内置 Provider 候选（顺序即内置 llm_provider mapping 顺序）。
-
-    api_key 为有效环境中已有的该 Provider 凭据，仅用于向导预填；repr 不含该值。
-    """
-
-    name: str
-    base_url: str
-    requires_key: bool
-    api_key: str | None = field(default=None, repr=False)
-    models: list[str] = field(default_factory=list)
-
-
-@dataclass(frozen=True, slots=True)
-class SetupResult:
-    """向导确认的完整 Provider 配置结果；repr 不含 api_key。
-
-    default_model 写入激活角色的 default 槽位，fast_model 写入 fast 槽位；
-    两者可以是同一个模型。
-    """
-
-    provider: str
-    base_url: str
-    api_key: str | None = field(repr=False)
-    default_model: str
-    fast_model: str
-
-
-DiscoverFunc = Callable[[ProviderOption, Optional[str], str], Awaitable[ModelDiscovery]]
 
 
 def build_provider_options(config_mgr: ConfigManager) -> list[ProviderOption]:
@@ -127,7 +93,8 @@ async def _run_setup_app(
 ) -> SetupResult | None:
     """运行独立 SetupApp；返回用户确认的 SetupResult，取消时返回 None。
 
-    SetupApp 构造契约（供 src/interfaces/tui/provider_setup.py 实现）::
+    SetupApp 构造契约（数据结构见 src/llm/setup_contract.py，实现在
+    src/interfaces/tui/provider_setup.py）::
 
         SetupApp(options: list[ProviderOption], discover: DiscoverFunc)
         await app.run_async() -> SetupResult | None

@@ -12,11 +12,11 @@ from src.commands.context import (
 )
 from src.commands.decorator import command
 from src.commands.mgr import (
-    CommandEntry,
     CommandMgr,
     CommandOutcome,
     CommandSignal,
 )
+from src.commands.registry import CommandEntry
 
 __all__ = [
     "CommandAppServices",

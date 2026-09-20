@@ -4,9 +4,9 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from src.mgr.memory_mgr import MemoryType
+from src.common.memory_types import MemoryType
+from src.common.tool_policy import AccessKind, DataFlow, ToolAvailability, ToolPolicy
 from src.mode import RunMode
-from src.tools.policy import AccessKind, DataFlow, ToolAvailability, ToolPolicy
 from src.tools.decorator import tool
 
 

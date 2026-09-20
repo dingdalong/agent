@@ -13,11 +13,13 @@ from src.events.types import (
     LLMLengthRetrying,
     caller_identity,
 )
+from src.agent.assembly import AgentAssembly, AgentAssembler
+from src.agent.spec import AgentSpec
 from src.agent.states import AgentState, RunContext, RunResult, parse_command
+from src.mgr.common.subagent_port import ParentAgentFacts, SubagentSpawnRequest
 from src.events import NoEventSubscribers, emit_telemetry_safely
 from src.llm.base import TruncationKind, classify_truncation
 from src.llm.errors import LLMCallError, LLMConfigurationError, LLMErrorInfo, LLMErrorKind
-from src.mgr import TaskManager, CompactMgr, CompactResult, PromptMgr, SkillMgr, SubAgentMgr, ReminderMgr
 from src.prompt_tags import (
     ExternalContextItem,
     PromptTag,
@@ -40,6 +42,9 @@ if TYPE_CHECKING:
     from src.mgr.session_mgr import SessionMgr
     from src.common.session_state import SessionState
     from src.mgr.mcp_mgr import McpMgr
+    from src.mgr.skill_mgr import SkillMgr
+    from src.mgr.subagent_mgr import SubAgentMgr
+    from src.mgr.task_mgr import TaskManager
     from src.mgr.role_mgr import RoleMgr, AgentManifest
     from src.interfaces.turn_clock import TurnClock
     from src.mgr.web_access_mgr import WebAccessMgr
@@ -115,25 +120,33 @@ def _format_llm_failure_text(error: LLMErrorInfo) -> str:
     return f"错误：LLM 调用失败（{error.kind.value}）：{message}"
 
 
-def _resolve_memory_scope(manifest_memory: str | None, is_subagent: bool) -> str | None:
-    """解析 agent 的记忆范围。
-
-    Args:
-        manifest_memory: manifest 中声明的记忆范围，未声明为 None。
-        is_subagent: 是否为子 agent。
-
-    Returns:
-        记忆范围字符串；manifest 显式声明则用其值，未声明时按类型取默认——
-        主 agent → "project"（加载项目记忆），子 agent → None（不加载）。
-    """
-    if manifest_memory is not None:
-        return manifest_memory
-    return None if is_subagent else "project"
-
-
 @dataclass
+class SessionContext:
+    """会话级可变状态 — 与进程级依赖分离。
+
+    会话边界（`AgentApp._reset_session`、`/resume`）只更新本对象，进程级
+    `AgentDeps` 与其 Manager 在整个进程生命周期内保持不变。
+
+    Attributes:
+        id: 当前会话 ID；空串表示尚未开始会话。
+        state: 当前会话的 `SessionState`；未初始化为 None。
+        context: 会话级外部上下文条目（SessionStart hook、resume 摘要）。
+        env_baseline: 静态环境基线文本，每个会话采集一次。
+    """
+
+    id: str = ""
+    state: "SessionState | None" = None
+    context: list[ExternalContextItem] = field(default_factory=list)
+    env_baseline: str = ""
+
+
+@dataclass(frozen=True)
 class AgentDeps:
-    """由 bootstrap 组装、供 Agent 与显式重载流程共享的进程级依赖。"""
+    """由 bootstrap 组装、供 Agent 与显式重载流程共享的进程级依赖。
+
+    本容器在 `create_app()` 之后不可变：会话级可变状态全部收在
+    `session`（`SessionContext`）中，运行期不得就地改写 deps 字段。
+    """
 
     llm_mgr: LLMMgr = None
     ui: UserInterface = None
@@ -153,51 +166,40 @@ class AgentDeps:
     role_mgr: RoleMgr | None = None
     turn_clock: TurnClock | None = None
     command_mgr: CommandMgr | None = None
-    plan_mode_controller: Any = None
     data_guard: Any = None
     trust_gate: Any = None
-    session_context: list[ExternalContextItem] = field(default_factory=list)
-    # 环境基线由 AgentApp._reset_session 采集一次，作为外部上下文消息提供。
-    env_baseline: str = ""
-    session_state: SessionState | None = None
-    session_id: str = ""
+    session: SessionContext = field(default_factory=SessionContext)
     workdir: Path | None = None
     global_dir: Path | None = None
     task_change_notifier: Callable[[list[dict]], None] | None = None
 
 @dataclass
 class Agent:
-    """Agent 定义。
+    """Agent 状态机 — 消费装配产物，只持有自身状态。
+
+    身份与配置在冻结的 `AgentSpec`，agent 级 Manager 与初始模型部件在冻结的
+    `AgentAssembly`；本类只保留逐轮变化的状态与状态机 handler，构造过程不再
+    解析模型、构造 Manager 或构建提示词（见 `AgentAssembler`）。
 
     Attributes:
-        uuid: 唯一类型标识。
-        agent_type: agent类型
-        description: 一句话描述
-        mode: 本 agent 当前运行模式。
+        spec: 不可变的身份与配置。
+        deps: bootstrap 组装的进程级依赖。
+        assembly: 装配产物。
+        uuid: 唯一实例标识。
+        history: 当前对话消息。
+        mode: 当前运行模式（运行时权威值）。
+        model: 解析后的 ``供应商/模型ID`` 展示名。
+        reasoning_effort: 当前生效的推理强度覆盖；None 时跟随 provider。
     """
 
-    uuid: UUID = field(init=False)
-    agent_type: str
-    description: str
+    spec: AgentSpec
     deps: AgentDeps = field(repr=False)
-    role_prompt: str | None = field(default=None)
-    tools: set[str] | None = field(default=None)
-    is_subagent: bool = field(default=False)
-    memory: str | None = field(default=None)
-    model: str | None = field(default=None)
-    enable_thinking: bool = field(default=True)
-    reasoning_effort: str | None = field(default=None)
-    features: set[str] | None = field(default=None)
-    mode: RunMode = field(default=RunMode.EXECUTE)
+    assembly: AgentAssembly = field(repr=False)
+    uuid: UUID = field(default_factory=uuid.uuid4)
     history: list[dict] = field(init=False, default_factory=list)
-    llm: Any = field(init=False, repr=False)
-    _task_mgr: TaskManager | None = field(init=False, repr=False)
-    _compact_mgr: CompactMgr = field(init=False, repr=False)
-    _skill_mgr: SkillMgr | None = field(init=False, repr=False)
-    _subagent_mgr: SubAgentMgr | None = field(init=False, repr=False)
-    _prompt_mgr: PromptMgr = field(init=False, repr=False)
-    _reminder_mgr: ReminderMgr = field(init=False, repr=False)
-    _system_prompt: list[dict] = field(init=False, repr=False)
+    mode: RunMode = field(init=False, default=RunMode.EXECUTE)
+    model: str = field(init=False, default="")
+    reasoning_effort: str | None = field(init=False, default=None)
     _last_injected_mode: RunMode | None = field(init=False, default=None, repr=False)
     _last_capability_mode: RunMode | None = field(init=False, default=None, repr=False)
     _initial_context_added: bool = field(init=False, default=False, repr=False)
@@ -208,61 +210,24 @@ class Agent:
     _handlers: dict[AgentState, Callable] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        """解析依赖并初始化本 Agent 的 Manager、工具与状态 handler。
+        """初始化本实例的状态与状态 handler。
+
+        装配（模型解析、feature 解析、工具校验、Manager 构造、固定 system）
+        全部由 `AgentAssembler` 完成，这里只做状态初始化：模式与模型镜像、
+        会话历史水合和 handler 表。
 
         Returns:
             None。
         """
-        self.uuid = uuid.uuid4()
-        if not self.is_subagent and self.deps.session_state is not None:
-            self.history[:] = self.deps.session_state.context_messages()
+        self.mode = self.spec.initial_mode
+        self.model = self.assembly.model
+        self.reasoning_effort = self.spec.initial_reasoning_effort
+        if not self.spec.is_subagent and self.deps.session.state is not None:
+            self.history[:] = self.deps.session.state.context_messages()
             self._initial_context_added = bool(self.history)
             self._initial_context_message_count = 1 if self.history else 0
             self._manager_guidance_injected = bool(self.history)
             self._last_capability_mode = self.mode if self.history else None
-        # 主、子 agent 均以单实例 UUID 关联生命周期、usage 与转录事件，
-        # 供 AgentViewStore 汇聚成一致快照。
-        self.llm = self.deps.llm_mgr.get(self.model)
-        self.model = f"{self.llm.provider_name}/{self.llm.model}"
-        # feature 只控制能力与 Manager；所有 agent 共享同一工具 schema 目录。
-        from src.common.features import resolve_features
-        self.features = resolve_features(self.features)
-        tools_mgr = getattr(self.deps, "tools_mgr", None)
-        validate_tools = getattr(tools_mgr, "validate_declared_tools", None)
-        if callable(validate_tools):
-            try:
-                validate_tools(
-                    self.tools,
-                    source=f"Agent {self.agent_type}",
-                    defer_dynamic=True,
-                )
-            except ValueError as exc:
-                raise LLMConfigurationError(str(exc)) from exc
-        self._compact_mgr = self._build_compact_mgr(self.llm)
-        workdir = self.deps.workdir
-        # 可插拔 Manager：仅启用对应 feature 时创建，否则为 None。
-        self._skill_mgr = (
-            SkillMgr(workdir, global_dir=self.deps.global_dir, plugin_mgr=self.deps.plugin_mgr, role_mgr=self.deps.role_mgr)
-            if "skill" in self.features else None
-        )
-        self._subagent_mgr = (
-            SubAgentMgr(workdir, self.deps, global_dir=self.deps.global_dir)
-            if "subagent" in self.features else None
-        )
-        self._prompt_mgr = PromptMgr(agent=self, workdir=workdir, global_dir=self.deps.global_dir, role_prompt=self.role_prompt)
-        # 主 agent：持久化到磁盘；子 agent：纯内存模式，独立实例。
-        if "task" in self.features:
-            tasks_dir = None
-            if not self.is_subagent and self.deps.global_dir and self.deps.session_id:
-                tasks_dir = self.deps.global_dir / "tasks" / self.deps.session_id
-            on_change = self.deps.task_change_notifier if not self.is_subagent else None
-            self._task_mgr = TaskManager(tasks_dir=tasks_dir, data_guard=self.deps.data_guard, on_change=on_change)
-        else:
-            self._task_mgr = None
-        self._reminder_mgr = ReminderMgr()
-        if self._task_mgr is not None:
-            self._reminder_mgr.register(self._task_mgr)
-        self._system_prompt = self._prompt_mgr.build()
         self._handlers = {
             AgentState.REQUEST_INPUT:    self._on_request_input,
             AgentState.CHECK_COMPACT:    self._on_check_compact,
@@ -279,22 +244,54 @@ class Agent:
             AgentState.LLM_FAILURE:      self._on_llm_failure,
         }
 
-    def _build_compact_mgr(self, llm: Any) -> CompactMgr:
-        """按当前模型上下文窗口创建压缩管理器。"""
-        compact_cfg = self.deps.config_mgr.get_config("compact")
-        context_limit = llm.context_limit
-        return CompactMgr(
-            llm=llm,
-            workdir=self.deps.workdir,
-            caller_agent_type=self.agent_type,
-            caller_uuid=str(self.uuid),
-            auto_compact_size=int(context_limit * compact_cfg["auto_compact_rate"]),
-            keep_recent_user_turns=compact_cfg.get("keep_recent_user_turns", 3),
-            recent_messages_token_limit=int(
-                context_limit * compact_cfg.get("keep_recent_messages_token_rate", 0.25)
-            ),
-            data_guard=self.deps.data_guard,
-        )
+    # ---- 只读查询面 ----
+    # 事实始终落在 spec / assembly 两处权威；外部协作者（ToolsMgr、工具实现、
+    # UI 与委派路径）只通过这些只读属性读取，避免各自 getattr 猜测字段位置。
+
+    @property
+    def agent_type(self) -> str:
+        """本 agent 的类型标识。"""
+        return self.spec.agent_type
+
+    @property
+    def is_subagent(self) -> bool:
+        """本实例是否以子 agent 身份装配。"""
+        return self.spec.is_subagent
+
+    @property
+    def features(self) -> frozenset[str]:
+        """本 agent 已解析启用的 feature 集。"""
+        return self.spec.features
+
+    @property
+    def tools(self) -> frozenset[str] | None:
+        """本 agent 声明的工具白名单；None 表示未声明。"""
+        return self.spec.tools
+
+    @property
+    def enable_thinking(self) -> bool:
+        """本 agent 声明是否启用模型思考。"""
+        return self.spec.enable_thinking
+
+    @property
+    def llm(self) -> Any:
+        """当前生效的 provider 实例。"""
+        return self.assembly.llm
+
+    @property
+    def task_mgr(self) -> TaskManager | None:
+        """任务管理器；未启用 task feature 时为 None。"""
+        return self.assembly.task_mgr
+
+    @property
+    def skill_mgr(self) -> SkillMgr | None:
+        """技能管理器；未启用 skill feature 时为 None。"""
+        return self.assembly.skill_mgr
+
+    @property
+    def subagent_mgr(self) -> SubAgentMgr | None:
+        """子 agent 管理器；未启用 subagent feature 或本实例是子 agent 时为 None。"""
+        return self.assembly.subagent_mgr
 
     def switch_model(self, model: str, reasoning_effort: str) -> None:
         """原地切换模型与推理强度，保留对话历史和 Agent 身份。"""
@@ -303,15 +300,11 @@ class Agent:
         effort = normalize_reasoning_effort(reasoning_effort)
         if effort is None:
             raise ValueError(f"无效推理强度: {reasoning_effort!r}")
-        new_llm = self.deps.llm_mgr.get(model)
-        new_compact_mgr = self._build_compact_mgr(new_llm)
-        new_compact_mgr.recent_files = list(self._compact_mgr.recent_files)
-        new_compact_mgr.has_compacted = self._compact_mgr.has_compacted
-
-        self.model = f"{new_llm.provider_name}/{new_llm.model}"
+        self.assembly = AgentAssembler(self.deps).rebuild_model(
+            self.assembly, self.spec, agent_uuid=self.uuid, model=model,
+        )
+        self.model = self.assembly.model
         self.reasoning_effort = effort
-        self.llm = new_llm
-        self._compact_mgr = new_compact_mgr
 
     @classmethod
     def from_manifest(
@@ -324,49 +317,144 @@ class Agent:
     ) -> Agent:
         """从 AgentManifest 创建 Agent 实例。
 
-        将 manifest 的每个字段映射到 Agent 构造参数。
-        manifest 为 None 时创建最小 Agent（回退用途）。
-        **overrides 允许调用方覆盖任意字段。
+        manifest 为 None 时创建最小 Agent（回退用途）；**overrides 允许
+        调用方覆盖任意 spec 字段，键名与历史构造参数一致。
 
         Args:
             manifest: 解析后的 manifest，或 None。
             deps: 外部依赖。
             is_subagent: 是否为子 agent。
-            **overrides: 需覆盖的 Agent 字段。
+            **overrides: 需覆盖的 spec 字段。
 
         Returns:
-            Agent 实例。
+            已装配完成的 Agent 实例。
         """
-        if manifest is None:
-            kwargs: dict[str, Any] = dict(
-                agent_type="agent",
-                description="",
-                deps=deps,
-                role_prompt=None,
-                is_subagent=is_subagent,
-                memory=_resolve_memory_scope(None, is_subagent),
+        return cls.from_spec(
+            AgentSpec.from_manifest(manifest, is_subagent=is_subagent, **overrides),
+            deps,
+        )
+
+    @classmethod
+    def from_spec(
+        cls,
+        spec: AgentSpec,
+        deps: AgentDeps,
+        *,
+        assembly: AgentAssembly | None = None,
+        assembler: AgentAssembler | None = None,
+    ) -> Agent:
+        """按已解析的 spec 装配并创建 Agent 实例。
+
+        Args:
+            spec: 不可变的身份与配置。
+            deps: 外部依赖。
+            assembly: 已装配的部件集合；测试可注入桩件，None 时现场装配。
+            assembler: 自定义装配器；None 时按 deps 新建。
+
+        Returns:
+            已装配完成的 Agent 实例。
+        """
+        agent_uuid = uuid.uuid4()
+        if assembly is None:
+            assembly = (assembler or AgentAssembler(deps)).assemble(
+                spec, agent_uuid=agent_uuid,
             )
-        else:
-            kwargs = dict(
-                agent_type=manifest.agent_type,
-                description=manifest.description,
-                deps=deps,
-                role_prompt=manifest.prompt,
-                tools=manifest.tools,
-                is_subagent=is_subagent,
-                memory=_resolve_memory_scope(manifest.memory, is_subagent),
-                model=manifest.model,
-                mode=RunMode.PLAN if manifest.start_in_plan_mode else RunMode.EXECUTE,
-                enable_thinking=(
-                    manifest.enable_thinking
-                    if manifest.enable_thinking is not None
-                    else True
-                ),
-                reasoning_effort=manifest.reasoning_effort,
-                features=manifest.features,
-            )
-        kwargs.update(overrides)
-        return cls(**kwargs)
+        return cls(spec=spec, deps=deps, assembly=assembly, uuid=agent_uuid)
+
+    # ---- 子 agent 委派端口实现 ----
+    # 调度（查表、任务状态、hook/事件、共享上下文记账）在 SubAgentMgr；
+    # 构造与运行子 agent 属于 agent 层，因此由本类实现 SubagentExecutor。
+
+    def delegation_facts(self) -> ParentAgentFacts:
+        """导出委派路径所需的自身事实快照。
+
+        子 agent 的思考、推理力度与 feature 继承规则消费这份快照，
+        管理器因此不必回读本实例的私有字段。
+
+        Returns:
+            本次委派使用的不可变事实快照。
+        """
+        return ParentAgentFacts(
+            uuid=str(self.uuid),
+            agent_type=self.spec.agent_type,
+            mode=self.mode,
+            features=self.spec.features,
+            enable_thinking=self.spec.enable_thinking,
+            reasoning_effort=self.reasoning_effort,
+            provider_reasoning_effort=getattr(
+                self.assembly.llm, "reasoning_effort", None,
+            ),
+            task_writer=self.assembly.task_mgr,
+        )
+
+    def spawn_subagent(self, request: SubagentSpawnRequest) -> Agent:
+        """按委派请求构造（不运行）子 agent。
+
+        Args:
+            request: 已解析继承值的构造请求。
+
+        Returns:
+            装配完成的子 agent 实例。
+
+        Raises:
+            LLMConfigurationError: 声明的工具未注册或模型不可用。
+        """
+        manifest = request.manifest
+        tools_mgr = getattr(self.deps, "tools_mgr", None)
+        if tools_mgr is not None:
+            try:
+                tools_mgr.validate_declared_tools(
+                    manifest.tools,
+                    source=f"子 agent 定义 {manifest.path}",
+                    defer_dynamic=True,
+                )
+            except ValueError as exc:
+                raise LLMConfigurationError(str(exc)) from exc
+        return Agent.from_manifest(
+            manifest,
+            self.deps,
+            is_subagent=True,
+            tools=manifest.tools,
+            model=manifest.model,
+            enable_thinking=request.enable_thinking,
+            reasoning_effort=request.reasoning_effort,
+            features=request.features,
+            mode=request.mode,
+        )
+
+    async def delegate_subagent(
+        self,
+        agent_type: str,
+        prompt: str,
+        *,
+        task_id: str | None = None,
+        description: str = "",
+        shared_context: str = "auto",
+    ) -> str:
+        """把任务委派给子 agent 并返回执行结果文本。
+
+        Args:
+            agent_type: 目标子 agent 类型标识。
+            prompt: 传给子 agent 的完整任务正文。
+            task_id: 关联的任务 ID（可选），框架自动维护其状态。
+            description: 委派摘要，进入生命周期事件与共享账本标题。
+            shared_context: "auto" 注入共享账本摘要；"none" 完全隔离。
+
+        Returns:
+            子 agent 的执行结果文本，或错误信息。
+        """
+        subagent_mgr = self.assembly.subagent_mgr
+        if subagent_mgr is None:
+            return "错误: 当前 agent 未启用 subagent feature，不能委派子智能体。"
+        return await subagent_mgr.delegate(
+            agent_type,
+            prompt,
+            parent=self.delegation_facts(),
+            executor=self,
+            task_id=task_id,
+            description=description,
+            shared_context=shared_context,
+        )
 
     def set_mode(self, mode: RunMode) -> bool:
         """切换运行模式。"""
@@ -409,13 +497,13 @@ class Agent:
                 turn_start_messages=list(self.history),
                 round_start_idx=len(self.history),
             )
-            self._reminder_mgr.queue_turn_start(self.mode, self.is_subagent)
+            self.assembly.reminder_mgr.queue_turn_start(self.mode, self.spec.is_subagent)
             self._append_pending_framework_message(ctx)
             self._append_message(self.history, {"role": "user", "content": input})
             ctx.user_input = input
             result = await self._run_single_turn(ctx, AgentState.CHECK_COMPACT)
             if not ctx.has_tool_calls:
-                self.llm.clear_reasoning_content(self.history[ctx.round_start_idx:])
+                self.assembly.llm.clear_reasoning_content(self.history[ctx.round_start_idx:])
                 self._sync_context_from_history()
             await self._cleanup_tasks_at_turn_end(ctx)
             return result
@@ -424,7 +512,7 @@ class Agent:
             ctx = RunContext(messages=self.history, round_start_idx=len(self.history))
             result = await self._run_single_turn(ctx, AgentState.REQUEST_INPUT)
             if not ctx.has_tool_calls:
-                self.llm.clear_reasoning_content(self.history[ctx.round_start_idx:])
+                self.assembly.llm.clear_reasoning_content(self.history[ctx.round_start_idx:])
                 self._sync_context_from_history()
             # 流式事件完成归并后再保存与下一次 LLM 输入一致的会话状态。
             event_bus = getattr(self.deps, "event_bus", None)
@@ -488,11 +576,11 @@ class Agent:
         Args:
             ctx: 当前运行上下文。
         """
-        if getattr(self, "_task_mgr", None) is None:
+        if self.assembly.task_mgr is None:
             return
         if ctx.llm_error is not None or ctx.exit_requested or ctx.command is not None:
             return
-        await asyncio.to_thread(self._task_mgr.cleanup_if_all_completed)
+        await asyncio.to_thread(self.assembly.task_mgr.cleanup_if_all_completed)
 
     def _complete_interrupted_tool_results(self) -> None:
         """保留已完成工具轮；只为悬空调用补中断结果。"""
@@ -634,9 +722,9 @@ class Agent:
                 "UserPromptSubmit",
                 user_input,
                 {"prompt": user_input},
-                session_id=self.deps.session_id,
+                session_id=self.deps.session.id,
                 agent_id=str(self.uuid),
-                agent_type=self.agent_type,
+                agent_type=self.spec.agent_type,
             )
             if hook_result.blocked:
                 reason = hook_result.block_reason or "UserPromptSubmit hook blocked"
@@ -655,7 +743,7 @@ class Agent:
         if data_guard is not None:
             user_input = str(data_guard.redact(user_input))
         self._append_initial_context_messages()
-        self._reminder_mgr.queue_turn_start(self.mode, self.is_subagent)
+        self.assembly.reminder_mgr.queue_turn_start(self.mode, self.spec.is_subagent)
         ctx.turn_start_messages = list(self.history)
         ctx.round_start_idx = len(self.history)
         self._append_pending_framework_message(ctx)
@@ -687,11 +775,10 @@ class Agent:
         Returns:
             下一状态：继续调用 LLM、执行 compact，或进入退出总结。
         """
-        ctx.prompt = getattr(self, "_system_prompt", None)
+        ctx.prompt = self.assembly.system_prompt
         if ctx.prompt is None:
-            ctx.prompt = self._prompt_mgr.build()
-            self._system_prompt = ctx.prompt
-        if self._compact_mgr.auto_compact_size <= 0:
+            ctx.prompt = self.assembly.prompt_mgr.build()
+        if self.assembly.compact_mgr.auto_compact_size <= 0:
             ctx.compact_streak = 0
             ctx.auto_compact_before_tokens = None
             ctx.auto_compact_summarized_message_count = None
@@ -699,12 +786,12 @@ class Agent:
             return AgentState.LLM_CALL
 
         estimated_tokens = await asyncio.to_thread(
-            self.llm.estimate_tokens,
+            self.assembly.llm.estimate_tokens,
             ctx.messages,
             ctx.prompt,
             self.deps.tools_mgr.schemas(),
         )
-        needs_compact = self._compact_mgr.is_need_compact(
+        needs_compact = self.assembly.compact_mgr.is_need_compact(
             ctx.messages,
             ctx.prompt,
             self.deps.tools_mgr.schemas(),
@@ -729,7 +816,7 @@ class Agent:
                 logger.warning(
                     "agent=%s compact 无有效进展: before_tokens=%d "
                     "after_tokens=%d summarized_message_count=%d reason=%s",
-                    self.agent_type,
+                    self.spec.agent_type,
                     before_tokens,
                     estimated_tokens,
                     summarized_count,
@@ -750,7 +837,7 @@ class Agent:
                 logger.warning(
                     "agent=%s 连续 %d 次有效 compact 后仍需压缩: "
                     "before_tokens=%d after_tokens=%d",
-                    self.agent_type,
+                    self.spec.agent_type,
                     ctx.max_compact_streak,
                     before_tokens,
                     estimated_tokens,
@@ -782,12 +869,12 @@ class Agent:
         caller_agent_type, caller_uuid = caller_identity(self)
         await self.deps.event_bus.emit(CompactDelta(
             timestamp=time.time(),
-            source=self.agent_type,
+            source=self.spec.agent_type,
             content="auto compact",
             caller_agent_type=caller_agent_type,
             caller_uuid=caller_uuid,
         ))
-        result = await self._compact_mgr.compact_history(
+        result = await self.assembly.compact_mgr.compact_history(
             ctx.messages,
             bootstrap_message_count=getattr(
                 self, "_initial_context_message_count", 0,
@@ -807,7 +894,7 @@ class Agent:
         Returns:
             自身 manifest 声明的 reasoning_effort，未声明时回退 Provider 类默认档位。
         """
-        return self.reasoning_effort or self.llm.reasoning_effort
+        return self.reasoning_effort or self.assembly.llm.reasoning_effort
 
     async def _on_llm_call(self, ctx: RunContext) -> AgentState:
         """调用 LLM 并保存响应。
@@ -824,16 +911,16 @@ class Agent:
         self._append_pending_framework_message(ctx)
         self._replace_messages(
             ctx.messages,
-            self.llm.normalize_messages(ctx.messages),
+            self.assembly.llm.normalize_messages(ctx.messages),
             preserve_positions=True,
         )
-        ctx.response = await self.llm.chat(
+        ctx.response = await self.assembly.llm.chat(
             prompt=ctx.prompt,
             messages=ctx.messages,
             tools=self.deps.tools_mgr.schemas(),
-            caller_agent_type=self.agent_type,
+            caller_agent_type=self.spec.agent_type,
             caller_uuid=str(self.uuid),
-            enable_thinking=self.enable_thinking,
+            enable_thinking=self.spec.enable_thinking,
             reasoning_effort_override=ctx.length_effort_override or self.reasoning_effort,
             phase=self.mode.value,
         )
@@ -940,7 +1027,7 @@ class Agent:
 
         if regenerate:
             current_effort = ctx.length_effort_override or self._base_reasoning_effort()
-            lower = self.llm.next_lower_effort(current_effort)
+            lower = self.assembly.llm.next_lower_effort(current_effort)
             if lower:
                 ctx.length_effort_override = lower
                 strategy, effort = "regenerate-lower-effort", lower
@@ -1015,7 +1102,7 @@ class Agent:
         caller_agent_type, caller_uuid = caller_identity(self)
         await emit_telemetry_safely(event_bus, LLMLengthRetrying(
             timestamp=time.time(),
-            source=self.agent_type,
+            source=self.spec.agent_type,
             truncation_kind=truncation_kind,
             call_id=getattr(ctx.response, "call_id", "") if ctx.response is not None else "",
             strategy=strategy,
@@ -1040,7 +1127,7 @@ class Agent:
         if ctx.response_recovery_start_idx is None:
             ctx.response_recovery_start_idx = len(ctx.messages)
 
-        limit = self.llm.protocol_continuation_limit("pause_turn")
+        limit = self.assembly.llm.protocol_continuation_limit("pause_turn")
         if ctx.pause_turn_continuations >= limit:
             assistant_message = response.assistant_message or {}
             return await self._fail_response_recovery(
@@ -1075,7 +1162,7 @@ class Agent:
         ctx.pause_turn_continuations += 1
         self._replace_messages(
             ctx.messages,
-            self.llm.normalize_messages(ctx.messages),
+            self.assembly.llm.normalize_messages(ctx.messages),
             preserve_positions=True,
         )
         if ctx.messages and ctx.messages[-1].get("role") == "assistant":
@@ -1086,7 +1173,7 @@ class Agent:
 
     async def _on_execute_tools(self, ctx: RunContext) -> AgentState:
         """并发独立读取；修改和交互形成屏障。取消保留已完成调用结果。"""
-        from src.tools.display import ToolResult
+        from src.common.tool_display import ToolResult
         ctx.has_tool_calls = True
         calls = list(ctx.response.tool_calls.values())
         completed = {}
@@ -1139,7 +1226,7 @@ class Agent:
                 result = completed.get(tc["id"], ToolResult('工具调用未完成或未执行', status='cancelled', error_code='cancelled'))
                 end_turn = end_turn or result.end_turn
                 self._append_message(ctx.messages, {"role": "tool", "tool_call_id": tc["id"], "content": str(result)}, correlation_id=tc["id"], kind="tool")
-        self._reminder_mgr.notify_tool_round([tc["name"] for tc in calls if tc["id"] in completed])
+        self.assembly.reminder_mgr.notify_tool_round([tc["name"] for tc in calls if tc["id"] in completed])
         return AgentState.DONE if end_turn else AgentState.POST_ROUND
 
     async def _on_check_stop(self, ctx: RunContext) -> AgentState:
@@ -1148,9 +1235,9 @@ class Agent:
                 "Stop",
                 ctx.final_text,
                 {"final_text": ctx.final_text},
-                session_id=self.deps.session_id,
+                session_id=self.deps.session.id,
                 agent_id=str(self.uuid),
-                agent_type=self.agent_type,
+                agent_type=self.spec.agent_type,
             )
             if stop_hook.blocked:
                 ctx.stop_hook_used = True
@@ -1165,7 +1252,7 @@ class Agent:
         return AgentState.DONE
 
     async def _on_post_round(self, ctx: RunContext) -> AgentState:
-        self._reminder_mgr.queue_post_round(self.mode, self.is_subagent)
+        self.assembly.reminder_mgr.queue_post_round(self.mode, self.spec.is_subagent)
         return AgentState.CHECK_COMPACT
 
     async def _on_summarize_exit(self, ctx: RunContext) -> AgentState:
@@ -1186,13 +1273,13 @@ class Agent:
             "1) 已经完成了什么；2) 还有什么未完成；3) 给出后续建议。"
         )
         self._append_pending_framework_message(ctx)
-        summary_messages = self.llm.normalize_messages(ctx.messages)
+        summary_messages = self.assembly.llm.normalize_messages(ctx.messages)
         try:
-            response = await self.llm.chat(
+            response = await self.assembly.llm.chat(
                 prompt=ctx.prompt,
                 messages=summary_messages,
                 tools=[],
-                caller_agent_type=self.agent_type,
+                caller_agent_type=self.spec.agent_type,
                 caller_uuid=str(self.uuid),
                 enable_thinking=False,
             )
@@ -1252,41 +1339,32 @@ class Agent:
 
     def _append_initial_context_messages(self) -> None:
         """在首条真实输入之前追加一次外部上下文，不污染固定 system。"""
-        if getattr(self, "_initial_context_added", False):
+        if self._initial_context_added:
             return
-        prompt_mgr = getattr(self, "_prompt_mgr", None)
-        if prompt_mgr is not None:
-            build = getattr(prompt_mgr, "build_initial_context_messages", None)
-            if build is not None:
-                messages = build()
-                for message in messages:
-                    self._append_message(self.history, message, kind="external_context")
-                self._initial_context_message_count = len(messages)
+        messages = self.assembly.prompt_mgr.build_initial_context_messages()
+        for message in messages:
+            self._append_message(self.history, message, kind="external_context")
+        self._initial_context_message_count = len(messages)
         self._initial_context_added = True
 
     def _append_pending_framework_message(self, ctx: RunContext) -> None:
         """在 chat 前把模式变化和框架提醒合并成最多一条 developer 消息。"""
         sections: list[str] = []
-        mode = getattr(self, "mode", RunMode.EXECUTE)
-        if getattr(self, "_last_capability_mode", None) is not mode:
-            prompt_mgr = getattr(self, "_prompt_mgr", None)
-            build_capability = getattr(prompt_mgr, "build_capability_instructions", None)
-            capability_text = build_capability() if build_capability is not None else ""
+        mode = self.mode
+        prompt_mgr = self.assembly.prompt_mgr
+        if self._last_capability_mode is not mode:
+            capability_text = prompt_mgr.build_capability_instructions(mode)
             if capability_text:
                 sections.append(capability_text)
             self._last_capability_mode = mode
-        if not getattr(self, "_manager_guidance_injected", False):
-            prompt_mgr = getattr(self, "_prompt_mgr", None)
-            build_manager = getattr(prompt_mgr, "build_manager_instructions", None)
-            manager_text = build_manager() if build_manager is not None else ""
+        if not self._manager_guidance_injected:
+            manager_text = prompt_mgr.build_manager_instructions()
             if manager_text:
                 sections.append(manager_text)
             self._manager_guidance_injected = True
 
-        if getattr(self, "_last_injected_mode", None) is not mode:
-            prompt_mgr = getattr(self, "_prompt_mgr", None)
-            build_mode = getattr(prompt_mgr, "build_mode_instructions", None)
-            mode_text = build_mode() if build_mode is not None else ""
+        if self._last_injected_mode is not mode:
+            mode_text = prompt_mgr.build_mode_instructions(mode)
             if mode_text:
                 sections.append(render_prompt_tag(
                     PromptTag.COLLABORATION_MODE, mode_text,
@@ -1295,10 +1373,7 @@ class Agent:
 
         reminders = list(ctx.pending_framework_instructions)
         ctx.pending_framework_instructions.clear()
-        reminder_mgr = getattr(self, "_reminder_mgr", None)
-        pop_pending = getattr(reminder_mgr, "pop_pending", None)
-        if pop_pending is not None:
-            reminders.extend(pop_pending())
+        reminders.extend(self.assembly.reminder_mgr.pop_pending())
         seen: set[str] = set()
         for reminder in reminders:
             if reminder and reminder not in seen:
@@ -1319,7 +1394,8 @@ class Agent:
     def _session_state(self) -> "SessionState | None":
         if getattr(self, "is_subagent", False):
             return None
-        return getattr(getattr(self, "deps", None), "session_state", None)
+        session = getattr(getattr(self, "deps", None), "session", None)
+        return getattr(session, "state", None)
 
     def _append_message(
         self,
@@ -1381,9 +1457,9 @@ class Agent:
         Args:
             user_input: 用户本轮原始输入，首次调用时作为会话主题。
         """
-        if self.is_subagent or self.deps.session_mgr is None:
+        if self.spec.is_subagent or self.deps.session_mgr is None:
             return
-        session_id = self.deps.session_id
+        session_id = self.deps.session.id
         if not session_id:
             return
         state = self._session_state()
@@ -1411,9 +1487,9 @@ class Agent:
             return
         await self.deps.event_bus.emit(AgentStateChanged(
             timestamp=time.time(),
-            source=self.agent_type,
+            source=self.spec.agent_type,
             agent_id=str(self.uuid),
-            agent_type=self.agent_type,
+            agent_type=self.spec.agent_type,
             from_state=from_state.value,
             to_state=to_state.value,
         ))

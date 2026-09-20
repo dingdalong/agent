@@ -12,9 +12,11 @@ from unittest.mock import patch
 import pytest
 
 from src.agent.agent import Agent
+from src.agent.spec import AgentSpec
 from src.agent.states import RunResult
 from src.app.app import AgentApp
 from src.common.session_state import SessionState
+from src.agent import SessionContext
 from src.events.types import SubagentLifecycle
 from src.interfaces.agent_view_store import AgentViewStore
 from src.mode import RunMode
@@ -173,10 +175,8 @@ def _session_app(order: list[str]) -> tuple[AgentApp, _SessionBus]:
         event_bus=bus,
         hooks_mgr=_SessionHooks(order),
         trust_gate=None,
-        session_id="",
-        session_state=SessionState(),
+        session=SessionContext(state=SessionState()),
         session_mgr=None,
-        session_context=[],
         config_mgr=SimpleNamespace(project_trusted=False, environment={}),
         data_guard=None,
         global_dir=None,
@@ -184,14 +184,12 @@ def _session_app(order: list[str]) -> tuple[AgentApp, _SessionBus]:
         mcp_mgr=None,
         memory_mgr=None,
         context_mgr=None,
-        env_baseline="",
         tools_mgr=None,
         plugin_mgr=None,
         plan_mgr=None,
         role_mgr=_ReloadingRoleMgr(order),
         llm_mgr=_ReloadingLLMMgr(order),
         command_mgr=None,
-        plan_mode_controller=None,
     )
     output_router = SimpleNamespace(
         bind_session_state=lambda _state: order.append("bind_state")
@@ -283,8 +281,8 @@ def test_reset_session_refreshes_env_baseline_and_rebinds_ledger(tmp_path) -> No
     ):
         asyncio.run(app.reset_session(source="clear"))
 
-    assert app.deps.env_baseline
-    assert ledger.session_id == app.deps.session_id
+    assert app.deps.session.env_baseline
+    assert ledger.session_id == app.deps.session.id
     assert ledger._entries == []
     assert ledger.digest() == ""
 
@@ -294,7 +292,9 @@ def _app(
     event_bus: object,
     store: AgentViewStore | None = None,
 ) -> AgentApp:
-    deps = SimpleNamespace(ui=ui, event_bus=event_bus)
+    deps = SimpleNamespace(
+        ui=ui, event_bus=event_bus, session=SessionContext(),
+    )
     return AgentApp(deps, store or AgentViewStore(), output_router=object())
 
 
@@ -358,8 +358,8 @@ def test_slow_interrupt_save_does_not_block_event_loop_and_is_awaited() -> None:
         app = _app(ui, event_bus)
         sessions = SlowSessions()
         app.deps.session_mgr = sessions
-        app.deps.session_state = SessionState()
-        app.deps.session_id = "session"
+        app.deps.session.state = SessionState()
+        app.deps.session.id = "session"
         main_thread = threading.get_ident()
         beats = 0
         running = True
@@ -408,11 +408,10 @@ def test_agent_round_persistence_serializes_in_worker_thread() -> None:
         sessions = SlowSessions()
         state = SessionState()
         agent = object.__new__(Agent)
-        agent.is_subagent = False
+        agent.spec = AgentSpec(agent_type="main", description="")
         agent.deps = SimpleNamespace(
             session_mgr=sessions,
-            session_id="session",
-            session_state=state,
+            session=SessionContext(id="session", state=state),
         )
         agent.history = [{"role": "user", "content": "hello"}]
         agent.mode = RunMode.EXECUTE

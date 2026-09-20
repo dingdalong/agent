@@ -4,7 +4,7 @@
 
 ## 工具策略
 
-工具通过冻结的 `ToolAvailability` 声明运行时可用模式、所需 feature 与调用方范围，通过 `ToolPolicy` 声明风险事实，定义见 `src/tools/policy.py`。availability 不改变发送给模型的 schema。
+工具通过冻结的 `ToolAvailability` 声明运行时可用模式、所需 feature 与调用方范围，通过 `ToolPolicy` 声明风险事实，定义见 `src/common/tool_policy.py`。availability 不改变发送给模型的 schema。
 
 | 字段 | 含义 |
 |---|---|
@@ -78,9 +78,24 @@ LOCAL_READ 可以读取工作区外的普通文件或目录，但拒绝设备、
 
 智能权限 allow/deny 直接成为本次裁决；ask、异常、超时、缺失或无效输出进入一次性确认。确认只接受 yes/no，不产生任何后续调用权限。
 
-权限裁决会以一行提示展示给用户，格式 `{标记} {来源} · {中文工具名} · {结论}(理由)`（组装见 `src/tools/display.py` 的 `permission_line`）。标记 `✘`/`✔`/`?` 分别对应拒绝/放行/需确认；来源标签由 `AuthorizationResult.source` 决定。所有拒绝都发 `PermissionNotice`，放行仅 `source="judge"` 的智能权限裁决提示；确定性策略放行不打断输出。ask 走 `PermissionMenu`，理由在确认弹窗之前显示。
-
 Web 外部读取走另一条路径：`WebPrivacyGuard` 本地预检拒绝秘密、URL userinfo 和认证/签名 query；疑似个人信息、源代码、专有文本或高熵私有标识符直接进入一次性人工确认；其余请求本地放行。该路径不调用 LLM 审查。原生 `web_search`/`web_fetch` 的 Provider 路由仍使用发起调用的 Agent 自己的 Provider，与授权预检是两件事。
+
+## 权限提示与可见性
+
+权限裁决只有两类会出现在 TUI：**所有拒绝**，以及**来源为 `judge` 的放行**。其余放行是确定性放行，静默执行、不打断输出——看不到权限行不代表没有裁决，`PermissionManager.authorize()` 对每次调用都返回结论，结论同时写入授权日志。
+
+提示行格式为 `{标记} {来源} · {中文工具名} · {结论}(理由)`（组装见 `src/common/tool_display.py` 的 `permission_line`），理由完整保留、不截断。标记 `✔`/`✘`/`?` 对应已放行/已拒绝/需确认；来源标签由 `AuthorizationResult.source` 决定，未登记的来源原样显示以暴露漏配。
+
+| `AuthorizationResult.source` | 发 `PermissionNotice` | TUI 表现 | 是否打断 |
+|---|---|---|---|
+| `hard_rule`、`availability`、`plan`、`judge`（deny）、`failure`、`user`（拒绝） | 是（`status="deny"`） | `✘ {来源} · {工具} · 已拒绝(理由)` | 否，工具不执行，回合继续 |
+| `judge`（allow） | 是（`status="allow"`） | `✔ 智能权限 · {工具} · 已放行(理由)` | 否 |
+| `policy`、`web_privacy`（allow） | 否 | 只有普通工具调用行，没有权限行 | 否 |
+| `user`（确认通过后的 allow） | 否 | 确认弹窗已经交互过，不重复提示 | 确认本身打断 |
+
+一次性人工确认（`PermissionMenu`，标题「工具请求权限」）只在这些情况出现：`judge` 返回 ask、异常、超时或无效输出，Web 隐私预检判为 ask，以及工作区外写入、受保护路径、移动、扩权和 MCP/动态工具等非确定性放行类别。弹窗前先在输出区打印请求上下文（工具、内容与裁决理由）。
+
+常见实例：沙箱内 `exec_command`（未申请扩权）、工作区内 `apply_patch`、LOCAL_READ 与 INTERNAL 工具都命中确定性放行，因此既不弹窗也不显示权限行；只有申请额外可写目录或网络、越过工作区、命中受保护路径或调用 MCP 工具时才会看到确认或权限行。
 
 ## DataGuard
 
@@ -129,7 +144,7 @@ Plan 激活时只允许：
 
 ## Shell 运行时隔离
 
-PermissionManager 签发绑定命令、目录与可写范围的 ExecutionPolicy，ProcessMgr 持有运行会话，SandboxBackend 安装平台策略。普通沙箱内调用不进入模型审核；额外可写目录或网络权限经过现有审核且只属于该进程。保护目录不能通过额外目录申请直接扩权，路径与工作目录启动前重验。
+PermissionManager 签发绑定命令、目录与可写范围的 ExecutionPolicy，ProcessMgr 持有运行会话，SandboxBackend 安装平台策略。普通沙箱内调用不进入模型审核，也不显示权限行或弹确认——它们属于 `policy` 确定性放行（见[权限提示与可见性](#权限提示与可见性)）；额外可写目录或网络权限经过现有审核且只属于该进程。保护目录不能通过额外目录申请直接扩权，路径与工作目录启动前重验。
 
 macOS 需要 /usr/bin/sandbox-exec；Linux 需要 bubblewrap 0.11+、libseccomp 和可用的 user namespace。Linux 用隔离的进程与网络 namespace、只读根文件系统、限定可写挂载及 seccomp，禁止宿主 socket、提权和危险系统调用；网络授权仍不开放 Unix socket。Windows Shell 明确不可用。依赖缺失或安装失败时不执行用户命令。agent --self-check 会实际探测沙箱安装能力。
 

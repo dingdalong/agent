@@ -1,4 +1,8 @@
-"""工具展示数据结构与格式化 — 供事件和 UI 消费，不影响 LLM 结果。"""
+"""工具展示数据结构与格式化 — 供事件和 UI 消费，不影响 LLM 结果。
+
+放在 `src/common/`：interfaces（权限提示行）、mgr（中文标题与参数/结果摘要）与
+`common.patch`（文件 diff）都直接使用，留在工具包里会让公共层反向依赖 tools 层。
+"""
 
 from __future__ import annotations
 

@@ -1,4 +1,8 @@
-"""工具授权所需的声明式策略。"""
+"""工具授权所需的声明式策略 — 被 tools/mgr/interfaces/common 共用的跨层词汇。
+
+放在 `src/common/` 而不是 `src/tools/`：路径解析、补丁与授权判定都直接消费这些事实，
+留在工具包里会让公共层反向依赖 tools 层。
+"""
 
 from __future__ import annotations
 

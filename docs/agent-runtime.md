@@ -8,7 +8,7 @@
 
 `_consume_events()`（`app.py:121-133`）内联处理 `InterruptRequested`，其余事件统一交 `OutputRouter.dispatch()`，确保 Store 先记录再决定可见性。`_run_agent_turn()`（`app.py:135-156`）把 `agent.run()` 包成任务，取消或键盘中断时调用 `_handle_interrupted_turn()` 收束任务与输入。
 
-`reset_session()` 是首次启动与 `/clear` 共用的新会话生命周期。处理 `/clear` 时先检查工作目录信任；确认结束后进入 UI reset gate，取消活跃、排队和只读请求并等待窗口 runner 清理。随后拒绝新的 `UiRequest`，用 `EventBus.join()` 收束已投递事件并保存源 `SessionState`，生成新 `session_id` 和空状态；`/clear` 再更新信任状态并重载配置、角色、Hook、模型与 MCP。最后重置 `AgentViewStore`，从激活角色 manifest 构造新主 Agent，替换 UI 会话状态，运行 `SessionStart` Hook，输出使用重载后模型、角色、Plan 状态和工作目录的启动 Banner，并在重新开放 gate 前完成最终事件 drain。重建失败时不输出 Banner。
+`reset_session()` 是首次启动与 `/clear` 共用的新会话生命周期。处理 `/clear` 时先检查工作目录信任；确认结束后进入 UI reset gate，取消活跃、排队和只读请求并等待窗口 runner 清理。随后拒绝新的 `UiRequest`，用 `EventBus.join()` 收束已投递事件并保存源 `SessionState`，在 `deps.session` 上生成新 `id` 和空状态；`/clear` 再更新信任状态并重载配置、角色、Hook、模型与 MCP。最后重置 `AgentViewStore`，从激活角色 manifest 构造新主 Agent，替换 UI 会话状态，运行 `SessionStart` Hook，输出使用重载后模型、角色、Plan 状态和工作目录的启动 Banner，并在重新开放 gate 前完成最终事件 drain。重建失败时不输出 Banner。
 
 `resume_session()` 使用同一组 UI/EventBus gate：保存源状态后绑定目标 `.state.json`，清空旧 metrics 和瞬态 UI，按目标 session 重建任务与 Plan，并从隐藏的 `subagent` view 投影恢复 `/agents` 只读记录，再从其他 `SessionRecord.view` 水合聊天。旧子 agent 不会继续运行。`/resume` 是 app 层命令，不能在 Agent 状态机内直接替换共享状态。
 
@@ -122,7 +122,7 @@ LLM_CALL → PROCESS_RESPONSE ──length────→ LENGTH_RETRY ──可
 
 ## 5. 主要 handler
 
-handler 映射在 `Agent.__post_init__` 建立（`src/agent/agent.py:236-250`）。
+handler 映射在 `Agent.__post_init__` 建立（`src/agent/agent.py:212-245`）。
 
 ### 输入与命令
 
@@ -183,16 +183,24 @@ handler 映射在 `Agent.__post_init__` 建立（`src/agent/agent.py:236-250`）
 
 ## 8. 主 Agent 与子 Agent
 
-`Agent.from_manifest()` 映射 manifest 的身份、提示词、工具、记忆、模型、初始 `RunMode`、思考与 feature。主 Agent 未声明 memory 时默认 `project`，子 Agent 默认不加载；`**overrides` 供委派时注入父 Agent 当前模式等已解析设置。
+装配分三步，输入、产物与状态各自只有一处权威：
 
-`Agent.__post_init__()` 解析模型和 feature，创建带调用方身份的 `CompactMgr`，再按 feature 创建 `SkillMgr`、`SubAgentMgr`、`TaskManager`，并构造 `PromptMgr`、`ReminderMgr` 与 handler 表。它不持有或过滤工具 schema。
+1. `AgentSpec.from_manifest()` 把 manifest 与调用方覆盖值映射为**不可变输入**（`src/agent/spec.py:71`）：身份、提示词、工具、记忆、模型请求值、初始 `RunMode`、思考与 feature。它只做纯数据映射，不解析模型、不构造 Manager、不读写文件，因此委派路径与测试可以共享同一份事实。主 Agent 未声明 memory 时默认 `project`，子 Agent 默认不加载；`**overrides` 键名与历史构造参数一致（`model`/`mode`/`reasoning_effort`/`tools`/`features`/`enable_thinking`/`memory`）。
+2. `AgentAssembler.assemble()`（`src/agent/assembly.py:62`）按 spec 解析模型与 feature、校验声明的工具，创建带调用方身份的 `CompactMgr`，再按 feature 创建 `SkillMgr`、`SubAgentMgr`、`TaskManager`，并构造 `PromptMgr`、`ReminderMgr` 与固定 system，产出 `AgentAssembly`。装配器是 `bootstrap.create_app()` 之外唯一的 Manager 具体实现实例化点；`is_subagent=True` 的 spec 不构造 `SubAgentMgr`（`task_delegator` 是 MAIN_ONLY），省掉每个子 agent 一次四层目录扫描与工具校验。
+3. `Agent.__post_init__()` 只做状态初始化：镜像 spec 的初始模式与装配产物的模型名、水合会话历史、建立 handler 表。它不构造任何 Manager，也不持有或过滤工具 schema。
 
-`Agent.run()` 有两种模式（`agent.py:342-379`）：
+`AgentAssembly` 与 `AgentSpec` 都是 frozen dataclass。切换模型时 `AgentAssembler.rebuild_model()` 重新装配模型相关部件并**整体替换** `assembly` 字段，保留 `CompactMgr` 的压缩进展（`recent_files`/`has_compacted`），避免就地修改留下两份权威。
+
+外部协作者（`ToolsMgr`、工具实现、UI 与委派路径）通过 `Agent` 的只读查询面读取事实——`agent_type`、`is_subagent`、`features`、`tools`、`enable_thinking`、`llm`、`task_mgr`、`skill_mgr`、`subagent_mgr`（`src/agent/agent.py:250-294`），而不是自行 `getattr` 猜测字段位置。
+
+委派链路被拆成两个端口（`src/mgr/common/subagent_port.py`）：`SubAgentMgr.delegate()` 只做调度——查表、任务状态、hook/生命周期事件、共享上下文记账，输入是父 agent 的 `ParentAgentFacts` 快照；「构造并运行子 agent」由 `SubagentExecutor` 承担，生产实现是 `Agent.spawn_subagent()`（构造）与 `Agent.delegate_subagent()`（调度入口，`task_delegator` 工具的唯一落点）。因此 `src/mgr/**` 运行期不 import `src.agent`，委派测试可以在任一端用最小替身。
+
+`Agent.run()` 有两种模式（`agent.py:477-524`）：
 
 - 主 Agent `input=None`：持续多轮 REPL；终态 LLM 错误结束当前轮但不退出会话。
 - 子 Agent `input` 非空：从 `CHECK_COMPACT` 执行一个任务，立即返回含 `llm_error` 的 `RunResult`。
 
-`SubAgentMgr.task_delegator()` 检查 `run_result.llm_error`；子 agent 以 LLM 终态失败返回时，关联 task 回滚为无 owner 的 `pending`，与异常/取消路径一致，最终错误文本仍返回父 Agent（`src/mgr/subagent_mgr.py:197-205`）。生命周期 end 事件照常携当时的真实 history，便于 `/agents` 诊断。
+`SubAgentMgr.delegate()` 检查 `run_result.llm_error`；子 agent 以 LLM 终态失败返回时，关联 task 回滚为无 owner 的 `pending`，与异常/取消路径一致，最终错误文本仍返回父 Agent（`src/mgr/subagent_mgr.py:294-297`）。生命周期 end 事件照常携当时的真实 history，便于 `/agents` 诊断。
 
 ## 9. Plan 状态协调
 

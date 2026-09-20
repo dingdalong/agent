@@ -13,7 +13,7 @@ import uuid
 from src.mode import RunMode
 from src.common.frozen import clean_env
 from src.common.sandbox import ExecutionPolicy, SandboxBackend, SandboxError
-from src.tools.display import ToolResult
+from src.common.tool_display import ToolResult
 
 
 class WorkspaceAccess:

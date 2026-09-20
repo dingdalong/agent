@@ -25,7 +25,7 @@ from src.mgr.role_mgr import RoleMgr
 from src.mgr.skill_mgr import SkillMgr
 from src.mgr.subagent_mgr import SubAgentMgr
 from src.tools.decorator import ToolEntry
-from src.tools.policy import ToolOrigin
+from src.common.tool_policy import ToolOrigin
 
 
 class _Config:
@@ -47,8 +47,24 @@ class _Config:
         raise KeyError(parts)
 
 
-def _main(tmp_path: Path, role_name: str) -> Agent:
-    """用真实 Manager 和权限服务构造无网络的主 agent。"""
+def _main(
+    tmp_path: Path,
+    role_name: str,
+    *,
+    plan_mgr=None,
+    hooks_mgr=None,
+) -> Agent:
+    """用真实 Manager 和权限服务构造无网络的主 agent。
+
+    Args:
+        tmp_path: 测试工作目录。
+        role_name: 激活角色名。
+        plan_mgr: 可选计划管理器；None 时 deps 不含计划能力。
+        hooks_mgr: 可选 Hooks 管理器；None 时 deps 不含 hook。
+
+    Returns:
+        已装配的主 agent。
+    """
     from src.mgr.tools_mgr import ToolsMgr
 
     config = _Config(role_name)
@@ -66,6 +82,8 @@ def _main(tmp_path: Path, role_name: str) -> Agent:
         tools_mgr=ToolsMgr(),
         workdir=tmp_path,
         data_guard=guard,
+        plan_mgr=plan_mgr,
+        hooks_mgr=hooks_mgr,
         permission_mgr=PermissionManager(
             workdir=str(tmp_path), judge_client=None, confirm=None, data_guard=guard,
         ),
@@ -75,13 +93,17 @@ def _main(tmp_path: Path, role_name: str) -> Agent:
 
 def _child(parent: Agent, agent_type: str) -> Agent:
     """按调度器的 manifest、feature 与模式规则构造独立实例。"""
-    manifest = parent._subagent_mgr._documents[agent_type]
+    manifest = parent.subagent_mgr._documents[agent_type]
     return Agent.from_manifest(
         manifest,
         parent.deps,
         is_subagent=True,
         tools=manifest.tools,
-        features=manifest.features if manifest.features is not None else parent.features,
+        features=(
+            manifest.features
+            if manifest.features is not None
+            else parent.spec.features
+        ),
         mode=parent.mode,
     )
 
@@ -121,16 +143,14 @@ def test_skill_loading_deduplicates_per_turn_and_resets_with_new_context(tmp_pat
 
 def test_blocked_skill_result_does_not_consume_turn_deduplication(tmp_path: Path) -> None:
     """正文未进入历史时，本轮仍可重新加载该技能。"""
-    parent = _main(tmp_path, "coding")
-    context = RunContext(messages=parent.history)
-
     class Hooks:
         async def run_event(self, event, tool, payload, **kwargs):
             if event == "PostToolUse":
                 return HookRunResult(blocked=True, block_reason="blocked")
             return HookRunResult()
 
-    parent.deps.hooks_mgr = Hooks()
+    parent = _main(tmp_path, "coding", hooks_mgr=Hooks())
+    context = RunContext(messages=parent.history)
     result = asyncio.run(parent.deps.tools_mgr.execute(
         "load_skill", {"name": "builtin:debugging"},
         deps=parent.deps, agent=parent, run_context=context,
@@ -153,15 +173,15 @@ def test_roles_resolve_shared_agents_and_loadable_skills(
 ) -> None:
     """完整扫描包含 common 回退，所有技能正文和引用资源均可加载。"""
     parent = _main(tmp_path, role_name)
-    assert set(parent._subagent_mgr._documents) == exclusive | {
+    assert set(parent.subagent_mgr._documents) == exclusive | {
         "explore", "shell", "general-purpose",
     }
     expected = {f"builtin:{name}" for name in skills}
-    assert set(parent._skill_mgr._documents) == expected
+    assert set(parent.assembly.skill_mgr._documents) == expected
     for name in expected:
         text = _call(parent, "load_skill", {"name": name})
         assert f'<skill name="{name}"' in text
-        document = parent._skill_mgr._documents[name]
+        document = parent.assembly.skill_mgr._documents[name]
         for reference in re.findall(r"\]\((references/[^)]+)\)", text):
             assert (document.manifest.path.parent / reference).is_file()
 
@@ -173,13 +193,20 @@ def test_skill_directory_requires_feature(
 ) -> None:
     """技能目录由 feature/Manager 决定，不受统一 schema 或 manifest 列表影响。"""
     parent = _main(tmp_path, "coding")
-    agent = _child(parent, "explore") if is_subagent else parent
-    if not enabled:
-        agent.features = resolve_features({"file"})
-        agent._skill_mgr = None
+    if enabled:
+        agent = _child(parent, "explore") if is_subagent else parent
+    else:
+        manifest = (
+            parent.subagent_mgr._documents["explore"] if is_subagent
+            else parent.deps.role_mgr.manifest
+        )
+        agent = Agent.from_manifest(
+            manifest, parent.deps, is_subagent=is_subagent,
+            features=resolve_features({"file"}),
+        )
     prompt = "\n\n".join(
         message["content"]
-        for message in agent._prompt_mgr.build_initial_context_messages()
+        for message in agent.assembly.prompt_mgr.build_initial_context_messages()
     )
     assert ("# 可用技能" in prompt) == enabled
     if not enabled:
@@ -192,8 +219,8 @@ def test_loading_skill_preserves_readonly_and_execution_permissions(tmp_path: Pa
     parent.mode = RunMode.PLAN
     child = _child(parent, "explore")
     before_tools = set(child.tools)
-    system = child._prompt_mgr.build()
-    external_context = child._prompt_mgr.build_initial_context_messages()
+    system = child.assembly.prompt_mgr.build()
+    external_context = child.assembly.prompt_mgr.build_initial_context_messages()
     assert "# 可用技能" in external_context[0]["content"]
     assert "# 可用技能" not in system[0]["content"]
     assert '<skill name="builtin:debugging"' in _call(
@@ -201,7 +228,7 @@ def test_loading_skill_preserves_readonly_and_execution_permissions(tmp_path: Pa
     )
     assert child.tools == before_tools
     assert child.mode is RunMode.PLAN
-    assert child._prompt_mgr.build() == system
+    assert child.assembly.prompt_mgr.build() == system
     assert parent.history == []
     forbidden_calls = {
         "apply_patch": {"patch": "*** Begin Patch\n*** End Patch"},
@@ -252,9 +279,9 @@ def test_real_delegation_loads_skill_in_fresh_child(
 
     monkeypatch.setattr(Agent, "run", run_child)
     for _ in range(2):
-        result = asyncio.run(parent._subagent_mgr.task_delegator(
+        result = asyncio.run(parent.delegate_subagent(
             "evidence-reviewer", "加载 builtin:onboard-verify-evidence 核实指定报告",
-            parent_agent=parent, shared_context="none",
+            shared_context="none",
         ))
         assert '<skill name="builtin:onboard-verify-evidence"' in result
     assert children[0].uuid != children[1].uuid
@@ -270,7 +297,7 @@ def test_project_override_and_lazy_dimension_references(tmp_path: Path) -> None:
     project_agent.write_text("---\nagent_type: explore\ndescription: project-explore\n---\n")
     manager = SubAgentMgr(tmp_path, parent.deps)
     assert manager._documents["explore"].description == "project-explore"
-    classifier = parent._skill_mgr.load_full_text("builtin:onboard-classify-evidence")
+    classifier = parent.assembly.skill_mgr.load_full_text("builtin:onboard-classify-evidence")
     assert "references/change-patterns.md" in classifier
     assert "两个独立完整案例" not in classifier
     user_skill = tmp_path / ".agent" / "skills" / "sample" / "SKILL.md"

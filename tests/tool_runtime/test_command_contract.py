@@ -123,11 +123,11 @@ def test_actual_agent_mode_switch_keeps_schema_and_system_fixed(tmp_path):
     parent = _main(tmp_path, 'coding')
     parent.set_mode(RunMode.EXECUTE)
     schemas = parent.deps.tools_mgr.schemas()
-    execute_prompt = parent._prompt_mgr.build()
-    execute_mode = parent._prompt_mgr.build_mode_instructions()
+    execute_prompt = parent.assembly.prompt_mgr.build()
+    execute_mode = parent.assembly.prompt_mgr.build_mode_instructions(parent.mode)
     parent.set_mode(RunMode.PLAN)
-    plan_prompt = parent._prompt_mgr.build()
-    plan_mode = parent._prompt_mgr.build_mode_instructions()
+    plan_prompt = parent.assembly.prompt_mgr.build()
+    plan_mode = parent.assembly.prompt_mgr.build_mode_instructions(parent.mode)
     assert parent.deps.tools_mgr.schemas() is schemas
     assert execute_prompt == plan_prompt
     assert execute_mode != plan_mode

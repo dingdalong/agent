@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 from src.agent.agent import Agent
+from src.agent.spec import AgentSpec
 from src.agent.states import AgentState, RunContext
 from src.llm.base import LLMResponse
 from src.llm.errors import LLMErrorKind
@@ -46,7 +48,8 @@ def _agent_with_identity_normalizer() -> Agent:
         llm 使用 IdentityNormalizer 的未初始化 Agent 实例。
     """
     agent = object.__new__(Agent)
-    agent.llm = IdentityNormalizer()
+    agent.spec = AgentSpec(agent_type="main", description="")
+    agent.assembly = SimpleNamespace(llm=IdentityNormalizer())
     return agent
 
 
@@ -454,7 +457,8 @@ def test_thinking_bottom_of_ladder_uses_compress_instruction_not_history() -> No
         _EFFORT_DOWNGRADE: dict[str, str] = {}
 
     agent = object.__new__(Agent)
-    agent.llm = NoLadderNormalizer()
+    agent.spec = AgentSpec(agent_type="main", description="")
+    agent.assembly = SimpleNamespace(llm=NoLadderNormalizer())
     ctx = RunContext(
         messages=[{"role": "user", "content": "长思考"}],
         response=LLMResponse(

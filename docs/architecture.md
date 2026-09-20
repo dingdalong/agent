@@ -16,13 +16,13 @@
 
 框架是一个基于 Python `asyncio` 单事件循环运行的 AI Agent CLI，自顶向下分为四层。上层依赖下层，装配方向自下而上（先构造底层 Manager，再注入上层）。
 
-**入口装配层** — `main.py` 解析 CLI 参数（`--workdir`、`--debug`），调用 `src/app/bootstrap.py` 的 `create_app()`。这是整个框架**唯一的具体实现实例化点**：手动构造所有 Manager 与 UI 状态服务，注入 `AgentDeps` dataclass，返回 `AgentApp`（`bootstrap.py:19-92`）。
+**入口装配层** — `main.py` 解析 CLI 参数（`--workdir`、`--debug`），调用 `src/app/bootstrap.py` 的 `create_app()`。这是整个框架**进程级依赖的唯一实例化点**：手动构造所有进程级 Manager 与 UI 状态服务，注入 `AgentDeps` dataclass，返回 `AgentApp`（`bootstrap.py:19-92`）。每 agent 层部件（`CompactMgr`/`PromptMgr`/`ReminderMgr`/`SkillMgr`/`SubAgentMgr`/`TaskManager`）则由 `src/agent/assembly.py` 的 `AgentAssembler` 按 `AgentSpec` 装配。
 
 **应用主循环层** — `src/app/app.py` 的 `AgentApp` 管理外层 REPL：启动 UI、创建事件消费任务、打印启动横幅、重置会话、循环驱动 Agent 轮次、处理中断、退出时收尾（`app.py:31-77`）。
 
-**Agent 状态机层** — `src/agent/agent.py` 的 `Agent` 是由 `_handlers: dict[AgentState, Callable]` 驱动的有限状态机（`agent.py:236-249`），枚举定义在 `src/agent/states.py:42-55`。每轮的可变状态封装在 `RunContext`（`states.py:58-106`）中；终态 LLM 错误由 `LLM_FAILURE` 承接，上下文超限仍进入 `CONTEXT_OVERFLOW`。
+**Agent 状态机层** — `src/agent/agent.py` 的 `Agent` 是由 `_handlers: dict[AgentState, Callable]` 驱动的有限状态机（`agent.py:212-245`），枚举定义在 `src/agent/states.py:42-55`。每轮的可变状态封装在 `RunContext`（`states.py:58-106`）中；终态 LLM 错误由 `LLM_FAILURE` 承接，上下文超限仍进入 `CONTEXT_OVERFLOW`。`Agent` 自身只持有身份（`AgentSpec`）、装配产物（`AgentAssembly`）与逐轮状态，构造过程不解析模型、不创建 Manager。
 
-**Manager 服务层** — `src/mgr/` 下各 Manager 各司其职（`RoleMgr`、`LLMMgr`、`ToolsMgr`、`PermissionManager`、`CompactMgr`、`PromptMgr`、`SubAgentMgr`、`SkillMgr` 等）。部分 Manager 受 feature 门控，未启用时在 `create_app()` 注入 `None`。跨 Manager 的 `ReviewVerdict` 协议位于 `src/mgr/common/`；被 app、agent、interfaces、tools、llm 或 web 直接复用的基础能力位于 `src/common/`，公共层不得反向依赖 Manager。
+**Manager 服务层** — `src/mgr/` 下各 Manager 各司其职（`RoleMgr`、`LLMMgr`、`ToolsMgr`、`PermissionManager`、`CompactMgr`、`PromptMgr`、`SubAgentMgr`、`SkillMgr` 等）。部分 Manager 受 feature 门控，未启用时在 `create_app()` 注入 `None`。跨 Manager 与调用方之间的协议位于 `src/mgr/common/`：`ReviewVerdict`、`AgentCaller`（工具执行层读取调用方事实）与 `ParentAgentFacts`/`SubagentExecutor`/`SubagentHandle`（委派端口）。管理器只通过这些协议感知调用方，`src/mgr/**` 运行期不 import `src.agent`（注解期最多引用 `AgentDeps` 容器类型），只读查询面由 `Agent` 的只读属性满足；被 app、agent、interfaces、tools、llm 或 web 直接复用的基础能力位于 `src/common/`，公共层不得反向依赖 Manager。
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -82,6 +82,8 @@
 
 ### 首次 LLM Provider 配置向导
 
+向导契约（`ProviderOption`/`SetupResult`/`DiscoverFunc`）在 `src/llm/setup_contract.py`：`src/app/provider_setup.py` 负责候选构造、模型发现与持久化编排，`src/interfaces/tui/provider_setup.py` 是其 Textual 实现，UI 因此不反向依赖 app 层，导入 app 也不会在启动期拉入 Textual。
+
 `bootstrap.create_app()` 在项目信任确认和 `ConfigManager` 构造后调用 `maybe_run_provider_setup(config_mgr)`。仅当「`ConfigManager.has_explicit_provider_config()` 判定用户层已有显式 Provider 配置」且「激活角色的 `role.<角色>.model.default` 与 `role.<角色>.model.fast` 双槽位都已配置为合法的 `供应商/模型ID`」时才跳过向导；缺少配置时进入向导，非空但格式非法的引用报告配置错误。显式 Provider 配置的判定来源（任一命中）：
 
 - 有效环境中存在任一内置 Provider 的 `{NAME}_API_KEY` 或 `{NAME}_API_URL` 键；有效环境遵循项目信任边界；
@@ -122,7 +124,7 @@ ConfigManager 三层合并
 
 ## 3. `AgentDeps` 依赖容器
 
-`AgentDeps` 是进程级依赖容器，定义在 `src/agent/agent.py:49-73`（**并非单独文件**）。它由 `create_app()` 一次性组装，注入所有 Agent 实例共享。门控 Manager 未启用时注入 `None`。
+`AgentDeps` 是**冻结的**进程级依赖容器，定义在 `src/agent/agent.py:144-174`（**并非单独文件**）。它由 `create_app()` 一次性组装，注入所有 Agent 实例共享；门控 Manager 未启用时注入 `None`。`frozen=True` 让"运行期不得改写依赖"成为运行时约束，而不是靠约定。
 
 | 字段 | 类型 | feature 门控 | 用途 |
 |---|---|---|---|
@@ -141,14 +143,22 @@ ConfigManager 三层合并
 | `session_mgr` | `SessionMgr \| None` | 否 | 会话持久化与恢复 |
 | `mcp_mgr` | `McpMgr \| None` | 否 | MCP server 连接管理 |
 | `role_mgr` | `RoleMgr \| None` | 否 | 角色发现与激活，提供 manifest |
-| `plan_mode_controller` | `Any` | 否 | 入口 Agent 的 Plan 状态与快捷键协调器，`_reset_session` 时注入 |
-| `session_context` | `list[str]` | 否 | 会话级附加上下文（SessionStart hook、resume 摘要注入） |
-| `env_baseline` | `str` | 否 | 静态环境基线（git/技术栈/目录树），`_reset_session` 采集一次，作为外部 user 上下文 |
-| `session_id` | `str` | 否 | 当前会话 ID，`_reset_session` 时生成 |
+| `session` | `SessionContext` | 否 | 会话级可变状态容器（见下），随会话边界就地更新 |
 | `workdir` | `Path \| None` | 否 | 用户工作目录 |
 | `global_dir` | `Path \| None` | 否 | 全局配置目录 |
 
-> 说明：`memory_mgr`、`plan_mgr` 与 `context_mgr` 在 `bootstrap.create_app()` 处即按 feature 门控决定是否实例化（`bootstrap.py:50,53`）。而 `SkillMgr`、`SubAgentMgr`、`TaskManager` 则是在每个 `Agent.__post_init__` 内按该 agent 自身的 feature 集创建（见 [agent-runtime.md](./agent-runtime.md) 第 6 节），不进入 `AgentDeps`。
+会话级状态不在 `AgentDeps` 的顶层字段上，而是收在 `SessionContext`（`agent.py:124-140`）里：
+
+| 字段 | 类型 | 用途 |
+|---|---|---|
+| `id` | `str` | 当前会话 ID，`_reset_session` / `/resume` 时更新 |
+| `state` | `SessionState \| None` | 当前会话状态；未开始时为 None |
+| `context` | `list[ExternalContextItem]` | 会话级附加上下文（SessionStart hook、resume 摘要） |
+| `env_baseline` | `str` | 静态环境基线（git/技术栈/目录树），`_reset_session` 采集一次 |
+
+读写规则：`deps.session.*` 是运行期唯一允许写入的 deps 子树（仍受不变量测试约束），其余 deps 字段只在 `bootstrap.create_app()` 赋值。入口的 Plan 状态与快捷键协调器是 `AgentApp._plan_mode_controller` 自身字段，不再挂在 `AgentDeps` 上——它此前只写不读，是纯粹的死字段。
+
+> 说明：`memory_mgr`、`plan_mgr` 与 `context_mgr` 在 `bootstrap.create_app()` 处即按 feature 门控决定是否实例化（`bootstrap.py:153,187`）。而 `SkillMgr`、`SubAgentMgr`、`TaskManager` 属于每 agent 层部件，由 `AgentAssembler.assemble()` 按 `AgentSpec.features` 创建并放入 `AgentAssembly`（见 [agent-runtime.md](./agent-runtime.md) 第 8 节），不进入 `AgentDeps`。
 
 `AgentViewStore` 与 `OutputRouter` 属于 app/UI 层，不进入业务依赖容器 `AgentDeps`。同一个 Store 实例由 `TextualInterface`、`OutputRouter` 和 `AgentApp` 共享，避免业务 Agent 持有展示状态。
 
@@ -177,14 +187,14 @@ ALL_FEATURES = frozenset({"task", "skill", "subagent", "file", "memory", "plan"}
 
 | feature | 门控的 Manager / 工具 / 提示词段 |
 |---|---|
-| `task` | `TaskManager`（`agent.py:151-155`），任务工具，任务提醒段 |
-| `skill` | `SkillMgr`（`agent.py:141-144`），`load_skill` 等技能工具，技能提示词段 |
-| `subagent` | `SubAgentMgr`（`agent.py:145-148`），`task_delegator` 工具 |
+| `task` | `TaskManager`（`assembly.py:192-204`），任务工具，任务提醒段 |
+| `skill` | `SkillMgr`（`assembly.py:206-215`），`load_skill` 等技能工具，技能提示词段 |
+| `subagent` | `SubAgentMgr`（`assembly.py:217-229`，`is_subagent=True` 时不构造），`task_delegator` 工具 |
 | `file` | `apply_patch` 文本修改工具 |
-| `memory` | `MemoryMgr`（`bootstrap.py:50`），记忆工具与提示词段 |
-| `plan` | `PlanMgr`（`bootstrap.py:53`），`submit_plan` 工具，计划模式 |
+| `memory` | `MemoryMgr`（`bootstrap.py:153`），记忆工具与提示词段 |
+| `plan` | `PlanMgr`（`bootstrap.py:187`），`submit_plan` 工具，计划模式 |
 
-`create_app()` 用 `resolve_features(role_mgr.manifest.features)` 计算有效集，决定 `MemoryMgr`/`PlanMgr` 是否实例化。每个 `Agent` 在 `__post_init__` 中再次解析自身 feature 集，据此按需创建 agent 级 Manager。子 agent 的 feature 集：自身 manifest 声明则用其值，否则继承父 agent。详见 [roles-subagents-skills.md](./roles-subagents-skills.md) 与 [managers.md](./managers.md)。
+`create_app()` 用 `resolve_features(role_mgr.manifest.features)` 计算有效集，决定 `MemoryMgr`/`PlanMgr` 是否实例化。`AgentSpec.from_manifest()` 在装配前解析该 agent 自身的 feature 集并冻结成 `spec.features`，`AgentAssembler` 据此按需创建 agent 级 Manager；`Agent.__post_init__` 只消费已解析结果。子 agent 的 feature 集：自身 manifest 声明则用其值，否则继承父 agent。详见 [roles-subagents-skills.md](./roles-subagents-skills.md) 与 [managers.md](./managers.md)。
 
 `ToolsMgr.schemas()` 是所有模式和 agent 共用的完整稳定目录，不接受 feature、模式或 manifest 过滤参数。`ToolAvailability` 声明模式、feature 和调用方范围；`ToolsMgr.execute()` 把它与 `ToolCallerContext` 一并交给 `PermissionManager`，由授权层在执行期拒绝不可用工具。
 

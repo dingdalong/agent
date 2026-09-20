@@ -8,12 +8,18 @@ from pathlib import Path
 
 from src.events.types import SubagentLifecycle
 from src.llm.errors import LLMConfigurationError
+from src.mgr.common.subagent_port import (
+    ParentAgentFacts,
+    SubagentExecutor,
+    SubagentHandle,
+    SubagentSpawnRequest,
+)
 from src.mgr.llm_mgr import MODEL_ALIASES
 from src.llm.models import split_model_reference
 from src.mgr.role_mgr import parse_frontmatter, extract_manifest, AgentManifest
 
 if TYPE_CHECKING:
-    from src.agent import Agent, AgentDeps
+    from src.agent import AgentDeps
 
 logger = logging.getLogger(__name__)
 
@@ -156,12 +162,13 @@ class SubAgentMgr:
             "验收后由你用同一任务 ID 标记 completed；未完成的部分可直接补齐或按上述条件重新委派。"
         )
 
-    async def task_delegator(
+    async def delegate(
         self,
         agent_type: str,
         prompt: str,
         *,
-        parent_agent: Any = None,
+        parent: ParentAgentFacts,
+        executor: SubagentExecutor,
         task_id: str | None = None,
         description: str = "",
         shared_context: str = "auto",
@@ -180,10 +187,15 @@ class SubAgentMgr:
         会互相覆盖那个槽位（共享消费槽位已经
         踩过同一个坑）。本方法的局部变量天然 per-delegation、并发安全。
 
+        本方法不读取调用方的任何私有字段：继承规则绑定在 `ParentAgentFacts`
+        上，子 agent 的构造与运行由 `SubagentExecutor` 承担，因此 `src/mgr/**`
+        运行期不依赖 `src.agent`。
+
         Args:
             agent_type: 目标子智能体类型标识。
             prompt: 传给子智能体的完整任务正文。
-            parent_agent: 调用方 Agent 实例，用于管理父任务状态和触发 hooks。
+            parent: 调用方 agent 的委派事实快照。
+            executor: 构造子 agent 的执行器（由调用方 agent 实现）。
             task_id: 关联的任务 ID（可选），指定后框架自动管理任务状态。
             description: 委派的任务摘要，传入生命周期事件供 UI 展示，
                 并作为共享上下文条目的标题。
@@ -199,7 +211,7 @@ class SubAgentMgr:
             return f"错误: 不存在的子智能体：'{agent_type}'。可用子智能体列表：{known}"
 
         # —— 自动标记任务为 in_progress ——
-        task_mgr = getattr(parent_agent, '_task_mgr', None) if parent_agent else None
+        task_mgr = parent.task_writer
         task_rolled_back = False
 
         def _rollback_task() -> None:
@@ -225,69 +237,35 @@ class SubAgentMgr:
 
         event_bus = getattr(self.deps, "event_bus", None)
         context_mgr = getattr(self.deps, "context_mgr", None)
-        agent: Any = None
+        handle: SubagentHandle | None = None
         primary_error: BaseException | None = None
         # 提到 try 之外初始化：异常/取消路径下也要能在记账处判断"这次委派没有正常完成"
         run_result: Any = None
 
         try:
-            # 模型：加载期已校验，None 表示走激活角色的 default 槽位
-            model_value = manifest.model
-
-            # 思考模式：显式设置则用设置值，否则继承父 agent
-            enable_thinking = manifest.enable_thinking
-            if enable_thinking is None:
-                enable_thinking = getattr(parent_agent, "enable_thinking", True)
-
-            # 推理力度：显式设置则用设置值，否则继承父 agent 已解析值
-            reasoning_effort = manifest.reasoning_effort
-            if reasoning_effort is None:
-                reasoning_effort = getattr(parent_agent, "reasoning_effort", None)
-                if reasoning_effort is None:
-                    parent_llm = getattr(parent_agent, "llm", None)
-                    reasoning_effort = getattr(parent_llm, "reasoning_effort", None)
-
-            # feature 集：子 agent 自身 manifest 声明则用其值，否则继承父 agent 已解析的 feature 集
-            features = manifest.features
-            if features is None:
-                features = getattr(parent_agent, "features", None)
-
-            from src.agent import Agent
-            tools_mgr = getattr(self.deps, "tools_mgr", None)
-            if tools_mgr is not None:
-                try:
-                    tools_mgr.validate_declared_tools(
-                        manifest.tools,
-                        source=f"子 agent 定义 {manifest.path}",
-                        defer_dynamic=True,
-                    )
-                except ValueError as exc:
-                    raise LLMConfigurationError(str(exc)) from exc
-            agent = Agent.from_manifest(
+            # 思考、推理力度与 feature 的继承规则绑定在父 agent 事实快照上
+            agent = executor.spawn_subagent(SubagentSpawnRequest(
                 manifest=manifest,
-                deps=self.deps,
-                is_subagent=True,
-                tools=manifest.tools,
-                model=model_value,
-                enable_thinking=enable_thinking,
-                reasoning_effort=reasoning_effort,
-                features=features,
-                mode=parent_agent.mode,
-            )
+                enable_thinking=parent.resolve_thinking(manifest.enable_thinking),
+                reasoning_effort=parent.resolve_reasoning_effort(manifest.reasoning_effort),
+                features=parent.resolve_features(manifest.features),
+                mode=parent.mode,
+            ))
+            handle = SubagentHandle.of(agent)
 
             hooks_mgr = self.deps.hooks_mgr
-            fire_hooks = hooks_mgr is not None and parent_agent is not None
+            fire_hooks = hooks_mgr is not None
             hook_kwargs = {}
             if fire_hooks:
                 hook_kwargs = {
-                    "session_id": self.deps.session_id,
-                    "agent_id": str(getattr(parent_agent, "uuid", "")),
-                    "agent_type": getattr(parent_agent, "agent_type", ""),
+                    "session_id": self.deps.session.id,
+                    "agent_id": parent.uuid,
+                    "agent_type": parent.agent_type,
                 }
                 await hooks_mgr.run_event(
                     "SubagentStart",
                     agent_type,
-                    {"subagent_type": agent_type, "subagent_id": str(agent.uuid), "prompt": prompt},
+                    {"subagent_type": agent_type, "subagent_id": handle.uuid, "prompt": prompt},
                     **hook_kwargs,
                 )
 
@@ -296,7 +274,7 @@ class SubAgentMgr:
                 await event_bus.emit(SubagentLifecycle(
                     timestamp=time.time(),
                     source="subagent_mgr",
-                    agent_uuid=str(agent.uuid),
+                    agent_uuid=handle.uuid,
                     agent_type=agent_type,
                     phase="start",
                     task=description,
@@ -322,20 +300,20 @@ class SubAgentMgr:
             _rollback_task()
             raise
         finally:
-            if agent is not None and getattr(self.deps, "process_mgr", None):
-                await self.deps.process_mgr.close((self.deps.session_id, str(agent.uuid)))
+            if handle is not None and getattr(self.deps, "process_mgr", None):
+                await self.deps.process_mgr.close((self.deps.session.id, handle.uuid))
             # 发射子 agent 生命周期结束事件（异常/取消也发）；携完整原始消息记录供 /agents 回看。
             # list(...) 浅拷贝快照：结束后 history 内各 dict 不再被改写。异常/取消路径捕获到当时的部分 history。
-            if agent is not None and event_bus is not None:
+            if handle is not None and event_bus is not None:
                 try:
                     await event_bus.emit(SubagentLifecycle(
                         timestamp=time.time(),
                         source="subagent_mgr",
-                        agent_uuid=str(agent.uuid),
+                        agent_uuid=handle.uuid,
                         agent_type=agent_type,
                         phase="end",
                         task=description,
-                        messages=list(agent.history),
+                        messages=handle.snapshot_history(),
                     ))
                 except BaseException:
                     if primary_error is None:
@@ -347,7 +325,7 @@ class SubAgentMgr:
                 stop_result = await hooks_mgr.run_event(
                     "SubagentStop",
                     agent_type,
-                    {"subagent_type": agent_type, "subagent_id": str(agent.uuid), "result": result},
+                    {"subagent_type": agent_type, "subagent_id": handle.uuid, "result": result},
                     **hook_kwargs,
                 )
                 if stop_result.blocked:

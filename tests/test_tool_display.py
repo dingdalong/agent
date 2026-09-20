@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from src.tools.display import (
+from src.common.tool_display import (
     PERMISSION_SOURCES,
     TOOL_TITLES,
     ToolDisplay,

@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
-from src.mgr.prompt_mgr import PromptMgr
+from src.mgr.prompt_mgr import PromptFacts, PromptMgr
 
 
 def test_project_agents_md_is_external_context(tmp_path: Path) -> None:
@@ -15,15 +15,11 @@ def test_project_agents_md_is_external_context(tmp_path: Path) -> None:
         tmp_path: pytest 提供的临时项目目录。
     """
     (tmp_path / "AGENTS.md").write_text("project guidance")
-    agent = SimpleNamespace(
+    prompt_mgr = PromptMgr(
+        facts=PromptFacts(),
         deps=SimpleNamespace(role_mgr=None, memory_mgr=None, session_context=[]),
-        is_subagent=False,
-        memory=None,
-        _task_mgr=None,
-        _subagent_mgr=None,
-        _skill_mgr=None,
+        workdir=tmp_path,
     )
-    prompt_mgr = PromptMgr(agent=agent, workdir=tmp_path)
 
     system = prompt_mgr.build()[0]["content"]
     context = prompt_mgr.build_initial_context_messages()[0]

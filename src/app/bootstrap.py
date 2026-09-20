@@ -21,7 +21,7 @@ from src.common.frozen import clean_env
 from src.common.session_state import SessionState
 from src.mgr.permission_mgr import LLMJudgeClient
 from src.common.paths import global_data_dir, workdir as resolve_workdir
-from src.agent import AgentDeps
+from src.agent import AgentDeps, SessionContext
 from src.commands import CommandMgr
 from src.app.app import AgentApp
 from src.app.provider_setup import maybe_run_provider_setup
@@ -232,8 +232,7 @@ async def create_app(
         data_guard=data_guard,
         trust_gate=trust_gate,
         task_change_notifier=_make_task_notifier(event_bus),
-        session_context=[],
-        session_state=session_state,
+        session=SessionContext(state=session_state),
         workdir=work_dir,
         global_dir=global_dir,
     )

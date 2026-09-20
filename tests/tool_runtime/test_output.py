@@ -8,7 +8,7 @@ import pytest
 from src.common.sandbox import ExecutionPolicy
 
 from src.mgr.tools_mgr import ToolOutput
-from src.tools.display import ToolResult
+from src.common.tool_display import ToolResult
 
 
 def test_budget_artifact_and_no_tokenizer(runtime):
@@ -118,7 +118,7 @@ def test_process_increment_is_truncated_without_artifact(runtime):
     import sys
     deps, agent = runtime
     async def scenario():
-        owner = (deps.session_id, str(agent.uuid))
+        owner = (deps.session.id, str(agent.uuid))
         command = f'"{sys.executable}" -c "print(\'sentinel-secret\' * 5000)"'
         started = await deps.process_mgr.start(owner, command, deps.workdir, {}, ExecutionPolicy(command, deps.workdir, deps.workdir), 5000, 0)
         result = await deps.tools_mgr.execute('write_stdin', {'session_id': started.session_id, 'yield_time_ms': 3000}, deps=deps, agent=agent)
@@ -153,3 +153,40 @@ def test_hook_modified_output_budget_is_validated_and_used(runtime, monkeypatch)
         result = await deps.tools_mgr.execute('exec_command', {'cmd': 'printf x'}, deps=deps, agent=agent)
         assert result.error_code == 'invalid_arguments'
     asyncio.run(scenario())
+
+
+def test_artifact_directory_is_partitioned_by_session(runtime):
+    """产物目录按「会话 + 调用方」分区，会话 ID 必须真正流到落盘路径。
+
+    回归点：会话态迁入 `deps.session` 后，落盘曾继续读已删除的
+    `deps.session_id`，导致所有会话被静默折叠进同一个空串目录。
+    """
+    import hashlib
+
+    from pydantic import BaseModel
+
+    from src.tools.decorator import ToolEntry
+    from src.common.tool_policy import AccessKind, DataFlow, ToolOrigin, ToolPolicy
+
+    class Args(BaseModel):
+        pass
+
+    def big():
+        return 'x' * 80000
+
+    deps, agent = runtime
+    deps.tools_mgr.register(ToolEntry(
+        name='big_internal',
+        func=big,
+        model=Args,
+        description='big',
+        parameters_schema=Args.model_json_schema(),
+        policy=ToolPolicy(AccessKind.INTERNAL, DataFlow.LOCAL, plan_safe=True),
+        origin=ToolOrigin('builtin'),
+    ))
+
+    result = asyncio.run(deps.tools_mgr.execute('big_internal', {}, deps=deps, agent=agent))
+
+    assert result.artifact_path is not None, str(result)
+    session_dir = Path(result.artifact_path).parent.parent
+    assert session_dir.name == hashlib.sha256(deps.session.id.encode()).hexdigest()[:16]

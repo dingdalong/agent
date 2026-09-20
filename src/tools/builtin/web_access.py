@@ -5,8 +5,8 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from src.tools.decorator import tool
-from src.tools.display import ToolResult
-from src.tools.policy import AccessKind, DataFlow, ToolPolicy
+from src.common.tool_display import ToolResult
+from src.common.tool_policy import AccessKind, DataFlow, ToolPolicy
 
 
 class WebSearchInput(BaseModel):

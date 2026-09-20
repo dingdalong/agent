@@ -63,7 +63,7 @@ sequenceDiagram
 
 Shell 输出超预算时保留头尾并标记 `truncated`，响应头记录裁剪前的近似 token 数。模型需要更多内容时根据原命令语义使用 `sed -n`、`rg`、`head`、`tail` 或命令自身的过滤参数重新定向查询。技能、用户回答等控制内容必须完整返回，超过单次上限时报错并保留结束回合语义。
 
-普通工具结果超预算时保留头尾；`ToolOutput` 将脱敏、PostToolUse 后的正文先保存为有界临时日志，再整理模型输出，并通过 `artifact_path` 暴露该日志。Shell 输出不创建 artifact，模型应使用原命令的过滤参数定向重查。单文件 `artifact_max_bytes` 默认 1 MiB、上限 8 MiB；单应用会话总量 `artifact_total_bytes` 默认 32 MiB，不小于单文件上限。超出总量按创建顺序回收。日志保存失败不改变原始工具状态，也不重跑工具。
+普通工具结果超预算时保留头尾；`ToolOutput` 将脱敏、PostToolUse 后的正文先保存为有界临时日志，再整理模型输出，并通过 `artifact_path` 暴露该日志；日志目录按「会话 ID + 调用方 UUID」分区，会话 ID 由 `execute()` 显式传入，不在落盘路径回读调用方内部结构。Shell 输出不创建 artifact，模型应使用原命令的过滤参数定向重查。单文件 `artifact_max_bytes` 默认 1 MiB、上限 8 MiB；单应用会话总量 `artifact_total_bytes` 默认 32 MiB，不小于单文件上限。超出总量按创建顺序回收。日志保存失败不改变原始工具状态，也不重跑工具。
 
 日志路径为应用拥有的临时目录下的会话/agent 子目录，目录 0700、文件 0600，原子写入。普通中断仍保留已生成的普通工具日志，clear/resume/关闭回收，历史会话恢复不恢复临时文件。落盘与清理共用线程锁；取消必须等待正在进行的落盘结束，避免清理后文件重现。
 
@@ -105,7 +105,7 @@ MCP 工具通过 `_PassThroughArgs(extra="allow")` 接收上游 schema 所描述
 
 `note_context`（`src/tools/builtin/note_context.py`）把关键发现写入跨 agent 账本；其 availability 要求 `subagent` feature、调用方范围为 `ALL`，`counts_as_work=False`。
 
-它与自动记账的分工：`SubAgentMgr.task_delegator` 已经自动把每个子智能体的返回报告记账，那是主力且零 LLM 纪律成本；`note_context` 覆盖自动记账抓不到的部分——主 agent 与用户对话中确认的决策与约束，以及长任务中途得出的阶段性结论。
+它与自动记账的分工：`SubAgentMgr.delegate` 已经自动把每个子智能体的返回报告记账，那是主力且零 LLM 纪律成本；`note_context` 覆盖自动记账抓不到的部分——主 agent 与用户对话中确认的决策与约束，以及长任务中途得出的阶段性结论。
 
 策略取 `INTERNAL + LOCAL + plan_safe=True`，与 `save_memory`、`task_create` 同构：**落盘由 `ContextMgr` 内部完成，不经 `apply_patch`**。这一点是刻意的——`.agent` 被 `PathResolver` 归为 protected，`.agent/context/**` 因此是 `PathClass.PROTECTED`，而 Plan 模式下 `_authorize_plan()` 拒绝通用文件写入，改用 `apply_patch` 落盘会让本工具在 Plan 模式下必然被拒。
 

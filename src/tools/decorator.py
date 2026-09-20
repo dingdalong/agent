@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, TypedDict
 from pydantic import BaseModel, ValidationError
 
-from src.tools.policy import (
+from src.common.tool_policy import (
     BUILTIN_ORIGIN,
     DEFAULT_AVAILABILITY,
     DEFAULT_POLICY,
@@ -96,7 +96,7 @@ class ToolEntry:
         Returns:
             工具执行结果字符串。
         """
-        from src.tools.display import ToolResult
+        from src.common.tool_display import ToolResult
 
         try:
             validated_args = kwds if validated else self.validate_arguments(kwds)
@@ -118,7 +118,7 @@ class ToolEntry:
                     await asyncio.gather(worker, return_exceptions=True)
                     raise
 
-            from src.tools.display import ToolResult
+            from src.common.tool_display import ToolResult
             if isinstance(result, ToolResult):
                 return result  # 保留 ToolResult，ToolsMgr 提取 .text
             return ToolResult(text=str(result))

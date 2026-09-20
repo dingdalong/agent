@@ -17,15 +17,7 @@ from src.common.sandbox import ExecutionPolicy
 from src.common.path_resolver import PathClass, PathGrant, PathResolutionError, PathResolver, ResolvedPath
 from src.mgr.common.review import ReviewVerdict, StructuredVerdictRunner
 from src.mode import RunMode, plan_mode_denial_reminder
-from src.tools import (
-    AccessKind,
-    DataFlow,
-    PathRole,
-    ToolAudience,
-    ToolAvailability,
-    ToolOrigin,
-    ToolPolicy,
-)
+from src.common.tool_policy import AccessKind, DataFlow, PathRole, ToolAudience, ToolAvailability, ToolOrigin, ToolPolicy
 from src.web.privacy import WebPrivacyGuard
 
 logger = logging.getLogger(__name__)

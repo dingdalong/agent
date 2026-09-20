@@ -11,6 +11,8 @@ import uuid
 import pytest
 
 from src.agent.agent import Agent
+from src.agent import SessionContext
+from src.agent.spec import AgentSpec
 from src.agent.states import AgentState, RunContext
 from src.events.types import (
     AgentStateChanged,
@@ -267,7 +269,15 @@ class StaticPromptMgr:
     def build_initial_context_messages(self) -> list[dict]:
         return []
 
-    def build_mode_instructions(self) -> str:
+    def build_capability_instructions(self, mode: RunMode) -> str:
+        del mode
+        return ""
+
+    def build_manager_instructions(self) -> str:
+        return ""
+
+    def build_mode_instructions(self, mode: RunMode) -> str:
+        del mode
         return ""
 
 
@@ -350,11 +360,9 @@ def _runtime_agent(
         未运行 __post_init__ 的最小 Agent。
     """
     agent = object.__new__(Agent)
+    agent.spec = AgentSpec(agent_type="main", description="", enable_thinking=True)
     agent.uuid = uuid.uuid4()
-    agent.agent_type = "main"
-    agent.description = ""
     agent.history = []
-    agent.llm = llm
     schemas = [
         {
             "type": "function",
@@ -365,18 +373,19 @@ def _runtime_agent(
             },
         }
     ]
-    agent.enable_thinking = True
     agent.mode = RunMode.EXECUTE
-    agent.is_subagent = False
     agent._pending_input = ""
-    agent._prompt_mgr = StaticPromptMgr()
-    agent._compact_mgr = SimpleNamespace(auto_compact_size=0)
-    agent._reminder_mgr = NoopReminder()
+    agent.assembly = _assembly(
+        llm=llm,
+        prompt_mgr=StaticPromptMgr(),
+        compact_mgr=SimpleNamespace(auto_compact_size=0),
+        reminder_mgr=NoopReminder(),
+    )
     agent.deps = SimpleNamespace(
         event_bus=event_bus,
         hooks_mgr=hooks_mgr,
         session_mgr=None,
-        session_id="session-test",
+        session=SessionContext(id="session-test"),
         tools_mgr=SimpleNamespace(schemas=lambda: schemas),
     )
     agent._handlers = {
@@ -390,6 +399,30 @@ def _runtime_agent(
         AgentState.LLM_FAILURE: agent._on_llm_failure,
     }
     return agent
+
+
+def _assembly(**parts: Any) -> SimpleNamespace:
+    """构造只含被测路径所需部件的装配产物桩。
+
+    Args:
+        **parts: 需要覆盖的装配部件。
+
+    Returns:
+        未覆盖部件为 None 或空值的装配产物桩。
+    """
+    values: dict[str, Any] = {
+        "llm": None,
+        "model": "test/model",
+        "compact_mgr": None,
+        "prompt_mgr": None,
+        "reminder_mgr": None,
+        "task_mgr": None,
+        "skill_mgr": None,
+        "subagent_mgr": None,
+        "system_prompt": [],
+    }
+    values.update(parts)
+    return SimpleNamespace(**values)
 
 
 def test_pause_turn_state_is_declared() -> None:
@@ -439,7 +472,7 @@ def test_process_response_routes_pause_turn_without_committing_carrier() -> None
 def test_single_pause_appends_raw_carrier_without_synthetic_user() -> None:
     """首次 pause_turn 续接追加原始载体且不注入合成 user。"""
     agent = object.__new__(Agent)
-    agent.llm = PauseNormalizer(limit=2)
+    agent.assembly = _assembly(llm=PauseNormalizer(limit=2))
     carrier = {
         "role": "assistant",
         "content": "第一段",
@@ -481,7 +514,7 @@ def test_pause_handler_does_not_keep_index_removed_by_real_normalizer() -> None:
     provider = object.__new__(AnthropicProvider)
     provider.max_pause_turn_continuations = 3
     agent = object.__new__(Agent)
-    agent.llm = provider
+    agent.assembly = _assembly(llm=provider)
     ctx = RunContext(
         messages=[{"role": "user", "content": "继续服务端工具"}],
         response=LLMResponse(
@@ -515,7 +548,7 @@ def test_pause_handler_does_not_keep_index_removed_by_real_normalizer() -> None:
 def test_consecutive_pause_replaces_previous_carrier_and_accumulates_text() -> None:
     """连续 pause_turn 用最新载体替换旧载体并拼接可见正文。"""
     agent = object.__new__(Agent)
-    agent.llm = PauseNormalizer(limit=3)
+    agent.assembly = _assembly(llm=PauseNormalizer(limit=3))
     first_carrier = {
         "role": "assistant",
         "content": "第一段",
@@ -559,9 +592,9 @@ def test_pause_limit_rolls_back_chain_and_emits_one_output_limit_failure() -> No
     """pause_turn 达到协议上限时整体回滚并只发一次不可重试失败事件。"""
     bus = RecordingEventBus()
     agent = object.__new__(Agent)
+    agent.spec = AgentSpec(agent_type="main", description="")
     agent.uuid = uuid.uuid4()
-    agent.agent_type = "main"
-    agent.llm = PauseNormalizer(limit=1)
+    agent.assembly = _assembly(llm=PauseNormalizer(limit=1))
     agent.deps = SimpleNamespace(event_bus=bus)
     original_messages = [
         {"role": "user", "content": "先前问题"},
@@ -603,13 +636,13 @@ def test_pause_limit_rolls_back_chain_and_emits_one_output_limit_failure() -> No
     assert failures[0].attempts == 2
     assert failures[0].partial is True
     assert failures[0].tool_fragment_state == "none"
-    assert agent.llm.finish_reasons == ["pause_turn", "pause_turn"]
+    assert agent.assembly.llm.finish_reasons == ["pause_turn", "pause_turn"]
 
 
 def test_pause_then_stop_commits_full_text_and_clears_recovery_state() -> None:
     """pause_turn 续接成功时提交完整正文、真实 assistant 并清空恢复状态。"""
     agent = object.__new__(Agent)
-    agent.llm = PauseNormalizer(limit=2)
+    agent.assembly = _assembly(llm=PauseNormalizer(limit=2))
     pause_carrier = {"role": "assistant", "content": "前半句"}
     terminal_carrier = {"role": "assistant", "content": "后半句"}
     ctx = RunContext(
@@ -645,7 +678,7 @@ def test_pause_then_stop_commits_full_text_and_clears_recovery_state() -> None:
 def test_pause_then_length_keeps_checkpoint_but_clears_pause_carrier_index() -> None:
     """pause_turn 转 length 时保留整链 checkpoint 并停止替换旧 pause 载体。"""
     agent = object.__new__(Agent)
-    agent.llm = PauseNormalizer(limit=3)
+    agent.assembly = _assembly(llm=PauseNormalizer(limit=3))
     ctx = RunContext(
         messages=[{"role": "user", "content": "完成混合续接"}],
         response=LLMResponse(
@@ -1100,9 +1133,9 @@ def test_length_pause_exhaustion_counts_both_recovery_responses() -> None:
     """
     bus = RecordingEventBus()
     agent = object.__new__(Agent)
+    agent.spec = AgentSpec(agent_type="main", description="")
     agent.uuid = uuid.uuid4()
-    agent.agent_type = "main"
-    agent.llm = PauseNormalizer(limit=0)
+    agent.assembly = _assembly(llm=PauseNormalizer(limit=0))
     agent.deps = SimpleNamespace(event_bus=bus)
     original_messages = [{"role": "user", "content": "执行反向混合续接"}]
     ctx = RunContext(
@@ -1136,9 +1169,9 @@ def test_new_recovery_chain_attempts_ignore_prior_length_recoveries() -> None:
     """
     bus = RecordingEventBus()
     agent = object.__new__(Agent)
+    agent.spec = AgentSpec(agent_type="main", description="")
     agent.uuid = uuid.uuid4()
-    agent.agent_type = "main"
-    agent.llm = PauseNormalizer(limit=2)
+    agent.assembly = _assembly(llm=PauseNormalizer(limit=2))
     agent.deps = SimpleNamespace(event_bus=bus)
     completed_assistant = {"role": "assistant", "content": "第一条已完成"}
     ctx = RunContext(
@@ -1340,7 +1373,7 @@ def test_subagent_run_restores_automatic_snapshot_after_compact_pause_cancel() -
                 summary="摘要",
             )
 
-    agent._compact_mgr = RewritingCompact()
+    agent.assembly.compact_mgr = RewritingCompact()
     agent._handlers[AgentState.COMPACT] = agent._on_compact
 
     with pytest.raises(asyncio.CancelledError):

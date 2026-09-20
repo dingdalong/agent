@@ -32,11 +32,11 @@ make install                         # 构建并把产物装到 ~/.local/bin（�
 
 本项目是一个自研的 AI Agent CLI 框架，采用 Python asyncio 构建，分为四层：
 
-**入口与组装层** — `main.py` 解析 CLI 参数，`src/app/bootstrap.py` 中的 `create_app()` 是唯一的依赖组装点，手动构造所有 Manager 并注入 `AgentDeps` dataclass。
+**入口与组装层** — `main.py` 解析 CLI 参数，`src/app/bootstrap.py` 中的 `create_app()` 是唯一的**进程级依赖**组装点，手动构造进程级 Manager 并注入 `AgentDeps` dataclass。每 agent 层部件（`CompactMgr`/`PromptMgr`/`ReminderMgr`/`SkillMgr`/`SubAgentMgr`/`TaskManager`）由 `src/agent/assembly.py` 的 `AgentAssembler` 按冻结的 `AgentSpec` 装配成不可变的 `AgentAssembly`。
 
 **应用主循环层** — `src/app/app.py` 中的 `AgentApp` 管理外层 REPL：启动 UI → 消费事件 → 驱动 Agent 轮次 → 处理中断 → 会话 Hook → 关闭。
 
-**Agent 状态机层** — `src/agent/agent.py` 中的 `Agent` 是有限状态机，由 `_handlers: dict[AgentState, Callable]` 驱动（枚举见 `src/agent/states.py`）。主流程（happy path）：
+**Agent 状态机层** — `src/agent/agent.py` 中的 `Agent` 是有限状态机，由 `_handlers: dict[AgentState, Callable]` 驱动（枚举见 `src/agent/states.py`）。`Agent` 只持有 `spec`（身份与配置）、`assembly`（装配产物）与逐轮状态；`__post_init__` 不做装配，外部协作者通过只读属性读取 `agent_type`/`features`/`tools`/`llm`/`*_mgr` 等事实。主流程（happy path）：
 ```
 REQUEST_INPUT → CHECK_COMPACT → [COMPACT →] LLM_CALL → PROCESS_RESPONSE
 → [EXECUTE_TOOLS → POST_ROUND → CHECK_COMPACT] → CHECK_STOP → DONE
@@ -45,7 +45,7 @@ REQUEST_INPUT → CHECK_COMPACT → [COMPACT →] LLM_CALL → PROCESS_RESPONSE
 
 **Manager 服务层** — `src/mgr/` 下的各 Manager 类各司其职：`RoleMgr`（角色发现与激活）、`LLMMgr`（模型管理）、`ToolsMgr`（工具注册与执行）、`PermissionManager`（单入口授权）、`CompactMgr`（上下文压缩）、`PromptMgr`（固定 system、模式指令与初始上下文构建）、`SubAgentMgr`（子智能体调度）、`SkillMgr`（技能加载）、`ContextMgr`（跨 agent 共享上下文账本）等。部分 Manager 受 feature 门控（见下）：未启用对应 feature 时在 `bootstrap.create_app()` 注入 `None`（如 `MemoryMgr`/`PlanMgr`），相关提示词段省略，工具执行由 `PermissionManager` 拒绝；所有模式和 agent 始终共享 `ToolsMgr.schemas()` 的完整 schema 目录。
 
-`src/mgr/common/` 只放跨 Manager 的协议；`src/common/` 放被非 Manager 层直接复用的基础能力（路径、沙箱、会话状态、数据保护等）。`src/common` 不得依赖 `src.mgr`，公共模块不再从 `src.mgr` 导出。
+`src/mgr/common/` 只放跨 Manager 与调用方之间的协议（`ReviewVerdict`、`AgentCaller`、`ParentAgentFacts`/`SubagentExecutor` 等）；管理器只通过这些协议感知调用方，`src/mgr/**` 运行期不 import `src.agent`。`src/common/` 放被非 Manager 层直接复用的基础能力（路径、沙箱、会话状态、数据保护等），以及跨层共用的词汇（工具策略 `tool_policy.py`、工具展示 `tool_display.py`、记忆类型 `memory_types.py`）。`src/tools/` 只放注册表、装饰器与内置工具，运行期不依赖 `src.mgr`/`src.agent`；`src/common` 不得依赖 `src.tools`/`src.mgr`，公共模块不再从 `src.mgr` 导出。这些方向由 `tests/test_module_layout.py` 的不变式守护。
 
 ### 角色系统（Roles）
 
@@ -68,7 +68,7 @@ REQUEST_INPUT → CHECK_COMPACT → [COMPACT →] LLM_CALL → PROCESS_RESPONSE
 - 未声明（`None`）→ 全部启用（向后兼容）；声明 → 取与 `ALL_FEATURES` 的交集（未知名告警丢弃）。
 - **依赖校验**：`plan` 依赖 `file`，缺 `file` 时丢弃 `plan` 并告警。
 - `bootstrap.create_app()` 用 `resolve_features(role_mgr.manifest.features)` 计算有效集，据此决定 `MemoryMgr`/`PlanMgr` 等是否实例化（未启用注入 `None`）。
-- 子 agent 的 feature 集：自身 manifest 声明则用其值，否则继承父 agent 已解析的集（见 `subagent_mgr.task_delegator`）。
+- 子 agent 的 feature 集：自身 manifest 声明则用其值，否则继承父 agent 已解析的集（继承规则在 `ParentAgentFacts.resolve_features`，由 `SubAgentMgr.delegate` 消费）。
 
 ### 事件驱动 I/O
 
@@ -101,9 +101,9 @@ MCP server 连接配置在独立的 `mcp_servers.json`（角色 `src/roles/<role
   - **阻塞型**：函数体做同步 I/O / CPU 工作。叶子工具直接声明为普通 `def`——装饰器（`decorator.py:94-97`）会用 `asyncio.to_thread` 自动卸载到线程；若方法必须保留 `async def`（被异步调用方 `await` 的 Manager 方法），则把阻塞段包进 `await asyncio.to_thread(...)`。范例：补丁与计划保存工具使用同步文件 I/O，声明为普通 `def`，由装饰器统一经 `to_thread` 卸载（装饰器是唯一的线程卸载点，无需层层手写 `to_thread`）。
   - **禁止**：`async def` 里直接跑同步阻塞工作而不 `await`。排查此类问题可用 `python main.py --debug`（启用 asyncio 调试，事件循环被占用超过 0.1s 即打印 `Executing ... took N seconds` 告警）。
 
-**子智能体** — 定义为 `*.md`（YAML frontmatter 声明 `agent_type`、`tools`、`model`、`memory`、`startInPlanMode`、`thinking`、`reasoning_effort`、`features` 等 + body 作提示词），由 `SubAgentMgr` 四层扫描加载。主 Agent 通过 `task_delegator` 调度子智能体；子智能体继承父 Agent 当前的 `mode`，并共享 `AgentDeps`。manifest 的 `tools` 是执行期声明边界，不改变发给模型的 schema。
+**子智能体** — 定义为 `*.md`（YAML frontmatter 声明 `agent_type`、`tools`、`model`、`memory`、`startInPlanMode`、`thinking`、`reasoning_effort`、`features` 等 + body 作提示词），由 `SubAgentMgr` 四层扫描加载。主 Agent 通过 `task_delegator` 工具调度子智能体：工具只转交 `Agent.delegate_subagent()`，调度在 `SubAgentMgr.delegate()`，子 agent 的构造与运行由 `Agent.spawn_subagent()` 经 `SubagentExecutor` 端口承担；子智能体继承父 Agent 当前的 `mode`，并共享 `AgentDeps`。manifest 的 `tools` 是执行期声明边界，不改变发给模型的 schema。
 
-**跨 agent 共享上下文** — 子 agent 的 `history` 从空开始，唯一输入是委派 prompt，因此天然会重复探索。`ContextMgr`（`src/mgr/context_mgr.py`，deps 层单例，挂 `subagent` feature）维护会话级「已核实事实」账本：`SubAgentMgr.task_delegator` 在 `run()` 前把 `digest()` 拼到 prompt 之前，在 `SubagentStop` hook 后把子 agent 的返回报告自动记账；`note_context` 工具供 agent 显式记录对话中确认的决策。改这块前必须知道三条约束：**(1)** AGENTS.md、环境、记忆、目录、Hook 和其他动态内容绝不能进固定 system 或框架 developer 消息，只能作为带来源标记的 user/tool 外部内容；**(2)** 注入点必须是 `task_delegator` 而非 `ReminderMgr`——后者的 provider 拿不到本次委派信息，按委派过滤就得在进程级单例存槽位，而并行委派会互相覆盖；**(3)** 落盘必须由 `ContextMgr` 直接写，改用 `apply_patch` 会因 `.agent/context/**` 属 `PathClass.PROTECTED` 而在 Plan 模式下必然被拒。静态环境基线（git/技术栈/目录树）由 `collect_env_baseline()` 在 `AgentApp._reset_session` 中经 `to_thread` 采集一次存 `deps.env_baseline`，并在首次 chat 前作为外部 user 上下文追加。新增结构标签必须先登记到 `src/prompt_tags.py`，不得在生产者中手写标签。
+**跨 agent 共享上下文** — 子 agent 的 `history` 从空开始，唯一输入是委派 prompt，因此天然会重复探索。`ContextMgr`（`src/mgr/context_mgr.py`，deps 层单例，挂 `subagent` feature）维护会话级「已核实事实」账本：`SubAgentMgr.delegate` 在 `run()` 前把 `digest()` 拼到 prompt 之前，在 `SubagentStop` hook 后把子 agent 的返回报告自动记账；`note_context` 工具供 agent 显式记录对话中确认的决策。改这块前必须知道三条约束：**(1)** AGENTS.md、环境、记忆、目录、Hook 和其他动态内容绝不能进固定 system 或框架 developer 消息，只能作为带来源标记的 user/tool 外部内容；**(2)** 注入点必须是 `SubAgentMgr.delegate`（`task_delegator` 工具的唯一落点）而非 `ReminderMgr`——后者的 provider 拿不到本次委派信息，按委派过滤就得在进程级单例存槽位，而并行委派会互相覆盖；**(3)** 落盘必须由 `ContextMgr` 直接写，改用 `apply_patch` 会因 `.agent/context/**` 属 `PathClass.PROTECTED` 而在 Plan 模式下必然被拒。静态环境基线（git/技术栈/目录树）由 `collect_env_baseline()` 在 `AgentApp._reset_session` 中经 `to_thread` 采集一次存 `deps.session.env_baseline`，并在首次 chat 前作为外部 user 上下文追加。新增结构标签必须先登记到 `src/prompt_tags.py`，不得在生产者中手写标签。
 
 **统一授权与 Plan** — `PermissionManager.authorize(ToolAuthorizationRequest)` 是唯一授权入口；先按 `ToolAvailability` 检查 `Agent.mode`、feature、主/子身份和 manifest 声明，再进入路径与风险策略。模式拒绝返回当前模式、目标工具和该模式完整禁用列表，不调用智能权限；因 Plan 导致的拒绝还必须重申 Plan 限制。工具声明冻结的 `ToolPolicy`，不从用户配置提升权限。`Agent.mode` 是状态权威，Shift+Tab 可双向切换；下一次 chat 前追加的 Plan developer 消息先明确当前处于计划模式及完整限制，只允许经验证的只读命令、本地/隐私预检后的外部读取、在只读项目沙箱内运行的现有测试与明确安全的内部工具；临时输出只能写框架专用临时目录，计划文件仅由 submit_plan 内部写入。
 

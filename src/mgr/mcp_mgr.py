@@ -21,7 +21,7 @@ from typing import Any, TYPE_CHECKING
 from pydantic import BaseModel, ConfigDict
 
 from src.common.frozen import clean_env
-from src.tools import AccessKind, DataFlow, ToolOrigin, ToolPolicy
+from src.common.tool_policy import AccessKind, DataFlow, ToolOrigin, ToolPolicy
 from src.tools.decorator import ToolEntry
 
 if TYPE_CHECKING:
@@ -117,7 +117,7 @@ def _format_result(result: Any) -> str:
     if not parts and getattr(result, "structuredContent", None):
         parts.append(str(result.structuredContent))
     text = "\n".join(parts)
-    from src.tools.display import ToolResult
+    from src.common.tool_display import ToolResult
     return ToolResult.failure("mcp_error", text) if getattr(result, "isError", False) else ToolResult(text)
 
 

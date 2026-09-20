@@ -7,8 +7,8 @@ from pathlib import Path
 import tempfile
 
 from src.common.path_resolver import PathResolver, ResolvedPath
-from src.tools.policy import PathRole
-from src.tools.display import ToolResult, ToolDisplay, build_file_diff, format_result
+from src.common.tool_display import ToolDisplay, ToolResult, build_file_diff, format_result
+from src.common.tool_policy import PathRole
 
 
 @dataclass

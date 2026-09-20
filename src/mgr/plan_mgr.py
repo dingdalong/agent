@@ -10,12 +10,10 @@ import tempfile
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
 
+from src.mgr.common.agent_port import ModeOwner
 from src.mode import RunMode, plan_mode_boundary
 
-if TYPE_CHECKING:
-    from src.agent import Agent
 
 @dataclass
 class PlanMgr:
@@ -29,14 +27,14 @@ class PlanMgr:
 
     # ── 模式切换 ──────────────────────────────────────────────────────
 
-    def enter_mode(self, agent: Agent) -> bool:
+    def enter_mode(self, agent: ModeOwner) -> bool:
         """切换到计划模式；schema 与稳定提示前缀保持不变。"""
         if agent.mode is RunMode.PLAN:
             return False
         agent.mode = RunMode.PLAN
         return True
 
-    def exit_mode(self, agent: Agent) -> bool:
+    def exit_mode(self, agent: ModeOwner) -> bool:
         """切换到普通模式；schema 与稳定提示前缀保持不变。"""
         if agent.mode is RunMode.EXECUTE:
             return False

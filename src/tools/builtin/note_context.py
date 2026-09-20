@@ -1,6 +1,6 @@
 """共享上下文记录工具 — 把关键发现显式记入跨 agent 账本。
 
-与自动记账的分工：`SubAgentMgr.task_delegator` 已经自动把每个子智能体的返回报告
+与自动记账的分工：`SubAgentMgr.delegate` 已经自动把每个子智能体的返回报告
 记进账本，那是主力、零纪律成本。本工具覆盖自动记账抓不到的部分——主 agent 与用户
 对话中确认的决策与约束，以及子智能体在长任务中途得出的、不适合等到最终报告才说的
 阶段性结论。
@@ -17,8 +17,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from src.tools.policy import AccessKind, DataFlow, ToolAudience, ToolAvailability, ToolPolicy
-from src.tools.display import ToolResult
+from src.common.tool_policy import AccessKind, DataFlow, ToolAudience, ToolAvailability, ToolPolicy
+from src.common.tool_display import ToolResult
 from src.tools.decorator import tool
 
 

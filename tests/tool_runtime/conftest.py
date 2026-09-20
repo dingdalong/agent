@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 import pytest
 
+from src.agent import SessionContext
 from src.common.data_guard import DataGuard
 from src.mgr.permission_mgr import PermissionManager
 from src.mgr.process_mgr import ProcessMgr
@@ -15,7 +16,7 @@ def runtime(tmp_path, request):
     if sys.platform == "win32" and request.node.get_closest_marker("integration"):
         pytest.skip("真实 Shell 沙箱仅支持 macOS/Linux")
     guard = DataGuard({'test': 'sentinel-secret'})
-    deps = SimpleNamespace(session_id='session', workdir=tmp_path, data_guard=guard,
+    deps = SimpleNamespace(session=SessionContext(id='session'), workdir=tmp_path, data_guard=guard,
         config_mgr=SimpleNamespace(environment={}), hooks_mgr=None, event_bus=None,
         turn_clock=None, context_mgr=None, process_mgr=ProcessMgr(), tools_mgr=ToolsMgr(),
         permission_mgr=PermissionManager(str(tmp_path), None, None, guard))

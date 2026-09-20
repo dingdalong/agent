@@ -9,6 +9,8 @@ import pytest
 import yaml
 
 from src.agent.agent import Agent
+from src.agent.assembly import AgentAssembly, AgentAssembler
+from src.agent.spec import AgentSpec
 from src.mgr.config_mgr import ConfigManager
 
 
@@ -25,27 +27,39 @@ class ConfigStub:
 def test_switch_model_rebinds_model_state_without_replacing_history(tmp_path: Path) -> None:
     old_llm = SimpleNamespace(provider_name="openai", model="old-model", reasoning_effort="high", context_limit=1000)
     new_llm = SimpleNamespace(provider_name="anthropic", model="new-model", reasoning_effort="max", context_limit=2000)
-    agent = object.__new__(Agent)
-    agent.uuid = uuid.uuid4()
-    agent.agent_type = "main"
-    agent.model = "old-model"
-    agent.reasoning_effort = "high"
-    agent.llm = old_llm
-    agent.history = [{"role": "user", "content": "保留历史"}]
-    agent._prompt_mgr = SimpleNamespace()
-    input_history = ["保留输入"]
-    agent.deps = SimpleNamespace(
+    deps = SimpleNamespace(
         llm_mgr=SimpleNamespace(get=lambda model: new_llm if model == "new-model" else old_llm),
         config_mgr=ConfigStub(),
         workdir=tmp_path,
         data_guard=None,
-        session_state=SimpleNamespace(input_history=lambda: input_history),
+        session=SimpleNamespace(state=SimpleNamespace(input_history=lambda: input_history)),
     )
+    spec = AgentSpec(agent_type="main", description="")
+    agent = object.__new__(Agent)
+    agent.uuid = uuid.uuid4()
+    agent.spec = spec
+    agent.model = "old-model"
+    agent.reasoning_effort = "high"
+    agent.history = [{"role": "user", "content": "保留历史"}]
+    input_history = ["保留输入"]
+    agent.deps = deps
     history = agent.history
     agent_uuid = agent.uuid
-    agent._compact_mgr = agent._build_compact_mgr(old_llm)
-    agent._compact_mgr.recent_files = ["src/old.py"]
-    agent._compact_mgr.has_compacted = True
+    agent.assembly = AgentAssembly(
+        llm=old_llm,
+        model="openai/old-model",
+        compact_mgr=AgentAssembler(deps).build_compact_mgr(
+            spec, old_llm, agent_uuid=agent_uuid,
+        ),
+        prompt_mgr=SimpleNamespace(),
+        reminder_mgr=None,
+        task_mgr=None,
+        skill_mgr=None,
+        subagent_mgr=None,
+        system_prompt=[],
+    )
+    agent.assembly.compact_mgr.recent_files = ["src/old.py"]
+    agent.assembly.compact_mgr.has_compacted = True
 
     agent.switch_model("new-model", "xhigh")
 
@@ -56,11 +70,12 @@ def test_switch_model_rebinds_model_state_without_replacing_history(tmp_path: Pa
     assert agent.llm is new_llm
     assert agent.model == "anthropic/new-model"
     assert agent.reasoning_effort == "xhigh"
-    assert agent._compact_mgr.llm is new_llm
-    assert agent._compact_mgr.auto_compact_size == 1600
-    assert agent._compact_mgr.recent_messages_token_limit == 500
-    assert agent._compact_mgr.recent_files == ["src/old.py"]
-    assert agent._compact_mgr.has_compacted is True
+    assert agent.assembly.llm is new_llm
+    assert agent.assembly.compact_mgr.llm is new_llm
+    assert agent.assembly.compact_mgr.auto_compact_size == 1600
+    assert agent.assembly.compact_mgr.recent_messages_token_limit == 500
+    assert agent.assembly.compact_mgr.recent_files == ["src/old.py"]
+    assert agent.assembly.compact_mgr.has_compacted is True
 
 
 def test_model_role_overrides_are_written_together(tmp_path: Path) -> None:
@@ -140,6 +155,8 @@ def test_model_role_override_failure_preserves_project_config(tmp_path: Path) ->
     assert manager.project_config_path.read_text() == original
 
 
-def test_agent_declares_llm_as_dataclass_field() -> None:
-    """llm 是声明的 dataclass 字段，静态可见，不再是动态挂载属性。"""
-    assert "llm" in {item.name for item in dataclasses.fields(Agent)}
+def test_agent_declares_assembly_as_dataclass_field() -> None:
+    """装配产物是声明的 dataclass 字段；provider 不再挂在 Agent 自身。"""
+    names = {item.name for item in dataclasses.fields(Agent)}
+    assert "assembly" in names
+    assert "llm" not in names

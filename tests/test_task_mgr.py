@@ -123,7 +123,7 @@ def test_turn_end_cleanup_on_normal_done(tmp_path: Path) -> None:
     mgr.update("1", status="completed")
 
     agent = object.__new__(Agent)
-    agent._task_mgr = mgr
+    agent.assembly = types.SimpleNamespace(task_mgr=mgr)
     ctx = types.SimpleNamespace(llm_error=None, exit_requested=False, command=None)
 
     asyncio.run(agent._cleanup_tasks_at_turn_end(ctx))
@@ -140,7 +140,7 @@ def test_turn_end_cleanup_skipped_on_llm_error(tmp_path: Path) -> None:
     mgr.update("1", status="completed")
 
     agent = object.__new__(Agent)
-    agent._task_mgr = mgr
+    agent.assembly = types.SimpleNamespace(task_mgr=mgr)
     ctx = types.SimpleNamespace(llm_error=object(), exit_requested=False, command=None)
 
     asyncio.run(agent._cleanup_tasks_at_turn_end(ctx))
@@ -158,7 +158,7 @@ def test_turn_end_cleanup_skipped_on_exit_or_command(tmp_path: Path) -> None:
         mgr.update("1", status="completed")
 
         agent = object.__new__(Agent)
-        agent._task_mgr = mgr
+        agent.assembly = types.SimpleNamespace(task_mgr=mgr)
         ctx = types.SimpleNamespace(llm_error=None, exit_requested=exit_requested, command=command)
 
 

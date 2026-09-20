@@ -85,7 +85,7 @@ Hooks 在 8 个生命周期事件上执行 shell 命令，通过 JSON stdin/stdo
 | `Stop` | 主 agent 一轮结束 | |
 | `SessionStart` | 会话开始 | |
 | `SessionEnd` | 会话结束 | |
-| `SubagentStart` | 子 agent 启动前（`subagent_mgr.task_delegator`） | |
+| `SubagentStart` | 子 agent 启动前（`subagent_mgr.delegate`） | |
 | `SubagentStop` | 子 agent 结束后 | |
 
 ### 配置格式与两层加载

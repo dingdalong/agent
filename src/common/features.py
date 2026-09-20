@@ -15,11 +15,11 @@ logger = logging.getLogger(__name__)
 ALL_FEATURES = frozenset({"task", "skill", "subagent", "file", "memory", "plan"})
 
 
-def resolve_features(declared: set[str] | None) -> set[str]:
+def resolve_features(declared: "set[str] | frozenset[str] | None") -> set[str]:
     """将角色声明的 feature 集解析为有效启用集。
 
     Args:
-        declared: 角色声明的 feature 名集合；None 表示未声明。
+        declared: 角色声明的 feature 名集合（可为可变或冻结集合）；None 表示未声明。
 
     Returns:
         有效启用的 feature 名集合。None → 全部启用；否则取与 ALL_FEATURES 的交集

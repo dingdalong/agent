@@ -10,7 +10,7 @@ import pytest
 
 from src.mgr.role_mgr import RoleMgr
 from src.mgr.subagent_mgr import SubAgentMgr
-from src.mgr.prompt_mgr import PromptMgr
+from src.mgr.prompt_mgr import PromptFacts, PromptMgr
 from src.mgr.task_mgr import TaskManager
 from src.mode import RunMode
 
@@ -67,21 +67,21 @@ def test_execution_guidance_follows_role_and_actual_tools(
     assert role_mgr.role_name == role_name
     deps = SimpleNamespace(role_mgr=role_mgr, llm_mgr=None)
     subagent_mgr = SubAgentMgr(tmp_path / "work", deps)
-    agent = SimpleNamespace(mode=RunMode.EXECUTE,
-        deps=deps, is_subagent=is_subagent, memory=None,
-        _task_mgr=TaskManager(),
-        _subagent_mgr=subagent_mgr if can_delegate else None,
-        _skill_mgr=None,
-    )
     prompt_mgr = PromptMgr(
-        agent=agent, workdir=tmp_path / "work",
-        role_prompt="限定子任务" if is_subagent else role_mgr.manifest.prompt,
+        facts=PromptFacts(
+            is_subagent=is_subagent,
+            role_prompt="限定子任务" if is_subagent else role_mgr.manifest.prompt,
+            task_mgr=TaskManager(),
+            subagent_mgr=subagent_mgr if can_delegate else None,
+        ),
+        deps=deps,
+        workdir=tmp_path / "work",
     )
     text = "\n\n".join(
         message["content"]
         for message in prompt_mgr.build() + prompt_mgr.build_initial_context_messages()
     ) + "\n\n" + prompt_mgr.build_manager_instructions()
-    text += "\n\n" + prompt_mgr.build_mode_instructions()
+    text += "\n\n" + prompt_mgr.build_mode_instructions(RunMode.EXECUTE)
     assert text.count("# 通用执行原则") == 1
     assert text.count("# 工具协议") == 1
     assert text.count("# Manager 工作流") == 1
@@ -97,7 +97,7 @@ def test_execution_guidance_follows_role_and_actual_tools(
         can_delegate and not is_subagent
     )
 
-    if agent._subagent_mgr is not None:
+    if prompt_mgr.facts.subagent_mgr is not None:
         subagent_mgr._documents.clear()
     assert "# 可用子智能体" not in "\n\n".join(
         message["content"] for message in prompt_mgr.build_initial_context_messages()

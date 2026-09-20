@@ -50,7 +50,7 @@ def test_unlisted_model_routes_without_discovery(monkeypatch):
 
 @pytest.mark.parametrize("is_subagent, requested", [(False, None), (True, "fast"), (True, "openai/custom")])
 def test_agent_construction_does_not_discover_models(tmp_path, monkeypatch, is_subagent, requested):
-    from src.agent import Agent, AgentDeps
+    from src.agent import Agent, AgentDeps, AgentSpec
 
     discovery = AsyncMock(side_effect=AssertionError("启动不得发现模型"))
     monkeypatch.setattr(OpenAIProvider, "list_models", discovery)
@@ -62,9 +62,12 @@ def test_agent_construction_does_not_discover_models(tmp_path, monkeypatch, is_s
         config_mgr=manager.config_mgr, llm_mgr=manager, workdir=tmp_path,
         tools_mgr=SimpleNamespace(schemas=lambda: []),
     )
-    agent = Agent(
-        agent_type="test", description="test", deps=deps,
-        is_subagent=is_subagent, model=requested, features=set(), tools=set(),
+    agent = Agent.from_spec(
+        AgentSpec(
+            agent_type="test", description="test", is_subagent=is_subagent,
+            requested_model=requested, features=frozenset(), tools=frozenset(),
+        ),
+        deps,
     )
     assert agent.model == manager.resolve_model(requested)
     assert agent.llm.provider_name == "openai"

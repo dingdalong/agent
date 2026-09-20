@@ -98,7 +98,7 @@ role:
 
 ## 子智能体（Subagents）
 
-子智能体是**共享同一 `AgentDeps` 的完整 `Agent` 实例**，由主 agent 通过 `task_delegator` 工具委派。定义为 `agents/*.md`，由 `SubAgentMgr`（`src/mgr/subagent_mgr.py`）加载。
+子智能体是**共享同一 `AgentDeps` 的完整 `Agent` 实例**，由主 agent 通过 `task_delegator` 工具委派（调度在 `SubAgentMgr.delegate()`，构造在 `Agent.spawn_subagent()`）。定义为 `agents/*.md`，由 `SubAgentMgr`（`src/mgr/subagent_mgr.py`）加载。
 
 ### 四层扫描
 
@@ -119,7 +119,7 @@ role:
 | `description` | str | `"没有说明内容"` | 出现在主 agent 的可用子智能体提示词段 |
 | `tools` | 逗号分隔 str | 空 → `None`（全部工具） | 执行期工具声明边界；不改变统一 schema。静态工具名称必须已在 `ToolsMgr` 注册；`mcp__` 名称允许等待 MCP 注册，但实际调用前必须已出现在 schema |
 | `model` | str | `None`（解析角色 default 槽位） | 只允许 `default`、`fast`、`opus`、`sonnet`、`haiku` 或`供应商/模型ID` |
-| `startInPlanMode` | bool | `False` | 独立构造时的初始 Plan 状态；经 `task_delegator` 构造时由父 Agent 当前状态覆盖 |
+| `startInPlanMode` | bool | `False` | 独立构造时的初始 Plan 状态；经 `delegate` 构造时由父 Agent 当前状态覆盖 |
 | `thinking` | bool | `None`（继承父 agent） | 是否启用思考；仅 bool 有效 |
 | `reasoning_effort` | str | `None`（继承父 agent 已解析值） | 合法值 `low`/`medium`/`high`/`xhigh`/`max`；字符串会去空白并转小写，非法值告警后视为未声明 |
 | `memory` | str | `None` | 记忆范围（如 `project`），控制 `MemoryMgr` 注入 |
@@ -127,21 +127,21 @@ role:
 
 模型别名固定映射为 `opus`/`sonnet` → `default`，`haiku` → `fast`。`SubAgentMgr` 加载 manifest 时只校验别名或 `供应商/模型ID` 格式，不查询候选列表；非法格式抛 `LLMConfigurationError`，消息包含定义文件路径和合法格式。字段缺失、`null`、空字符串或纯空白均视为未设置，委派时由 `LLMMgr.get(None)` 解析到 default 槽位；其他非字符串类型直接报错。
 
-### 委派流程 `task_delegator`
+### 委派流程
+
+`task_delegator` 工具是唯一的 LLM 入口，它把调用转交 `Agent.delegate_subagent()`；调度由 `SubAgentMgr.delegate(agent_type, prompt, *, parent, executor, ...)` 承担，子 agent 的构造与运行由 `executor`（生产实现 `Agent.spawn_subagent()`）承担。父 agent 的模式、feature、思考、推理力度与任务写入面经 `ParentAgentFacts` 显式传入，管理器不回读调用方的私有字段——`src/mgr/**` 运行期不 import `src.agent`（端口见 `src/mgr/common/subagent_port.py`）。
 
 1. 查表定位 `manifest`，不存在则返回错误文本（含可用列表）。
 2. 若带 `task_id`：委派前把任务标记 `in_progress` 并设 `owner`；子 agent 异常退出或返回 LLM 错误时回滚为 `pending`，正常返回不自动标 `completed`。
-3. 把 `manifest.tools` 原样传入 Agent。首次 chat 前，框架自动追加一条 developer 能力说明，列出该子 agent 在当前 mode、feature 和主/子范围下实际可执行的已声明工具；`PermissionManager` 只在执行期做最终兜底。schema 始终保持完整。
+3. 把 `manifest.tools` 原样传给执行器构造 Agent。首次 chat 前，框架自动追加一条 developer 能力说明，列出该子 agent 在当前 mode、feature 和主/子范围下实际可执行的已声明工具；`PermissionManager` 只在执行期做最终兜底。schema 始终保持完整。
 4. 模型直接传 `manifest.model`；`None` 由 `LLMMgr` 解析 default，合法别名解析对应槽位，完整模型 ID 精确使用。
-5. `thinking` 未声明时继承父 agent。
-6. `reasoning_effort` 自身合法声明优先；否则依次继承 `parent_agent.reasoning_effort`、父 agent Provider 的 `reasoning_effort`。继承的是父 agent 已解析的有效值，与子 agent 选择 default 还是 fast 槽位无关。
-7. `features` 未声明时继承父 agent 已解析集；同时继承父 agent 当前 `mode`。
-8. 用 `Agent.from_manifest(is_subagent=True, ...)` 构造完整子 agent，触发 start hook/事件，运行后在 `finally` 发 end 事件，再触发 stop hook。
-9. **上下文交接**：`run()` 前把 `ContextMgr.digest()` 拼到 `prompt` 之前（子 agent 的 history 从空开始，这是它唯一能拿到「别人已核实了什么」的通道）；`SubagentStop` hook 之后把最终 `result` 记入账本，供后续委派复用。委派时传 `shared_context="none"` 可完全隔离，用于需要独立判断的场景（如代码审查）。详见 [managers.md](managers.md#contextmgr--跨-agent-共享上下文)。
+5. `ParentAgentFacts` 解析继承值并放进 `SubagentSpawnRequest`：`thinking` 未声明时继承父 agent；`reasoning_effort` 自身合法声明优先，否则取父 agent 已解析值，仍为空时取父 Provider 的 `reasoning_effort`，与子 agent 选择 default 还是 fast 槽位无关；`features` 未声明时继承父 agent 已解析集；子 agent 同时继承父 agent 当前 `mode`。
+6. 执行器用 `Agent.from_manifest(is_subagent=True, ...)` 构造完整子 agent，触发 start hook/事件，运行后在 `finally` 发 end 事件，再触发 stop hook。
+7. **上下文交接**：`run()` 前把 `ContextMgr.digest()` 拼到 `prompt` 之前（子 agent 的 history 从空开始，这是它唯一能拿到「别人已核实了什么」的通道）；`SubagentStop` hook 之后把最终 `result` 记入账本，供后续委派复用。委派时传 `shared_context="none"` 可完全隔离，用于需要独立判断的场景（如代码审查）。详见 [managers.md](managers.md#contextmgr--跨-agent-共享上下文)。
 
 > 所有子 Agent 接收与主 Agent 相同的 schema。能力说明只表达执行白名单和当前有效边界，不复制 schema 参数；参数、类型和枚举以 schema 为准。`submit_plan` 通过 `ToolAudience.MAIN_ONLY` 禁止子 Agent 执行；子 Agent 继承父 Agent 当前 `mode`，模式限制同样由授权层执行。未列出的静态 manifest 工具属于配置错误，不能静默过滤；未注册的动态 MCP 工具只能等待注册，不能被执行。
 
-> 共享上下文的注入点刻意选在 `task_delegator` 而非 `ReminderMgr`：后者的 provider 只收 `(mode, is_subagent)`，要按委派过滤就得在进程级单例上存槽位，而并行委派会互相覆盖它。
+> 共享上下文的注入点刻意选在 `SubAgentMgr.delegate` 而非 `ReminderMgr`：后者的 provider 只收 `(mode, is_subagent)`，要按委派过滤就得在进程级单例上存槽位，而并行委派会互相覆盖它。
 
 
 ### 子智能体执行边界

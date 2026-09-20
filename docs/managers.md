@@ -1,6 +1,6 @@
 # Manager 服务层完整参考
 
-本文档面向开发者与运维者，逐一说明 `src/mgr/` 下的各 Manager 类：单一职责、消费的配置/文件、公共方法、是否受 feature 门控、是否实现 `reload()`、持有的关键状态。跨 Manager 的协议放在 `src/mgr/common/`，非 Manager 层直接复用的基础能力放在 `src/common/`；这些模块不作为 Manager API 导出。所有事实以源码为准，方法名/字段名/配置键均保留英文。
+本文档面向开发者与运维者，逐一说明 `src/mgr/` 下的各 Manager 类：单一职责、消费的配置/文件、公共方法、是否受 feature 门控、是否实现 `reload()`、持有的关键状态。跨 Manager 与调用方之间的协议放在 `src/mgr/common/`（`AgentCaller`、`ParentAgentFacts`/`SubagentExecutor`），非 Manager 层直接复用的基础能力放在 `src/common/`；这些模块不作为 Manager API 导出。所有事实以源码为准，方法名/字段名/配置键均保留英文。
 
 术语沿用四层架构中的约定（详见 [architecture.md](architecture.md)）：四层架构、feature 门控和 `PermissionManager.authorize()` 单一授权入口。安全顺序见 [permissions.md](permissions.md)。
 
@@ -13,14 +13,14 @@ Manager 服务层是框架的横切能力层：每个 Manager 类各司其职（
 Manager 分两批被构造：
 
 1. **deps 层 Manager**（进程级、跨 agent 共享）——在 `src/app/bootstrap.py` 的 `create_app()` 中手动构造并注入 `AgentDeps` dataclass。包括：`ConfigManager`、`RoleMgr`、`ToolsMgr`、`MemoryMgr`、`ContextMgr`、`PluginMgr`、`HooksMgr`、`PlanMgr`、`McpMgr`、`PermissionManager`、`WebAccessMgr`、`SessionMgr`、`LLMMgr`。
-2. **每 agent 层 Manager**（随 `Agent` 实例创建，主/子 agent 各自独立）——在 `Agent.__post_init__`（`src/agent/agent.py:113-160`）中构造。包括：`CompactMgr`、`SkillMgr`、`SubAgentMgr`、`PromptMgr`、`TaskManager`、`ReminderMgr`。子 agent 是共享同一份 `AgentDeps` 的完整 `Agent` 实例，因此复用 deps 层 Manager，但拥有自己的每 agent 层 Manager。
+2. **每 agent 层 Manager**（随 `Agent` 实例创建，主/子 agent 各自独立）——由 `AgentAssembler.assemble()`（`src/agent/assembly.py:62-109`）按冻结的 `AgentSpec` 构造，产出不可变的 `AgentAssembly`。包括：`CompactMgr`、`SkillMgr`、`SubAgentMgr`、`PromptMgr`、`TaskManager`、`ReminderMgr`。`Agent.__post_init__` 只消费装配产物，自身不创建任何 Manager。子 agent 是共享同一份 `AgentDeps` 的完整 `Agent` 实例，因此复用 deps 层 Manager，但拥有自己的每 agent 层 Manager。
 
 ### feature 门控哪些 Manager
 
 角色在 `role.md` frontmatter 声明 `features` 列表，`resolve_features()`（`src/common/features.py`）解析为有效启用集（合法名单：`task`、`skill`、`subagent`、`file`、`memory`、`plan`）。据此：
 
 - deps 层：`MemoryMgr`（`memory`）、`PlanMgr`（`plan`）、`ContextMgr`（`subagent`）未启用时在 `bootstrap.create_app()` 注入 `None`。
-- 每 agent 层：`SkillMgr`（`skill`）、`SubAgentMgr`（`subagent`）、`TaskManager`（`task`）未启用时在 `Agent.__post_init__` 置 `None`；`file` 直接门控 `apply_patch` 工具。
+- 每 agent 层：`SkillMgr`（`skill`）、`SubAgentMgr`（`subagent`）、`TaskManager`（`task`）未启用时由 `AgentAssembler` 在 `AgentAssembly` 中置 `None`；`file` 直接门控 `apply_patch` 工具。
 - 所有 agent 共享 `ToolsMgr.schemas()` 的完整 schema；未启用 feature 的工具由 `PermissionManager` 在执行期拒绝。
 
 feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `file`）见 [architecture.md](architecture.md#feature-门控) 与 [roles-subagents-skills.md](roles-subagents-skills.md)。
@@ -147,10 +147,12 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 | `unavailable_in_mode` | `mode: RunMode` | `tuple[str, ...]` | 当前模式不能执行的完整工具名列表 |
 | `execute` (async) | `tool_name`, `arguments`, `current_tool_call_id`, `deps`, `agent`, `run_context` | `ToolResult` | 执行工具全流程；`run_context` 供工具访问当前用户轮次状态（见下） |
 
+**调用方端口**：`agent` 参数只需满足 `src/mgr/common/agent_port.py` 的 `AgentCaller` 协议（`uuid`/`mode`/`agent_type`/`is_subagent`/`features`/`tools`/`history`），`Agent` 用只读属性实现它；工具执行层因此不 import `src.agent`，测试可以传最小替身。
+
 **`execute()` 完整流程**：Pydantic 校验 → PreToolUse Hook → 修改后重校验 → `authorize()` → 脱敏的 `ToolCallStarted`（含 `ToolDisplay`） → 调用工具 → 提取 `ToolResult` → 立即脱敏和限长 → PostToolUse → 再次脱敏 → 一次输出整理 → `ToolCallCompleted`（含 `ToolDisplay`） → 历史。临时日志、Hook payload 和事件预览都只接收脱敏数据。
 
 **展示数据生成逻辑**：
-- `_emit_tool_started()`：接收 `arguments`，使用 `tool_title()` 生成中文标题（`src/tools/display.py` 的 `TOOL_TITLES` 映射），使用 `format_params()` 按工具类型格式化参数摘要（如 exec_command 提取命令）。`EXTERNAL_READ` 工具不生成参数展示。参数经 `DataGuard.redact()` 脱敏后传入 `ToolDisplay`。
+- `_emit_tool_started()`：接收 `arguments`，使用 `tool_title()` 生成中文标题（`src/common/tool_display.py` 的 `TOOL_TITLES` 映射），使用 `format_params()` 按工具类型格式化参数摘要（如 exec_command 提取命令）。`EXTERNAL_READ` 工具不生成参数展示。参数经 `DataGuard.redact()` 脱敏后传入 `ToolDisplay`。
 - `_emit_tool_completed()`：接收 `tool_display`（来自 `ToolResult`，如文件差异）。若存在则直接使用并对 `content` 脱敏；否则使用 `format_result()` 截断结果内容生成通用 `ToolDisplay`。`EXTERNAL_READ` 工具不生成结果展示（`display=None`）。
 
 **feature 门控**：否；feature、模式与 agent 范围统一在授权请求中判定。 **reload**：有，回收工具临时日志。
@@ -183,7 +185,7 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 
 **单一职责**：判断是否需要压缩，按原子消息块无损切分历史，用 LLM 滚动生成摘要，拼装压缩后的上下文前缀，并把完整原始历史写入 transcript。
 
-**构造参数**（每 agent 层，在 `Agent.__post_init__` `agent.py:202-212` 从 `compact` 配置换算）：
+**构造参数**（每 agent 层，由 `AgentAssembler.build_compact_mgr()` `assembly.py:138-164` 从 `compact` 配置换算）：
 - `llm`：本 agent 的 provider（估算 token、生成摘要）。
 - `workdir`：transcript 落盘目录 `workdir/.agent/transcripts/`。
 - `caller_agent_type`、`caller_uuid`：摘要 LLM 调用沿用的 agent 类型与实例标识。
@@ -221,6 +223,8 @@ Agent 显式传入初始化消息数量，CompactMgr 原文保留该 bootstrap�
 
 **职责**：构建 Agent 生命周期内固定不变的一条 system；另行生成 Manager/模式 developer 指令和首次 chat 前的外部 user 上下文。模式切换、模型切换和工具轮都不重建 system。
 
+**窄接口**：`PromptMgr` 不持有 `Agent`，只消费装配期冻结的 `PromptFacts`（`agent_type`/`is_subagent`/`role_prompt`/`tools`/`features`/`memory` 与 `task_mgr`/`subagent_mgr`/`skill_mgr` 三个管理器引用）。当前模式不进入 facts，而是由调用方在每次组装时显式传入 `build_*_instructions(mode)`，因此同一实例可服务模式切换后的重建，也不会出现"提示词里写死的旧模式"。
+
 **固定 system 顺序**（`_build_static_prompt`）：
 1. **身份与通用原则**——`role_prompt` 非空时用之，否则使用默认身份；按主/子 agent 注入固定责任、证据、推进和验收原则；
 2. **工具协议**——schema 是参数契约的唯一权威；
@@ -240,8 +244,9 @@ Agent 显式传入初始化消息数量，CompactMgr 原文保留该 bootstrap�
 | 方法 | 关键参数 | 返回 | 作用 |
 |---|---|---|---|
 | `build` | — | `list` | 返回一条固定 system 消息 |
+| `build_capability_instructions` | `mode` | `str` | 返回能力边界说明；模式变化时重新生成 |
 | `build_manager_instructions` | — | `str` | 返回首个真实用户请求前追加的 Manager 工作流 |
-| `build_mode_instructions` | — | `str` | 返回当前最终模式的框架指令 |
+| `build_mode_instructions` | `mode` | `str` | 返回传入模式的框架指令 |
 | `build_initial_context_messages` | — | `list[dict]` | 返回首次 chat 前追加的外部 user 上下文 |
 
 **feature 门控**：否（初始上下文和模式段按对应 Manager 是否存在动态出现）。 **reload**：无（随新 Agent 重建）。
@@ -254,7 +259,7 @@ Agent 显式传入初始化消息数量，CompactMgr 原文保留该 bootstrap�
 
 `src/mgr/subagent_mgr.py`
 
-**单一职责**：四层扫描子 agent 定义，在加载期验证模型字段，暴露列表提示词段，并通过 `task_delegator` 构造和运行完整子 Agent。
+**单一职责**：四层扫描子 agent 定义，在加载期验证模型字段，暴露列表提示词段，并通过 `delegate()` 端口调度子 Agent；子 Agent 的构造与运行由调用方经 `SubagentExecutor` 注入（端口定义在 `src/mgr/common/subagent_port.py`）。
 
 **扫描与模型校验**：共享 `roles/common/agents/` → 激活角色 `agents/` → 全局 `~/.agent/agents/` → 项目 `.agent/agents/`，同名 `agent_type` 后者覆盖。每份文件在解析 frontmatter 时校验 model 的格式：
 
@@ -263,14 +268,15 @@ Agent 显式传入初始化消息数量，CompactMgr 原文保留该 bootstrap�
 - 其他字符串必须采用 `供应商/模型ID`，不查询模型候选列表；
 - 非法值抛 `LLMConfigurationError`，消息包含 manifest 路径和合法格式。没有 `best`、`inherit`、子串匹配或静默回退。
 
-**公共方法**：`describe()` 只返回按 type 排序的外部能力目录（同时显示每个子 agent 的工具边界），`system_guidance()` 返回不含目录数据的固定协作工作流，`task_delegator(agent_type, prompt, parent_agent, task_id, description, shared_context)` 执行委派。
+**公共方法**：`describe()` 只返回按 type 排序的外部能力目录（同时显示每个子 agent 的工具边界），`system_guidance()` 返回不含目录数据的固定协作工作流，`delegate(agent_type, prompt, *, parent, executor, task_id, description, shared_context)` 执行委派。
 
-**`task_delegator` 关键行为**：
+**端口**：`parent: ParentAgentFacts` 是父 agent 的委派事实快照（`uuid`/`agent_type`/`mode`/`features`/`enable_thinking`/`reasoning_effort`/provider 默认 effort/任务写入面），思考、推理力度与 feature 的继承规则作为方法冻结在快照上；`executor: SubagentExecutor` 只声明 `spawn_subagent(request) -> SubagentRun`，生产实现是 `Agent.spawn_subagent()`，LLM 侧入口是 `Agent.delegate_subagent()`（`task_delegator` 工具的唯一落点）。管理器因此不读调用方的私有字段，`src/mgr/**` 运行期不 import `src.agent`，两端都可以用最小替身单独测试。
+
+**`delegate()` 关键行为**：
 - 未知 `agent_type` 返回错误并列出已知；带 `task_id` 时先置 `in_progress` 并设 owner，异常或 `RunResult.llm_error` 时回滚为无 owner 的 `pending`，正常返回不自动 completed；
 - manifest 工具声明在加载期和委派/Agent 构造期校验静态工具均已注册；`mcp__` 动态名称允许等待 MCP 生命周期完成，但实际执行仍必须命中已注册 schema。声明原样传给 Agent，作为执行期授权边界。首次 chat 前由 PromptMgr 追加 developer 能力摘要，说明当前有效工具；所有子 agent 仍接收统一 schema，参数细节不在摘要中复制。模型原样传 manifest：`None`、槽位别名、兼容别名或完整 ID 最终都由 `LLMMgr.get()` 解析；
-- `thinking` 自身未声明时继承父 agent；`reasoning_effort` 自身合法声明优先，否则继承 `parent_agent.reasoning_effort`，父值仍为空时继承父 Provider 的 effort；该 effort 继承与子 agent 选择哪个模型槽位相互独立；
-- `features` 未声明时继承父 agent 已解析集，同时继承父 agent 当前 `mode`；
-- 用 `Agent.from_manifest(is_subagent=True, ...)` 构造实例，触发 `SubagentStart`/`SubagentStop` hook 与 start/end 生命周期事件，异常和取消路径也发 end；
+- `ParentAgentFacts` 解析继承值并放进 `SubagentSpawnRequest`：`thinking` 自身未声明时继承父 agent；`reasoning_effort` 自身合法声明优先，否则取父 agent 已解析值，父值仍为空时取父 Provider 的 effort；`features` 未声明时继承父 agent 已解析集；子 agent 继承父 agent 当前 `mode`。effort 继承与子 agent 选择哪个模型槽位相互独立；
+- 执行器用 `Agent.from_manifest(is_subagent=True, ...)` 构造实例，触发 `SubagentStart`/`SubagentStop` hook 与 start/end 生命周期事件，异常和取消路径也发 end；
 - **跨 agent 上下文交接的唯一枢纽**（见 [ContextMgr](#contextmgr--跨-agent-共享上下文)）：
   - *注入*——`run()` 之前把 `ContextMgr.digest()` 拼到 `prompt` 前面（摘要在前、任务正文在最后，recency）。`shared_context="none"` 可完全隔离，供独立复核用。账本为空时 prompt 逐字节不变。
   - *记账*——`SubagentStop` hook 处理**之后**把 `result` 记入账本，因此记的正是父 agent 实际收到的文本。仅当 `llm_error is None`、`agent_type` 在 `record_types` 白名单内、正文够长时才记；异常与取消路径走不到记账点，天然不记。
@@ -361,7 +367,7 @@ MCP 连接配置和授权边界见 [mcp-and-hooks.md](mcp-and-hooks.md)。
 
 `src/mgr/context_mgr.py`
 
-**单一职责**：维护会话级的「已核实事实」账本，供 `SubAgentMgr.task_delegator` 在委派前注入、委派后记账，让子 agent 不必重新探索别人已经查清的东西。
+**单一职责**：维护会话级的「已核实事实」账本，供 `SubAgentMgr.delegate` 在委派前注入、委派后记账，让子 agent 不必重新探索别人已经查清的东西。
 
 **为什么需要**：子 agent 的 `history` 从空开始，唯一输入是委派 prompt。此前 3 个并行 `explore` 的发现必须由主 agent 手抄摘要进下一个委派 prompt，抄漏了下游就重新探索一遍。而框架本来就白拿着 `run_result.final_text`——`explore` 的输出格式（结论/证据/可复用资产/影响面/不确定点）已经是一张结构良好的发现卡，自动记账即可，写入侧零 LLM 纪律。
 
@@ -384,7 +390,7 @@ MCP 连接配置和授权边界见 [mcp-and-hooks.md](mcp-and-hooks.md)。
 **三条设计约束**（改这块前必读）：
 
 1. **注入载体只能是子 agent 的首条 user 消息，绝不能进固定 system 或框架 developer。** 账本是动态外部数据；放消息尾部既保持信任边界，也不改变已缓存的固定前缀。
-2. **注入点是 `SubAgentMgr.task_delegator` 而非 `ReminderMgr`。** ReminderMgr 的 provider 只收 `(mode, is_subagent)`，拿不到本次委派信息；按委派过滤就得在进程级单例上存槽位，而计划工作流允许同一轮并行委派多个 `explore`，`asyncio.gather` 会互相覆盖——共享消费槽位会产生同样的竞态。
+2. **注入点是 `SubAgentMgr.delegate` 而非 `ReminderMgr`。** ReminderMgr 的 provider 只收 `(mode, is_subagent)`，拿不到本次委派信息；按委派过滤就得在进程级单例上存槽位，而计划工作流允许同一轮并行委派多个 `explore`，`asyncio.gather` 会互相覆盖——共享消费槽位会产生同样的竞态。
 3. **落盘必须由本 Manager 直接写，不能改成 `apply_patch` 工具。** `.agent` 被 `PathResolver` 归为 protected，`.agent/context/**` 因此是 `PathClass.PROTECTED`；而 plan 模式下 `PermissionManager._authorize_plan()` 拒绝通用文件写入，走 `apply_patch` 必被拒——plan 模式恰是本机制最痛的场景。触发它的工具（`task_delegator`、`note_context`）声明 `INTERNAL + plan_safe=True`，与 `save_memory` 同构。
 
 **生命周期语义**：`/clear` 走 `reload()` 清内存、磁盘旧文件保留供排查，新会话按新 `session_id` 另开文件。**resume 不恢复账本**——恢复的历史里主 agent 已带着全部工具结果，账本只服务后续新委派，这是刻意设计不是遗漏。
@@ -409,7 +415,7 @@ MCP 连接配置和授权边界见 [mcp-and-hooks.md](mcp-and-hooks.md)。
 
 **单一职责**：会话内任务的 CRUD、依赖关系（双向同步 + 环检测）、文件持久化，并作为提醒源向 `ReminderMgr` 注入任务状态。
 
-**消费的配置或文件**：`tasks_dir`（主 agent 为 `{global_dir}/tasks/{session_id}/`，`agent.py:151-155`；子 agent 传 `None` 为**纯内存模式**）。每 task 一个 `{id}.json`（原子写），`.highwatermark` 记录最高分配 ID 防重用；全部任务 `completed` 时由轮末 `cleanup_if_all_completed()` 清空内存并删除整个目录。`MAX_TASKS = 50`。
+**消费的配置或文件**：`tasks_dir`（主 agent 为 `{global_dir}/tasks/{session_id}/`，`assembly.py:197-198`；子 agent 传 `None` 为**纯内存模式**）。每 task 一个 `{id}.json`（原子写），`.highwatermark` 记录最高分配 ID 防重用；全部任务 `completed` 时由轮末 `cleanup_if_all_completed()` 清空内存并删除整个目录。`MAX_TASKS = 50`。
 
 **`Task` 字段**（`task_mgr.py:14-36`）：`id`、`subject`、`description`、`active_form`、`status`（`pending`/`in_progress`/`completed`）、`owner`、`blocks`、`blocked_by`、`metadata`。
 

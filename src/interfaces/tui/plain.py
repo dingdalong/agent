@@ -13,7 +13,7 @@ from typing import TextIO
 from rich.text import Text
 
 from src.events.menu import FormQuestion
-from src.tools.display import permission_line
+from src.common.tool_display import permission_line
 
 try:  # POSIX 专有；Windows 上缺失时降级为不做终端规范化
     import termios

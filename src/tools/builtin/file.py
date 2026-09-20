@@ -3,7 +3,7 @@ from pydantic import BaseModel, Field
 
 from src.tools.decorator import tool
 from src.mode import RunMode
-from src.tools.policy import AccessKind, DataFlow, ToolAvailability, ToolPolicy
+from src.common.tool_policy import AccessKind, DataFlow, ToolAvailability, ToolPolicy
 
 
 class ApplyPatch(BaseModel):

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from src.app.app import AgentApp
+from src.agent import SessionContext
 from src.events.types import (
     InteractionCompleted,
     LLMCallCompleted,
@@ -438,11 +439,8 @@ def test_app_resume_switches_state_inside_gates_and_resets_transient_store() -> 
         event_bus=bus,
         ui=ui,
         session_mgr=sessions,
-        session_id="source",
-        session_state=source,
-        session_context=["old"],
+        session=SessionContext(id="source", state=source, context=["old"]),
         role_mgr=None,
-        plan_mode_controller=None,
     )
     app = AgentApp(deps, AgentViewStore(), router)  # type: ignore[arg-type]
     app._install_plan_mode_controller = lambda: None  # type: ignore[method-assign]
@@ -452,7 +450,7 @@ def test_app_resume_switches_state_inside_gates_and_resets_transient_store() -> 
         llm=SimpleNamespace(model="model", reasoning_effort="medium"),
         reasoning_effort=None,
         mode=RunMode.PLAN,
-        _task_mgr=None,
+        task_mgr=None,
         get_input_history=target.input_history,
     )
     result = ResumeResult(
@@ -470,11 +468,11 @@ def test_app_resume_switches_state_inside_gates_and_resets_transient_store() -> 
     asyncio.run(scenario())
 
     assert sessions.saved == [("source", source)]
-    assert deps.session_id == "target"
-    assert deps.session_state is target
+    assert deps.session.id == "target"
+    assert deps.session.state is target
     assert router.state is target
     assert ui.state is target
     assert app.agent_view_store.foreground_uuid == "new-main"
     assert [s.uuid for s in app.agent_view_store.subagent_snapshots()] == ["worker-target"]
-    assert deps.session_context != ["old"]
+    assert deps.session.context != ["old"]
     assert bus.joins == 2

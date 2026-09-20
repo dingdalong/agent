@@ -7,6 +7,7 @@ from dataclasses import fields
 from io import StringIO
 from pathlib import Path
 import time
+from types import SimpleNamespace
 from typing import Any, get_args
 import uuid
 
@@ -15,6 +16,7 @@ from rich.text import Text
 
 import src.events as events_package
 from src.agent.agent import Agent
+from src.agent.spec import AgentSpec
 from src.agent.states import AgentState, RunContext
 from src.events import AgentEvent
 from src.events.types import (
@@ -1218,8 +1220,8 @@ def test_length_recovery_exhaustion_emits_output_limit_failure() -> None:
     """无 provider exception 的长度恢复耗尽也发一次 output_limit 终态事件。"""
     bus = RecordingEventBus()
     agent = object.__new__(Agent)
-    agent.llm = IdentityNormalizer()
-    agent.agent_type = "main"
+    agent.assembly = SimpleNamespace(llm=IdentityNormalizer())
+    agent.spec = AgentSpec(agent_type="main", description="")
     agent.uuid = uuid.uuid4()
     agent.deps = type("Deps", (), {"event_bus": bus})()
     response = LLMResponse(
@@ -1254,8 +1256,8 @@ def test_length_recovery_failure_uses_response_partial_data_marker() -> None:
     """无正文和工具时，长度终态仍消费 provider 保存的思考残片标记。"""
     bus = RecordingEventBus()
     agent = object.__new__(Agent)
-    agent.llm = IdentityNormalizer()
-    agent.agent_type = "main"
+    agent.assembly = SimpleNamespace(llm=IdentityNormalizer())
+    agent.spec = AgentSpec(agent_type="main", description="")
     agent.uuid = uuid.uuid4()
     agent.deps = type("Deps", (), {"event_bus": bus})()
     response = LLMResponse(
@@ -1282,8 +1284,8 @@ def test_length_failure_event_publish_error_does_not_escape_handler() -> None:
     """长度恢复耗尽的 Failed 遥测故障不覆盖 LLM_FAILURE 状态。"""
     bus = FaultingEventBus(LLMCallFailed)
     agent = object.__new__(Agent)
-    agent.llm = IdentityNormalizer()
-    agent.agent_type = "main"
+    agent.assembly = SimpleNamespace(llm=IdentityNormalizer())
+    agent.spec = AgentSpec(agent_type="main", description="")
     agent.uuid = uuid.uuid4()
     agent.deps = type("Deps", (), {"event_bus": bus})()
     ctx = RunContext(

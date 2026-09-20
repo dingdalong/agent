@@ -1,3 +1,10 @@
+"""提示词组装 — 只消费显式的 agent 事实，不持有 Agent 实例。
+
+`PromptFacts` 是装配期冻结的窄接口：身份、工具、feature 与所需 Manager
+引用。随会话变化的 `deps.session` 由 `PromptMgr` 活引用读取，当前模式则由
+调用方在每次组装时显式传入，二者都不经过 `Agent` 本身。
+"""
+
 from __future__ import annotations
 from typing import TYPE_CHECKING
 
@@ -7,7 +14,7 @@ from pathlib import Path
 from dataclasses import dataclass, field
 
 from src.mode import RunMode
-from src.tools import ToolAudience
+from src.common.tool_policy import ToolAudience
 from src.prompt_tags import (
     ExternalContextItem,
     PromptConsumer,
@@ -16,21 +23,51 @@ from src.prompt_tags import (
 )
 
 if TYPE_CHECKING:
-    from src.agent import Agent
+    from src.agent import AgentDeps
+    from src.mgr.skill_mgr import SkillMgr
+    from src.mgr.subagent_mgr import SubAgentMgr
+    from src.mgr.task_mgr import TaskManager
+
+
+@dataclass(frozen=True)
+class PromptFacts:
+    """PromptMgr 组装提示词所需的 agent 事实。
+
+    Attributes:
+        agent_type: 当前 agent 类型标识。
+        is_subagent: 是否为子 agent。
+        role_prompt: role.md body；为空时回退默认身份。
+        tools: 声明的工具白名单；None 表示未声明。
+        features: 已解析的有效 feature 集。
+        memory: 记忆范围；``project`` 时注入项目记忆。
+        task_mgr: 任务管理器；未启用时为 None。
+        subagent_mgr: 子 agent 管理器；主 agent 未启用或为子 agent 时为 None。
+        skill_mgr: 技能管理器；未启用时为 None。
+    """
+
+    agent_type: str = "agent"
+    is_subagent: bool = False
+    role_prompt: str | None = None
+    tools: frozenset[str] | None = None
+    features: frozenset[str] = frozenset()
+    memory: str | None = None
+    task_mgr: TaskManager | None = None
+    subagent_mgr: SubAgentMgr | None = None
+    skill_mgr: SkillMgr | None = None
 
 @dataclass
 class PromptMgr:
-    agent: Agent
+    facts: PromptFacts
+    deps: AgentDeps
     workdir: Path
     global_dir: Path | None = None
-    role_prompt: str | None = None
     _system_content: str | None = field(init=False, default=None)
 
     def _build_core(self) -> str:
         """构建核心身份段。role identity 非空时优先使用，否则回退默认身份。"""
         identity = (
-            self.role_prompt
-            if self.role_prompt
+            self.facts.role_prompt
+            if self.facts.role_prompt
             else (
                 "你是一个超级智能体。\n"
                 "你的任务是理解用户需求，基于可用上下文和工具给出可靠结果。"
@@ -40,7 +77,7 @@ class PromptMgr:
 
     def _build_execution_guidance(self) -> str:
         """按调用方职责提供 Agent 生命周期内固定的通用执行原则。"""
-        if self.agent.is_subagent:
+        if self.facts.is_subagent:
             return (
                 "# 通用执行原则\n"
                 "完成委派范围内的任务，基于实际输入和工具结果执行与验证。\n"
@@ -66,7 +103,7 @@ class PromptMgr:
         items: list[ExternalContextItem] = []
 
         # 共享 AGENTS.md（最低优先级，所有角色可用）
-        role_mgr = getattr(getattr(self.agent, "deps", None), "role_mgr", None)
+        role_mgr = getattr(self.deps, "role_mgr", None)
         if role_mgr is not None:
             common_agent = role_mgr.common_agent_md_path()
             if common_agent is not None:
@@ -100,7 +137,7 @@ class PromptMgr:
         """构建作为外部上下文提供的运行环境数据。
 
         环境基线（git 分支、技术栈入口、顶层目录结构）由 `AgentApp._reset_session`
-        经 `collect_env_baseline` 一次性采集并缓存在 `deps.env_baseline`，本方法只做
+        经 `collect_env_baseline` 一次性采集并缓存在 `deps.session.env_baseline`，本方法只做
         字符串拼接。它由 `build_initial_context_messages()` 在首次 chat 前调用，不能
         在此做 git 子进程或目录扫描等阻塞 I/O；且每个子 agent 都新建自己的
         PromptMgr，在此现算会让一次协作流程重复采集多次。
@@ -114,21 +151,23 @@ class PromptMgr:
             f"当前日期：`{datetime.date.today().isoformat()}`",
         ]
         # getattr 带默认值：大量测试用 SimpleNamespace 造 deps，不能假设字段存在
-        baseline = getattr(getattr(self.agent, "deps", None), "env_baseline", "") or ""
+        session = getattr(self.deps, "session", None)
+        baseline = getattr(session, "env_baseline", "") or ""
         if baseline:
             lines.append(baseline)
         return "# 运行环境\n" + "\n".join(lines)
 
     def _build_memory_context(self) -> str:
-        if getattr(self.agent, "memory", "project") != "project":
+        if self.facts.memory != "project":
             return ""
-        memory_mgr = getattr(getattr(self.agent, "deps", None), "memory_mgr", None)
+        memory_mgr = getattr(self.deps, "memory_mgr", None)
         if memory_mgr is None:
             return ""
         return memory_mgr.build_context()
 
     def _build_session_context(self) -> list[ExternalContextItem]:
-        session_context = getattr(getattr(self.agent, "deps", None), "session_context", None)
+        session = getattr(self.deps, "session", None)
+        session_context = getattr(session, "context", None)
         if not session_context:
             return []
         return [item for item in session_context if item.content]
@@ -137,21 +176,21 @@ class PromptMgr:
         """收集当前 agent 实际具备能力的固定 Manager 工作流。"""
         guidance: list[str] = []
 
-        task_mgr = getattr(self.agent, "_task_mgr", None)
+        task_mgr = self.facts.task_mgr
         if task_mgr is not None:
             guidance.append(task_mgr.system_guidance())
 
-        if not self.agent.is_subagent:
-            subagent_mgr = getattr(self.agent, "_subagent_mgr", None)
+        if not self.facts.is_subagent:
+            subagent_mgr = self.facts.subagent_mgr
             if subagent_mgr is not None and subagent_mgr.describe():
                 guidance.append(subagent_mgr.system_guidance())
 
-        skill_mgr = getattr(self.agent, "_skill_mgr", None)
+        skill_mgr = self.facts.skill_mgr
         if skill_mgr is not None and skill_mgr.describe():
             guidance.append(skill_mgr.system_guidance())
 
-        if getattr(self.agent, "memory", "project") == "project":
-            memory_mgr = getattr(getattr(self.agent, "deps", None), "memory_mgr", None)
+        if self.facts.memory == "project":
+            memory_mgr = getattr(self.deps, "memory_mgr", None)
             if memory_mgr is not None:
                 guidance.append(memory_mgr.system_guidance())
 
@@ -159,17 +198,22 @@ class PromptMgr:
             return ""
         return "# Manager 工作流\n" + "\n\n".join(guidance)
 
-    def build_capability_instructions(self) -> str:
+    def build_capability_instructions(self, mode: RunMode) -> str:
         """生成当前 agent 的框架能力边界说明。
 
         工具参数仍以完整 schema 为准；此处只说明当前 agent 可以执行哪些
         工具，以及 manifest、mode、feature 和主/子 agent 范围造成的限制。
+
+        Args:
+            mode: 当前运行模式（运行时权威值由调用方提供）。
+
+        Returns:
+            能力边界说明正文；无内容时返回空字符串。
         """
-        tools_mgr = getattr(getattr(self.agent, "deps", None), "tools_mgr", None)
-        declared = getattr(self.agent, "tools", None)
-        features = set(getattr(self.agent, "features", set()) or ())
-        mode = getattr(self.agent, "mode", RunMode.EXECUTE)
-        is_subagent = bool(getattr(self.agent, "is_subagent", False))
+        tools_mgr = getattr(self.deps, "tools_mgr", None)
+        declared = self.facts.tools
+        features = set(self.facts.features)
+        is_subagent = self.facts.is_subagent
 
         if tools_mgr is None:
             allowed = sorted(declared) if declared is not None else []
@@ -199,7 +243,7 @@ class PromptMgr:
 
         lines = [
             "# 当前 Agent 能力边界",
-            f"当前 agent：{getattr(self.agent, 'agent_type', 'agent')}",
+            f"当前 agent：{self.facts.agent_type}",
             f"当前模式：{mode.display_name}",
         ]
         if allowed:
@@ -238,7 +282,7 @@ class PromptMgr:
 
         sections.append(render_tag_guide(PromptConsumer.WORKING_AGENT))
 
-        web_access_mgr = getattr(getattr(self.agent, "deps", None), "web_access_mgr", None)
+        web_access_mgr = getattr(self.deps, "web_access_mgr", None)
         if web_access_mgr is not None:
             sections.append(web_access_mgr.system_guidance())
 
@@ -248,8 +292,8 @@ class PromptMgr:
         """构建首次 chat 前追加的非指令上下文消息。"""
         items: list[ExternalContextItem] = []
 
-        if not self.agent.is_subagent:
-            subagent_mgr = getattr(self.agent, "_subagent_mgr", None)
+        if not self.facts.is_subagent:
+            subagent_mgr = self.facts.subagent_mgr
             if subagent_mgr is not None:
                 subagents = subagent_mgr.describe()
                 if subagents:
@@ -257,7 +301,7 @@ class PromptMgr:
                         "subagent_catalog", "# 可用子智能体\n" + subagents,
                     ))
 
-        skill_mgr = getattr(self.agent, "_skill_mgr", None)
+        skill_mgr = self.facts.skill_mgr
         if skill_mgr is not None:
             skills = skill_mgr.describe()
             if skills:
@@ -285,13 +329,20 @@ class PromptMgr:
         """构建首次真实用户请求前追加的 Manager 工作流。"""
         return self._build_manager_guidance()
 
-    def build_mode_instructions(self) -> str:
-        """构建当前模式的框架指令，供 Agent 在 chat 前追加。"""
+    def build_mode_instructions(self, mode: RunMode) -> str:
+        """构建当前模式的框架指令，供 Agent 在 chat 前追加。
+
+        Args:
+            mode: 当前运行模式（运行时权威值由调用方提供）。
+
+        Returns:
+            当前模式的框架指令正文。
+        """
         sections: list[str] = []
-        if self.agent.mode is RunMode.PLAN:
-            plan_mgr = getattr(getattr(self.agent, "deps", None), "plan_mgr", None)
+        if mode is RunMode.PLAN:
+            plan_mgr = getattr(self.deps, "plan_mgr", None)
             if plan_mgr is not None:
-                sections.append(plan_mgr.instructions(self.agent.is_subagent))
+                sections.append(plan_mgr.instructions(self.facts.is_subagent))
         else:
             sections.append(
                 "# 当前模式：执行模式\n"

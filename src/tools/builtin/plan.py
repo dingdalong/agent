@@ -4,9 +4,9 @@ from pydantic import BaseModel, Field
 
 from src.events.types import caller_identity
 from src.tools.decorator import tool
-from src.tools.display import ToolResult
+from src.common.tool_display import ToolResult
 from src.mode import RunMode
-from src.tools.policy import AccessKind, DataFlow, ToolAudience, ToolAvailability, ToolPolicy
+from src.common.tool_policy import AccessKind, DataFlow, ToolAudience, ToolAvailability, ToolPolicy
 
 
 class SubmitPlan(BaseModel):
@@ -23,12 +23,12 @@ async def submit_plan(title, content, agent, deps, authorization):
     title = str(deps.data_guard.redact(title))
     content = str(deps.data_guard.redact(content))
     try:
-        path = await asyncio.to_thread(deps.plan_mgr.save, content, deps.session_state.plan if deps.session_state else {})
+        path = await asyncio.to_thread(deps.plan_mgr.save, content, deps.session.state.plan if deps.session.state else {})
     except (OSError, ValueError) as exc:
         return ToolResult.failure('plan_save_failed', str(exc))
     state = {'path': str(path), 'title': title, 'approved': False}
-    if deps.session_state is not None:
-        deps.session_state.plan = state
+    if deps.session.state is not None:
+        deps.session.state.plan = state
     await deps.event_bus.request_output(f'计划：{title}\n{path}\n')
     await deps.event_bus.request_output(content, markdown=True)
     caller_type, caller_uuid = caller_identity(agent)
@@ -41,8 +41,8 @@ async def submit_plan(title, content, agent, deps, authorization):
     if choice in {'auto', 'manual'} and not feedback.strip():
         state['approved'] = True
         deps.plan_mgr.exit_mode(agent)
-    if deps.session_mgr is not None and deps.session_state is not None:
-        await asyncio.to_thread(deps.session_mgr.save_state, deps.session_id, deps.session_state)
+    if deps.session_mgr is not None and deps.session.state is not None:
+        await asyncio.to_thread(deps.session_mgr.save_state, deps.session.id, deps.session.state)
     if feedback.strip():
         return ToolResult(f'修改意见：{feedback.strip()}\n请修订后再次 submit_plan；路径：{path}')
     if choice == 'auto':

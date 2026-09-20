@@ -11,7 +11,7 @@ import pytest
 from pydantic import BaseModel
 
 from src.app.plan_mode_controller import PlanModeController
-from src.agent import Agent
+from src.agent import Agent, SessionContext
 from src.events.types import PermissionNotice, ToolCallCompleted, ToolCallStarted
 from src.common.data_guard import DataGuard, REDACTED
 from src.mgr.hooks_mgr import HookRunResult
@@ -19,22 +19,14 @@ from src.mgr.mcp_mgr import McpMgr
 from src.common.path_resolver import PathClass, PathResolutionError, PathResolver
 from src.mgr.permission_mgr import JudgeVerdict, PermissionManager
 from src.mgr.permission_mgr import ToolAuthorizationRequest, ToolCallerContext
+from src.mgr.common.subagent_port import ParentAgentFacts
 from src.mgr.role_mgr import AgentManifest
 from src.mgr.subagent_mgr import SubAgentMgr
 from src.mode import RunMode
 from src.common.features import ALL_FEATURES
-from src.tools import (
-    AccessKind,
-    DataFlow,
-    PathArgument,
-    PathRole,
-    ToolAudience,
-    ToolAvailability,
-    ToolOrigin,
-    ToolPolicy,
-)
+from src.common.tool_policy import AccessKind, DataFlow, PathArgument, PathRole, ToolAudience, ToolAvailability, ToolOrigin, ToolPolicy
 from src.tools.decorator import ToolEntry, _registry
-from src.tools.policy import DEFAULT_AVAILABILITY, DEFAULT_POLICY
+from src.common.tool_policy import DEFAULT_AVAILABILITY, DEFAULT_POLICY
 from src.mgr.tools_mgr import ToolsMgr
 
 
@@ -589,8 +581,6 @@ def test_subagent_inherits_parent_plan_state(tmp_path, monkeypatch):
         hooks_mgr=None,
         event_bus=None,
     )
-    captured = {}
-
     class Child:
         uuid = "child"
         history = []
@@ -598,23 +588,19 @@ def test_subagent_inherits_parent_plan_state(tmp_path, monkeypatch):
         async def run(self, _prompt):
             return SimpleNamespace(final_text="ok", llm_error=None)
 
-    def from_manifest(cls, manifest, deps, **overrides):
-        del cls, manifest, deps
-        captured.update(overrides)
-        return Child()
+    class Executor:
+        def __init__(self):
+            self.requests = []
 
-    monkeypatch.setattr(Agent, "from_manifest", classmethod(from_manifest))
-    parent = SimpleNamespace(
-        mode=RunMode.PLAN,
-        llm=SimpleNamespace(model="default"),
-        enable_thinking=True,
-        reasoning_effort=None,
-        features=set(),
-        _task_mgr=None,
-    )
-    result = run(manager.task_delegator("worker", "work", parent_agent=parent))
+        def spawn_subagent(self, request):
+            self.requests.append(request)
+            return Child()
+
+    executor = Executor()
+    parent = ParentAgentFacts(mode=RunMode.PLAN, enable_thinking=True)
+    result = run(manager.delegate("worker", "work", parent=parent, executor=executor))
     assert result == "ok"
-    assert captured["mode"] is RunMode.PLAN
+    assert executor.requests[0].mode is RunMode.PLAN
 
 
 def test_tools_mgr_redacts_events_post_hook_and_artifact(tmp_path):
@@ -664,13 +650,16 @@ def test_tools_mgr_redacts_events_post_hook_and_artifact(tmp_path):
         permission_mgr=manager,
         hooks_mgr=hooks,
         event_bus=bus,
-        session_id="session",
+        session=SessionContext(id="session"),
         turn_clock=None,
     )
     agent = SimpleNamespace(
         uuid="agent-id",
         agent_type="main",
         mode=RunMode.EXECUTE,
+        is_subagent=False,
+        features=frozenset(),
+        tools=None,
         history=[],
         deps=deps,
     )
@@ -720,7 +709,11 @@ def test_tools_mgr_redacts_pre_hook_denial(tmp_path):
         policy=ToolPolicy(AccessKind.INTERNAL, DataFlow.LOCAL),
     ))
     deps = SimpleNamespace(data_guard=guard, hooks_mgr=Hooks())
-    result = run(tools_mgr.execute("blocked", {}, deps=deps, agent=SimpleNamespace()))
+    agent = SimpleNamespace(
+        uuid="agent-id", agent_type="main", mode=RunMode.EXECUTE,
+        is_subagent=False, features=frozenset(), tools=None, history=[],
+    )
+    result = run(tools_mgr.execute("blocked", {}, deps=deps, agent=agent))
     assert secret not in str(result)
     assert REDACTED in str(result)
 
@@ -1031,13 +1024,16 @@ def test_deny_notice_carries_real_authorization_source(tmp_path):
         permission_mgr=manager,
         hooks_mgr=Hooks(),
         event_bus=bus,
-        session_id="session",
+        session=SessionContext(id="session"),
         turn_clock=None,
     )
     agent = SimpleNamespace(
         uuid="agent-id",
         agent_type="main",
         mode=RunMode.EXECUTE,
+        is_subagent=False,
+        features=frozenset(),
+        tools=None,
         history=[],
         llm=SimpleNamespace(model="default"),
     )
@@ -1056,3 +1052,131 @@ def test_deny_notice_carries_real_authorization_source(tmp_path):
     assert notice.decision_source == "hard_rule"
     # detail 完整携带路径，不被截断。
     assert str(missing) in notice.detail
+
+
+# ---------------------------------------------------------------------------
+# 权限提示的发出条件（可见性契约，见 docs/permissions.md 的「权限提示与可见性」）
+# ---------------------------------------------------------------------------
+
+class _NoticeBus:
+    """只收集事件的 EventBus 替身，按真实 notify_permission 组装 PermissionNotice。"""
+
+    def __init__(self) -> None:
+        self.events: list[Any] = []
+
+    async def emit(self, event):
+        self.events.append(event)
+
+    async def notify_permission(self, status, tool_name, detail="", decision_source="", **_kwargs):
+        self.events.append(PermissionNotice(
+            timestamp=0.0, source="permission", status=status,
+            tool_name=tool_name, detail=detail, decision_source=decision_source,
+        ))
+
+
+class _NoopHooks:
+    async def run_event(self, _event, _tool, _payload, **_kwargs):
+        return HookRunResult()
+
+
+def _notice_deps(tmp_path: Path, judge, bus: _NoticeBus):
+    """构造 ToolsMgr.execute 所需的最小依赖与调用方事实。"""
+    guard = DataGuard()
+    deps = SimpleNamespace(
+        data_guard=guard,
+        permission_mgr=PermissionManager(str(tmp_path), judge, None, guard),
+        hooks_mgr=_NoopHooks(),
+        event_bus=bus,
+        session=SessionContext(id="session"),
+        turn_clock=None,
+    )
+    agent = SimpleNamespace(
+        uuid="agent-id",
+        agent_type="main",
+        mode=RunMode.EXECUTE,
+        is_subagent=False,
+        features=frozenset(),
+        tools=None,
+        history=[],
+        llm=SimpleNamespace(model="default"),
+    )
+    return deps, agent
+
+
+def test_judge_allow_emits_permission_notice(tmp_path):
+    """智能权限放行会显示权限行——这是除拒绝之外唯一会提示的放行来源。"""
+    class Args(BaseModel):
+        query: str
+
+    executed: list[str] = []
+
+    async def probe(query: str) -> str:
+        executed.append(query)
+        return "done"
+
+    tools_mgr = ToolsMgr(load_registered=False)
+    tools_mgr.register(ToolEntry(
+        name="probe",
+        func=probe,
+        model=Args,
+        description="probe",
+        parameters_schema=Args.model_json_schema(),
+        policy=ToolPolicy(AccessKind.REVIEW, DataFlow.DYNAMIC),
+        origin=ToolOrigin("builtin"),
+    ))
+    bus = _NoticeBus()
+    judge = RecordingJudge(JudgeVerdict("allow", "任务范围内"))
+    deps, agent = _notice_deps(tmp_path, judge, bus)
+
+    result = run(tools_mgr.execute(
+        "probe",
+        {"query": "hi"},
+        current_tool_call_id="call-allow",
+        deps=deps,
+        agent=agent,
+    ))
+
+    assert result.status == "success"
+    assert executed == ["hi"]
+    assert judge.requests, "该用例必须真正走智能权限分支"
+    notices = [event for event in bus.events if isinstance(event, PermissionNotice)]
+    assert len(notices) == 1
+    assert notices[0].status == "allow"
+    assert notices[0].decision_source == "judge"
+    assert notices[0].tool_name == "probe"
+    assert notices[0].detail == "任务范围内"
+
+
+def test_policy_allow_emits_no_permission_notice(tmp_path):
+    """确定性放行保持静默：不弹确认、不发权限行，也不进智能权限。"""
+    class Args(BaseModel):
+        note: str
+
+    async def probe(note: str) -> str:
+        return note
+
+    tools_mgr = ToolsMgr(load_registered=False)
+    tools_mgr.register(ToolEntry(
+        name="probe",
+        func=probe,
+        model=Args,
+        description="probe",
+        parameters_schema=Args.model_json_schema(),
+        policy=ToolPolicy(AccessKind.INTERNAL, DataFlow.LOCAL, plan_safe=True),
+        origin=ToolOrigin("builtin"),
+    ))
+    bus = _NoticeBus()
+    judge = RecordingJudge(JudgeVerdict("deny", "不该被调用"))
+    deps, agent = _notice_deps(tmp_path, judge, bus)
+
+    result = run(tools_mgr.execute(
+        "probe",
+        {"note": "写内部状态"},
+        current_tool_call_id="call-policy",
+        deps=deps,
+        agent=agent,
+    ))
+
+    assert result.status == "success"
+    assert [event for event in bus.events if isinstance(event, PermissionNotice)] == []
+    assert judge.requests == []

@@ -33,19 +33,19 @@ uv run pytest                            # 运行全部测试
 
 **角色（Role）是框架的顶层组织单位**——一套角色决定主 agent 的身份提示词、可用子 agent、技能、MCP server 与启用的 feature 集（见 roles-subagents-skills.md）。
 
-目录边界：`src/mgr/` 顶层只放 Manager；多个 Manager 共用的协议放在 `src/mgr/common/`；被 app、agent、interfaces、tools、llm 或 web 直接使用的基础能力放在 `src/common/`。公共模块不反向依赖 Manager，也不通过 `src.mgr` 兼容导出。
+目录边界：`src/mgr/` 顶层只放 Manager；多个 Manager 共用的协议放在 `src/mgr/common/`；被 app、agent、interfaces、tools、llm 或 web 直接使用的基础能力放在 `src/common/`（含工具授权策略 `tool_policy.py`、工具展示结构 `tool_display.py`、记忆类型 `memory_types.py`）。`src/tools/` 只放注册表、装饰器与内置工具，运行期不依赖 Manager/agent 层；公共模块不反向依赖 tools/Manager 层，也不通过 `src.mgr` 兼容导出。`src/interfaces/` 不反向依赖 `src/app/`（首次配置向导的契约在 `src/llm/setup_contract.py`）。
 
 ## 文档导航
 
 | 文档 | 内容 |
 |---|---|
 | [architecture.md](architecture.md) | 四层架构、`create_app()` 装配顺序、`AgentDeps` 字段、feature 门控总览、`reload()` 协议、路径解析（`paths.py`） |
-| [agent-runtime.md](agent-runtime.md) | `AgentApp` 外层 REPL、`AgentState` 全枚举与边缘状态、`RunContext`、逐个 handler、`Agent.from_manifest`、`PlanModeController` |
+| [agent-runtime.md](agent-runtime.md) | `AgentApp` 外层 REPL、`AgentState` 全枚举与边缘状态、`RunContext`、逐个 handler、`AgentSpec`/`AgentAssembly` 装配与委派端口 |
 | [managers.md](managers.md) | Manager 服务层参考：逐个 Manager 的职责/公共方法/消费配置/reload/feature 门控 |
 | [llm.md](llm.md) | `LLMProvider` 调用模板、统一错误分类与重试、流式协议、模型发现及五个 provider（Anthropic/OpenAI/DeepSeek/Ollama/Moonshot）差异 |
 | [tools.md](tools.md) | `@tool` 装饰器、`ToolEntry`/`ToolPolicy`、`subagent`/`feature` 门控、`ToolsMgr.execute` 流水线、内置工具清单 |
 | [roles-subagents-skills.md](roles-subagents-skills.md) | 角色系统（三层发现、`role.md`、`common/`）、子智能体（四层扫描、frontmatter、委派）、技能系统、内置 agent 清单 |
-| [permissions.md](permissions.md) | 单一授权入口、工具策略、路径分类、Hard Deny、LLM 智能权限审查、DataGuard、项目启动信任与 Plan 约束 |
+| [permissions.md](permissions.md) | 单一授权入口、工具策略、路径分类、Hard Deny、LLM 智能权限审查、权限提示与可见性、DataGuard、项目启动信任与 Plan 约束 |
 | [mcp-and-hooks.md](mcp-and-hooks.md) | MCP 三层合并/三种 transport/工具命名/server 开关；Hooks 8 事件/配置格式/JSON 协议/退出码 |
 | [events-and-ui.md](events-and-ui.md) | `EventBus` API、`EventLevel` 门控、事件目录表、`UserInterface`/`TextualInterface`、多 Agent 路由、流式 Markdown、响应式布局与交互协调 |
 | [configuration-reference.md](configuration-reference.md) | 配置总参考：三层合并规则、`config.yaml`/`settings.json`/`mcp_servers.json` 完整 schema、环境变量、目录布局 |

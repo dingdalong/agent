@@ -31,7 +31,7 @@ from src.interfaces.base import UserInterface
 from src.interfaces.turn_clock import TurnClock
 from src.interfaces.tui.app import AgentTuiApp
 from src.interfaces.tui.diagnostics import TuiDiagnostics
-from src.tools.display import permission_line
+from src.common.tool_display import permission_line
 from src.interfaces.tui.dialogs import PendingInteractions
 from src.interfaces.tui.history_journal import PlainHistoryJournal
 from src.interfaces.tui.render_policy import TuiRenderPolicy

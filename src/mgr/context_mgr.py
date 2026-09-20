@@ -2,8 +2,8 @@
 
 ## 为什么需要它
 
-子 agent 的 history 从空开始，唯一输入是 `task_delegator` 的 prompt 字符串
-（`SubAgentMgr.task_delegator`）。这意味着并行 `explore` 的发现必须由主 agent
+子 agent 的 history 从空开始，唯一输入是委派 prompt 字符串
+（`SubAgentMgr.delegate`）。这意味着并行 `explore` 的发现必须由主 agent
 手抄摘要进下一个委派 prompt，抄漏了下游子 agent 就重新探索一遍。
 
 而框架其实白拿着最有价值的文本：子 agent 的 `run_result.final_text`。`explore` 的
@@ -16,7 +16,7 @@
 1. **注入载体只能是子 agent 的首条 user 消息，绝不能进固定 system 或框架
    developer 消息。** 账本是动态外部数据；放在消息尾部既维持信任边界，也不改变
    已缓存的固定前缀。
-2. **注入点是 `SubAgentMgr.task_delegator` 而非 `ReminderMgr`。**
+2. **注入点是 `SubAgentMgr.delegate` 而非 `ReminderMgr`。**
    ReminderMgr 的 provider 只收 `(mode, is_subagent)`，拿不到本次委派信息；
    要支持按委派过滤就得在进程级单例上存槽位，而计划工作流允许同一轮并行委派多个
    explore，`asyncio.gather` 会互相覆盖——这正是 PlanMgr 已知缺陷

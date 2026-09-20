@@ -13,8 +13,12 @@ import pytest
 import yaml
 import src.tools  # noqa: F401 触发内置工具注册
 
-from src.agent import Agent
+from src.agent import Agent, SessionContext
 from src.llm.errors import LLMConfigurationError
+from src.mgr.common.subagent_port import (
+    ParentAgentFacts,
+    SubagentSpawnRequest,
+)
 from src.mgr.llm_mgr import MODEL_ALIASES
 from src.mgr.role_mgr import AgentManifest
 from src.mgr.subagent_mgr import SubAgentMgr
@@ -254,11 +258,11 @@ def test_explicit_reference_does_not_require_llm_manager(tmp_path: Path) -> None
     assert mgr._documents["worker"].model == "openai/some-unknown-model"
 
 
-def test_delegation_passes_manifest_model_verbatim(
+def test_spawn_subagent_passes_manifest_model_verbatim(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """委派时 manifest.model 原样透传，不再有 inherit 继承父 agent 的分支。
+    """构造子 agent 时 manifest.model 原样透传，不再有 inherit 继承父 agent 的分支。
 
     Args:
         tmp_path: 测试工作目录。
@@ -268,23 +272,12 @@ def test_delegation_passes_manifest_model_verbatim(
         None。
     """
     captured: dict[str, object] = {}
-
-    class _Child:
-        """记录委派结果的最小子 agent 替身。"""
-
-        uuid = "child"
-        history: list[dict[str, str]] = []
-
-        async def run(self, _prompt: str) -> SimpleNamespace:
-            """返回固定成功结果。
-
-            Args:
-                _prompt: 子任务提示词。
-
-            Returns:
-                成功结果。
-            """
-            return SimpleNamespace(final_text="ok", llm_error=None)
+    manifest = AgentManifest(
+        agent_type="worker",
+        description="test",
+        path=tmp_path / "worker.md",
+        model="inherit",
+    )
 
     def from_manifest(cls, manifest, deps, **overrides):
         """记录构造覆盖字段并返回子 agent 替身。
@@ -300,31 +293,90 @@ def test_delegation_passes_manifest_model_verbatim(
         """
         del cls, manifest, deps
         captured.update(overrides)
-        return _Child()
+        return object()
 
     monkeypatch.setattr(Agent, "from_manifest", classmethod(from_manifest))
+    parent = object.__new__(Agent)
+    parent.deps = SimpleNamespace(tools_mgr=None)
+
+    parent.spawn_subagent(SubagentSpawnRequest(
+        manifest=manifest,
+        enable_thinking=True,
+        reasoning_effort=None,
+        features=None,
+        mode=RunMode.EXECUTE,
+    ))
+
+    assert captured["is_subagent"] is True
+    assert captured["model"] == "inherit"
+
+
+def test_delegate_hands_manifest_to_executor_unresolved(tmp_path: Path) -> None:
+    """委派只查表并转交 manifest，模型继承值的解析属于执行器一侧。
+
+    Args:
+        tmp_path: 测试工作目录。
+
+    Returns:
+        None。
+    """
+
+    class _Child:
+        """最小子 agent 替身。"""
+
+        uuid = "child"
+        history: list[dict[str, str]] = []
+
+        async def run(self, _prompt: str) -> SimpleNamespace:
+            """返回固定成功结果。
+
+            Args:
+                _prompt: 子任务提示词。
+
+            Returns:
+                成功结果。
+            """
+            return SimpleNamespace(final_text="ok", llm_error=None)
+
+    class _Executor:
+        """记录构造请求并返回子 agent 替身。"""
+
+        def __init__(self) -> None:
+            self.requests: list[SubagentSpawnRequest] = []
+
+        def spawn_subagent(self, request: SubagentSpawnRequest) -> _Child:
+            """记录请求并返回替身。
+
+            Args:
+                request: 已解析继承值的构造请求。
+
+            Returns:
+                子 agent 替身。
+            """
+            self.requests.append(request)
+            return _Child()
+
+    manifest = AgentManifest(
+        agent_type="worker",
+        description="test",
+        path=tmp_path / "worker.md",
+        model="anthropic/claude-opus-5",
+    )
     mgr = object.__new__(SubAgentMgr)
     mgr.workdir = tmp_path
     mgr.global_dir = None
-    mgr._documents = {
-        "worker": AgentManifest(
-            agent_type="worker",
-            description="test",
-            path=tmp_path / "worker.md",
-            model="inherit",
-        )
-    }
-    mgr.deps = SimpleNamespace(hooks_mgr=None, event_bus=None)
-    parent = SimpleNamespace(
-        mode=RunMode.EXECUTE,
-        llm=SimpleNamespace(model="parent-real-model"),
-        enable_thinking=True,
-        reasoning_effort=None,
-        features=set(),
-        _task_mgr=None,
+    mgr._documents = {"worker": manifest}
+    mgr.deps = SimpleNamespace(
+        hooks_mgr=None, event_bus=None, session=SessionContext(id="s"),
     )
+    executor = _Executor()
 
-    result = asyncio.run(mgr.task_delegator("worker", "work", parent_agent=parent))
+    result = asyncio.run(mgr.delegate(
+        "worker",
+        "work",
+        parent=ParentAgentFacts(mode=RunMode.EXECUTE, enable_thinking=True),
+        executor=executor,
+    ))
 
     assert result == "ok"
-    assert captured["model"] == "inherit"
+    assert executor.requests[0].manifest is manifest

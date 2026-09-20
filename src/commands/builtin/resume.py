@@ -28,7 +28,7 @@ async def resume(ctx: CommandContext, args: list[str]) -> CommandResult | None:
 
     # 无参：弹出方向键选择菜单让用户挑选历史会话，选中后转为以 session_id 解析
     if not cmd_args:
-        sessions = session_mgr.list_resumable(deps.session_id)
+        sessions = session_mgr.list_resumable(deps.session.id)
         if not sessions:
             await deps.event_bus.request_output("没有可恢复的历史会话。\n")
             return
@@ -47,7 +47,7 @@ async def resume(ctx: CommandContext, args: list[str]) -> CommandResult | None:
 
     result = session_mgr.resolve_resume(
         cmd_args,
-        current_session_id=deps.session_id,
+        current_session_id=deps.session.id,
         current_workdir=str(deps.workdir) if deps.workdir else "",
     )
 

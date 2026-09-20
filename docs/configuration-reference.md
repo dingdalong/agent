@@ -139,15 +139,15 @@
 
 ### 3.4 `compact` — 上下文压缩
 
-`Agent.__post_init__`（`agent.py:202-212`）读取整个 `compact` 段，按 provider 的 `context_limit` 换算为**绝对 token 数**后构造 `CompactMgr`：
+`AgentAssembler.build_compact_mgr()`（`assembly.py:138-164`）读取整个 `compact` 段，按 provider 的 `context_limit` 换算为**绝对 token 数**后构造 `CompactMgr`：
 
 | 键 | 类型 | 默认值 | 可选值 | 效果 |
 |----|------|--------|--------|------|
-| `compact.auto_compact_rate` | float | `0.8` | `0`~`1` | 输入估算超过 `context_limit × auto_compact_rate` 时触发自动压缩。换算为 `auto_compact_size = int(context_limit * auto_compact_rate)`（`agent.py:209`）；`context_limit <= 0` 时自动压缩禁用 |
-| `compact.keep_recent_user_turns` | int | `3` | 非负整数 | 定义优先保留原文的最近 N 个用户轮次范围；直接传给 `CompactMgr`（`agent.py:210`），不覆盖近期原文硬预算 |
-| `compact.keep_recent_messages_token_rate` | float | `0.25` | `0`~`1` | 近期原文的硬预算比例；换算为 `recent_messages_token_limit = int(context_limit * keep_recent_messages_token_rate)`（`agent.py:211`）。优先轮次超限时会在其内部按 assistant/tool 原子块移动切分点 |
+| `compact.auto_compact_rate` | float | `0.8` | `0`~`1` | 输入估算超过 `context_limit × auto_compact_rate` 时触发自动压缩。换算为 `auto_compact_size = int(context_limit * auto_compact_rate)`（`assembly.py:158`）；`context_limit <= 0` 时自动压缩禁用 |
+| `compact.keep_recent_user_turns` | int | `3` | 非负整数 | 定义优先保留原文的最近 N 个用户轮次范围；直接传给 `CompactMgr`（`assembly.py:159`），不覆盖近期原文硬预算 |
+| `compact.keep_recent_messages_token_rate` | float | `0.25` | `0`~`1` | 近期原文的硬预算比例；换算为 `recent_messages_token_limit = int(context_limit * keep_recent_messages_token_rate)`（`assembly.py:160`）。优先轮次超限时会在其内部按 assistant/tool 原子块移动切分点 |
 
-> **换算说明**：`config.yaml` 里存的是**比例**，`Agent` 在构造 `CompactMgr` 时用当前 agent 所用模型的 `context_limit`（`self.llm.context_limit`，`agent.py:203`）乘以比例得到绝对 token 数。不同 agent 若用不同 `context_limit` 的模型，绝对阈值也不同；窗口未知（非正数）时不会自动压缩。`CompactMgr` 细节见 [managers.md](managers.md)。
+> **换算说明**：`config.yaml` 里存的是**比例**，`AgentAssembler` 在构造 `CompactMgr` 时用当前 agent 所用模型的 `context_limit`（`llm.context_limit`，`assembly.py:152`）乘以比例得到绝对 token 数。不同 agent 若用不同 `context_limit` 的模型，绝对阈值也不同；窗口未知（非正数）时不会自动压缩。切换模型时 `AgentAssembler.rebuild_model()` 用新 provider 重算阈值并整体替换装配产物，窗口不会停留在旧模型上。`CompactMgr` 细节见 [managers.md](managers.md)。
 
 ### 3.5 `context` — 跨 agent 共享上下文
 
@@ -425,7 +425,7 @@ OPENAI_API_KEY=sk-yyyyyyyyyyyyyyyy
 | `~/.agent/skills/` | 全局技能 | 手工 |
 | `~/.agent/plugins/` | 全局插件 | 手工 |
 | `~/.agent/sessions/` | 会话历史与元数据 | `SessionMgr`（`session_mgr.py:50`，`global_dir / "sessions"`） |
-| `~/.agent/tasks/{session_id}/` | 主 agent 任务持久化（每 task 一个 JSON + highwatermark） | `TaskManager`，仅主 agent（`agent.py:151`，`global_dir / "tasks" / session_id`） |
+| `~/.agent/tasks/{session_id}/` | 主 agent 任务持久化（每 task 一个 JSON + highwatermark） | `TaskManager`，仅主 agent（`assembly.py:197-198`，`global_dir / "tasks" / session_id`） |
 | `~/.agent/logs/tui.jsonl` | TUI 生命周期、降级与渲染诊断；2 MiB 轮转并保留两个备份 | `TuiDiagnostics`；生产装配注入 `global_dir / "logs"` |
 
 ### 项目 `{workdir}/.agent/`
@@ -449,7 +449,7 @@ OPENAI_API_KEY=sk-yyyyyyyyyyyyyyyy
 
 TUI 诊断路径随 `$AGENT_HOME` 改写，不提供独立配置项。`tui.jsonl` 及 `.1`、`.2` 总上限约 6 MiB；日志不包含对话正文、Markdown、用户输入或工具参数，异常文本和 traceback 在写入前经运行时 `DataGuard` 脱敏。
 
-> 落盘目录要点：会话（`sessions/`）、主 agent 任务（`tasks/`）和 TUI 诊断（`logs/`）在**全局** `~/.agent/` 下；记忆（`memory/`）、plan（`plans/`）、transcript（`transcripts/`）和运行日志（`logs/`）在**项目** `{workdir}/.agent/` 下。子 agent 的 `TaskManager` 为纯内存模式（`tasks_dir=None`），不落盘（`agent.py:150`、`task_mgr.py:82`）。目录路径体系见 [architecture.md](architecture.md)。
+> 落盘目录要点：会话（`sessions/`）、主 agent 任务（`tasks/`）和 TUI 诊断（`logs/`）在**全局** `~/.agent/` 下；记忆（`memory/`）、plan（`plans/`）、transcript（`transcripts/`）和运行日志（`logs/`）在**项目** `{workdir}/.agent/` 下。子 agent 的 `TaskManager` 为纯内存模式（`tasks_dir=None`），不落盘（`assembly.py:193-195`、`task_mgr.py:82`）。目录路径体系见 [architecture.md](architecture.md)。
 
 ---
 

@@ -51,7 +51,7 @@ LLM 调用使用 `emit_telemetry_safely()`（`src/events/bus.py:36-65`）发布�
 | `LLMCallFailed` | `llm_call_failed` | `error_kind`、`safe_message`、`attempts`、`partial`、工具片段状态、状态码、provider code、request ID、diagnostic ID |
 | `OutputRequested` | `output_requested` | `content`、`markdown` |
 | `InterruptRequested` | `interrupt_requested` | 无 |
-| `PermissionNotice` | `permission_notice` | 决策状态（allow/deny）、工具名、detail（裁决理由，完整不截断）、decision_source（`AuthorizationResult.source`，与基类 `Event.source` 含义不同）；UI 以 `{标记} {来源} · {中文工具名} · {结论}(理由)` 一行展示（组装见 `permission_line`） |
+| `PermissionNotice` | `permission_notice` | 决策状态（allow/deny）、工具名、detail（裁决理由，完整不截断）、decision_source（`AuthorizationResult.source`，与基类 `Event.source` 含义不同）；UI 以 `{标记} {来源} · {中文工具名} · {结论}(理由)` 一行展示（组装见 `permission_line`；发出条件见 [permissions.md](permissions.md#权限提示与可见性)） |
 | `AgentStateChanged` | `agent_state_changed` | Agent ID/类型、前后状态 |
 | `SubagentLifecycle` | `subagent_lifecycle` | 子 Agent UUID/类型、start/end、结束 messages |
 | `PlanStateChanged` | `plan_state_changed` | `active`，通知 UI 重读入口 Agent 的 Plan 状态 |
@@ -128,7 +128,7 @@ TTY 只缓冲前台 Agent 当前一轮的工具。实时区优先级为”重试
 
 ### ToolDisplay 展示数据
 
-工具事件的 `display` 字段携带 `ToolDisplay` 数据（`src/tools/display.py`），为 UI 提供结构化的展示信息，不影响 LLM 侧结果。
+工具事件的 `display` 字段携带 `ToolDisplay` 数据（`src/common/tool_display.py`），为 UI 提供结构化的展示信息，不影响 LLM 侧结果。
 
 `ToolDisplay` 字段：
 - `title`（`str`）：中文动作标题，如”执行命令”、”• 已编辑 path (+3 -1)”。

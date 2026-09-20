@@ -3,7 +3,7 @@
 主 agent 与子 agent 需要共享仓库的静态环境事实，否则每个子 agent 开局都要先
 `ls -la` 摸一遍仓库长什么样。本模块把这些
 **整个会话不变**的客观事实一次性算好，由 `AgentApp._reset_session()` 存进
-`AgentDeps.env_baseline`，`PromptMgr._build_environment_context()` 只做字符串拼接，
+`AgentDeps.session.env_baseline`，`PromptMgr._build_environment_context()` 只做字符串拼接，
 并作为带来源标记的外部 user 上下文进入历史。
 
 两条不可违反的约束：

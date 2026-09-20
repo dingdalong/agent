@@ -483,7 +483,8 @@ class EventBus:
         """通过事件队列发布工具权限状态通知。
 
         Args:
-            status: 权限决策结果（allow 静默 / deny）。
+            status: 权限决策结果。调用方只在「所有拒绝」与「来源为 judge 的放行」两种情况下发布，
+                确定性放行不发布（见 docs/permissions.md 的「权限提示与可见性」）。
             tool_name: 工具名。
             detail: 通知详情文本。
             decision_source: AuthorizationResult.source，UI 据此显示真实裁决来源；

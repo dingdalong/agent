@@ -1,0 +1,30 @@
+name: test
+
+# 合入门禁：push 到主干与所有 PR 都跑常规测试（含结构不变式）。
+# 真实 UI/PTY 集成与冻结产物冒烟不在这里——它们需要 Linux 沙箱依赖与构建，
+# 由 release.yml 在各自 runner 上覆盖；常规 pytest 默认已排除这两个 marker。
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: 安装依赖
+        run: uv sync --extra dev
+
+      - name: 单元测试与结构不变式
+        run: uv run pytest -q

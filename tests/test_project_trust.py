@@ -18,6 +18,7 @@ from unittest.mock import patch
 import pytest
 
 from src.app.app import AgentApp
+from src.agent import SessionContext
 from src.app.bootstrap import _confirm_project_trust
 from src.interfaces.agent_view_store import AgentViewStore
 from src.mgr.config_mgr import ConfigManager
@@ -292,8 +293,7 @@ def test_clear_uses_choice_before_reset_gate_and_defaults_to_restricted(tmp_path
         mcp_mgr=None,
         event_bus=BusProbe(),
         ui=UiProbe(),
-        session_id="old-session",
-        session_context=[],
+        session=SessionContext(id="old-session"),
         memory_mgr=None,
         tools_mgr=None,
         permission_mgr=None,
@@ -301,7 +301,6 @@ def test_clear_uses_choice_before_reset_gate_and_defaults_to_restricted(tmp_path
         plan_mgr=None,
         role_mgr=None,
         command_mgr=None,
-        plan_mode_controller=None,
         workdir=workdir,
     )
     app = AgentApp(deps, AgentViewStore(), output_router=object())

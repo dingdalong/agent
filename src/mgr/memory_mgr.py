@@ -5,16 +5,14 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal, get_args
+from typing import Any
 
 import yaml
 
+from src.common.memory_types import MEMORY_TYPES, MemoryType
 from src.common.secure_io import atomic_write_text
 
 logger = logging.getLogger(__name__)
-
-MemoryType = Literal["user", "feedback", "project", "reference"]
-MEMORY_TYPES = get_args(MemoryType)
 
 
 @dataclass

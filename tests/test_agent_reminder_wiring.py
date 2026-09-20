@@ -18,7 +18,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.agent import Agent
+from src.agent import Agent, SessionContext
+from src.agent.spec import AgentSpec
 from src.agent.states import RunContext, RunResult
 from src.mgr.reminder_mgr import ReminderMgr
 from src.mode import RunMode
@@ -48,6 +49,55 @@ class _RecordingReminder:
         return pending
 
 
+class _StubPromptMgr:
+    """Agent 在首轮上下文与 chat 边界实际使用的最小 PromptMgr 桩。
+
+    只实现被 `Agent` 调用的四个方法，避免用例依赖提示词装配细节。
+    """
+
+    def __init__(
+        self,
+        *,
+        initial_context: list[dict] | None = None,
+        capability: object = "",
+        manager: object = "",
+        mode_text: object = "",
+    ) -> None:
+        """登记各方法的行为。
+
+        Args:
+            initial_context: 首轮外部上下文消息。
+            capability: 能力摘要文本，或 `mode -> str` 可调用对象。
+            manager: Manager 工作流文本，或 `() -> str` 可调用对象。
+            mode_text: 模式文本，或 `mode -> str` 可调用对象。
+
+        """
+        self._initial_context = list(initial_context or [])
+        self._capability = capability
+        self._manager = manager
+        self._mode_text = mode_text
+
+    @staticmethod
+    def _render(value: object, *args: object) -> str:
+        return value(*args) if callable(value) else value
+
+    def build_initial_context_messages(self) -> list[dict]:
+        """返回首轮外部上下文消息。"""
+        return list(self._initial_context)
+
+    def build_capability_instructions(self, mode: RunMode) -> str:
+        """返回能力边界说明。"""
+        return self._render(self._capability, mode)
+
+    def build_manager_instructions(self) -> str:
+        """返回 Manager 工作流说明。"""
+        return self._render(self._manager)
+
+    def build_mode_instructions(self, mode: RunMode) -> str:
+        """返回协作模式说明。"""
+        return self._render(self._mode_text, mode)
+
+
 def _agent(*, is_subagent: bool, mode: RunMode) -> tuple[Agent, _RecordingReminder]:
     """装配一个只跑到 `_run_single_turn` 的最小 Agent。
 
@@ -60,15 +110,26 @@ def _agent(*, is_subagent: bool, mode: RunMode) -> tuple[Agent, _RecordingRemind
     """
     agent = object.__new__(Agent)
     agent.uuid = uuid.uuid4()
-    agent.agent_type = "worker" if is_subagent else "main"
-    agent.description = ""
+    agent.spec = AgentSpec(
+        agent_type="worker" if is_subagent else "main",
+        description="",
+        is_subagent=is_subagent,
+    )
     agent.history = []
-    agent.is_subagent = is_subagent
     agent.mode = mode
-    agent.deps = SimpleNamespace(data_guard=None, session_state=None)
-    agent.llm = SimpleNamespace(clear_reasoning_content=lambda _messages: None)
+    agent.deps = SimpleNamespace(data_guard=None, session=SessionContext())
     reminder = _RecordingReminder()
-    agent._reminder_mgr = reminder
+    agent.assembly = SimpleNamespace(
+        llm=SimpleNamespace(clear_reasoning_content=lambda _messages: None),
+        reminder_mgr=reminder,
+        prompt_mgr=_StubPromptMgr(),
+        compact_mgr=None,
+        task_mgr=None,
+        skill_mgr=None,
+        subagent_mgr=None,
+        model="test/model",
+        system_prompt=[],
+    )
 
     async def _single_turn(ctx: object, state: object) -> RunResult:
         """短路状态机，直接返回空结果。
@@ -138,14 +199,14 @@ def test_turn_start_instructions_remain_separate_from_task() -> None:
 def test_first_framework_message_precedes_real_user_request() -> None:
     """Manager 工作流、模式和提醒在首个真实 user 之前合并。"""
     agent, reminder = _agent(is_subagent=False, mode=RunMode.PLAN)
-    agent._prompt_mgr = SimpleNamespace(
-        build_initial_context_messages=lambda: [{
+    agent.assembly.prompt_mgr = _StubPromptMgr(
+        initial_context=[{
             "role": "user",
             "content": "CATALOGS\nAGENTS\nENVIRONMENT",
         }],
-        build_capability_instructions=lambda: "CAPABILITY_BOUNDARY",
-        build_manager_instructions=lambda: "MANAGER_WORKFLOW",
-        build_mode_instructions=lambda: "MODE_PLAN",
+        capability="CAPABILITY_BOUNDARY",
+        manager="MANAGER_WORKFLOW",
+        mode_text="MODE_PLAN",
     )
     reminder.pending.append("TURN_REMINDER")
 
@@ -173,15 +234,15 @@ def test_first_framework_message_precedes_real_user_request() -> None:
 def test_chat_boundary_combines_mode_and_reminders_into_one_developer() -> None:
     """一次 chat 前的模式与多项框架提醒合并成一条 developer 消息。"""
     agent = object.__new__(Agent)
+    agent.spec = AgentSpec(agent_type="main", description="")
     agent.history = [{"role": "user", "content": "任务正文"}]
     agent.mode = RunMode.EXECUTE
-    agent.is_subagent = False
-    agent.deps = SimpleNamespace(data_guard=None, session_state=None)
+    agent.deps = SimpleNamespace(data_guard=None, session=SessionContext())
     agent._last_injected_mode = None
-    agent._prompt_mgr = SimpleNamespace(
-        build_mode_instructions=lambda: f"MODE-{agent.mode.value}",
+    agent.assembly = SimpleNamespace(
+        prompt_mgr=_StubPromptMgr(mode_text=lambda mode: f"MODE-{mode.value}"),
+        reminder_mgr=ReminderMgr(),
     )
-    agent._reminder_mgr = ReminderMgr()
     ctx = RunContext(
         messages=agent.history,
         pending_framework_instructions=["提醒 A", "提醒 A", "提醒 B"],
@@ -203,15 +264,17 @@ def test_chat_boundary_combines_mode_and_reminders_into_one_developer() -> None:
 def test_capability_guidance_refreshes_after_mode_change() -> None:
     """能力摘要在模式切换后的下一个 chat 边界重新追加。"""
     agent = object.__new__(Agent)
+    agent.spec = AgentSpec(agent_type="agent", description="", is_subagent=True)
     agent.history = []
     agent.mode = RunMode.EXECUTE
-    agent.is_subagent = True
-    agent.deps = SimpleNamespace(data_guard=None, session_state=None)
-    agent._prompt_mgr = SimpleNamespace(
-        build_capability_instructions=lambda: f"CAPABILITY-{agent.mode.value}",
-        build_mode_instructions=lambda: f"MODE-{agent.mode.value}",
+    agent.deps = SimpleNamespace(data_guard=None, session=SessionContext())
+    agent.assembly = SimpleNamespace(
+        prompt_mgr=_StubPromptMgr(
+            capability=lambda mode: f"CAPABILITY-{mode.value}",
+            mode_text=lambda mode: f"MODE-{mode.value}",
+        ),
+        reminder_mgr=ReminderMgr(),
     )
-    agent._reminder_mgr = ReminderMgr()
 
     ctx = RunContext(messages=agent.history)
     agent._append_pending_framework_message(ctx)
@@ -226,15 +289,19 @@ def test_capability_guidance_refreshes_after_mode_change() -> None:
 def test_mode_injection_uses_final_mode_at_next_chat_boundary() -> None:
     """多次模式切换不即时写历史，下一次 chat 只注入最终模式。"""
     agent = object.__new__(Agent)
+    agent.spec = AgentSpec(agent_type="main", description="")
     agent.history = []
     agent.mode = RunMode.EXECUTE
-    agent.is_subagent = False
-    agent.deps = SimpleNamespace(data_guard=None, session_state=None)
+    agent.deps = SimpleNamespace(data_guard=None, session=SessionContext())
     agent._last_injected_mode = RunMode.EXECUTE
-    agent._prompt_mgr = SimpleNamespace(
-        build_mode_instructions=lambda: f"MODE-{agent.mode.value}",
+    agent.assembly = SimpleNamespace(
+        prompt_mgr=SimpleNamespace(
+            build_capability_instructions=lambda _mode: "",
+            build_manager_instructions=lambda: "",
+            build_mode_instructions=lambda mode: f"MODE-{mode.value}",
+        ),
+        reminder_mgr=ReminderMgr(),
     )
-    agent._reminder_mgr = ReminderMgr()
     ctx = RunContext(messages=agent.history)
 
     agent.mode = RunMode.PLAN

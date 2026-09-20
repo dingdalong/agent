@@ -1,7 +1,8 @@
 """斜杠命令注册装饰器 — 命令的声明与执行体内聚于单个 .py 文件。
 
-镜像 src/tools/decorator.py 的模式：装饰器在 import 时把 CommandEntry 追加到模块级
-_COMMAND_REGISTRY；CommandMgr 扫描命令目录、import 每个 .py 触发登记，再按层收集。
+镜像 src/tools/decorator.py 的模式：装饰器在 import 时把 CommandEntry 追加到
+src/commands/registry.py 的模块级 _COMMAND_REGISTRY；CommandMgr 扫描命令目录、
+import 每个 .py 触发登记，再按层收集。
 """
 
 from __future__ import annotations
@@ -9,20 +10,11 @@ from __future__ import annotations
 import inspect
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import Callable
 
-from src.commands.mgr import CommandEntry
-
-if TYPE_CHECKING:
-    from src.commands.context import CommandContext
+from src.commands.registry import _COMMAND_REGISTRY, CommandEntry, CommandRunner
 
 logger = logging.getLogger(__name__)
-
-# 命令 handler 统一签名：async def <name>(ctx, args) -> CommandResult | None
-CommandRunner = Callable[["CommandContext", list[str]], "object"]
-
-# 模块级注册表：import 命令模块时由装饰器追加；CommandMgr 收集后清空。
-_COMMAND_REGISTRY: list[CommandEntry] = []
 
 
 def command(

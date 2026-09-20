@@ -8,6 +8,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from src.agent.agent import Agent
+from src.agent.spec import AgentSpec
+from src.common.features import ALL_FEATURES
 from src.agent.states import AgentState, RunContext
 from src.commands.mgr import CommandMgr
 
@@ -34,8 +36,11 @@ def _agent(inputs: list[str], *, features: set[str] | None, tmp_path: Path) -> A
     command_mgr = CommandMgr(workdir=tmp_path, global_dir=None, project_trusted=False)
     agent = object.__new__(Agent)
     agent.uuid = uuid.uuid4()
-    agent.agent_type = "main"
-    agent.features = features
+    agent.spec = AgentSpec(
+        agent_type="main",
+        description="",
+        features=frozenset(features) if features is not None else ALL_FEATURES,
+    )
     agent.deps = SimpleNamespace(event_bus=bus, command_mgr=command_mgr, hooks_mgr=None)
     agent.set_mode = lambda mode: True
     return agent

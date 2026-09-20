@@ -8,8 +8,8 @@ from typing import Any, Dict, List, Literal, TYPE_CHECKING
 from pydantic import BaseModel, Field
 
 from src.mode import RunMode
-from src.tools.policy import AccessKind, DataFlow, ToolAudience, ToolAvailability, ToolPolicy
-from src.tools.display import ToolResult
+from src.common.tool_policy import AccessKind, DataFlow, ToolAudience, ToolAvailability, ToolPolicy
+from src.common.tool_display import ToolResult
 from src.tools.decorator import tool
 
 if TYPE_CHECKING:
@@ -52,7 +52,7 @@ async def task_create(
         JSON 字符串，包含新任务的 id 和 subject。
     """
     try:
-        result = agent._task_mgr.create(subject, description, active_form, metadata)
+        result = agent.task_mgr.create(subject, description, active_form, metadata)
         return json.dumps(result, ensure_ascii=False)
     except ValueError as e:
         return ToolResult.failure("execution_error", str(e))
@@ -110,7 +110,7 @@ async def task_update(
         JSON 字符串，包含 success、task_id、updated_fields。
     """
     try:
-        result = agent._task_mgr.update(
+        result = agent.task_mgr.update(
             task_id,
             subject=subject,
             description=description,
@@ -148,7 +148,7 @@ async def task_list(agent: Agent) -> str:
     Returns:
         JSON 字符串，包含 tasks 数组。
     """
-    result = agent._task_mgr.list_tasks()
+    result = agent.task_mgr.list_tasks()
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -176,7 +176,7 @@ async def task_get(task_id: str, agent: Agent) -> str:
         JSON 字符串，包含任务完整字段。
     """
     try:
-        result = agent._task_mgr.get_task(task_id)
+        result = agent.task_mgr.get_task(task_id)
         return json.dumps(result, ensure_ascii=False)
     except ValueError as e:
         return ToolResult.failure("execution_error", str(e))

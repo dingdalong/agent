@@ -18,8 +18,6 @@ from dotenv import dotenv_values
 from src.app import bootstrap
 from src.app.bootstrap import create_app
 from src.app.provider_setup import (
-    ProviderOption,
-    SetupResult,
     _non_tty_message,
     _persist_failure_message,
     build_provider_options,
@@ -28,6 +26,7 @@ from src.app.provider_setup import (
     discover_provider,
 )
 from src.llm import LLMConfigurationError
+from src.llm.setup_contract import ProviderOption, SetupResult
 from src.llm.deepseek import DeepSeekProvider
 from src.llm.ollama import OllamaProvider
 from src.mgr.config_mgr import ConfigManager

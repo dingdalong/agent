@@ -11,6 +11,9 @@ import uuid
 import pytest
 
 from src.agent.agent import Agent
+from src.agent import SessionContext
+from src.agent.spec import AgentSpec
+from src.mgr.common.subagent_port import ParentAgentFacts, SubagentSpawnRequest
 from src.agent.states import AgentState, RunContext, RunResult
 from src.llm.base import LLMResponse
 from src.llm.errors import LLMCallError, LLMErrorInfo, LLMErrorKind
@@ -115,7 +118,15 @@ class StaticPromptMgr:
     def build_initial_context_messages(self) -> list[dict]:
         return []
 
-    def build_mode_instructions(self) -> str:
+    def build_capability_instructions(self, mode: RunMode) -> str:
+        del mode
+        return ""
+
+    def build_manager_instructions(self) -> str:
+        return ""
+
+    def build_mode_instructions(self, mode: RunMode) -> str:
+        del mode
         return ""
 
 
@@ -277,17 +288,21 @@ def _runtime_agent(
     """
     agent = object.__new__(Agent)
     agent.uuid = uuid.uuid4()
-    agent.agent_type = "main"
-    agent.description = ""
+    agent.spec = AgentSpec(agent_type="main", description="", enable_thinking=True)
     agent.history = []
-    agent.llm = llm
-    agent.enable_thinking = True
     agent.mode = RunMode.EXECUTE
-    agent.is_subagent = False
     agent._pending_input = ""
-    agent._prompt_mgr = StaticPromptMgr()
-    agent._compact_mgr = SimpleNamespace(auto_compact_size=0)
-    agent._reminder_mgr = NoopReminder()
+    agent.assembly = SimpleNamespace(
+        llm=llm,
+        model="test/model",
+        prompt_mgr=StaticPromptMgr(),
+        compact_mgr=SimpleNamespace(auto_compact_size=0),
+        reminder_mgr=NoopReminder(),
+        task_mgr=None,
+        skill_mgr=None,
+        subagent_mgr=None,
+        system_prompt=[],
+    )
     agent.deps = SimpleNamespace(
         event_bus=event_bus or RecordingEventBus(),
         hooks_mgr=None,
@@ -417,7 +432,7 @@ def test_auto_compact_failure_is_caught_at_turn_boundary() -> None:
             raise error
 
     agent = _runtime_agent(SequenceLLM([]))
-    agent._compact_mgr = FailingCompact()
+    agent.assembly.compact_mgr = FailingCompact()
     start_state = AgentState.COMPACT
     handler = agent._on_compact
     ctx = RunContext(messages=[{"role": "user", "content": "自动压缩"}])
@@ -448,7 +463,7 @@ def test_compact_clears_loaded_skill_deduplication() -> None:
             )
 
     agent = _runtime_agent(SequenceLLM([]))
-    agent._compact_mgr = SuccessfulCompact()
+    agent.assembly.compact_mgr = SuccessfulCompact()
     ctx = RunContext(
         messages=[{"role": "user", "content": "压缩"}],
         loaded_skills={"builtin:debugging"},
@@ -665,7 +680,6 @@ def test_llm_error_type_hints_are_resolvable_at_runtime() -> None:
 
 
 def test_subagent_llm_failure_rolls_back_associated_task(
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """子 agent 返回 llm_error 时返回安全文本并回滚关联任务。"""
@@ -709,19 +723,8 @@ def test_subagent_llm_failure_rolls_back_associated_task(
             self.updates.append((task_id, status, owner))
 
     child = FakeChildAgent()
-    monkeypatch.setattr(
-        Agent,
-        "from_manifest",
-        classmethod(lambda cls, manifest, deps, **kwargs: child),
-    )
     task_mgr = RecordingTaskMgr()
-    parent = SimpleNamespace(
-        _task_mgr=task_mgr,
-        mode=RunMode.EXECUTE,
-        llm=SimpleNamespace(model="test"),
-        enable_thinking=True,
-        features=set(),
-    )
+    parent = _parent_facts(task_mgr)
     mgr = object.__new__(SubAgentMgr)
     mgr.workdir = tmp_path
     mgr.global_dir = None
@@ -737,7 +740,10 @@ def test_subagent_llm_failure_rolls_back_associated_task(
         event_bus=None,
     )
 
-    text = asyncio.run(mgr.task_delegator("worker", "执行任务", parent_agent=parent, task_id="task-1"))
+    text = asyncio.run(mgr.delegate(
+        "worker", "执行任务", parent=parent,
+        executor=_StubExecutor(child), task_id="task-1",
+    ))
 
     assert text == "service: 子任务服务不可用，请稍后重试。"
     assert task_mgr.updates == [
@@ -881,12 +887,60 @@ class _StageLifecycleBus:
             raise self.end_error
 
 
+class _StubExecutor:
+    """最小 SubagentExecutor：返回给定子 agent，可注入构造期异常。"""
+
+    def __init__(self, child: object, error: BaseException | None = None) -> None:
+        self.child = child
+        self.error = error
+        self.requests: list[SubagentSpawnRequest] = []
+
+    def spawn_subagent(self, request: SubagentSpawnRequest) -> object:
+        """记录请求并返回子 agent 替身。
+
+        Args:
+            request: 已解析继承值的构造请求。
+
+        Returns:
+            子 agent 替身。
+
+        Raises:
+            BaseException: 注入的构造期异常。
+        """
+        self.requests.append(request)
+        if self.error is not None:
+            raise self.error
+        return self.child
+
+
+def _parent_facts(task_mgr: object, **overrides: object) -> ParentAgentFacts:
+    """构造委派所需的父 agent 事实快照。
+
+    Args:
+        task_mgr: 父 agent 的任务管理器。
+        **overrides: 覆盖默认事实。
+
+    Returns:
+        父 agent 委派事实。
+    """
+    facts = {
+        "uuid": "parent-uuid",
+        "agent_type": "main",
+        "mode": RunMode.EXECUTE,
+        "features": frozenset(),
+        "enable_thinking": True,
+        "task_writer": task_mgr,
+    }
+    facts.update(overrides)
+    return ParentAgentFacts(**facts)
+
+
 def _configured_subagent_mgr(
     tmp_path: Path,
     task_mgr: _RecordingTaskManager,
     hooks_mgr: _StageHooks,
     event_bus: _StageLifecycleBus,
-) -> tuple[SubAgentMgr, SimpleNamespace]:
+) -> tuple[SubAgentMgr, ParentAgentFacts]:
     """构造带关联任务的最小 SubAgentMgr 与父 agent。
 
     Args:
@@ -896,17 +950,9 @@ def _configured_subagent_mgr(
         event_bus: lifecycle 总线。
 
     Returns:
-        SubAgentMgr 与父 agent。
+        SubAgentMgr 与父 agent 事实快照。
     """
-    parent = SimpleNamespace(
-        _task_mgr=task_mgr,
-        mode=RunMode.EXECUTE,
-        llm=SimpleNamespace(model="test"),
-        enable_thinking=True,
-        features=set(),
-        uuid=uuid.uuid4(),
-        agent_type="main",
-    )
+    parent = _parent_facts(task_mgr)
     mgr = object.__new__(SubAgentMgr)
     mgr.workdir = tmp_path
     mgr.global_dir = None
@@ -920,7 +966,7 @@ def _configured_subagent_mgr(
     mgr.deps = SimpleNamespace(
         hooks_mgr=hooks_mgr,
         event_bus=event_bus,
-        session_id="session",
+        session=SessionContext(id="session"),
     )
     return mgr, parent
 
@@ -928,7 +974,6 @@ def _configured_subagent_mgr(
 @pytest.mark.parametrize("stage", ["construct", "start_hook", "end_emit", "stop_hook"])
 def test_subagent_full_chain_failure_rolls_back_and_preserves_exception(
     stage: str,
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """构造、start/end lifecycle 与 stop hook 失败均回滚并传播原异常。"""
@@ -942,35 +987,12 @@ def test_subagent_full_chain_failure_rolls_back_and_preserves_exception(
     mgr, parent = _configured_subagent_mgr(tmp_path, task_mgr, hooks_mgr, event_bus)
     child = _SuccessfulChildAgent()
 
-    def from_manifest(
-        cls: type[Agent],
-        manifest: AgentManifest | None,
-        deps: object,
-        **overrides: object,
-    ) -> _SuccessfulChildAgent:
-        """返回测试子 agent 或在构造阶段抛错。
-
-        Args:
-            cls: Agent 类。
-            manifest: 子 agent manifest。
-            deps: Agent 依赖。
-            **overrides: 构造覆盖字段。
-
-        Returns:
-            测试子 agent。
-
-        Raises:
-            BaseException: 构造失败场景的原异常。
-        """
-        del cls, manifest, deps, overrides
-        if stage == "construct":
-            raise primary
-        return child
-
-    monkeypatch.setattr(Agent, "from_manifest", classmethod(from_manifest))
+    executor = _StubExecutor(child, primary if stage == "construct" else None)
 
     with pytest.raises(type(primary)) as raised:
-        asyncio.run(mgr.task_delegator("worker", "执行", parent_agent=parent, task_id="task-1"))
+        asyncio.run(mgr.delegate(
+            "worker", "执行", parent=parent, executor=executor, task_id="task-1",
+        ))
 
     assert raised.value is primary
     assert task_mgr.updates == [
@@ -982,7 +1004,6 @@ def test_subagent_full_chain_failure_rolls_back_and_preserves_exception(
 
 
 def test_subagent_primary_control_flow_error_survives_end_emit_failure(
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """agent.run 的控制流异常不被 lifecycle end emit 的次级异常覆盖。"""
@@ -994,30 +1015,11 @@ def test_subagent_primary_control_flow_error_survives_end_emit_failure(
     mgr, parent = _configured_subagent_mgr(tmp_path, task_mgr, hooks_mgr, event_bus)
     child = _SuccessfulChildAgent(primary)
 
-    def from_manifest(
-        cls: type[Agent],
-        manifest: AgentManifest | None,
-        deps: object,
-        **overrides: object,
-    ) -> _SuccessfulChildAgent:
-        """返回会抛控制流异常的测试子 agent。
-
-        Args:
-            cls: Agent 类。
-            manifest: 子 agent manifest。
-            deps: Agent 依赖。
-            **overrides: 构造覆盖字段。
-
-        Returns:
-            测试子 agent。
-        """
-        del cls, manifest, deps, overrides
-        return child
-
-    monkeypatch.setattr(Agent, "from_manifest", classmethod(from_manifest))
-
     with pytest.raises(asyncio.CancelledError) as raised:
-        asyncio.run(mgr.task_delegator("worker", "执行", parent_agent=parent, task_id="task-1"))
+        asyncio.run(mgr.delegate(
+            "worker", "执行", parent=parent, executor=_StubExecutor(child),
+            task_id="task-1",
+        ))
 
     assert raised.value is primary
     assert event_bus.phases == ["start", "end"]

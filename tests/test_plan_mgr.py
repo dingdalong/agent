@@ -52,21 +52,21 @@ def test_save_replaces_active_plan_and_rejects_symlink(tmp_path):
 
 def test_current_mode_prompt_survives_rebuild_without_history_injection(tmp_path):
     from tests.test_subagent_skills import _main
-    agent = _main(tmp_path, 'coding')
-    agent.deps.plan_mgr = PlanMgr(tmp_path)
+    agent = _main(tmp_path, 'coding', plan_mgr=PlanMgr(tmp_path))
     agent.set_mode(RunMode.PLAN)
     before = list(agent.history)
-    system = agent._prompt_mgr.build()
-    first = agent._prompt_mgr.build_mode_instructions()
-    second = agent._prompt_mgr.build_mode_instructions()
+    prompt_mgr = agent.assembly.prompt_mgr
+    system = prompt_mgr.build()
+    first = prompt_mgr.build_mode_instructions(agent.mode)
+    second = prompt_mgr.build_mode_instructions(agent.mode)
     assert first == second
     assert '# 规划流程' in first
     assert 'load_skill' not in first
     assert '每次新增工具调用必须解决' not in first
-    assert agent._prompt_mgr.build() == system
+    assert prompt_mgr.build() == system
     agent.set_mode(RunMode.EXECUTE)
-    assert '# 规划流程' not in agent._prompt_mgr.build_mode_instructions()
-    assert agent._prompt_mgr.build() == system
+    assert '# 规划流程' not in prompt_mgr.build_mode_instructions(agent.mode)
+    assert prompt_mgr.build() == system
     assert agent.history == before
 
 
@@ -74,15 +74,15 @@ def test_real_coding_prompt_isolates_plan_content_to_plan_suffix(tmp_path):
     """真实 coding 角色在普通模式不泄露计划流程或控制工具指导。"""
     from tests.test_subagent_skills import _main
 
-    agent = _main(tmp_path, "coding")
-    agent.deps.plan_mgr = PlanMgr(tmp_path)
-    execute_prompt = agent._prompt_mgr.build()
+    agent = _main(tmp_path, "coding", plan_mgr=PlanMgr(tmp_path))
+    prompt_mgr = agent.assembly.prompt_mgr
+    execute_prompt = prompt_mgr.build()
     execute_text = "\n\n".join(message["content"] for message in execute_prompt)
-    execute_text += "\n\n" + agent._prompt_mgr.build_mode_instructions()
+    execute_text += "\n\n" + prompt_mgr.build_mode_instructions(agent.mode)
     for forbidden in ("计划模式", "Plan", "plan-workflow", "execute-plan", "submit_plan"):
         assert forbidden not in execute_text
 
     agent.set_mode(RunMode.PLAN)
-    plan_prompt = agent._prompt_mgr.build()
+    plan_prompt = prompt_mgr.build()
     assert execute_prompt == plan_prompt
-    assert "submit_plan" in agent._prompt_mgr.build_mode_instructions()
+    assert "submit_plan" in prompt_mgr.build_mode_instructions(agent.mode)

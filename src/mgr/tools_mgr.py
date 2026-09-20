@@ -23,15 +23,20 @@ from src.mgr.permission_mgr import (
     tool_sort_order,
 )
 from src.tools import ToolDict, ToolEntry
-from src.tools.display import ToolResult
-from src.tools import AccessKind, PathRole, ToolPolicy
+from src.common.tool_display import ToolResult
+from src.common.tool_policy import AccessKind, PathRole, ToolPolicy
 
 if TYPE_CHECKING:
-    from src.llm.base import LLMProvider
+    from src.mgr.common.agent_port import AgentCaller
 
 logger = logging.getLogger(__name__)
 
 _TRUNCATED = '\n[中间内容已截断]\n'
+
+
+def _session_id(deps: Any) -> str:
+    """读取当前会话 ID；依赖容器或会话缺失时返回空串。"""
+    return str(getattr(getattr(deps, "session", None), "id", "") or "")
 
 
 def _head_tail(text: str, budget: int) -> str:
@@ -84,8 +89,8 @@ class ToolOutput:
             self._artifacts.clear()
             self._sizes.clear()
 
-    def _save_artifact(self, text, agent):
-        owner = (str(getattr(getattr(agent, 'deps', None), 'session_id', '')), str(getattr(agent, 'uuid', '')))
+    def _save_artifact(self, text, agent, session_id):
+        owner = (str(session_id), str(getattr(agent, 'uuid', '')))
         session, caller = (hashlib.sha256(value.encode()).hexdigest()[:16] for value in owner)
         data = _head_tail(text, self.artifact_max_bytes).encode('utf-8')
         with self.lock:
@@ -117,7 +122,19 @@ class ToolOutput:
                     self._sizes[session] -= size
             return str(target), len(text.encode('utf-8')) <= self.artifact_max_bytes
 
-    def finalize(self, result, agent, requested=None, *, control=False):
+    def finalize(self, result, agent, requested=None, *, control=False, session_id=""):
+        """按预算裁剪输出；超限的非 exec 结果写入按会话与调用方分区的产物文件。
+
+        Args:
+            result: 工具结果。
+            agent: 调用方事实面；只读取 ``uuid`` 用于产物目录分区。
+            requested: 本次调用的输出预算覆盖。
+            control: 是否为控制类工具（超限直接失败，不落产物）。
+            session_id: 当前会话 ID，与调用方 UUID 共同决定产物目录。
+
+        Returns:
+            裁剪后的工具结果。
+        """
         budget = (self.max_tokens if control else self.budget(requested)) * 4
         result = replace(result)
         if result.output_kind == 'exec':
@@ -130,7 +147,7 @@ class ToolOutput:
         result.annotations = ''
         if result.output_kind != 'exec':
             try:
-                artifact_path, complete = self._save_artifact(text, agent)
+                artifact_path, complete = self._save_artifact(text, agent, session_id)
                 result.artifact_path = artifact_path
                 result.artifact_complete = complete and not result.truncated
             except OSError as exc:
@@ -287,7 +304,7 @@ class ToolsMgr:
         # 生成展示数据
         display = None
         if arguments is not None:
-            from src.tools.display import ToolDisplay, tool_title, format_params
+            from src.common.tool_display import ToolDisplay, tool_title, format_params
             title = tool_title(tool.name)
             data_guard = getattr(deps, "data_guard", None) if deps is not None else None
             safe_args = data_guard.redact(arguments) if data_guard is not None else arguments
@@ -327,7 +344,7 @@ class ToolsMgr:
         data_guard = getattr(deps, "data_guard", None) if deps is not None else None
         if tool.policy.access is AccessKind.EXTERNAL_READ:
             result_preview = self._external_read_preview(result, status)
-            from src.tools.display import ToolDisplay, tool_title
+            from src.common.tool_display import ToolDisplay, tool_title
             title = tool_title(tool.name)
             if status in {"error", "cancelled"}:
                 title = f"✘ {title}"
@@ -341,7 +358,7 @@ class ToolsMgr:
                 if data_guard is not None and hasattr(display, "content") and display.content:
                     display.content = str(data_guard.redact(display.content))
             else:
-                from src.tools.display import ToolDisplay, tool_title, format_result
+                from src.common.tool_display import ToolDisplay, tool_title, format_result
                 title = tool_title(tool.name)
                 if status in {"error", "cancelled"}:
                     title = f"✘ {title}"
@@ -379,7 +396,7 @@ class ToolsMgr:
         *,
         current_tool_call_id: str = "",
         deps: Any = None,
-        agent: Any = None,
+        agent: "AgentCaller | None" = None,
         run_context: Any = None,
     ) -> ToolResult:
         """执行工具调用，返回明确的结果状态。
@@ -391,7 +408,7 @@ class ToolsMgr:
             arguments: 工具调用参数。
             current_tool_call_id: 当前工具调用的 ID。
             deps: AgentDeps 依赖对象。
-            agent: 当前 Agent 实例。
+            agent: 当前调用方实例；只需满足 `AgentCaller` 事实面。
             run_context: 当前用户轮次状态；仅供需要轮次级状态的内置工具使用。
 
         Returns:
@@ -415,9 +432,9 @@ class ToolsMgr:
         hook_kwargs = {}
         if hooks_mgr is not None:
             hook_kwargs = {
-                "session_id": getattr(deps, "session_id", "") if deps else "",
-                "agent_id": str(getattr(agent, "uuid", "")) if agent else "",
-                "agent_type": getattr(agent, "agent_type", "") if agent else "",
+                "session_id": _session_id(deps),
+                "agent_id": str(agent.uuid) if agent else "",
+                "agent_type": agent.agent_type if agent else "",
             }
 
         # 1. PreToolUse hook
@@ -453,13 +470,13 @@ class ToolsMgr:
             return ToolResult.failure("permission_denied", "授权服务不可用")
 
         user_intent = self._latest_user_intent(agent)
-        mode = getattr(agent, "mode", RunMode.EXECUTE)
-        declared_tools = getattr(agent, "tools", None)
+        mode = agent.mode if agent is not None else RunMode.EXECUTE
+        declared_tools = agent.tools if agent is not None else None
         caller = ToolCallerContext(
             mode=mode,
-            agent_type=str(getattr(agent, "agent_type", "")),
-            is_subagent=bool(getattr(agent, "is_subagent", False)),
-            features=frozenset(getattr(agent, "features", set()) or ()),
+            agent_type=str(agent.agent_type) if agent is not None else "",
+            is_subagent=bool(agent.is_subagent) if agent is not None else False,
+            features=frozenset(agent.features) if agent is not None else frozenset(),
             declared_tools=(
                 frozenset(declared_tools) if declared_tools is not None else None
             ),
@@ -585,7 +602,10 @@ class ToolsMgr:
                 result.recovery = str(guard.redact(result.recovery))
         original_bytes = len(str(result).encode("utf-8"))
         control = tool_name in {"load_skill", "ask_user", "submit_plan"}
-        worker = asyncio.create_task(asyncio.to_thread(self.output.finalize, result, agent, result.output_budget or budget, control=control))
+        worker = asyncio.create_task(asyncio.to_thread(
+            self.output.finalize, result, agent, result.output_budget or budget,
+            control=control, session_id=_session_id(deps),
+        ))
         try:
             result = await asyncio.shield(worker)
         except asyncio.CancelledError:
@@ -606,8 +626,8 @@ class ToolsMgr:
         return result
 
     @staticmethod
-    def _latest_user_intent(agent: Any) -> str:
-        history = getattr(agent, "history", None)
+    def _latest_user_intent(agent: "AgentCaller | None") -> str:
+        history = agent.history if agent is not None else None
         if not isinstance(history, list):
             return ""
         for message in reversed(history):

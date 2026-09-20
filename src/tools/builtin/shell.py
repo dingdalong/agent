@@ -6,8 +6,8 @@ from pydantic import BaseModel, Field
 
 from src.common.frozen import clean_env
 from src.tools.decorator import tool
-from src.tools.display import ToolResult
-from src.tools.policy import AccessKind, DataFlow, PathArgument, PathRole, ToolPolicy
+from src.common.tool_display import ToolResult
+from src.common.tool_policy import AccessKind, DataFlow, PathArgument, PathRole, ToolPolicy
 
 
 class AdditionalPermissions(BaseModel):
@@ -36,7 +36,7 @@ async def exec_command(cmd, workdir, yield_time_ms, timeout_ms, max_output_token
         return ToolResult.failure('invalid_workdir', f'工作目录不存在：{cwd}')
     environment = deps.data_guard.safe_environment(clean_env(getattr(deps.config_mgr, 'environment', None)))
     started = time.monotonic()
-    result = await deps.process_mgr.start((deps.session_id, str(agent.uuid)), cmd, cwd, environment, authorization.execution_policy, timeout_ms, yield_time_ms, stdin_open)
+    result = await deps.process_mgr.start((deps.session.id, str(agent.uuid)), cmd, cwd, environment, authorization.execution_policy, timeout_ms, yield_time_ms, stdin_open)
     if result.error_code is None:
         result.output_kind = "exec"
         result.chunk_id = uuid.uuid4().hex[:6]
@@ -59,7 +59,7 @@ class WriteStdin(BaseModel):
 @tool(model=WriteStdin, description="获取进程增量输出、发送 stdin 或终止；不重放已消费输出。", policy=ToolPolicy(AccessKind.INTERNAL, DataFlow.LOCAL, plan_safe=True))
 async def write_stdin(session_id, chars, yield_time_ms, max_output_tokens, terminate, deps, agent):
     started = time.monotonic()
-    result = await deps.process_mgr.poll((deps.session_id, str(agent.uuid)), session_id, chars, yield_time_ms, terminate, mode=agent.mode)
+    result = await deps.process_mgr.poll((deps.session.id, str(agent.uuid)), session_id, chars, yield_time_ms, terminate, mode=agent.mode)
     if result.error_code is None:
         result.output_kind = "exec"
         result.chunk_id = uuid.uuid4().hex[:6]

@@ -5,13 +5,14 @@ from types import SimpleNamespace
 from pydantic import BaseModel
 
 from src.agent import Agent
+from src.agent.spec import AgentSpec
 from src.agent.states import RunContext
 from src.llm.base import LLMResponse
 from src.mgr.process_mgr import WorkspaceAccess
 from src.mgr.reminder_mgr import ReminderMgr
 from src.mode import RunMode
 from src.tools.decorator import ToolEntry
-from src.tools.policy import AccessKind, DataFlow, ToolOrigin, ToolPolicy
+from src.common.tool_policy import AccessKind, DataFlow, ToolOrigin, ToolPolicy
 
 
 def test_workspace_readers_parallel_writer_waits():
@@ -42,14 +43,11 @@ def test_workspace_readers_parallel_writer_waits():
 def test_cancel_keeps_completed_tool_and_invalid_json_does_not_execute(runtime):
     deps, fake = runtime
     agent = object.__new__(Agent)
-    agent.deps = deps
-    agent.uuid = fake.uuid
-    agent.agent_type = 'main'
+    agent.deps, agent.uuid = deps, fake.uuid
+    agent.spec = AgentSpec(agent_type='main', description='')
     agent.mode = RunMode.EXECUTE
-    agent.llm = fake.llm
-    agent.tools = None
     agent.history = []
-    agent._reminder_mgr = ReminderMgr()
+    agent.assembly = SimpleNamespace(llm=fake.llm, reminder_mgr=ReminderMgr())
     ready = asyncio.Event()
     class Args(BaseModel):
         value: str = 'default'
@@ -97,7 +95,7 @@ def test_cancel_sync_write_holds_lease_until_thread_finishes(runtime):
     agent.mode = RunMode.EXECUTE
     started = threading.Event()
     finish = threading.Event()
-    from src.tools.policy import PathArgument, PathRole
+    from src.common.tool_policy import PathArgument, PathRole
     class Args(BaseModel):
         path: str = "target.txt"
     def write(path):
@@ -123,10 +121,11 @@ def test_parallel_results_keep_individual_budget_and_match_events(runtime):
     from src.events.types import ToolCallCompleted
     deps, fake = runtime
     agent = object.__new__(Agent)
-    agent.deps, agent.uuid, agent.llm = deps, fake.uuid, fake.llm
-    agent.agent_type, agent.mode, agent.tools = 'main', RunMode.EXECUTE, None
+    agent.deps, agent.uuid = deps, fake.uuid
+    agent.spec = AgentSpec(agent_type='main', description='')
+    agent.mode = RunMode.EXECUTE
     agent.history = []
-    agent._reminder_mgr = ReminderMgr()
+    agent.assembly = SimpleNamespace(llm=fake.llm, reminder_mgr=ReminderMgr())
     events = []
     class Bus:
         async def emit(self, event):

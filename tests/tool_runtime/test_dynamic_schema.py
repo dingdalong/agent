@@ -2,7 +2,7 @@ import asyncio
 import pytest
 from pydantic import BaseModel, ConfigDict
 from src.tools.decorator import ToolEntry
-from src.tools.policy import ToolOrigin
+from src.common.tool_policy import ToolOrigin
 
 
 def test_dynamic_tool_uses_server_schema():

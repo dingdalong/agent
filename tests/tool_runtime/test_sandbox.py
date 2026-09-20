@@ -14,8 +14,8 @@ from src.mgr.process_mgr import ProcessMgr
 from src.common.features import ALL_FEATURES
 from src.mgr.permission_mgr import ToolAuthorizationRequest, ToolCallerContext
 from src.mode import RunMode
-from src.tools import AccessKind, DataFlow, ToolOrigin, ToolPolicy
-from src.tools.policy import DEFAULT_AVAILABILITY
+from src.common.tool_policy import AccessKind, DataFlow, ToolOrigin, ToolPolicy
+from src.common.tool_policy import DEFAULT_AVAILABILITY
 
 
 def authorize(runtime, cmd='x=1; echo "$x"', extra=None):

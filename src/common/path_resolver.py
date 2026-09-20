@@ -9,7 +9,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Mapping
 
-from src.tools.policy import PathRole, ToolPolicy
+from src.common.tool_policy import PathRole, ToolPolicy
 
 
 MAX_READ_FILE_BYTES = 8 * 1024 * 1024

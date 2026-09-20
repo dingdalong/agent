@@ -1,7 +1,7 @@
 from __future__ import annotations
 from typing import Literal, TYPE_CHECKING
 
-from src.tools.policy import AccessKind, DataFlow, ToolAudience, ToolAvailability, ToolPolicy
+from src.common.tool_policy import AccessKind, DataFlow, ToolAudience, ToolAvailability, ToolPolicy
 from src.tools.decorator import tool
 from pydantic import BaseModel, Field
 
@@ -51,7 +51,7 @@ async def task_delegator(
     Returns:
         子智能体的执行结果文本。
     """
-    return await agent._subagent_mgr.task_delegator(
-        agent_type, prompt, parent_agent=agent, task_id=task_id,
+    return await agent.delegate_subagent(
+        agent_type, prompt, task_id=task_id,
         description=description, shared_context=shared_context,
     )

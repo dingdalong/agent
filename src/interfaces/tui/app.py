@@ -45,7 +45,7 @@ from src.interfaces.status_presenter import (
     present_task_panel,
 )
 from src.interfaces.turn_clock import TurnClock
-from src.tools.display import permission_line
+from src.common.tool_display import permission_line
 from src.interfaces.tui.diagnostics import TuiDiagnostics
 from src.interfaces.tui.dialogs import InlineWidget, InteractionCoordinator
 from src.interfaces.tui.history_log import HistoryEntry, HistoryLog

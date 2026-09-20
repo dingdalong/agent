@@ -76,7 +76,7 @@ class AgentApp:
                         "SessionEnd",
                         "exit",
                         {"reason": "exit"},
-                        session_id=self.deps.session_id,
+                        session_id=self.deps.session.id,
                     )
                 except Exception:
                     pass
@@ -206,8 +206,8 @@ class AgentApp:
                 try:
                     if event_bus is not None:
                         await event_bus.join()
-                    old_session_id = getattr(self.deps, "session_id", "")
-                    old_state = getattr(self.deps, "session_state", None)
+                    old_session_id = self.deps.session.id
+                    old_state = self.deps.session.state
                     session_mgr = getattr(self.deps, "session_mgr", None)
                     if old_session_id and old_state is not None and session_mgr is not None:
                         await asyncio.to_thread(
@@ -217,11 +217,11 @@ class AgentApp:
                         )
                     if getattr(self.deps, "process_mgr", None):
                         await self.deps.process_mgr.close()
-                    self.deps.session_id = str(uuid.uuid4())
-                    self.deps.session_state = SessionState()
+                    self.deps.session.id = str(uuid.uuid4())
+                    self.deps.session.state = SessionState()
                     bind_state = getattr(self.output_router, "bind_session_state", None)
                     if bind_state is not None:
-                        bind_state(self.deps.session_state)
+                        bind_state(self.deps.session.state)
                     data_guard = getattr(self.deps, "data_guard", None)
                     config_mgr = getattr(self.deps, "config_mgr", None)
                     global_dir = getattr(self.deps, "global_dir", None)
@@ -282,19 +282,18 @@ class AgentApp:
                             else:
                                 mgr.reload()
                     self.agent_view_store.reset()
-                    self.deps.session_context.clear()
+                    self.deps.session.context.clear()
                     # 环境基线：同步 I/O（git 子进程 + 目录扫描），必须卸载到线程，
                     # 且只能在这里算一次——本方法同时覆盖 startup 与 /clear，而下面
                     # 才创建新 Agent，新 PromptMgr 自然读到新值。
                     if workdir is not None:
-                        self.deps.env_baseline = await asyncio.to_thread(
+                        self.deps.session.env_baseline = await asyncio.to_thread(
                             collect_env_baseline, workdir
                         )
                     context_mgr = getattr(self.deps, "context_mgr", None)
                     if context_mgr is not None:
-                        context_mgr.bind_session(self.deps.session_id)
+                        context_mgr.bind_session(self.deps.session.id)
                     self._install_plan_mode_controller()
-                    self.deps.plan_mode_controller = self._plan_mode_controller
                     agent = Agent.from_manifest(
                         manifest=self.deps.role_mgr.manifest if self.deps.role_mgr else None,
                         deps=self.deps,
@@ -317,7 +316,7 @@ class AgentApp:
                         self._plan_mode_controller.notify_state_changed()
                     replace_state = getattr(self.deps.ui, "replace_session_state", None)
                     if replace_state is not None:
-                        await replace_state(self.deps.session_state)
+                        await replace_state(self.deps.session.state)
                     await self._run_session_start_hooks(source=source)
                     if event_bus is not None:
                         await event_bus.request_output(self._startup_banner())
@@ -335,8 +334,8 @@ class AgentApp:
                 if event_bus is not None:
                     await event_bus.join()
                 session_mgr = self.deps.session_mgr
-                source_id = self.deps.session_id
-                source_state = self.deps.session_state
+                source_id = self.deps.session.id
+                source_state = self.deps.session.state
                 if session_mgr is not None and source_id and source_state is not None:
                     await asyncio.to_thread(
                         session_mgr.save_state,
@@ -348,11 +347,11 @@ class AgentApp:
                     await self.deps.process_mgr.close()
                 if getattr(self.deps, "tools_mgr", None):
                     await asyncio.to_thread(self.deps.tools_mgr.reload)
-                self.deps.session_id = result.session_id
-                self.deps.session_state = result.state
+                self.deps.session.id = result.session_id
+                self.deps.session.state = result.state
                 self.output_router.bind_session_state(result.state)
                 self.agent_view_store.reset()
-                self.deps.session_context.clear()
+                self.deps.session.context.clear()
                 # resume **不恢复**共享上下文账本：恢复的历史里主 agent 已经带着全部
                 # 工具结果，账本只服务后续的新委派。这是刻意设计，不是遗漏。
                 context_mgr = getattr(self.deps, "context_mgr", None)
@@ -360,7 +359,6 @@ class AgentApp:
                     context_mgr.reload()
                     context_mgr.bind_session(result.session_id)
                 self._install_plan_mode_controller()
-                self.deps.plan_mode_controller = self._plan_mode_controller
 
                 try:
                     target_mode = RunMode(result.metadata.get("mode", RunMode.EXECUTE.value))
@@ -393,7 +391,7 @@ class AgentApp:
                 await self.deps.ui.replace_session_state(result.state)
 
                 topic = result.metadata.get("topic", "")
-                self.deps.session_context.append(
+                self.deps.session.context.append(
                     ExternalContextItem(
                         "session_resume",
                         f"当前会话已从历史会话恢复（session {result.session_id[:8]}...）。"
@@ -401,8 +399,8 @@ class AgentApp:
                     )
                 )
                 task_info = ""
-                if agent._task_mgr is not None and agent._task_mgr.has_open_items():
-                    tasks = agent._task_mgr.list_tasks()["tasks"]
+                if agent.task_mgr is not None and agent.task_mgr.has_open_items():
+                    tasks = agent.task_mgr.list_tasks()["tasks"]
                     open_count = sum(1 for task in tasks if task["status"] != "completed")
                     task_info = f"，{open_count} 个未完成任务"
                 plan_info = "，Plan: active" if agent.mode is RunMode.PLAN else ""
@@ -446,8 +444,8 @@ class AgentApp:
         await self.deps.event_bus.request_output("\n已中断当前任务。\n")
         await self.deps.event_bus.join()
         session_mgr = getattr(self.deps, "session_mgr", None)
-        session_state = getattr(self.deps, "session_state", None)
-        session_id = getattr(self.deps, "session_id", "")
+        session_state = self.deps.session.state
+        session_id = self.deps.session.id
         if session_mgr is not None and session_state is not None and session_id:
             await asyncio.to_thread(session_mgr.save_state, session_id, session_state)
         await self.deps.ui.wait_interactions_idle()
@@ -464,8 +462,8 @@ class AgentApp:
         if tools_mgr is not None:
             await asyncio.to_thread(tools_mgr.reload)
         session_mgr = getattr(self.deps, "session_mgr", None)
-        session_state = getattr(self.deps, "session_state", None)
-        session_id = getattr(self.deps, "session_id", "")
+        session_state = self.deps.session.state
+        session_id = self.deps.session.id
         if session_mgr is not None and session_state is not None and session_id:
             await asyncio.to_thread(session_mgr.save_state, session_id, session_state)
         if self.deps.mcp_mgr is not None:
@@ -484,9 +482,9 @@ class AgentApp:
             return
         result = await self.deps.hooks_mgr.run_event(
             "SessionStart", source, {"source": source},
-            session_id=self.deps.session_id,
+            session_id=self.deps.session.id,
         )
-        self.deps.session_context.extend(
+        self.deps.session.context.extend(
             ExternalContextItem("SessionStart hook", str(item))
             for item in result.additional_context
             if item

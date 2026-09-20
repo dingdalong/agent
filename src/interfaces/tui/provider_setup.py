@@ -14,7 +14,7 @@ model_default 与 model_fast 共用 discover 返回的同一份模型列表与 #
 credentials 态下 URL/Key 输入框用 Up/Down 纵向移动焦点（URL Up 回 Provider
 列表，Key Down 停留原地）；回列表后 Up/Down 恢复为切换高亮，Enter 重新选择。
 
-契约见 src/app/provider_setup.py 的 _run_setup_app：关键字构造
+契约见 src/llm/setup_contract.py；由 src/app/provider_setup.py 的 _run_setup_app 驱动：关键字构造
 ``SetupApp(options=..., discover=...)``，``await app.run_async()`` 经
 ``self.exit(result_or_none)`` 返回 SetupResult 或取消时的 None。
 """
@@ -31,7 +31,7 @@ from textual.message import Message
 from textual.widgets import Input
 from textual.widgets.option_list import Option
 
-from src.app.provider_setup import ProviderOption, SetupResult, DiscoverFunc
+from src.llm.setup_contract import DiscoverFunc, ProviderOption, SetupResult
 from src.interfaces.tui.widgets import KeyboardOptionList, SelectionStatic
 
 
