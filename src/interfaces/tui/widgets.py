@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import subprocess
 from collections import deque
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import partial
 from typing import Literal
@@ -192,7 +191,7 @@ class SelectionScreen(Screen[None]):
 
     def _forward_event(self, event: events.Event) -> None:
         if isinstance(event, events.MouseDown) and not self.app.mouse_captured:
-            select_widget, _select_offset = self.get_widget_and_offset_at(
+            select_widget, _ = self.get_widget_and_offset_at(
                 event.x,
                 event.y,
             )

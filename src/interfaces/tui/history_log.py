@@ -16,7 +16,7 @@ from rich.text import Text
 from textual import events
 from textual.geometry import Offset, Size
 from textual.screen import Screen
-from textual.selection import SelectEnd, Selection, SelectStart, SelectState
+from textual.selection import Selection, SelectStart, SelectState
 from textual.style import Style as TextualStyle
 from textual.strip import Strip
 from textual.timer import Timer
@@ -115,8 +115,6 @@ class HistoryLog(PointerScrollMixin, RichLog):
         self._streams: dict[str, _StreamBuffer] = {}
         self._stream_timer: Timer | None = None
         self._stream_dirty = False
-        self._stream_flush_count = 0
-        self._stream_merge_count = 0
         self._source_revision = 0
         self._rendered_revision = 0
         self._render_width = 0
@@ -131,22 +129,6 @@ class HistoryLog(PointerScrollMixin, RichLog):
         self._renderable_cache: dict[str, tuple[int, object]] = {}
 
     @property
-    def entries(self) -> tuple[HistoryEntry, ...]:
-        return tuple(self._entries)
-
-    @property
-    def entry_ranges(self) -> dict[str, tuple[int, int]]:
-        return dict(self._entry_ranges)
-
-    @property
-    def window_range(self) -> tuple[int, int]:
-        return self._window_start, self._window_end
-
-    @property
-    def rendered_entry_count(self) -> int:
-        return self._window_end - self._window_start
-
-    @property
     def has_older(self) -> bool:
         return self._window_start > 0
 
@@ -157,18 +139,6 @@ class HistoryLog(PointerScrollMixin, RichLog):
     @property
     def reflow_pending(self) -> bool:
         return self._resize_debounce_task is not None or self._reflow_task is not None
-
-    @property
-    def active_stream_id(self) -> str | None:
-        return self._active_stream_id
-
-    @property
-    def stream_flush_count(self) -> int:
-        return self._stream_flush_count
-
-    @property
-    def stream_merge_count(self) -> int:
-        return self._stream_merge_count
 
     def on_mount(self) -> None:
         self.anchor()
@@ -257,7 +227,6 @@ class HistoryLog(PointerScrollMixin, RichLog):
         buffer.append(content)
         self._stream_dirty = True
         if self._stream_timer is not None:
-            self._stream_merge_count += 1
             return
         if not self.is_mounted:
             return
@@ -380,7 +349,7 @@ class HistoryLog(PointerScrollMixin, RichLog):
             if control is not None or not text or style is None or style._meta is None:
                 selected_segments.append(segment)
                 continue
-            segment_start, _segment_y = style.meta["offset"]
+            segment_start, _ = style.meta["offset"]
             segment_end = segment_start + len(text)
             overlap_start = max(start, segment_start)
             overlap_end = segment_end if end == -1 else min(end, segment_end)
@@ -473,17 +442,6 @@ class HistoryLog(PointerScrollMixin, RichLog):
     def resume_anchor_at_end(self) -> None:
         if not self.has_newer and self.scroll_y >= self.max_scroll_y - 1:
             self.anchor()
-
-    def jump_to_tail(self) -> None:
-        """切回最新分页窗口并跟随尾部。"""
-        self._window_end = len(self._entries)
-        self._window_start = self._fit_window_backward(self._window_end)
-        self._window_bias = "end"
-        tail_anchor = _ViewportAnchor(None, 0, True)
-        self._reflow_anchor = tail_anchor
-        if self._resize_debounce_task is not None:
-            self._resize_anchor = tail_anchor
-        self._request_current_width_reflow(reason="jump_tail", capture_anchor=False)
 
     def _shift_page(self, direction: Literal["older", "newer"]) -> None:
         self._page_shift_pending = False
@@ -651,7 +609,6 @@ class HistoryLog(PointerScrollMixin, RichLog):
         entry.revision += 1
         self._renderable_cache.pop(entry.id, None)
         self._source_revision += 1
-        self._stream_flush_count += 1
         self._replace_rendered_tail(entry)
 
     def _replace_rendered_tail(self, entry: HistoryEntry) -> None:
@@ -670,7 +627,7 @@ class HistoryLog(PointerScrollMixin, RichLog):
         new_tail = self._render_entry_lines(entry, self._render_width)
         line_budget = max(1, self._policy.history_window_lines - start - 1)
         needs_window_trim = len(new_tail) > line_budget
-        needs_window_reflow = needs_window_trim and self.rendered_entry_count > 1
+        needs_window_reflow = needs_window_trim and (self._window_end - self._window_start) > 1
         if needs_window_trim:
             new_tail = self._limit_entry_lines(
                 new_tail,
@@ -993,10 +950,10 @@ class HistoryLog(PointerScrollMixin, RichLog):
         total_lines = sum(len(lines) for _entry, lines in rendered)
         while total_lines > entry_line_limit and len(rendered) > 1:
             if self._window_bias == "start":
-                _entry, removed = rendered.pop()
+                _, removed = rendered.pop()
                 window_end -= 1
             else:
-                _entry, removed = rendered.pop(0)
+                _, removed = rendered.pop(0)
                 window_start += 1
             total_lines -= len(removed)
             sentinel_lines = int(window_start > 0) + int(bool(rendered))

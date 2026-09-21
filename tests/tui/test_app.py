@@ -38,7 +38,6 @@ from src.interfaces.tui.app import AgentTuiApp, _rich_text_signature
 from src.interfaces.tui.dialogs import (
     InlineFormWidget,
     InlineSelectionWidget,
-    SelectionDialog,
 )
 from src.interfaces.tui.render_policy import TuiRenderPolicy
 from src.interfaces.tui.widgets import (
@@ -49,6 +48,33 @@ from src.interfaces.tui.widgets import (
     SelectionStatic,
 )
 from src.common.session_state import SessionState
+
+
+def _track_render_concurrency(app) -> list[int]:
+    """测试辅助：记录转录渲染的最大并发数，返回 [active, peak]。"""
+    state = [0, 0]
+    original = app._render_transcript_request
+
+    async def tracked(request):
+        state[0] += 1
+        state[1] = max(state[1], state[0])
+        try:
+            return await original(request)
+        finally:
+            state[0] -= 1
+
+    app._render_transcript_request = tracked
+    return state
+
+
+async def _follow_newest(history) -> None:
+    """测试辅助：沿滚到底部的用户路径翻到最新分页并跟随尾部。"""
+    while history.has_newer:
+        history._shift_page("newer")
+        await history.wait_for_reflow()
+    history.scroll_end(animate=False, immediate=True)
+    history.anchor()
+    await history.wait_for_reflow()
 
 
 def _app(
@@ -157,6 +183,7 @@ def test_rapid_transcript_switches_coalesce_without_cancelling_render() -> None:
             ))
         store.flush_completed()
         app = _app(store)
+        renders = _track_render_concurrency(app)
         async with app.run_test(size=(100, 30)) as pilot:
             await app.open_transcript(
                 "worker-0",
@@ -169,7 +196,7 @@ def test_rapid_transcript_switches_coalesce_without_cancelling_render() -> None:
             await _wait_for_transcript_render(app, pilot)
             assert app.viewing_agent_id == "worker-0"
             assert app._rendered_transcript_id == "worker-0"
-            assert app._transcript_max_concurrent_renders == 1
+            assert renders[1] == 1
             assert app._transcript_merged_requests > 0
             assert app.is_running
 
@@ -262,6 +289,7 @@ def test_large_transcript_switching_stays_responsive_during_response_stream() ->
             ))
         store.flush_completed()
         app = _app(store)
+        renders = _track_render_concurrency(app)
         event = ResponseDelta(
             timestamp=2.0,
             source="test",
@@ -295,7 +323,7 @@ def test_large_transcript_switching_stays_responsive_during_response_stream() ->
             await _wait_for_transcript_render(app, pilot)
             assert app.viewing_agent_id == "worker-0"
             assert app._rendered_transcript_id == "worker-0"
-            assert app._transcript_max_concurrent_renders == 1
+            assert renders[1] == 1
             assert app._transcript_worker_task is not None
             assert not app._transcript_worker_task.done()
             assert app.is_running
@@ -924,13 +952,13 @@ def test_permission_notice_renders_full_reason_and_wraps() -> None:
                 decision_source="hard_rule",
             ))
             await pilot.pause()
-            entry = app._history.entries[-1]
+            entry = app._history._entries[-1]
             rendered = entry.content.plain if isinstance(entry.content, Text) else entry.content
             assert "硬规则" in rendered
             assert detail in rendered
             # 60 列终端下长路径应折行（高度 > 1）而不是被截断。
             await pilot.pause()
-            start, end = app._history.entry_ranges[entry.id]
+            start, end = app._history._entry_ranges[entry.id]
             assert end - start > 2
 
     asyncio.run(scenario())
@@ -1133,7 +1161,7 @@ def test_visible_agent_list_animates_only_running_row_without_worker(
 
 
 @pytest.mark.integration
-def test_modal_controls_are_keyboard_only() -> None:
+def test_inline_controls_are_keyboard_only() -> None:
     async def scenario() -> None:
         app = _app()
         async with app.run_test(size=(100, 32)) as pilot:
@@ -1827,7 +1855,7 @@ def test_form_preview_pane_hides_on_empty_and_restores() -> None:
 
 
 @pytest.mark.integration
-def test_modal_fifo_and_permission_over_transcript() -> None:
+def test_inline_fifo_and_permission_over_transcript() -> None:
     async def scenario() -> None:
         store = AgentViewStore()
         store.register_foreground("main", "main")
@@ -1905,11 +1933,11 @@ def test_modal_fifo_and_permission_over_transcript() -> None:
             assert app.coordinator.inline_widget.request is permission
             assert app.viewing_agent_id == "worker-0"
             assert app.coordinator.pending_summary == (1, "worker")
-            modal_focus = app.focused
-            assert modal_focus is not None
+            widget_focus = app.focused
+            assert widget_focus is not None
             app.post_message(events.AppFocus())
             await pilot.pause()
-            assert app.focused is modal_focus
+            assert app.focused is widget_focus
             assert not app._composer.has_focus
 
             await pilot.press("1")
@@ -2051,9 +2079,9 @@ def test_selection_stays_stable_across_scroll_and_platform_copy_rules() -> None:
             app.clear_selection()
             text = "可复制的生产 TUI 文本"
             entry_id = app._history.append_entry(text)
-            app._history.jump_to_tail()
+            await _follow_newest(app._history)
             await app._history.wait_for_reflow()
-            start, _end = app._history.entry_ranges[entry_id]
+            start, _end = app._history._entry_ranges[entry_id]
             app.screen.selections = {
                 app._history: Selection(Offset(0, start), Offset(len(text), start))
             }
@@ -2113,13 +2141,13 @@ def test_history_entries_have_uniform_spacing() -> None:
             await app.append_output(Text("✔ ping (0.01s)"))
             await pilot.pause()
 
-            entries = list(app._history.entries)
+            entries = list(app._history._entries)
             assert len(entries) == 4
 
             # 内容不再残留尾随换行；每个条目的 Rich 行区间包含一行留白。
             heights = [
-                app._history.entry_ranges[entry.id][1]
-                - app._history.entry_ranges[entry.id][0]
+                app._history._entry_ranges[entry.id][1]
+                - app._history._entry_ranges[entry.id][0]
                 for entry in entries
             ]
             assert heights == [3, 2, 3, 2]
@@ -2131,8 +2159,8 @@ def test_history_entries_have_uniform_spacing() -> None:
 
             # 行区间连续，留白属于前一个条目。
             gaps = [
-                app._history.entry_ranges[after.id][0]
-                - app._history.entry_ranges[before.id][1]
+                app._history._entry_ranges[after.id][0]
+                - app._history._entry_ranges[before.id][1]
                 for before, after in zip(entries, entries[1:])
             ]
             assert gaps == [0, 0, 0]
@@ -2151,7 +2179,7 @@ def test_history_entry_trailing_newline_row_is_selectable_without_crash() -> Non
             )
             await pilot.pause()
 
-            start, end = app._history.entry_ranges[entry_id]
+            start, end = app._history._entry_ranges[entry_id]
             assert end - start == 4
             offset = Offset(0, start + 2)
 
@@ -2220,8 +2248,8 @@ def test_reverse_selection_tracks_tool_result_without_crossing_its_end() -> None
                     f"  ✔ shell-{index:02d}  ⎿ second-{index:02d}"
                 )
             await pilot.pause()
-            target = app._history.entries[16]
-            start, end = app._history.entry_ranges[target.id]
+            target = app._history._entries[16]
+            start, end = app._history._entry_ranges[target.id]
             app.screen.selections = {
                 app._history: Selection(
                     Offset(50, end - 2),
@@ -2325,7 +2353,7 @@ def test_native_clipboard_is_serial_latest_wins_and_osc52_is_fallback() -> None:
 
 
 @pytest.mark.integration
-def test_external_cancellation_cleans_modal_before_future_completion() -> None:
+def test_external_cancellation_cleans_inline_widget_before_future_completion() -> None:
     async def scenario() -> None:
         clock = TurnClock()
         app = AgentTuiApp(
@@ -2496,8 +2524,8 @@ def test_stream_follow_and_dialog_text_inputs() -> None:
             await app._history.wait_for_refresh()
             assert app._history.scroll_y == app._history.max_scroll_y
             await app.end_response()
-            assert app._history.entries[-1].markdown
-            assert app._history.entries[-1].content == (
+            assert app._history._entries[-1].markdown
+            assert app._history._entries[-1].content == (
                 "\n\n".join(f"stream paragraph {i}" for i in range(80)) + "\n\n"
             )
             app._history.scroll_to(
@@ -2514,7 +2542,7 @@ def test_stream_follow_and_dialog_text_inputs() -> None:
             await app._history.wait_for_refresh()
             assert app._history.scroll_y == old_scroll_y
             await app.end_response()
-            assert app._history.entries[-1].content == (
+            assert app._history._entries[-1].content == (
                 "\n\n".join(f"next paragraph {i}" for i in range(20)) + "\n\n"
             )
 
@@ -2592,12 +2620,12 @@ def test_session_history_is_bulk_hydrated_into_rich_lines() -> None:
             await app.replace_session_history(state.visible_records())
 
             assert not app._history.children
-            assert len(app._history.entries) == 5
-            assert app._history.entries[0].content == "› 恢复的问题"
-            assert app._history.entries[2].content == "恢复的思考"
-            assert app._history.entries[2].markdown
-            assert app._history.entries[4].content == "**恢复的回答**"
-            assert app._history.entries[4].markdown
+            assert len(app._history._entries) == 5
+            assert app._history._entries[0].content == "› 恢复的问题"
+            assert app._history._entries[2].content == "恢复的思考"
+            assert app._history._entries[2].markdown
+            assert app._history._entries[4].content == "**恢复的回答**"
+            assert app._history._entries[4].markdown
             assert "恢复的回答" in app.history_journal.snapshot()
 
     asyncio.run(scenario())

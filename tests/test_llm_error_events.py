@@ -1098,7 +1098,7 @@ def test_tty_partial_retry_prints_separator_and_countdown_uses_safe_category() -
                 entry.content.plain
                 if isinstance(entry.content, Text)
                 else entry.content
-                for entry in app._history.entries
+                for entry in app._history._entries
             )
             assert "尝试 1/3 失败，将重试" in rendered
             assert "service" in rendered

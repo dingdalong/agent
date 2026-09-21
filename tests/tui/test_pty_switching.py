@@ -49,6 +49,16 @@ def test_vscode_pty_rapid_arrow_switching_stays_stable(tmp_path) -> None:
                     native_clipboard=False,
                 )
                 self.switch_count = 0
+                self.render_peak = 0
+                self._render_active = 0
+
+            async def _render_transcript_request(self, request):
+                self._render_active += 1
+                self.render_peak = max(self.render_peak, self._render_active)
+                try:
+                    return await super()._render_transcript_request(request)
+                finally:
+                    self._render_active -= 1
 
             async def on_ready(self):
                 await self.open_transcript(
@@ -76,7 +86,7 @@ def test_vscode_pty_rapid_arrow_switching_stays_stable(tmp_path) -> None:
                 payload = {
                     "crash_count": int(self.fatal_error is not None),
                     "target": self.viewing_agent_id,
-                    "max_concurrent_renders": self._transcript_max_concurrent_renders,
+                    "max_concurrent_renders": self.render_peak,
                 }
                 await asyncio.to_thread(result_path.write_text, json.dumps(payload))
                 self.exit()

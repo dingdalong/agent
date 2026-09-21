@@ -354,7 +354,7 @@ def test_history_journal_bounds_completed_and_active_text_together() -> None:
     journal.append_stream("response", "abcdefghijklmno")
 
     active_snapshot = journal.snapshot()
-    assert journal._entry_chars + journal._active_chars <= policy.journal_chars
+    assert journal._completed_buffer.tell() + journal._active_chars <= policy.journal_chars
     assert journal._active_buffer.tell() <= policy.journal_chars
     assert active_snapshot.startswith("[较早历史未回放]\n")
     assert "older-a" not in active_snapshot
@@ -367,7 +367,7 @@ def test_history_journal_bounds_completed_and_active_text_together() -> None:
 
     journal.end_stream("response")
 
-    assert journal._entry_chars <= policy.journal_chars
+    assert journal._completed_buffer.tell() <= policy.journal_chars
     assert journal.snapshot().startswith("[较早历史未回放]\n")
 
 
@@ -475,7 +475,6 @@ def test_new_request_waits_for_pending_plain_interactions(monkeypatch) -> None:
 
 def test_inflight_invoke_finishes_when_app_exits(monkeypatch) -> None:
     class FakeCoordinator:
-        modal_active = False
         active = None
         queue = []
         view_request = None
@@ -533,7 +532,6 @@ def test_app_failure_does_not_start_second_textual_app(monkeypatch) -> None:
     crash = asyncio.Event()
 
     class FakeCoordinator:
-        modal_active = False
         active = None
         queue = []
         view_request = None

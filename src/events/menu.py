@@ -1,6 +1,6 @@
 """菜单/交互事件 — 阻塞等待用户经 TUI 作答、并通过 future 回传结果的事件。
 
-这些事件都是 UI 的"控制面"：EventBus 发布后，交互协调器选择对应输入或 Modal
+这些事件都是 UI 的"控制面"：EventBus 发布后，交互协调器选择对应输入或内嵌交互控件
 并安排渲染；用户完成或取消后经 future 回传。
 每个事件的注释给出其在组合式 TUI 上的具体呈现形态。
 """
@@ -69,7 +69,7 @@ class ViewRequest(UiRequest):
 class PermissionMenu(MenuRequest):
     """请求 UI 读取工具权限确认，并通过 future 返回结果。
 
-    TUI 由 `tui/dialogs.py` 的 `SelectionDialog` 呈现：
+    TUI 由 `tui/dialogs.py` 的 `InlineSelectionWidget` 呈现：
 
         工具请求权限
           工具: shell
@@ -112,7 +112,7 @@ class InputMenu(MenuRequest):
 class ChoiceMenu(MenuRequest):
     """请求 UI 以菜单读取一次选择，通过 future 返回所选 value（空串表示取消）。
 
-    TUI 由 `tui/dialogs.py` 的 `SelectionDialog` 呈现。选中行反显；
+    TUI 由 `tui/dialogs.py` 的 `InlineSelectionWidget` 呈现。选中行反显；
     Esc 返回 ""（取消）。用于 resume 等通用选择器。
     """
     prompt: str = ""  # 菜单上文（打印到 scrollback 的提示）
@@ -259,8 +259,8 @@ class ChoiceInputMenu(MenuRequest):
     """请求 UI 以「选项列表 + 一行可编辑输入」读取一次作答，通过 future 返回 JSON
     {"choice": "<value|''>", "text": "<typed|''>"} 串（空串表示取消）。
 
-    TUI 由 `tui/dialogs.py` 的 `ChoiceInputDialog` 呈现：上文为调用方 prompt；
-    选项行（❯ 序号. 标签，可带说明副行）与自由输入位于同一 Modal。
+    TUI 由 `tui/dialogs.py` 的 `InlineChoiceInputWidget` 呈现：上文为调用方 prompt；
+    选项行（❯ 序号. 标签，可带说明副行）与自由输入位于同一内嵌控件。
     布局如下：
 
         计划审核

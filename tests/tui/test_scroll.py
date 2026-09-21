@@ -16,6 +16,21 @@ from src.interfaces.tui.render_policy import TuiRenderPolicy
 from src.interfaces.tui.widgets import PointerScrollMixin, TranscriptPanel
 
 
+def _window(history: HistoryLog) -> tuple[int, int]:
+    """测试辅助：返回当前渲染窗口的 [start, end)。"""
+    return history._window_start, history._window_end
+
+
+async def _follow_newest(history: HistoryLog) -> None:
+    """测试辅助：沿滚到底部的用户路径翻到最新分页并跟随尾部。"""
+    while history.has_newer:
+        history._shift_page("newer")
+        await history.wait_for_reflow()
+    history.scroll_end(animate=False, immediate=True)
+    history.anchor()
+    await history.wait_for_reflow()
+
+
 class _TranscriptApp(App[None]):
     CSS = """
     TranscriptPanel { height: 1fr; scrollbar-size: 0 0; }
@@ -253,7 +268,7 @@ def test_history_burst_preserves_tail_following_contract() -> None:
             history.append_entry("while upscrolled", spacing=0, entry_id="upscrolled")
             assert history.scroll_y == upscrolled_y
 
-            history.jump_to_tail()
+            await _follow_newest(history)
             await history.wait_for_reflow()
             await pilot.pause()
             assert history.scroll_y == history.max_scroll_y
@@ -294,7 +309,7 @@ def test_accelerated_history_edge_shifts_one_page_without_losing_anchor(
             ])
             await history.wait_for_reflow()
             await pilot.pause()
-            assert history.window_range == (30, 60)
+            assert _window(history) == (30, 60)
             history.scroll_to(y=9, animate=False, immediate=True)
 
             shifts: list[str] = []
@@ -315,7 +330,7 @@ def test_accelerated_history_edge_shifts_one_page_without_losing_anchor(
             await pilot.pause()
 
             assert shifts == ["older"]
-            assert history.window_range == (20, 50)
+            assert _window(history) == (20, 50)
             assert history._capture_viewport_anchor() == expected_anchor
 
     asyncio.run(scenario())

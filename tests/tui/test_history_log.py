@@ -26,6 +26,21 @@ class _HistoryApp(App[None]):
         yield HistoryLog(id="history", policy=self.render_policy)
 
 
+def _window(history: HistoryLog) -> tuple[int, int]:
+    """测试辅助：返回当前渲染窗口的 [start, end)。"""
+    return history._window_start, history._window_end
+
+
+async def _follow_newest(history: HistoryLog) -> None:
+    """测试辅助：沿滚到底部的用户路径翻到最新分页并跟随尾部。"""
+    while history.has_newer:
+        history._shift_page("newer")
+        await history.wait_for_reflow()
+    history.scroll_end(animate=False, immediate=True)
+    history.anchor()
+    await history.wait_for_reflow()
+
+
 @pytest.mark.integration
 def test_bulk_markdown_and_plain_replay_keeps_constant_dom() -> None:
     async def scenario() -> None:
@@ -46,14 +61,14 @@ def test_bulk_markdown_and_plain_replay_keeps_constant_dom() -> None:
             await pilot.pause()
 
             assert history.max_lines is None
-            assert len(history.entries) == 300
-            assert history.window_range[1] == 300
-            assert history.rendered_entry_count <= 250
-            assert len(history.entry_ranges) == history.rendered_entry_count
+            assert len(history._entries) == 300
+            assert _window(history)[1] == 300
+            assert len(history._entry_ranges) <= 250
+            assert len(history._entry_ranges) == _window(history)[1] - _window(history)[0]
             assert not history.children
             assert len(list(app.walk_children())) == baseline_dom
-            assert history.entries[-1].content == markdown_entries[-1].content
-            assert len(history.lines) > history.rendered_entry_count
+            assert history._entries[-1].content == markdown_entries[-1].content
+            assert len(history.lines) > len(history._entry_ranges)
             assert len(history.lines) <= 4_000
 
             plain_entries = [
@@ -64,14 +79,14 @@ def test_bulk_markdown_and_plain_replay_keeps_constant_dom() -> None:
             await history.wait_for_reflow()
             await pilot.pause()
 
-            assert len(history.entries) == 1_000
-            assert history.window_range[1] == 1_000
-            assert history.rendered_entry_count <= 250
-            assert len(history.entry_ranges) == history.rendered_entry_count
+            assert len(history._entries) == 1_000
+            assert _window(history)[1] == 1_000
+            assert len(history._entry_ranges) <= 250
+            assert len(history._entry_ranges) == _window(history)[1] - _window(history)[0]
             assert len(history.lines) <= 4_000
             assert not history.children
             assert len(list(app.walk_children())) == baseline_dom
-            assert [entry.content for entry in history.entries] == [
+            assert [entry.content for entry in history._entries] == [
                 entry.content for entry in plain_entries
             ]
 
@@ -121,17 +136,17 @@ def test_fifty_thousand_deltas_use_one_coalesced_tail() -> None:
                 history.append_stream("response", "x")
 
             buffer = history._streams["response"]
-            assert len(history.entries) == 1
-            assert history.active_stream_id == "response"
+            assert len(history._entries) == 1
+            assert history._active_stream_id == "response"
             assert buffer.length == 50_000
             assert buffer.buffer.tell() == 50_000
-            assert history.stream_flush_count == 0
-            assert history.stream_merge_count == 49_999
+            assert not history.lines
+            assert history._entries[0].content == ""
 
             final = history.end_stream("response")
             assert final == "x" * 50_000
-            assert history.entries[0].content == final
-            assert history.active_stream_id is None
+            assert history._entries[0].content == final
+            assert history._active_stream_id is None
             assert history._stream_timer is None
             assert not history.children
 
@@ -167,9 +182,9 @@ def test_stream_tail_refresh_does_not_render_stable_path_line(monkeypatch) -> No
             history.end_stream("response")
             await pilot.pause()
 
-            path_start, _ = history.entry_ranges["path"]
-            response_start, _ = history.entry_ranges["response"]
-            assert history.entries[0].content == path
+            path_start, _ = history._entry_ranges["path"]
+            response_start, _ = history._entry_ranges["response"]
+            assert history._entries[0].content == path
             assert path_start - history.scroll_offset.y not in rendered_lines
             assert response_start - history.scroll_offset.y in rendered_lines
 
@@ -212,7 +227,7 @@ def test_offscreen_stream_tail_update_does_not_render_visible_history(
             history.end_stream("response")
             await pilot.pause()
 
-            response_start, _ = history.entry_ranges["response"]
+            response_start, _ = history._entry_ranges["response"]
             assert response_start >= history.scrollable_content_region.height
             assert history.lines[response_start].text.rstrip() == "tail update"
             assert rendered_lines == []
@@ -240,7 +255,7 @@ def test_selection_reads_only_selected_rich_lines() -> None:
                 for index in range(1_000)
             ])
             await history.wait_for_reflow()
-            start, _end = history.entry_ranges["line-900"]
+            start, _end = history._entry_ranges["line-900"]
             counting = CountingLines(history.lines)
             history.lines = counting
 
@@ -321,7 +336,7 @@ def test_follow_tail_upscroll_and_resize_restore_entry_anchor() -> None:
             history.append_entry("followed", entry_id="followed")
             assert history.scroll_y == history.max_scroll_y
 
-            start, end = history.entry_ranges["entry-40"]
+            start, end = history._entry_ranges["entry-40"]
             line_offset = min(1, end - start - 1)
             history.scroll_to(y=start + line_offset, animate=False, immediate=True)
             old_scroll_y = history.scroll_y
@@ -331,7 +346,7 @@ def test_follow_tail_upscroll_and_resize_restore_entry_anchor() -> None:
             await pilot.resize_terminal(52, 30)
             await history.wait_for_reflow()
             await pilot.pause()
-            new_start, new_end = history.entry_ranges["entry-40"]
+            new_start, new_end = history._entry_ranges["entry-40"]
             assert history.scroll_y == new_start + min(
                 line_offset,
                 new_end - new_start - 1,
@@ -360,7 +375,7 @@ def test_scroll_edges_page_history_and_new_messages_do_not_move_old_page() -> No
             await pilot.pause()
             await history.wait_for_reflow()
 
-            assert history.window_range == (40, 60)
+            assert _window(history) == (40, 60)
             assert history.has_older
             assert not history.has_newer
 
@@ -369,26 +384,26 @@ def test_scroll_edges_page_history_and_new_messages_do_not_move_old_page() -> No
             await history.wait_for_reflow()
             await pilot.pause()
 
-            assert history.window_range == (30, 50)
+            assert _window(history) == (30, 50)
             assert history.has_older
             assert history.has_newer
-            assert "line-30" in history.entry_ranges
-            assert "line-49" in history.entry_ranges
+            assert "line-30" in history._entry_ranges
+            assert "line-49" in history._entry_ranges
             old_scroll_y = history.scroll_y
 
             history.append_entry("new tail", spacing=0, entry_id="new-tail")
 
-            assert len(history.entries) == 61
-            assert history.window_range == (30, 50)
+            assert len(history._entries) == 61
+            assert _window(history) == (30, 50)
             assert history.scroll_y == old_scroll_y
-            assert "new-tail" not in history.entry_ranges
+            assert "new-tail" not in history._entry_ranges
             assert history.lines[-1].text.rstrip() == "↓ 较新历史 11 条"
 
-            history.jump_to_tail()
+            await _follow_newest(history)
             await history.wait_for_reflow()
 
-            assert history.window_range == (41, 61)
-            assert "new-tail" in history.entry_ranges
+            assert _window(history) == (41, 61)
+            assert "new-tail" in history._entry_ranges
             assert not history.has_newer
             assert history.scroll_y == history.max_scroll_y
 
@@ -414,8 +429,8 @@ def test_history_budgets_limit_window_and_project_oversized_entry() -> None:
             ])
             await history.wait_for_reflow()
 
-            visible = history.entries[slice(*history.window_range)]
-            assert history.rendered_entry_count <= policy.history_window_entries
+            visible = history._entries[history._window_start:history._window_end]
+            assert len(history._entry_ranges) <= policy.history_window_entries
             assert sum(len(entry.content) for entry in visible) <= policy.history_window_chars
             assert len(history.lines) <= policy.history_window_lines
 
@@ -433,7 +448,7 @@ def test_history_budgets_limit_window_and_project_oversized_entry() -> None:
             assert isinstance(projected, str)
             assert len(projected) <= policy.history_entry_chars
             assert "内容过长" in projected
-            assert history.entries[0].content == source
+            assert history._entries[0].content == source
             assert len(history.lines) <= policy.history_window_lines
             assert any("内容过长" in line.text for line in history.lines)
 
@@ -475,7 +490,7 @@ def test_resize_burst_runs_one_final_window_reflow(monkeypatch) -> None:
                 await pilot.resize_terminal(width, 24)
             await history.wait_for_reflow()
 
-            assert render_calls == history.rendered_entry_count
+            assert render_calls == len(history._entry_ranges)
             assert history._render_width == history.scrollable_content_region.width
             assert not history.reflow_pending
 

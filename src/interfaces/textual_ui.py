@@ -152,7 +152,7 @@ class TextualInterface(UserInterface):
             self._on_app_task_done(finished, current_app)
         )
         ready_task = asyncio.create_task(app.ready.wait())
-        done, _pending = await asyncio.wait(
+        done, _ = await asyncio.wait(
             {task, ready_task},
             return_when=asyncio.FIRST_COMPLETED,
         )
@@ -250,9 +250,6 @@ class TextualInterface(UserInterface):
             "stopping": self._stopping,
             "ui_ready": self._ui_ready.is_set(),
             "viewing_transcript": bool(getattr(app, "viewing_agent_id", None)),
-            "modal_active": bool(
-                getattr(getattr(app, "coordinator", None), "modal_active", False)
-            ),
             "response_stream_active": getattr(app, "_response_stream", None) is not None,
             "thinking_stream_active": getattr(app, "_thinking_stream", None) is not None,
         }
@@ -533,7 +530,7 @@ class TextualInterface(UserInterface):
             return False
         invocation = asyncio.create_task(app.invoke(callback))
         try:
-            done, _pending = await asyncio.wait(
+            done, _ = await asyncio.wait(
                 {invocation, app_task},
                 return_when=asyncio.FIRST_COMPLETED,
             )

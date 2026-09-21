@@ -168,21 +168,21 @@ TTY 的 `InteractionCoordinator` 是交互请求状态权威写入者。普通�
 
 内嵌交互结束后默认静默：`InteractionCoordinator` 只移除控件并写入 Widget 返回的非空摘要，是否保留成功或取消历史由各 Widget 显式声明。`ModelMenu` 成功和取消都不留控件摘要；`/models` 成功时由命令输出最终应用结果。
 
-转录是只读面板，不占用作答队列。`/agents` 创建带 future 的 `TranscriptView`，Esc 关闭后才完成该 future；Agent 列表实时查看不创建请求 future。Modal 覆盖转录时拥有键盘，结束后转录的 UUID 和每 Agent 独立滚动位置原样恢复。权限、表单和选择期间不能进入 Agent 列表。
+转录是只读面板，不占用作答队列。`/agents` 创建带 future 的 `TranscriptView`，Esc 关闭后才完成该 future；Agent 列表实时查看不创建请求 future。内嵌交互控件挂载时拥有键盘，结束后转录的 UUID 和每 Agent 独立滚动位置原样恢复。权限、表单和选择期间不能进入 Agent 列表。
 
 转录数据来自 Agent 运行期间保存的原始消息，渲染层按不可信数据防御式处理：缺失或格式异常的消息、tool call 和参数会降级为可读文本，不应导致 Textual App 退出。已结束的子 Agent 在 Store 的有界历史中保留期间仍可浏览。初次打开、实时刷新和切换视图都进入同一个常驻渲染 worker；worker 串行完成当前 `Markdown.update()`，并只保留一个最新待处理目标。左右键立即更新目标索引和版本，连续输入会跳过中间展示；旧版本完成后不得恢复焦点、滚动位置或标题，关闭视图会使当前版本失效。渲染等待布局稳定期间不得采样滚动位置，避免把过渡几何覆盖到目标 Agent 的已保存位置。其他展示 worker 接收异步函数工厂，只在 worker 真正启动后创建 coroutine。
 
-`UserInterface.on_event()` 先让 TTY 前端接受 `UiRequest`，成功后立即返回给事件消费者；非 TTY 仍串行读取。这样正在查看转录时，后续权限请求可马上进入 Modal，而不会被 `TranscriptView` 阻塞。协调器在清理活动 Modal、人工等待计时和焦点后才落定对外 future。`EventBus.join()` 不等待协调器自有的 Modal 生命周期，因此中断收束会在 join 后额外等待 `ui.wait_interactions_idle()`；UI 停止时取消活动、排队和只读请求，再退出 Textual。`/clear` 在重载 Managers、清空 Store 和创建新 Agent 前同步取消旧请求并等待交互清理，重置期间到达的新请求不会跨越 session 边界。
+`UserInterface.on_event()` 先让 TTY 前端接受 `UiRequest`，成功后立即返回给事件消费者；非 TTY 仍串行读取。这样正在查看转录时，后续权限请求可马上挂载内嵌控件，而不会被 `TranscriptView` 阻塞。协调器在清理活动内嵌控件、人工等待计时和焦点后才落定对外 future。`EventBus.join()` 不等待协调器自有的内嵌交互生命周期，因此中断收束会在 join 后额外等待 `ui.wait_interactions_idle()`；UI 停止时取消活动、排队和只读请求，再退出 Textual。`/clear` 在重载 Managers、清空 Store 和创建新 Agent 前同步取消旧请求并等待交互清理，重置期间到达的新请求不会跨越 session 边界。
 
-Textual 进程意外结束后，门面会停止向旧 App 投递消息，等待 Textual 退出并恢复终端，然后永久切换到 `PlainFrontend`。切换提示之后，`PlainHistoryJournal` 把已展示的 Rich 文本转为无样式文字、按原文输出 Markdown，并把尚未结束的流式增量作为普通文字一次性回放。日志不保存控件树或视口状态，因此输入草稿、Modal 选择/编辑状态、主历史滚动位置和转录滚动位置不会恢复。
+Textual 进程意外结束后，门面会停止向旧 App 投递消息，等待 Textual 退出并恢复终端，然后永久切换到 `PlainFrontend`。切换提示之后，`PlainHistoryJournal` 把已展示的 Rich 文本转为无样式文字、按原文输出 Markdown，并把尚未结束的流式增量作为普通文字一次性回放。日志不保存控件树或视口状态，因此输入草稿、内嵌控件的选择/编辑状态、主历史滚动位置和转录滚动位置不会恢复。
 
-降级时，活动和排队的作答请求按原 FIFO 顺序由文字前端从头询问，旧草稿和 Modal 内部状态不参与；活动 `TranscriptView` 直接以空结果完成。降级处理这些旧请求期间，新的 UI 事件等待文字前端就绪，避免并发读取 stdin。已经投递但尚未完成的 TUI 调用会同时监听 App Task，App 先结束时取消调用并等待降级完成，避免 future 永久悬挂。`stop()` 仍保持幂等，并恢复 VS Code 终端键盘协议。VS Code 的 debugpy 配置使用 `onTerminate: KeyboardInterrupt`，使停止调试进入应用清理流程；`AgentApp` 只把 `_work_task` 的取消视为轮次中断，外层任务取消必须向上传播到 `run()` 的 `finally`，否则 debugpy 硬杀会绕过终端恢复。
+降级时，活动和排队的作答请求按原 FIFO 顺序由文字前端从头询问，旧草稿和内嵌控件内部状态不参与；活动 `TranscriptView` 直接以空结果完成。降级处理这些旧请求期间，新的 UI 事件等待文字前端就绪，避免并发读取 stdin。已经投递但尚未完成的 TUI 调用会同时监听 App Task，App 先结束时取消调用并等待降级完成，避免 future 永久悬挂。`stop()` 仍保持幂等，并恢复 VS Code 终端键盘协议。VS Code 的 debugpy 配置使用 `onTerminate: KeyboardInterrupt`，使停止调试进入应用清理流程；`AgentApp` 只把 `_work_task` 的取消视为轮次中断，外层任务取消必须向上传播到 `run()` 的 `finally`，否则 debugpy 硬杀会绕过终端恢复。
 
 Textual 8.2.8 可能在消息循环内部捕获 fatal exception 后以 `run_async()` 正常返回，因此 UI 生命周期同时检查 asyncio Task 异常、App 捕获的 fatal、内部 `_exception`、return code、退出标志和 UI 状态。无异常但非停止流程中的返回也作为 `unexpected_return` 记录，不构造替代真实原因的异常。Textual App 只创建一次；终止记录与降级最多执行一次，不会在同一终端原位重建 App。
 
 生产装配默认把结构化诊断写入 `$AGENT_HOME/logs/tui.jsonl`，降级提示包含本次进程的诊断 ID 和路径。日志由后台线程写入，单文件达到 2 MiB 时轮转，保留当前文件和两个备份；目录权限为 `0700`，文件权限为 `0600`。事件只包含生命周期、切换版本、渲染耗时、合并数、worker/流状态及异常类型；不写对话正文、Markdown、用户输入或工具参数。异常文本与 traceback 经共享 `DataGuard` 脱敏并限制字段长度。写入、轮转和关闭失败不能影响 TUI。
 
-键盘由当前 Textual Screen 和逻辑焦点决定：Modal 快捷键优先；转录有焦点时处理分页、切换和 Esc；普通输入内部再按补全、Agent 列表和输入行处理。逻辑焦点只随键盘导航变化，终端窗口重新激活、Modal 切换或转录关闭时恢复到 Modal 当前选项/输入区、转录面板或主界面先前的输入框/Agent 列表。主输入、对话输入和表单输入统一使用常亮光标，不启用 Textual 的周期闪烁，避免无内容变化的终端重绘使 VS Code 路径悬停失效；处理态的主输入框保持只读但继续承接键盘焦点，字符与提交键无效，`↓` 仍可进入运行中 Agent 列表。`AgentList` 的运行中图标由全局 100 ms tick 驱动；只有列表可见且 UUID 结构稳定时逐行更新变化标签，隐藏期间停止动画，新增或移除 Agent 时才重建节点。鼠标只用于历史与转录的文本选择、复制和滚动；点击输入、选项、Agent 行或窗口空白不会切换焦点、移动输入光标、选择或提交。普通输入默认一行、按显式换行增高到八行，支持 `Shift+Enter`/`Ctrl+J` 换行；查看转录时隐藏主输入栏及其分隔线，转录或 Modal 覆盖期间隐藏整个 Agent 列表。`Ctrl+C` 在 Windows 有选区时复制，普通输入非空时清空、空时退出，处理态或 Modal 中请求中断；macOS 默认鼠标选中即复制，并保留 `Cmd+C` 显式复制。
+键盘由当前 Textual Screen 和逻辑焦点决定：内嵌交互控件快捷键优先；转录有焦点时处理分页、切换和 Esc；普通输入内部再按补全、Agent 列表和输入行处理。逻辑焦点只随键盘导航变化，终端窗口重新激活、内嵌控件挂载或卸载、或转录关闭时恢复到控件当前选项/输入区、转录面板或主界面先前的输入框/Agent 列表。主输入、对话输入和表单输入统一使用常亮光标，不启用 Textual 的周期闪烁，避免无内容变化的终端重绘使 VS Code 路径悬停失效；处理态的主输入框保持只读但继续承接键盘焦点，字符与提交键无效，`↓` 仍可进入运行中 Agent 列表。`AgentList` 的运行中图标由全局 100 ms tick 驱动；只有列表可见且 UUID 结构稳定时逐行更新变化标签，隐藏期间停止动画，新增或移除 Agent 时才重建节点。鼠标只用于历史与转录的文本选择、复制和滚动；点击输入、选项、Agent 行或窗口空白不会切换焦点、移动输入光标、选择或提交。普通输入默认一行、按显式换行增高到八行，支持 `Shift+Enter`/`Ctrl+J` 换行；查看转录时隐藏主输入栏、其分隔线和整个 Agent 列表。`Ctrl+C` 在 Windows 有选区时复制，普通输入非空时清空、空时退出，处理态或内嵌控件中请求中断；macOS 默认鼠标选中即复制，并保留 `Cmd+C` 显式复制。
 
 历史区与 Agent 转录区按滚轮同向事件密度做有上限的突发加速：以事件自带时间戳统计最近 120 ms，1-2 个事件保持 `1x`，3-5 个为 `2x`，6 个及以上为 `3x`。方向反转、停顿超过窗口、时间戳回退、到达边界或按住 `Ctrl`/`Shift` 都会重置突发；每个事件只更新一次滚动目标，输入停止后不运行定时器或模拟惯性。边界事件继续冒泡给父容器，输入框、列表、表单和模型菜单不接入该加速。
 

@@ -153,7 +153,7 @@ MarkdownFence {
 
 .viewing #composer-shell, .viewing #separator-top,
 .viewing #separator-bottom, .viewing #input-status,
-.viewing #agent-list, .dialog-open #agent-list {
+.viewing #agent-list {
     display: none;
 }
 
@@ -194,11 +194,6 @@ MarkdownFence {
 
 .short #model-menu-scroll {
     max-height: 5;
-}
-
-ModalScreen {
-    align: center middle;
-    background: rgba(0, 0, 0, 0.62);
 }
 
 #dialog-shell {
@@ -259,7 +254,7 @@ ModalScreen {
     margin-bottom: 1;
 }
 
-#form-tabs, #form-body {
+#form-tabs {
     height: auto;
 }
 
@@ -272,16 +267,6 @@ ModalScreen {
     color: #76d7c4;
     text-style: bold;
     margin-top: 1;
-}
-
-#form-question-text {
-    height: auto;
-    color: #d8dee4;
-    margin-top: 1;
-}
-
-#form-body {
-    min-height: 3;
 }
 
 /* --- 选项预览分栏布局 --- */
@@ -511,8 +496,4 @@ ModalScreen {
 
 .compact .inline-widget #form-preview-pane {
     border-left: none;
-}
-
-.inline-widget-active #agent-list {
-    display: none;
 }

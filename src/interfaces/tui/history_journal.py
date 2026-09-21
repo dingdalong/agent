@@ -89,7 +89,6 @@ class PlainHistoryJournal:
         self._policy = policy or TuiRenderPolicy()
         budget = max(1, self._policy.journal_chars)
         self._completed_buffer = _TailTextBuffer(budget)
-        self._entry_chars = 0
         self._truncated = False
         self._active_stream: str | None = None
         self._active_buffer = _TailTextBuffer(budget)
@@ -138,7 +137,6 @@ class PlainHistoryJournal:
         """清空当前会话的降级回放缓存。"""
         budget = max(1, self._policy.journal_chars)
         self._completed_buffer = _TailTextBuffer(budget)
-        self._entry_chars = 0
         self._truncated = False
         self._active_stream = None
         self._active_buffer = _TailTextBuffer(budget)
@@ -161,14 +159,12 @@ class PlainHistoryJournal:
         self._completed_buffer.set_limit(budget)
         if self._completed_buffer.append(normalized):
             self._truncated = True
-        self._entry_chars = self._completed_buffer.tell()
 
     def _trim_active_stream(self) -> None:
         budget = max(1, self._policy.journal_chars)
         completed_limit = max(0, budget - self._active_chars)
         if self._completed_buffer.set_limit(completed_limit):
             self._truncated = True
-        self._entry_chars = self._completed_buffer.tell()
 
     @staticmethod
     def _normalize_entry(value: str) -> str:

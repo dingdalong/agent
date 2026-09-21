@@ -215,8 +215,6 @@ class AgentTuiApp(App[None]):
         self._retry_attempt = 0
         self._retry_max = 0
         self._round_entries: list[RoundEntry] = []
-        self._round_agent_type: str | None = None
-        self._round_agent_uuid: str | None = None
         self._chrome_dirty = False
         self._activity_line_count = 0
         self._activity_content_cache: str | None = None
@@ -244,7 +242,6 @@ class AgentTuiApp(App[None]):
         self._transcript_worker_task: asyncio.Task[None] | None = None
         self._transcript_merged_requests = 0
         self._transcript_active_renders = 0
-        self._transcript_max_concurrent_renders = 0
         self._transcript_incremental_uuid: str | None = None
         self._transcript_rendered_source_len = 0
         self._transcript_last_render_time = 0.0
@@ -549,7 +546,7 @@ class AgentTuiApp(App[None]):
             return
         input_visible = (
             not self.viewing_agent_id
-            and not (self.coordinator.modal_active or self.coordinator.inline_widget_active)
+            and not self.coordinator.inline_widget_active
         )
         editable = (
             self.coordinator.input_active
@@ -577,10 +574,6 @@ class AgentTuiApp(App[None]):
 
     def restore_focus(self) -> None:
         self.sync_input_state()
-        if self.coordinator.modal is not None:
-            if self.coordinator.modal.is_mounted:
-                self.coordinator.modal.restore_focus()
-            return
         if self.coordinator.inline_widget is not None:
             if self.coordinator.inline_widget.is_mounted:
                 self.coordinator.inline_widget.restore_focus()
@@ -615,7 +608,7 @@ class AgentTuiApp(App[None]):
         visible = (
             not self.coordinator.input_active
             and not self.viewing_agent_id
-            and not (self.coordinator.modal_active or self.coordinator.inline_widget_active)
+            and not self.coordinator.inline_widget_active
             and bool(self._activity or self._round_entries or self._retry_deadline is not None or task_snapshot)
         )
         self._activity_widget.display = visible
@@ -733,7 +726,7 @@ class AgentTuiApp(App[None]):
             )
             processing = (
                 not self.coordinator.input_active
-                and not (self.coordinator.modal_active or self.coordinator.inline_widget_active)
+                and not self.coordinator.inline_widget_active
                 and bool(self._activity or self._retry_deadline is not None)
             )
             if processing:
@@ -792,7 +785,7 @@ class AgentTuiApp(App[None]):
             or " " in stripped
             or not self.coordinator.input_active
             or self.viewing_agent_id
-            or (self.coordinator.modal_active or self.coordinator.inline_widget_active)
+            or self.coordinator.inline_widget_active
         ):
             self.hide_completion()
             return
@@ -979,7 +972,7 @@ class AgentTuiApp(App[None]):
         self._agent_list.display = (
             has_sub_agents
             and not self.viewing_agent_id
-            and not (self.coordinator.modal_active or self.coordinator.inline_widget_active)
+            and not self.coordinator.inline_widget_active
         )
         if (
             not has_sub_agents
@@ -1000,7 +993,7 @@ class AgentTuiApp(App[None]):
     def focus_agent_list(self) -> bool:
         if (
             self.viewing_agent_id
-            or (self.coordinator.modal_active or self.coordinator.inline_widget_active)
+            or self.coordinator.inline_widget_active
             or not self._has_sub_agents()
         ):
             return False
@@ -1076,7 +1069,7 @@ class AgentTuiApp(App[None]):
         position.follow = self._transcript_panel.scroll_y >= self._transcript_panel.max_scroll_y - 1
 
     def _schedule_transcript_refresh(self) -> None:
-        if not self.viewing_agent_id or (self.coordinator.modal_active or self.coordinator.inline_widget_active):
+        if not self.viewing_agent_id or self.coordinator.inline_widget_active:
             return
         self._save_transcript_position()
         signature = self._current_transcript_signature(self.viewing_agent_id)
@@ -1169,10 +1162,6 @@ class AgentTuiApp(App[None]):
                     self._transcript_pending = None
                     rendered = False
                     self._transcript_active_renders += 1
-                    self._transcript_max_concurrent_renders = max(
-                        self._transcript_max_concurrent_renders,
-                        self._transcript_active_renders,
-                    )
                     try:
                         rendered = await self._render_transcript_request(request)
                     except asyncio.CancelledError:
@@ -1381,7 +1370,7 @@ class AgentTuiApp(App[None]):
         )
 
     def switch_transcript(self, delta: int) -> None:
-        if (self.coordinator.modal_active or self.coordinator.inline_widget_active) or not self.viewing_agent_id:
+        if self.coordinator.inline_widget_active or not self.viewing_agent_id:
             return
         ids = [
             uuid
@@ -1417,7 +1406,7 @@ class AgentTuiApp(App[None]):
         )
 
     def close_transcript(self) -> None:
-        if not (self.coordinator.modal_active or self.coordinator.inline_widget_active):
+        if not self.coordinator.inline_widget_active:
             self.coordinator.close_transcript()
 
     def hide_transcript(self) -> None:
@@ -1576,9 +1565,6 @@ class AgentTuiApp(App[None]):
         self._set_activity(event.tool_name)
         if event.caller_uuid != self.agent_view_store.foreground_uuid:
             return
-        if not self._round_entries:
-            self._round_agent_type = event.caller_agent_type
-            self._round_agent_uuid = event.caller_uuid
         self._round_entries.append(
             RoundEntry(
                 tool_call_id=event.tool_call_id,
@@ -1604,8 +1590,6 @@ class AgentTuiApp(App[None]):
         for entry in self._round_entries:
             await self.append_output(self._round_entry_text(entry))
         self._round_entries = []
-        self._round_agent_type = None
-        self._round_agent_uuid = None
 
     def _round_entry_text(self, entry: RoundEntry) -> Text:
         text = Text()
@@ -1697,8 +1681,6 @@ class AgentTuiApp(App[None]):
         self._current_agent_type = None
         self._current_agent_uuid = None
         self._round_entries = []
-        self._round_agent_type = None
-        self._round_agent_uuid = None
 
     def _turn_elapsed(self, now: float) -> float:
         if self._turn_started is None:
@@ -1955,6 +1937,8 @@ class AgentTuiApp(App[None]):
         if not self.native_clipboard_enabled or not self._native_clipboard.supported:
             super().copy_to_clipboard(text)
             return
+        # Textual 的 App.clipboard 读取其私有 _clipboard；本路径不调用 super()，
+        # 需自行维护该本地剪贴板副本。
         self._clipboard = text
         self._clipboard_pending = text
         if self._clipboard_worker_task is None or self._clipboard_worker_task.done():
@@ -1984,7 +1968,7 @@ class AgentTuiApp(App[None]):
         normal_input = (
             self.coordinator.input_active
             and not self.viewing_agent_id
-            and not (self.coordinator.modal_active or self.coordinator.inline_widget_active)
+            and not self.coordinator.inline_widget_active
             and not self._agent_list.has_focus
         )
         if normal_input:
@@ -2000,7 +1984,7 @@ class AgentTuiApp(App[None]):
         if (
             self.coordinator.input_active
             and not self.viewing_agent_id
-            and not (self.coordinator.modal_active or self.coordinator.inline_widget_active)
+            and not self.coordinator.inline_widget_active
             and not self._composer.text
         ):
             self.coordinator.cancel_input_for_exit()
@@ -2012,7 +1996,7 @@ class AgentTuiApp(App[None]):
         if (
             not self.coordinator.input_active
             or self.viewing_agent_id
-            or (self.coordinator.modal_active or self.coordinator.inline_widget_active)
+            or self.coordinator.inline_widget_active
             or self.completion_visible
             or self._agent_list.has_focus
         ):
