@@ -150,10 +150,19 @@ TTY 只缓冲前台 Agent 当前一轮的工具。实时区优先级为”重试
 
 | 模块 | 职责 |
 |---|---|
-| `app.py` | Textual App、历史/流输出、活动区、状态栏、Agent 与转录切换 |
+| `app.py` | Textual App 组装、历史/流输出、回合状态与跨区域键盘分派 |
+| `input_area.py` | 主输入框、斜杠命令补全菜单与输入历史回溯 |
+| `event_lines.py` | 事件与会话记录到展示块的唯一投影；实时、非 TTY 与回放共用同一措辞 |
+| `session_replay.py` | 会话记录到历史条目与纯文本行的回放投影 |
+| `chrome.py` | 活动区、回合状态行、输入状态行与分隔线的分段渲染与内容签名缓存 |
+| `transcript.py` | Agent 转录面板的挂载、常驻渲染 worker、目标切换与每 Agent 滚动位置 |
+| `coordinator.py` | 内嵌交互 FIFO、转录请求与 Future 生命周期 |
+| `interactions.py` | 权限、选择、ModelMenu、组合输入与表单的内嵌控件 |
+| `history_log.py` | 单控件历史区、流式尾项替换与 resize 重排 |
 | `widgets.py` | 多行输入、历史锚定、跨视口选择补偿、系统剪贴板后端 |
-| `dialogs.py` | 权限、选择、ModelMenu、组合输入、表单与 FIFO 协调器 |
 | `plain.py` | 非 TTY 输入输出与菜单串行降级，保证无 ANSI |
+| `render_policy.py` | 渲染频率与内存预算 |
+| `provider_setup.py` | 首次 LLM Provider 配置的独立向导 App |
 | `diagnostics.py` | TUI 生命周期、降级和转录渲染的后台滚动诊断日志 |
 | `history_journal.py` | 当前前台的纯文本降级缓存；会话切换时从 `SessionRecord.view` 重建 |
 | `agent.tcss` | 宽窄和高矮窗口的响应式布局 |
@@ -170,7 +179,7 @@ TTY 的 `InteractionCoordinator` 是交互请求状态权威写入者。普通�
 
 转录是只读面板，不占用作答队列。`/agents` 创建带 future 的 `TranscriptView`，Esc 关闭后才完成该 future；Agent 列表实时查看不创建请求 future。内嵌交互控件挂载时拥有键盘，结束后转录的 UUID 和每 Agent 独立滚动位置原样恢复。权限、表单和选择期间不能进入 Agent 列表。
 
-转录数据来自 Agent 运行期间保存的原始消息，渲染层按不可信数据防御式处理：缺失或格式异常的消息、tool call 和参数会降级为可读文本，不应导致 Textual App 退出。已结束的子 Agent 在 Store 的有界历史中保留期间仍可浏览。初次打开、实时刷新和切换视图都进入同一个常驻渲染 worker；worker 串行完成当前 `Markdown.update()`，并只保留一个最新待处理目标。左右键立即更新目标索引和版本，连续输入会跳过中间展示；旧版本完成后不得恢复焦点、滚动位置或标题，关闭视图会使当前版本失效。渲染等待布局稳定期间不得采样滚动位置，避免把过渡几何覆盖到目标 Agent 的已保存位置。其他展示 worker 接收异步函数工厂，只在 worker 真正启动后创建 coroutine。
+转录数据来自 Agent 运行期间保存的原始消息，渲染层按不可信数据防御式处理：缺失或格式异常的消息、tool call 和参数会降级为可读文本，不应导致 Textual App 退出。已结束的子 Agent 在 Store 的有界历史中保留期间仍可浏览。初次打开、实时刷新和切换视图都进入同一个常驻渲染 worker；worker 串行完成当前 `Markdown.update()`，并只保留一个最新待处理目标。左右键立即更新目标索引和版本，连续输入会跳过中间展示；旧版本完成后不得恢复焦点、滚动位置或标题，关闭视图会使当前版本失效。渲染等待布局稳定期间不得采样滚动位置，避免把过渡几何覆盖到目标 Agent 的已保存位置。`app.py` 的其他展示 worker 接收异步函数工厂，只在 worker 真正启动后创建 coroutine。
 
 `UserInterface.on_event()` 先让 TTY 前端接受 `UiRequest`，成功后立即返回给事件消费者；非 TTY 仍串行读取。这样正在查看转录时，后续权限请求可马上挂载内嵌控件，而不会被 `TranscriptView` 阻塞。协调器在清理活动内嵌控件、人工等待计时和焦点后才落定对外 future。`EventBus.join()` 不等待协调器自有的内嵌交互生命周期，因此中断收束会在 join 后额外等待 `ui.wait_interactions_idle()`；UI 停止时取消活动、排队和只读请求，再退出 Textual。`/clear` 在重载 Managers、清空 Store 和创建新 Agent 前同步取消旧请求并等待交互清理，重置期间到达的新请求不会跨越 session 边界。
 

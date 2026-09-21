@@ -69,7 +69,7 @@ class ViewRequest(UiRequest):
 class PermissionMenu(MenuRequest):
     """请求 UI 读取工具权限确认，并通过 future 返回结果。
 
-    TUI 由 `tui/dialogs.py` 的 `InlineSelectionWidget` 呈现：
+    TUI 由 `tui/interactions.py` 的 `InlineSelectionWidget` 呈现：
 
         工具请求权限
           工具: shell
@@ -112,7 +112,7 @@ class InputMenu(MenuRequest):
 class ChoiceMenu(MenuRequest):
     """请求 UI 以菜单读取一次选择，通过 future 返回所选 value（空串表示取消）。
 
-    TUI 由 `tui/dialogs.py` 的 `InlineSelectionWidget` 呈现。选中行反显；
+    TUI 由 `tui/interactions.py` 的 `InlineSelectionWidget` 呈现。选中行反显；
     Esc 返回 ""（取消）。用于 resume 等通用选择器。
     """
     prompt: str = ""  # 菜单上文（打印到 scrollback 的提示）
@@ -127,7 +127,7 @@ class ChoiceMenu(MenuRequest):
 class ModelMenu(MenuRequest):
     """模型双槽位与推理强度的单屏三轴选择器。
 
-    TUI 由 `tui/dialogs.py` 的 `InlineModelSelectionWidget` 呈现：
+    TUI 由 `tui/interactions.py` 的 `InlineModelSelectionWidget` 呈现：
     ↑↓ 移动当前激活槽位的模型选择、←→ 选角色级推理强度、Tab 切换激活槽位
     （default ⇄ fast，光标随之跳到该槽位已选模型）、Enter 一次提交、Esc 取消：
 
@@ -202,7 +202,7 @@ class FormQuestion:
 class FormMenu(MenuRequest):
     """请求 UI 以单屏表单读取多个问题的作答，通过 future 返回 JSON 编码的答案列表（空串表示取消）。
 
-    TUI 由 `tui/dialogs.py` 的 `InlineFormWidget` 以内嵌形式呈现：顶部标签栏（已答 ☑ 未答 ☐
+    TUI 由 `tui/interactions.py` 的 `InlineFormWidget` 以内嵌形式呈现：顶部标签栏（已答 ☑ 未答 ☐
     + header 简介 + 末尾「提交」）、题干、单选 ●/○ 或多选 [x]/[ ] 选项行（推荐项带 (推荐)
     后缀、可带暗色参考说明）、选项末尾常驻「其它」输入行与可切换的讨论输入行：
 
@@ -259,7 +259,7 @@ class ChoiceInputMenu(MenuRequest):
     """请求 UI 以「选项列表 + 一行可编辑输入」读取一次作答，通过 future 返回 JSON
     {"choice": "<value|''>", "text": "<typed|''>"} 串（空串表示取消）。
 
-    TUI 由 `tui/dialogs.py` 的 `InlineChoiceInputWidget` 呈现：上文为调用方 prompt；
+    TUI 由 `tui/interactions.py` 的 `InlineChoiceInputWidget` 呈现：上文为调用方 prompt；
     选项行（❯ 序号. 标签，可带说明副行）与自由输入位于同一内嵌控件。
     布局如下：
 

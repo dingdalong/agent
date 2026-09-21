@@ -311,6 +311,32 @@ class KeyboardListItem(ListItem):
         event.stop()
 
 
+class _NullInputArea:
+    """输入区控制器缺失时的空操作替身。"""
+
+    @property
+    def completion_visible(self) -> bool:
+        return False
+
+    def apply_completion(self) -> bool:
+        return False
+
+    def next_completion(self) -> bool:
+        return False
+
+    def previous_completion(self) -> bool:
+        return False
+
+    def hide_completion(self) -> None:
+        return None
+
+    def history_previous(self) -> bool:
+        return False
+
+    def history_next(self) -> bool:
+        return False
+
+
 class Composer(KeyboardTextArea):
     """主输入框：Enter 提交，Shift+Enter/Ctrl+J 换行。支持鼠标拖选复制。"""
 
@@ -336,7 +362,7 @@ class Composer(KeyboardTextArea):
             self.text = text
 
     def action_submit(self) -> None:
-        if getattr(self.app, "apply_completion", lambda: False)():
+        if self._input_area().apply_completion():
             return
         self.post_message(self.Submitted(self.text))
 
@@ -345,40 +371,46 @@ class Composer(KeyboardTextArea):
             self.insert("\n")
 
     def action_tab_or_complete(self) -> None:
-        if not getattr(self.app, "select_next_completion", lambda: False)():
+        if not self._input_area().next_completion():
             self.app.action_focus_next()
 
     def action_escape_or_clear(self) -> None:
-        getattr(self.app, "hide_completion", lambda: None)()
+        self._input_area().hide_completion()
 
     def action_cursor_down(self, select: bool = False) -> None:
-        if getattr(self.app, "completion_visible", False):
-            self.app.select_next_completion()
+        input_area = self._input_area()
+        if input_area.completion_visible:
+            input_area.next_completion()
             return
-        if getattr(self.app, "history_next", lambda: False)():
+        if input_area.history_next():
             return
         lines = self.text.split("\n")
         row, column = self.cursor_location
         if row == len(lines) - 1 and column >= len(lines[-1]):
-            if getattr(self.app, "focus_agent_list", lambda: False)():
+            if self.app.focus_agent_list():
                 return
         super().action_cursor_down(select)
 
     def action_cursor_up(self, select: bool = False) -> None:
-        if getattr(self.app, "completion_visible", False):
-            self.app.select_previous_completion()
+        input_area = self._input_area()
+        if input_area.completion_visible:
+            input_area.previous_completion()
             return
         location = self.cursor_location
         if not select and self.navigator.is_first_wrapped_line(location):
             if location == (0, 0):
                 # 已在全文开头：进入历史回溯
-                if getattr(self.app, "history_prev", lambda: False)():
+                if input_area.history_previous():
                     return
             else:
                 # 第一视觉行但不在全文开头：先跳到全文开头
                 self.move_cursor((0, 0))
                 return
         super().action_cursor_up(select)
+
+    def _input_area(self):
+        """返回输入区控制器；输入框脱离 App 单独构造时退化为空操作。"""
+        return getattr(self.app, "input_area", _NullInputArea())
 
 
 class AgentList(ListView):
@@ -393,13 +425,23 @@ class AgentList(ListView):
     ]
 
     def action_return_to_input(self) -> None:
-        getattr(self.app, "focus_composer", lambda: None)()
+        self.app.focus_composer()
 
     def action_cursor_up(self) -> None:
         if self.index is None or self.index <= 0:
             self.action_return_to_input()
             return
         super().action_cursor_up()
+
+
+class _NullTranscript:
+    """转录控制器缺失时的空操作替身。"""
+
+    def switch(self, delta: int) -> None:
+        del delta
+
+    def close(self) -> None:
+        return None
 
 
 class TranscriptPanel(PointerScrollMixin, VerticalScroll, can_focus=True):
@@ -422,13 +464,17 @@ class TranscriptPanel(PointerScrollMixin, VerticalScroll, can_focus=True):
         self.scroll_page_down(animate=False)
 
     def action_previous_agent(self) -> None:
-        getattr(self.app, "switch_transcript", lambda _delta: None)(-1)
+        self._transcript().switch(-1)
 
     def action_next_agent(self) -> None:
-        getattr(self.app, "switch_transcript", lambda _delta: None)(1)
+        self._transcript().switch(1)
 
     def action_close_transcript(self) -> None:
-        getattr(self.app, "close_transcript", lambda: None)()
+        self._transcript().close()
+
+    def _transcript(self):
+        """返回转录控制器；面板脱离 App 单独构造时退化为空操作。"""
+        return getattr(self.app, "transcript", _NullTranscript())
 
 
 class NativeClipboard:

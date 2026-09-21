@@ -28,11 +28,13 @@ from src.events.types import (
 )
 from src.interfaces.agent_view_store import AgentViewStore
 from src.interfaces.base import UserInterface
+from src.interfaces.status_presenter import agent_label
 from src.interfaces.turn_clock import TurnClock
+from src.interfaces.tui import session_replay
 from src.interfaces.tui.app import AgentTuiApp
 from src.interfaces.tui.diagnostics import TuiDiagnostics
-from src.common.tool_display import permission_line
-from src.interfaces.tui.dialogs import PendingInteractions
+from src.interfaces.tui.coordinator import PendingInteractions
+from src.interfaces.tui.event_lines import DisplayBlock, blocks_for_event, stream_label
 from src.interfaces.tui.history_journal import PlainHistoryJournal
 from src.interfaces.tui.render_policy import TuiRenderPolicy
 from src.common.session_state import SessionState
@@ -227,6 +229,7 @@ class TextualInterface(UserInterface):
         termination: TuiTermination,
         app: AgentTuiApp | None,
     ) -> None:
+        response_active, thinking_active = getattr(app, "active_streams", (False, False))
         fields = {
             "termination_kind": termination.kind,
             "task_exception_type": (
@@ -249,9 +252,11 @@ class TextualInterface(UserInterface):
             "app_running": termination.app_running,
             "stopping": self._stopping,
             "ui_ready": self._ui_ready.is_set(),
-            "viewing_transcript": bool(getattr(app, "viewing_agent_id", None)),
-            "response_stream_active": getattr(app, "_response_stream", None) is not None,
-            "thinking_stream_active": getattr(app, "_thinking_stream", None) is not None,
+            "viewing_transcript": bool(
+                getattr(getattr(app, "transcript", None), "viewing_agent_id", None)
+            ),
+            "response_stream_active": response_active,
+            "thinking_stream_active": thinking_active,
         }
         if termination.error is not None:
             self.diagnostics.record_exception(
@@ -424,10 +429,6 @@ class TextualInterface(UserInterface):
             return []
         return self._input_history_provider()
 
-    def refresh_input_history(self) -> None:
-        if self._ui_alive() and self._app is not None:
-            self._app.call_later(self._app.refresh_input_history)
-
     async def replace_session_state(self, state: SessionState) -> None:
         """切换聊天历史的数据源并水合当前前台。"""
         records = state.visible_records()
@@ -435,25 +436,8 @@ class TextualInterface(UserInterface):
             await self._app.invoke(lambda: self._app.replace_session_history(records))
             return
         self.history_journal.clear()
-        for record in records:
-            view = record.view
-            if view is None:
-                continue
-            data = view.data
-            if view.kind == "user":
-                self.history_journal.append_entry(f"› {data.get('text', '')}")
-            elif view.kind == "output":
-                self.history_journal.append_entry(str(data.get("content", "")))
-            elif view.kind == "assistant":
-                if data.get("thinking"):
-                    self.history_journal.append_entry(str(data["thinking"]))
-                if data.get("content"):
-                    self.history_journal.append_entry(str(data["content"]))
-            elif view.kind == "tool":
-                started = data.get("started", {})
-                completed = data.get("completed", {})
-                name = started.get("tool_name") or completed.get("tool_name") or "tool"
-                self.history_journal.append_entry(f"{name}: {completed.get('result_preview', '')}")
+        for line in session_replay.plain_lines(records):
+            self.history_journal.append_entry(line)
 
     def cancel_active_input(self) -> bool:
         if self.is_tty and self._app is not None:
@@ -463,7 +447,7 @@ class TextualInterface(UserInterface):
                 self._app.coordinator.active
                 or self._app.coordinator.queue
                 or self._app.coordinator.view_request
-                or self._app.viewing_agent_id
+                or self._app.transcript.viewing_agent_id
             )
             pending = self._pending_cancel
             if pending is None or pending.done():
@@ -553,6 +537,11 @@ class TextualInterface(UserInterface):
             return
         if not await self._invoke(lambda: self._app.append_output(message, markdown)):
             self._plain.write(message)
+
+    def _write_blocks(self, blocks: list[DisplayBlock]) -> None:
+        """降级日志只承载无样式文本：样式由 `plain` 投影丢弃，逐块独占一行。"""
+        for block in blocks:
+            self._plain.write(block.plain, end="\n")
 
     async def _read_input(
         self,
@@ -645,7 +634,8 @@ class TextualInterface(UserInterface):
             if await self._invoke(lambda: self._app.on_response_delta(event, content)):
                 return
         if not self._plain_response_active:
-            self._plain.write(f"\n› {self._stream_label(event, '助手')}\n")
+            label = stream_label("response", event.caller_agent_type, event.caller_uuid)
+            self._plain.write(f"\n› {label}\n")
             self._plain_response_active = True
         self._plain.write(content)
 
@@ -654,7 +644,8 @@ class TextualInterface(UserInterface):
             if await self._invoke(lambda: self._app.on_thinking_delta(event, content)):
                 return
         if not self._plain_thinking_active:
-            self._plain.write(f"\n› {self._stream_label(event, '思考')}\n")
+            label = stream_label("thinking", event.caller_agent_type, event.caller_uuid)
+            self._plain.write(f"\n› {label}\n")
             self._plain_thinking_active = True
         self._plain.write(content)
 
@@ -667,54 +658,31 @@ class TextualInterface(UserInterface):
             if await self._invoke(lambda: self._app.on_llm_retrying(event)):
                 return
         remaining = max(0, math.ceil(event.wait_seconds))
-        self._plain.write(
-            f"⚠ LLM 调用失败 [{event.error_kind}] {event.safe_message}；"
-            f"{remaining}秒后重试 ({event.attempt}/{event.max_attempts})\n"
-        )
+        self._write_blocks(blocks_for_event(event, retry_countdown=remaining))
 
     async def on_llm_length_retrying(self, event: LLMLengthRetrying) -> None:
         if self.is_tty:
             if await self._invoke(lambda: self._app.on_llm_length_retrying(event)):
                 return
-        action = {
-            "regenerate-lower-effort": f"降低推理力度至 {event.effort} 后重生成",
-            "regenerate-compress": "压缩思考后重生成",
-        }.get(event.strategy, "从中断处继续生成")
-        self._plain.write(
-            f"⚠ 输出截断（{event.truncation_kind}）：{action} "
-            f"({event.attempt}/{event.max_attempts})\n"
-        )
+        self._write_blocks(blocks_for_event(event))
 
     async def on_llm_call_failed(self, event: LLMCallFailed) -> None:
         if self.is_tty:
             if await self._invoke(lambda: self._app.on_llm_call_failed(event)):
                 return
-        identifiers = []
-        if event.request_id:
-            identifiers.append(f"request_id={event.request_id}")
-        if event.diagnostic_id:
-            identifiers.append(f"diagnostic_id={event.diagnostic_id}")
-        suffix = f" ({', '.join(identifiers)})" if identifiers else ""
-        self._plain.write(
-            f"✘ LLM 调用失败 [{event.error_kind}] {event.safe_message}{suffix}\n"
-        )
+        self._write_blocks(blocks_for_event(event))
 
     async def on_compact_delta(self, event: CompactDelta) -> None:
         if self.is_tty:
             if await self._invoke(lambda: self._app.on_compact_delta(event)):
                 return
-        self._plain.write(f"[compact] {event.content.strip() or 'context'}\n")
+        self._write_blocks(blocks_for_event(event))
 
     async def on_permission_notice(self, event: PermissionNotice) -> None:
         if self.is_tty:
             if await self._invoke(lambda: self._app.on_permission_notice(event)):
                 return
-        self._plain.write(
-            permission_line(
-                event.status, event.tool_name, event.detail, event.decision_source
-            )
-            + "\n"
-        )
+        self._write_blocks(blocks_for_event(event))
 
     async def on_tool_call_started(self, event: ToolCallStarted) -> None:
         if self.is_tty:
@@ -762,18 +730,4 @@ class TextualInterface(UserInterface):
     ) -> None:
         if self.is_tty or not caller_agent_type:
             return
-        short_uuid = caller_uuid.split("-")[0] if caller_uuid else ""
-        label = f"{caller_agent_type} {short_uuid}" if short_uuid else caller_agent_type
-        self._plain.write(f"\n› {label}\n")
-
-    @staticmethod
-    def _stream_label(event: ResponseDelta | ThinkingDelta, fallback: str) -> str:
-        if not event.caller_agent_type:
-            return fallback
-        short_uuid = event.caller_uuid.split("-")[0] if event.caller_uuid else ""
-        label = (
-            f"{event.caller_agent_type} {short_uuid}"
-            if short_uuid
-            else event.caller_agent_type
-        )
-        return f"{fallback}({label})"
+        self._plain.write(f"\n› {agent_label(caller_agent_type, caller_uuid)}\n")

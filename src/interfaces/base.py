@@ -219,15 +219,6 @@ class UserInterface(ABC):
 
         pass
 
-    def refresh_input_history(self) -> None:
-        """会话切换（如 /resume）后通知 UI 重新拉取输入历史。
-
-        Returns:
-            None.
-        """
-
-        pass
-
     async def replace_session_state(self, state: "SessionState") -> None:
         """用会话状态的可见投影替换当前聊天历史。"""
 

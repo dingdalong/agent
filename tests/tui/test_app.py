@@ -3,9 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import gc
-import warnings
-from types import SimpleNamespace
 
 import pytest
 from rich.text import Text
@@ -33,9 +30,8 @@ from src.events.types import (
 )
 from src.interfaces.agent_view_store import AgentViewStore
 from src.interfaces.turn_clock import TurnClock
-import src.interfaces.tui.app as tui_app_module
-from src.interfaces.tui.app import AgentTuiApp, _rich_text_signature
-from src.interfaces.tui.dialogs import (
+from src.interfaces.tui.app import AgentTuiApp
+from src.interfaces.tui.interactions import (
     InlineFormWidget,
     InlineSelectionWidget,
 )
@@ -48,383 +44,14 @@ from src.interfaces.tui.widgets import (
     SelectionStatic,
 )
 from src.common.session_state import SessionState
-
-
-def _track_render_concurrency(app) -> list[int]:
-    """测试辅助：记录转录渲染的最大并发数，返回 [active, peak]。"""
-    state = [0, 0]
-    original = app._render_transcript_request
-
-    async def tracked(request):
-        state[0] += 1
-        state[1] = max(state[1], state[0])
-        try:
-            return await original(request)
-        finally:
-            state[0] -= 1
-
-    app._render_transcript_request = tracked
-    return state
-
-
-async def _follow_newest(history) -> None:
-    """测试辅助：沿滚到底部的用户路径翻到最新分页并跟随尾部。"""
-    while history.has_newer:
-        history._shift_page("newer")
-        await history.wait_for_reflow()
-    history.scroll_end(animate=False, immediate=True)
-    history.anchor()
-    await history.wait_for_reflow()
-
-
-def _app(
-    store: AgentViewStore | None = None,
-    *,
-    platform: str = "darwin",
-    get_model_info=None,
-    render_policy: TuiRenderPolicy | None = None,
-) -> AgentTuiApp:
-    return AgentTuiApp(
-        store or AgentViewStore(),
-        [("clear", "清理会话"), ("agents", "查看 Agent")],
-        TurnClock(),
-        lambda: None,
-        lambda: False,
-        lambda: None,
-        get_model_info=get_model_info,
-        platform_name=platform,
-        native_clipboard=False,
-        render_policy=render_policy,
-    )
-
-
-async def _open_form(app, pilot, questions, **kwargs):
-    """提交 FormMenu 并等待挂载，返回请求对象。"""
-    loop = asyncio.get_running_loop()
-    form = FormMenu(
-        timestamp=1.0,
-        source="test",
-        questions=questions,
-        future=loop.create_future(),
-        **kwargs,
-    )
-    await app.coordinator.submit(form)
-    await pilot.pause()
-    return form
-
-
-def _assert_regions_do_not_overlap(app: AgentTuiApp) -> None:
-    regions = [
-        widget.region
-        for widget in app.screen.children
-        if widget.display and widget.region.height
-    ]
-    for upper, lower in zip(regions, regions[1:]):
-        assert upper.bottom <= lower.y, (upper, lower)
-    assert regions[-1].bottom <= app.screen.size.height
-
-
-async def _wait_for_transcript_render(app: AgentTuiApp, pilot) -> None:
-    for _ in range(200):
-        if (
-            app._transcript_pending is None
-            and app._transcript_active_renders == 0
-            and app._rendered_transcript_id == app.viewing_agent_id
-        ):
-            await pilot.pause()
-            return
-        await pilot.pause(0.01)
-    raise AssertionError("transcript render did not become idle")
-
-
-@pytest.mark.integration
-def test_malformed_completed_transcript_is_safe_and_switchable() -> None:
-    async def scenario() -> None:
-        store = AgentViewStore()
-        for uuid in ("worker-0", "worker-1"):
-            store.record(SubagentLifecycle(
-                timestamp=1.0,
-                source="test",
-                agent_uuid=uuid,
-                agent_type="worker",
-                phase="end",
-                messages=[
-                    {"role": "assistant", "tool_calls": [None, {"function": None}]},
-                    "unexpected message",
-                ],
-            ))
-        store.flush_completed()
-        app = _app(store)
-        async with app.run_test(size=(100, 30)) as pilot:
-            await app.open_transcript("worker-0", ["worker-0", "worker-1"], invoked=False)
-            await pilot.pause()
-            app.switch_transcript(1)
-            await app.workers.wait_for_complete()
-            await pilot.pause()
-            assert app.is_running
-            assert app.viewing_agent_id == "worker-1"
-            assert "unexpected message" in app._transcript_content.source
-
-    asyncio.run(scenario())
-
-
-@pytest.mark.integration
-def test_rapid_transcript_switches_coalesce_without_cancelling_render() -> None:
-    async def scenario() -> None:
-        store = AgentViewStore()
-        for uuid in ("worker-0", "worker-1"):
-            store.record(SubagentLifecycle(
-                timestamp=1.0,
-                source="test",
-                agent_uuid=uuid,
-                agent_type="worker",
-                phase="end",
-                messages=[{"role": "assistant", "content": f"transcript {uuid}"}],
-            ))
-        store.flush_completed()
-        app = _app(store)
-        renders = _track_render_concurrency(app)
-        async with app.run_test(size=(100, 30)) as pilot:
-            await app.open_transcript(
-                "worker-0",
-                ["worker-0", "worker-1"],
-                invoked=False,
-            )
-            for _ in range(50):
-                app.switch_transcript(1)
-                app.switch_transcript(-1)
-            await _wait_for_transcript_render(app, pilot)
-            assert app.viewing_agent_id == "worker-0"
-            assert app._rendered_transcript_id == "worker-0"
-            assert renders[1] == 1
-            assert app._transcript_merged_requests > 0
-            assert app.is_running
-
-    with warnings.catch_warnings(record=True) as captured:
-        warnings.simplefilter("always")
-        asyncio.run(scenario())
-        gc.collect()
-    assert not [
-        warning
-        for warning in captured
-        if "coroutine" in str(warning.message)
-        and "was never awaited" in str(warning.message)
-    ]
-
-
-@pytest.mark.integration
-def test_transcript_tick_does_not_overwrite_position_during_render(monkeypatch) -> None:
-    async def scenario() -> None:
-        store = AgentViewStore()
-        content = "\n\n".join(f"paragraph {index}" for index in range(50))
-        for uuid in ("worker-0", "worker-1"):
-            store.record(SubagentLifecycle(
-                timestamp=1.0,
-                source="test",
-                agent_uuid=uuid,
-                agent_type="worker",
-                phase="start",
-            ))
-            store.record(ResponseDelta(
-                timestamp=1.0,
-                source="test",
-                caller_uuid=uuid,
-                caller_agent_type="worker",
-                content=content,
-            ))
-
-        app = _app(store)
-        async with app.run_test(size=(100, 30)) as pilot:
-            await app.open_transcript(
-                "worker-0",
-                ["worker-0", "worker-1"],
-                invoked=False,
-            )
-            await _wait_for_transcript_render(app, pilot)
-            app._transcript_panel.scroll_to(y=0, animate=False, immediate=True)
-            await pilot.pause()
-            app._save_transcript_position()
-            assert app._transcript_positions["worker-0"].scroll_y == 0
-
-            app.switch_transcript(1)
-            await _wait_for_transcript_render(app, pilot)
-            assert app._transcript_panel.scroll_y > 0
-
-            wait_for_refresh = app._transcript_panel.wait_for_refresh
-
-            async def wait_for_refresh_after_tick() -> None:
-                app._tick()
-                await wait_for_refresh()
-
-            monkeypatch.setattr(
-                app._transcript_panel,
-                "wait_for_refresh",
-                wait_for_refresh_after_tick,
-            )
-            app.switch_transcript(-1)
-            await _wait_for_transcript_render(app, pilot)
-
-            assert app._transcript_positions["worker-0"].scroll_y == 0
-            assert app._transcript_panel.scroll_y == 0
-
-    asyncio.run(scenario())
-
-
-@pytest.mark.integration
-def test_large_transcript_switching_stays_responsive_during_response_stream() -> None:
-    async def scenario() -> None:
-        store = AgentViewStore()
-        large = "\n\n".join(
-            f"## section {index}\n\n```python\nvalue_{index} = {index}\n```"
-            for index in range(80)
-        )
-        for uuid in ("worker-0", "worker-1"):
-            store.record(SubagentLifecycle(
-                timestamp=1.0,
-                source="test",
-                agent_uuid=uuid,
-                agent_type="worker",
-                phase="end",
-                messages=[{"role": "assistant", "content": f"{uuid}\n\n{large}"}],
-            ))
-        store.flush_completed()
-        app = _app(store)
-        renders = _track_render_concurrency(app)
-        event = ResponseDelta(
-            timestamp=2.0,
-            source="test",
-            caller_uuid="main",
-            caller_agent_type="main",
-            content="",
-        )
-        async with app.run_test(size=(100, 30)) as pilot:
-            await app.open_transcript(
-                "worker-0",
-                ["worker-0", "worker-1"],
-                invoked=False,
-            )
-
-            async def stream_response() -> None:
-                for index in range(60):
-                    await app.on_response_delta(event, f"stream {index}\n\n")
-                    await asyncio.sleep(0)
-
-            async def switch_agents() -> None:
-                for _ in range(30):
-                    app.switch_transcript(1)
-                    await asyncio.sleep(0)
-                    app.switch_transcript(-1)
-                    await asyncio.sleep(0)
-
-            await asyncio.wait_for(
-                asyncio.gather(stream_response(), switch_agents()),
-                timeout=8,
-            )
-            await _wait_for_transcript_render(app, pilot)
-            assert app.viewing_agent_id == "worker-0"
-            assert app._rendered_transcript_id == "worker-0"
-            assert renders[1] == 1
-            assert app._transcript_worker_task is not None
-            assert not app._transcript_worker_task.done()
-            assert app.is_running
-
-    asyncio.run(scenario())
-
-
-@pytest.mark.integration
-def test_mouse_down_ignores_detached_markdown_hit(monkeypatch) -> None:
-    async def scenario() -> None:
-        app = _app()
-        async with app.run_test(size=(100, 30)) as pilot:
-            markdown = Markdown("old paragraph")
-            await app._history.mount(markdown)
-            await pilot.pause()
-            detached = markdown.query_one("MarkdownParagraph")
-
-            await markdown.update("replacement paragraph")
-            await pilot.pause()
-            assert not detached.is_attached
-
-            monkeypatch.setattr(
-                app.screen,
-                "get_widget_and_offset_at",
-                lambda _x, _y: (detached, Offset(0, 0)),
-            )
-            region = app._history.content_region
-            app.screen._forward_event(events.MouseDown(
-                None,
-                region.x,
-                region.y,
-                0,
-                0,
-                1,
-                False,
-                False,
-                False,
-                screen_x=region.x,
-                screen_y=region.y,
-            ))
-
-            assert app.screen._select_state is None
-            assert app.is_running
-
-    asyncio.run(scenario())
-
-
-@pytest.mark.integration
-def test_completed_agents_do_not_steal_focus_from_open_transcript() -> None:
-    async def scenario() -> None:
-        store = AgentViewStore()
-        store.record(SubagentLifecycle(
-            timestamp=1.0,
-            source="test",
-            agent_uuid="worker-0",
-            agent_type="worker",
-            phase="start",
-        ))
-        app = _app(store)
-        async with app.run_test(size=(100, 30)) as pilot:
-            await app.coordinator.open_live_transcript("worker-0")
-            await pilot.pause()
-            store.record(SubagentLifecycle(
-                timestamp=2.0,
-                source="test",
-                agent_uuid="worker-0",
-                agent_type="worker",
-                phase="end",
-            ))
-            store.flush_completed()
-            app._schedule_agent_refresh()
-            await app.workers.wait_for_complete()
-            await pilot.pause()
-            assert app.viewing_agent_id == "worker-0"
-            assert app._transcript_panel.has_focus
-
-    asyncio.run(scenario())
-
-
-@pytest.mark.integration
-def test_stale_transcript_ids_are_safe() -> None:
-    async def scenario() -> None:
-        store = AgentViewStore()
-        store.record(SubagentLifecycle(
-            timestamp=1.0,
-            source="test",
-            agent_uuid="worker-0",
-            agent_type="worker",
-            phase="end",
-        ))
-        store.flush_completed()
-        app = _app(store)
-        async with app.run_test(size=(100, 30)) as pilot:
-            await app.open_transcript("worker-0", ["missing"], invoked=False)
-            app._transcript_ids = ["missing"]
-            app.switch_transcript(1)
-            await pilot.pause()
-            assert app.viewing_agent_id is None
-            assert app.is_running
-
-    asyncio.run(scenario())
+from tests.tui.support import (
+    _app,
+    _assert_regions_do_not_overlap,
+    _follow_newest,
+    _open_form,
+    _track_render_concurrency,
+    _wait_for_transcript_render,
+)
 
 
 @pytest.mark.integration
@@ -465,45 +92,45 @@ def test_responsive_input_history_and_ctrl_c() -> None:
             request = InputMenu(timestamp=1.0, source="test", prompt="输入", future=future)
             assert await app.coordinator.submit(request)
             await pilot.pause()
-            assert app._composer_shell.region.height == 1
-            assert app._composer.region.height == app._composer_shell.content_region.height
-            assert app._composer.has_focus
+            assert app.input_area.shell.region.height == 1
+            assert app.input_area.composer.region.height == app.input_area.shell.content_region.height
+            assert app.input_area.composer.has_focus
             app.screen.set_focus(None)
             app.post_message(events.AppFocus())
             await pilot.pause()
-            assert app._composer.has_focus
-            app._composer.load_text("abcd")
-            app._composer.move_cursor((0, 4))
+            assert app.input_area.composer.has_focus
+            app.input_area.composer.load_text("abcd")
+            app.input_area.composer.move_cursor((0, 4))
             await pilot.click(app._history)
             await pilot.pause()
-            assert app._composer.has_focus
+            assert app.input_area.composer.has_focus
             await pilot.click(app._status)
             await pilot.pause()
-            assert app._composer.has_focus
-            await pilot.click(app._composer, offset=(0, 0))
+            assert app.input_area.composer.has_focus
+            await pilot.click(app.input_area.composer, offset=(0, 0))
             await pilot.pause()
-            assert app._composer.has_focus
+            assert app.input_area.composer.has_focus
             # 放开鼠标后，点击左上角会把光标定位到行首（不再保持原位）
-            assert app._composer.cursor_location == (0, 0)
-            app._composer.load_text("\n".join(str(index) for index in range(9)))
+            assert app.input_area.composer.cursor_location == (0, 0)
+            app.input_area.composer.load_text("\n".join(str(index) for index in range(9)))
             await pilot.pause()
-            assert app._composer_shell.styles.height.value == 8
-            app._composer.clear()
+            assert app.input_area.shell.styles.height.value == 8
+            app.input_area.composer.clear()
             await pilot.pause()
-            assert app._composer_shell.styles.height.value == 1
+            assert app.input_area.shell.styles.height.value == 1
             # 软折行（无显式 \n）也应撑高输入栏：视觉行数 = wrapped_document.height
-            app._composer.load_text("a" * 500)
+            app.input_area.composer.load_text("a" * 500)
             await pilot.pause()
-            expected_height = min(8, max(1, app._composer.wrapped_document.height))
+            expected_height = min(8, max(1, app.input_area.composer.wrapped_document.height))
             assert expected_height > 1
-            assert app._composer_shell.styles.height.value == expected_height
-            app._composer.clear()
+            assert app.input_area.shell.styles.height.value == expected_height
+            app.input_area.composer.clear()
             await pilot.pause()
-            assert app._composer_shell.styles.height.value == 1
+            assert app.input_area.shell.styles.height.value == 1
             await pilot.press("h", "i", "shift+enter", "x")
-            assert app._composer.text == "hi\nx"
-            assert app._composer_shell.styles.height.value == 2
-            assert app._composer.region.height == 2
+            assert app.input_area.composer.text == "hi\nx"
+            assert app.input_area.shell.styles.height.value == 2
+            assert app.input_area.composer.region.height == 2
             await pilot.press("enter")
             await pilot.pause()
             assert await future == "hi\nx"
@@ -561,14 +188,14 @@ def test_keyboard_text_areas_keep_cursor_visible_without_blinking(monkeypatch) -
 
             composer_refreshes: list[tuple[int, int]] = []
             monkeypatch.setattr(
-                app._composer,
+                app.input_area.composer,
                 "refresh_lines",
                 lambda start, count=1: composer_refreshes.append((start, count)),
             )
-            assert app._composer.has_focus
-            assert app._composer.show_cursor
-            assert app._composer._draw_cursor
-            assert not app._composer.cursor_blink
+            assert app.input_area.composer.has_focus
+            assert app.input_area.composer.show_cursor
+            assert app.input_area.composer._draw_cursor
+            assert not app.input_area.composer.cursor_blink
             await pilot.pause(0.55)
             assert composer_refreshes == []
 
@@ -600,102 +227,6 @@ def test_keyboard_text_areas_keep_cursor_visible_without_blinking(monkeypatch) -
             await pilot.pause()
 
     asyncio.run(scenario())
-
-
-@pytest.mark.integration
-def test_repeated_chrome_render_skips_unchanged_content(monkeypatch) -> None:
-    async def scenario() -> None:
-        app = _app()
-        async with app.run_test(size=(100, 32)):
-            app._tick_timer.pause()
-            monkeypatch.setattr(
-                tui_app_module,
-                "time",
-                SimpleNamespace(monotonic=lambda: 10.0),
-            )
-            app._set_activity("回应中")
-            app._render_activity()
-            app._render_status()
-
-            activity_updates: list[tuple[str, bool]] = []
-            status_updates: list[Text] = []
-            monkeypatch.setattr(
-                app._activity_widget,
-                "update",
-                lambda content, *, layout=True: activity_updates.append(
-                    (str(content), layout)
-                ),
-            )
-            monkeypatch.setattr(
-                app._status,
-                "update",
-                lambda content, *, layout=True: status_updates.append(content),
-            )
-
-            for _ in range(6):
-                app._render_activity()
-                app._render_status()
-            assert activity_updates == []
-            assert status_updates == []
-
-            app._set_activity("思考中")
-            app._render_activity()
-            assert len(activity_updates) == 1
-            app.get_plan_state = lambda: True
-            app._render_status()
-            assert len(status_updates) == 1
-
-    asyncio.run(scenario())
-
-
-@pytest.mark.integration
-def test_ask_user_ticks_do_not_repeat_static_updates(monkeypatch) -> None:
-    async def scenario() -> None:
-        app = _app()
-        async with app.run_test(size=(100, 32)) as pilot:
-            app._tick_timer.pause()
-            app._set_activity("回应中")
-            form = await _open_form(
-                app,
-                pilot,
-                [FormQuestion(question="模式", options=[("safe", "安全")])],
-            )
-            app.refresh_chrome()
-
-            activity_updates: list[str] = []
-            status_updates: list[Text] = []
-            monkeypatch.setattr(
-                app._activity_widget,
-                "update",
-                lambda content, *, layout=True: activity_updates.append(str(content)),
-            )
-            monkeypatch.setattr(
-                app._status,
-                "update",
-                lambda content, *, layout=True: status_updates.append(content),
-            )
-
-            for _ in range(6):
-                app._tick()
-            assert activity_updates == []
-            assert status_updates == []
-
-            app.get_plan_state = lambda: True
-            app._tick()
-            assert len(status_updates) == 1
-
-            form.future.cancel()
-            await pilot.pause()
-
-    asyncio.run(scenario())
-
-
-def test_rich_text_signature_includes_base_style() -> None:
-    red = Text("same", style="red")
-    blue = Text("same", style="blue")
-
-    assert red == blue
-    assert _rich_text_signature(red) != _rich_text_signature(blue)
 
 
 @pytest.mark.integration
@@ -986,7 +517,7 @@ def test_keyboard_focus_moves_between_composer_agent_list_and_transcript() -> No
             await app.coordinator.submit(request)
             await pilot.pause(0.2)
 
-            assert app._composer.has_focus
+            assert app.input_area.composer.has_focus
             await pilot.press("down")
             assert app._agent_list.has_focus
             assert app._main_focus_target == "agent_list"
@@ -998,32 +529,32 @@ def test_keyboard_focus_moves_between_composer_agent_list_and_transcript() -> No
             await pilot.click(app._agent_list.children[0])
             await pilot.pause()
             assert app._agent_list.has_focus
-            assert app.viewing_agent_id is None
+            assert app.transcript.viewing_agent_id is None
 
             await pilot.press("up")
-            assert app._composer.has_focus
+            assert app.input_area.composer.has_focus
             assert app._main_focus_target == "composer"
 
             await pilot.press("g", "o", "enter")
             await pilot.pause()
             assert await request.future == "go"
             assert not app.coordinator.input_active
-            assert app._composer.read_only
-            assert app._composer.has_focus
-            assert app._composer.show_cursor
-            assert app._composer._draw_cursor
-            assert app._composer.text == ""
+            assert app.input_area.composer.read_only
+            assert app.input_area.composer.has_focus
+            assert app.input_area.composer.show_cursor
+            assert app.input_area.composer._draw_cursor
+            assert app.input_area.composer.text == ""
 
             await pilot.press("x", "shift+enter", "enter")
             await pilot.pause()
-            assert app._composer.text == ""
-            assert app._composer.has_focus
+            assert app.input_area.composer.text == ""
+            assert app.input_area.composer.has_focus
 
             await pilot.press("down")
             assert app._agent_list.has_focus
             assert app._main_focus_target == "agent_list"
-            assert app._composer.show_cursor
-            assert not app._composer._draw_cursor
+            assert app.input_area.composer.show_cursor
+            assert not app.input_area.composer._draw_cursor
             app.post_message(events.AppFocus())
             await pilot.pause()
             assert app._agent_list.has_focus
@@ -1038,7 +569,7 @@ def test_keyboard_focus_moves_between_composer_agent_list_and_transcript() -> No
             await app.coordinator.submit(permission)
             await pilot.pause()
             assert not app._agent_list.display
-            assert not app._composer.show_cursor
+            assert not app.input_area.composer.show_cursor
             await pilot.press("1")
             await app.coordinator.wait_idle()
             await pilot.pause()
@@ -1047,21 +578,21 @@ def test_keyboard_focus_moves_between_composer_agent_list_and_transcript() -> No
             assert app._agent_list.has_focus
 
             await pilot.press("up")
-            assert app._composer.has_focus
-            assert app._composer.read_only
-            assert app._composer._draw_cursor
+            assert app.input_area.composer.has_focus
+            assert app.input_area.composer.read_only
+            assert app.input_area.composer._draw_cursor
 
             await pilot.press("down", "down", "enter")
             await app.workers.wait_for_complete()
             await pilot.pause()
-            assert app.viewing_agent_id == "worker-0"
-            assert app._transcript_panel.has_focus
+            assert app.transcript.viewing_agent_id == "worker-0"
+            assert app.transcript.panel.has_focus
             assert not app._agent_list.display
-            assert not app._composer.show_cursor
+            assert not app.input_area.composer.show_cursor
 
             await pilot.press("escape")
             await pilot.pause()
-            assert app.viewing_agent_id is None
+            assert app.transcript.viewing_agent_id is None
             assert app._agent_list.display
             assert app._agent_list.has_focus
             assert app._main_focus_target == "agent_list"
@@ -1077,7 +608,7 @@ def test_keyboard_focus_moves_between_composer_agent_list_and_transcript() -> No
             await app.workers.wait_for_complete()
             await pilot.pause()
             assert not app._agent_list.display
-            assert app._composer.has_focus
+            assert app.input_area.composer.has_focus
 
     asyncio.run(scenario())
 
@@ -1182,7 +713,7 @@ def test_inline_controls_are_keyboard_only() -> None:
             app.post_message(events.AppFocus())
             await pilot.pause()
             assert options.has_focus
-            await pilot.click("#dialog-shell", offset=(1, 0))
+            await pilot.click("#inline-shell", offset=(1, 0))
             await pilot.pause()
             assert options.has_focus
 
@@ -1205,27 +736,27 @@ def test_inline_controls_are_keyboard_only() -> None:
             await app.coordinator.submit(choice_input)
             await pilot.pause()
             navigation = app._interaction_slot.query_one("#choice-input-options", KeyboardNavigation)
-            dialog_input = app._interaction_slot.query_one("#dialog-input", TextArea)
+            inline_input = app._interaction_slot.query_one("#inline-input", TextArea)
             assert navigation.has_focus
 
-            await pilot.click(dialog_input)
+            await pilot.click(inline_input)
             await pilot.pause()
             assert navigation.has_focus
-            assert dialog_input.text == ""
+            assert inline_input.text == ""
 
             await pilot.press("down", "a", "b")
-            assert dialog_input.has_focus
-            assert dialog_input.text == "ab"
-            cursor = dialog_input.cursor_location
-            await pilot.click(dialog_input, offset=(0, 0))
+            assert inline_input.has_focus
+            assert inline_input.text == "ab"
+            cursor = inline_input.cursor_location
+            await pilot.click(inline_input, offset=(0, 0))
             await pilot.pause()
-            assert dialog_input.has_focus
-            assert dialog_input.cursor_location == cursor
-            assert dialog_input.text == "ab"
+            assert inline_input.has_focus
+            assert inline_input.cursor_location == cursor
+            assert inline_input.text == "ab"
 
             await pilot.click(navigation)
             await pilot.pause()
-            assert dialog_input.has_focus
+            assert inline_input.has_focus
             await pilot.press("enter")
             assert await choice_input.future == '{"choice": "", "text": "ab"}'
 
@@ -1272,7 +803,7 @@ def test_form_custom_row_is_inline_and_focus_shows_cursor() -> None:
                 options=[("safe", "安全")],
             )])
             slot = app._interaction_slot
-            assert len(slot.query("#dialog-input")) == 0
+            assert len(slot.query("#inline-input")) == 0
             custom_input = slot.query_one("#custom-input-0", TextArea)
             assert slot.query_one("#custom-row-0").display
 
@@ -1881,30 +1412,30 @@ def test_inline_fifo_and_permission_over_transcript() -> None:
             await pilot.pause()
             await app.coordinator.open_live_transcript("worker-0")
             await pilot.pause()
-            assert app.viewing_agent_id == "worker-0"
-            assert not app._composer_shell.display
+            assert app.transcript.viewing_agent_id == "worker-0"
+            assert not app.input_area.shell.display
             assert not app._separator_top.display
             assert not app._separator_bottom.display
             assert not app._agent_list.display
-            assert app._transcript_panel.has_focus
+            assert app.transcript.panel.has_focus
             app.post_message(events.AppFocus())
             await pilot.pause()
-            assert app._transcript_panel.has_focus
-            assert not app._composer.has_focus
-            assert app._transcript_panel.max_scroll_y > 0
-            app._transcript_panel.scroll_to(y=0, animate=False, immediate=True)
+            assert app.transcript.panel.has_focus
+            assert not app.input_area.composer.has_focus
+            assert app.transcript.panel.max_scroll_y > 0
+            app.transcript.panel.scroll_to(y=0, animate=False, immediate=True)
             await pilot.pause()
-            app._save_transcript_position()
-            assert not app._transcript_positions["worker-0"].follow
-            app.switch_transcript(1)
+            app.transcript.save_position()
+            assert not app.transcript.positions["worker-0"].follow
+            app.transcript.switch(1)
             await app.workers.wait_for_complete()
             await _wait_for_transcript_render(app, pilot)
-            assert app.viewing_agent_id == "worker-1"
-            app.switch_transcript(-1)
+            assert app.transcript.viewing_agent_id == "worker-1"
+            app.transcript.switch(-1)
             await app.workers.wait_for_complete()
             await _wait_for_transcript_render(app, pilot)
-            assert app.viewing_agent_id == "worker-0"
-            assert app._transcript_panel.scroll_y == 0
+            assert app.transcript.viewing_agent_id == "worker-0"
+            assert app.transcript.panel.scroll_y == 0
 
             permission_future = asyncio.get_running_loop().create_future()
             choice_future = asyncio.get_running_loop().create_future()
@@ -1931,89 +1462,33 @@ def test_inline_fifo_and_permission_over_transcript() -> None:
             await pilot.pause()
             assert isinstance(app.coordinator.inline_widget, InlineSelectionWidget)
             assert app.coordinator.inline_widget.request is permission
-            assert app.viewing_agent_id == "worker-0"
+            assert app.transcript.viewing_agent_id == "worker-0"
             assert app.coordinator.pending_summary == (1, "worker")
             widget_focus = app.focused
             assert widget_focus is not None
             app.post_message(events.AppFocus())
             await pilot.pause()
             assert app.focused is widget_focus
-            assert not app._composer.has_focus
+            assert not app.input_area.composer.has_focus
 
             await pilot.press("1")
             await pilot.pause()
             assert await permission_future == "yes"
-            assert app.viewing_agent_id == "worker-0"
+            assert app.transcript.viewing_agent_id == "worker-0"
             assert isinstance(app.coordinator.inline_widget, InlineSelectionWidget)
             assert app.coordinator.inline_widget.request is choice
             await pilot.press("1")
             await pilot.pause()
             assert await choice_future == "ok"
             await app.coordinator.wait_idle()
-            assert app.viewing_agent_id == "worker-0"
-            assert not app._composer_shell.display
-            app.close_transcript()
+            assert app.transcript.viewing_agent_id == "worker-0"
+            assert not app.input_area.shell.display
+            app.transcript.close()
             await pilot.pause()
-            assert app._composer_shell.display
+            assert app.input_area.shell.display
             assert app._separator_top.display
             assert app._separator_bottom.display
             assert app._agent_list.display
-
-    asyncio.run(scenario())
-
-
-@pytest.mark.integration
-def test_input_status_shows_model_and_effort() -> None:
-    async def scenario() -> None:
-        app = _app(get_model_info=lambda: ("deepseek-v4-pro", "max"))
-        async with app.run_test(size=(120, 40)) as pilot:
-            await pilot.pause()
-            assert app._input_status.display
-            assert app._input_status.render().plain == "deepseek-v4-pro max"
-            assert app._input_status.region.height == 1
-            _assert_regions_do_not_overlap(app)
-
-    asyncio.run(scenario())
-
-
-@pytest.mark.integration
-def test_input_status_keeps_blank_row_without_provider() -> None:
-    """无 provider 时保留空行占位，避免输入区随状态有无而上下跳动。"""
-
-    async def scenario() -> None:
-        app = _app()
-        async with app.run_test(size=(120, 40)) as pilot:
-            await pilot.pause()
-            assert app._input_status.display
-            assert app._input_status.render().plain == ""
-            assert app._input_status.region.height == 1
-            _assert_regions_do_not_overlap(app)
-
-    asyncio.run(scenario())
-
-
-@pytest.mark.integration
-def test_input_status_hidden_while_viewing_transcript() -> None:
-    async def scenario() -> None:
-        store = AgentViewStore()
-        store.register_foreground("main", "main")
-        store.record(SubagentLifecycle(
-            timestamp=0.0,
-            source="subagent",
-            agent_uuid="worker-0",
-            agent_type="worker",
-            phase="start",
-        ))
-        app = _app(store, get_model_info=lambda: ("deepseek-v4-pro", "max"))
-        async with app.run_test(size=(120, 40)) as pilot:
-            await pilot.pause()
-            assert app._input_status.display
-            await app.coordinator.open_live_transcript("worker-0")
-            await pilot.pause()
-            assert not app._input_status.display
-            app.close_transcript()
-            await pilot.pause()
-            assert app._input_status.display
 
     asyncio.run(scenario())
 
@@ -2206,7 +1681,7 @@ def test_history_entry_trailing_newline_row_is_selectable_without_crash() -> Non
 
 
 @pytest.mark.integration
-def test_dialog_prompt_trailing_newline_row_is_selectable_without_crash() -> None:
+def test_inline_prompt_trailing_newline_row_is_selectable_without_crash() -> None:
     async def scenario() -> None:
         app = _app()
         async with app.run_test(size=(80, 24)) as pilot:
@@ -2221,7 +1696,7 @@ def test_dialog_prompt_trailing_newline_row_is_selectable_without_crash() -> Non
             )
             await app.coordinator.submit(choice)
             await pilot.pause()
-            prompt = app._interaction_slot.query_one(".dialog-prompt", SelectionStatic)
+            prompt = app._interaction_slot.query_one(".inline-prompt", SelectionStatic)
             assert prompt.region.height == 2
 
             app.screen.selections = {prompt: Selection(Offset(0, 1), None)}
@@ -2505,7 +1980,7 @@ def test_close_cancels_active_model_menu_and_waits_for_removal() -> None:
 
 
 @pytest.mark.integration
-def test_stream_follow_and_dialog_text_inputs() -> None:
+def test_stream_follow_and_inline_text_inputs() -> None:
     async def scenario() -> None:
         app = _app()
         async with app.run_test(size=(100, 32)) as pilot:
@@ -2557,12 +2032,12 @@ def test_stream_follow_and_dialog_text_inputs() -> None:
             )
             await app.coordinator.submit(choice_input)
             await pilot.pause()
-            dialog_input = app._interaction_slot.query_one("#dialog-input")
-            assert dialog_input.has_focus
+            inline_input = app._interaction_slot.query_one("#inline-input")
+            assert inline_input.has_focus
             app.post_message(events.AppFocus())
             await pilot.pause()
-            assert dialog_input.has_focus
-            assert not app._composer.has_focus
+            assert inline_input.has_focus
+            assert not app.input_area.composer.has_focus
             await pilot.press("1", "space", "2", "shift+enter", "x", "enter")
             result = await choice_input.future
             assert result == '{"choice": "", "text": "1 2\\nx"}'
@@ -2632,191 +2107,6 @@ def test_session_history_is_bulk_hydrated_into_rich_lines() -> None:
 
 
 @pytest.mark.integration
-def test_up_key_recalls_history_after_submit_without_refresh() -> None:
-    """回归：历史快照不在 refresh 之外缓存——提交后按上键应立刻回溯到新条目。
-
-    根因：若 history_prev 读的是 refresh_input_history 时拉取的旧快照，
-    运行中新提交的输入不会进入回溯，按上键无反应。
-
-    语义：光标在第一行行首按上才进历史；首行非行首按上先跳到行首。
-    """
-
-    submitted: list[str] = []
-
-    def provider() -> list[str]:
-        return list(submitted)
-
-    app = AgentTuiApp(
-        AgentViewStore(),
-        [],
-        TurnClock(),
-        lambda: None,
-        lambda: False,
-        lambda: None,
-        get_input_history=provider,
-        native_clipboard=False,
-    )
-
-    async def scenario() -> None:
-        async with app.run_test(size=(100, 30)) as pilot:
-            app.refresh_input_history()
-            composer = app.query_one("#input", Composer)
-            composer.read_only = False
-            composer.focus()
-            await pilot.pause()
-
-            # 空输入框（行首）按上：无历史，无反应
-            await pilot.press("up")
-            assert composer.text == ""
-
-            # 之后才有新提交（provider 数据变化，但不再 refresh）
-            submitted.append("第一条")
-            submitted.append("第二条")
-            await pilot.pause()
-
-            # 光标在行首按上：立刻回溯到最新条目
-            await pilot.press("up")
-            assert composer.text == "第二条"
-            # 载入历史后光标停在行首，连续按上逐条上溯
-            await pilot.press("up")
-            assert composer.text == "第一条"
-            # 已在最早一条，再按上键无变化
-            await pilot.press("up")
-            assert composer.text == "第一条"
-            # 下键前进，越过最新条还原草稿（空）
-            await pilot.press("down")
-            assert composer.text == "第二条"
-            await pilot.press("down")
-            assert composer.text == ""
-
-    asyncio.run(scenario())
-
-
-@pytest.mark.integration
-def test_up_key_on_first_line_moves_to_line_start_before_history() -> None:
-    """光标在首行非行首按上先跳到行首；行首再按上才进历史；多行非首行按上正常上移。"""
-
-    def provider() -> list[str]:
-        return ["历史一", "历史二"]
-
-    app = AgentTuiApp(
-        AgentViewStore(),
-        [],
-        TurnClock(),
-        lambda: None,
-        lambda: False,
-        lambda: None,
-        get_input_history=provider,
-        native_clipboard=False,
-    )
-
-    async def scenario() -> None:
-        async with app.run_test(size=(100, 30)) as pilot:
-            app.refresh_input_history()
-            composer = app.query_one("#input", Composer)
-            composer.read_only = False
-            composer.focus()
-            await pilot.pause()
-
-            # 单行输入，光标在行尾（首行非行首）按上 → 跳到行首，不进历史
-            composer.load_text("hello")
-            composer.move_cursor((0, 5))
-            await pilot.press("up")
-            assert composer.text == "hello"
-            assert composer.cursor_location == (0, 0)
-            # 行首再按上 → 进历史
-            await pilot.press("up")
-            assert composer.text == "历史二"
-
-            # 还原草稿后测多行：光标在第 2 行按上 → 上移到第 1 行（不进历史）
-            await pilot.press("down")  # 越过最新条还原草稿 "hello"
-            assert composer.text == "hello"
-            composer.load_text("第一行\n第二行")
-            composer.move_cursor((1, 3))
-            await pilot.press("up")
-            assert composer.text == "第一行\n第二行"
-            assert composer.cursor_location[0] == 0  # 上移到首行
-            # 首行非行首按上 → 跳到行首
-            await pilot.press("up")
-            assert composer.cursor_location == (0, 0)
-            assert composer.text == "第一行\n第二行"
-            # 行首再按上 → 进历史
-            await pilot.press("up")
-            assert composer.text == "历史二"
-
-    asyncio.run(scenario())
-
-
-@pytest.mark.integration
-def test_up_key_on_soft_wrapped_line_moves_one_visual_line_before_history() -> None:
-    """软折行草稿按上键应逐视觉行上移，到文首后才回溯历史。"""
-
-    def provider() -> list[str]:
-        return ["较早历史", "最新历史"]
-
-    draft = "a" * 500
-    app = AgentTuiApp(
-        AgentViewStore(),
-        [],
-        TurnClock(),
-        lambda: None,
-        lambda: False,
-        lambda: None,
-        get_input_history=provider,
-        native_clipboard=False,
-    )
-
-    async def scenario() -> None:
-        async with app.run_test(size=(48, 24)) as pilot:
-            app.refresh_input_history()
-            composer = app.query_one("#input", Composer)
-            composer.read_only = False
-            composer.focus()
-            composer.load_text(draft)
-            await pilot.pause()
-
-            assert composer.has_focus
-            assert composer.text == draft
-            assert "\n" not in composer.text
-            wrapped_document = composer.wrapped_document
-            assert wrapped_document.height >= 3
-
-            composer.move_cursor(wrapped_document.offset_to_location(Offset(1, 2)))
-            start_offset = wrapped_document.location_to_offset(composer.cursor_location)
-            assert composer.cursor_location[0] == 0
-            assert start_offset.y == 2
-
-            for _ in range(start_offset.y):
-                before = composer.cursor_location
-                before_y = wrapped_document.location_to_offset(before).y
-                expected = composer.get_cursor_up_location()
-                expected_y = wrapped_document.location_to_offset(expected).y
-                assert expected_y == before_y - 1
-
-                await pilot.press("up")
-
-                assert composer.text == draft
-                assert composer.cursor_location == expected
-                after_y = wrapped_document.location_to_offset(composer.cursor_location).y
-                assert after_y == before_y - 1
-
-            assert wrapped_document.location_to_offset(composer.cursor_location).y == 0
-            assert composer.cursor_location != (0, 0)
-            expected = composer.get_cursor_up_location()
-            assert expected == (0, 0)
-
-            await pilot.press("up")
-
-            assert composer.text == draft
-            assert composer.cursor_location == expected
-
-            await pilot.press("up")
-            assert composer.text == "最新历史"
-
-    asyncio.run(scenario())
-
-
-@pytest.mark.integration
 def test_composer_mouse_drag_selects_for_copy() -> None:
     """回归：Composer 放开鼠标拖选后，可拖选文本并经 _selected_text 取到（复制数据源）。
 
@@ -2828,7 +2118,7 @@ def test_composer_mouse_drag_selects_for_copy() -> None:
 
     async def scenario() -> None:
         async with app.run_test(size=(100, 30)) as pilot:
-            composer = app.query_one("#input", Composer)
+            composer = app.input_area.composer
             composer.read_only = False
             composer.focus()
             composer.load_text("hello world")
@@ -2968,7 +2258,7 @@ def test_model_menu_scrolls_models_while_effort_and_hint_stay_visible() -> None:
             scroll = app._interaction_slot.query_one("#model-menu-scroll", VerticalScroll)
             body = app._interaction_slot.query_one("#model-menu-body", KeyboardNavigation)
             effort = app._interaction_slot.query_one("#model-menu-effort", Static)
-            hint = app._interaction_slot.query_one(".dialog-hint", Static)
+            hint = app._interaction_slot.query_one(".inline-hint", Static)
             interaction_region = app._interaction_slot.content_region
 
             assert scroll.max_scroll_y > 0

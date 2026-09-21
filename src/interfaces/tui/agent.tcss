@@ -104,20 +104,20 @@ MarkdownFence {
     scrollbar-size: 0 0;
 }
 
-#input .text-area--selection, #dialog-input .text-area--selection,
+#input .text-area--selection, #inline-input .text-area--selection,
 .form-input .text-area--selection {
     background: #2f6f68;
     color: #ffffff;
 }
 
 /* 光标所在行不高亮，避免输入后输入栏局部变色 */
-#input .text-area--cursor-line, #dialog-input .text-area--cursor-line,
+#input .text-area--cursor-line, #inline-input .text-area--cursor-line,
 .form-input .text-area--cursor-line {
     background: transparent;
 }
 
 /* 光标：不透明白底 + 深色字，去掉 :ansi 分支注入的 reverse 反显，确保清晰可见 */
-#input .text-area--cursor, #dialog-input .text-area--cursor,
+#input .text-area--cursor, #inline-input .text-area--cursor,
 .form-input .text-area--cursor {
     color: #000000;
     background: #ffffff;
@@ -196,7 +196,7 @@ MarkdownFence {
     max-height: 5;
 }
 
-#dialog-shell {
+#inline-shell {
     width: 88%;
     min-width: 42;
     max-width: 96;
@@ -208,18 +208,18 @@ MarkdownFence {
     color: #d8dee4;
 }
 
-.dialog-title {
+.inline-title {
     height: auto;
     color: #efc36a;
     text-style: bold;
 }
 
-.dialog-source, .dialog-hint {
+.inline-source, .inline-hint {
     height: auto;
     color: #8d989f;
 }
 
-.dialog-prompt, .dialog-detail {
+.inline-prompt, .inline-detail {
     height: auto;
     margin: 1 0;
 }
@@ -242,7 +242,7 @@ MarkdownFence {
     color: #d8dee4;
 }
 
-#dialog-options {
+#inline-options {
     height: auto;
     max-height: 12;
     border: none;
@@ -303,11 +303,11 @@ MarkdownFence {
     margin: 0;
 }
 
-.dialog-form-preview {
+.inline-form-preview {
     max-width: 140;
 }
 
-.compact .dialog-form-preview {
+.compact .inline-form-preview {
     max-width: 96;
 }
 
@@ -327,14 +327,14 @@ MarkdownFence {
     margin-top: 1;
 }
 
-#dialog-input {
+#inline-input {
     height: 4;
     border: solid #3b464f;
     background: ansi_default;
     color: #f0f3f5;
 }
 
-.compact #dialog-shell {
+.compact #inline-shell {
     width: 96%;
     min-width: 20;
     padding: 0 1;
@@ -350,7 +350,7 @@ MarkdownFence {
 }
 
 /* 内嵌模式：无边框、无独立背景，融入聊天流；左侧竖线标记交互区块 */
-.inline-widget #dialog-shell {
+.inline-widget #inline-shell {
     width: 100%;
     min-width: 0;
     max-width: 100%;
@@ -362,28 +362,28 @@ MarkdownFence {
     padding-left: 1;
 }
 
-.inline-widget .dialog-title {
+.inline-widget .inline-title {
     color: #efc36a;
     text-style: bold;
 }
 
-.inline-widget .dialog-source,
-.inline-widget .dialog-hint {
+.inline-widget .inline-source,
+.inline-widget .inline-hint {
     color: #8d989f;
 }
 
-.inline-widget .dialog-prompt,
-.inline-widget .dialog-detail {
+.inline-widget .inline-prompt,
+.inline-widget .inline-detail {
     margin: 0;
     color: #d8dee4;
 }
 
-.inline-widget #dialog-options {
+.inline-widget #inline-options {
     border: none;
     background: ansi_default;
 }
 
-.inline-widget #dialog-input {
+.inline-widget #inline-input {
     height: 4;
     border: solid #3b464f;
     background: ansi_default;

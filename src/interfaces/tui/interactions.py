@@ -1,13 +1,12 @@
-"""Textual 内嵌交互控件与 FIFO 请求协调器。"""
+"""Textual 内嵌交互控件：把菜单请求渲染成聊天流内的表单。
+
+控件只负责渲染与产出 `DialogResult`；排队、挂载与结算由 `coordinator` 负责。
+"""
 
 from __future__ import annotations
 
-import asyncio
 import json
-from collections import deque
-from collections.abc import Awaitable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 from rich.markdown import Markdown as RichMarkdown
 from rich.text import Text
@@ -25,15 +24,12 @@ from src.events.menu import (
     ChoiceMenu,
     FormMenu,
     FormQuestion,
-    InputMenu,
     ModelMenu,
     MenuRequest,
     PermissionMenu,
-    TranscriptView,
     UiRequest,
-    ViewRequest,
 )
-from src.interfaces.turn_clock import TurnClock
+from src.interfaces.status_presenter import agent_label
 from src.interfaces.tui.widgets import (
     AutoGrowTextArea,
     FormBodyScroll,
@@ -42,9 +38,6 @@ from src.interfaces.tui.widgets import (
     KeyboardTextArea,
     SelectionStatic,
 )
-
-if TYPE_CHECKING:
-    from src.interfaces.tui.app import AgentTuiApp
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,28 +48,15 @@ class DialogResult:
     cancelled: bool = False
 
 
-@dataclass(slots=True)
-class PendingInteractions:
-    """TUI 降级到文字模式时转交的未完成请求。"""
-
-    active: MenuRequest | None
-    queue: list[MenuRequest]
-    view_request: ViewRequest | None
-
-
 def _prompt_widget(request: MenuRequest):
     prompt = getattr(request, "prompt", "")
     if getattr(request, "markdown", False):
-        return Markdown(prompt, classes="dialog-prompt")
-    return SelectionStatic(prompt, classes="dialog-prompt", markup=False)
+        return Markdown(prompt, classes="inline-prompt")
+    return SelectionStatic(prompt, classes="inline-prompt", markup=False)
 
 
 def _source_label(request: UiRequest) -> str:
-    agent_type = request.caller_agent_type
-    if not agent_type:
-        return request.source
-    short_uuid = request.caller_uuid.split("-")[0] if request.caller_uuid else ""
-    return f"{agent_type} {short_uuid}" if short_uuid else agent_type
+    return agent_label(request.caller_agent_type, request.caller_uuid) or request.source
 
 
 def _form_source_label(request: UiRequest, task: str = "") -> str:
@@ -88,8 +68,7 @@ def _form_source_label(request: UiRequest, task: str = "") -> str:
         return agent_type
     if task:
         return f"{agent_type}  {task}"
-    short_uuid = request.caller_uuid.split("-")[0] if request.caller_uuid else ""
-    return f"{agent_type} {short_uuid}" if short_uuid else agent_type
+    return agent_label(agent_type, request.caller_uuid)
 
 
 def _option_prompt(index: int, label: str, markdown: bool) -> object:
@@ -274,6 +253,18 @@ class InlineWidget(Vertical, can_focus=True):
         """恢复焦点到合适的子组件。"""
         raise NotImplementedError
 
+    def _finish(self, result: DialogResult) -> bool:
+        """结算一次交互：重复触发不再二次提交，返回本次是否生效。"""
+        if self._completed:
+            return False
+        self._completed = True
+        self.post_message(self.Completed(result))
+        return True
+
+    def _cancel(self) -> bool:
+        """取消当前交互：与提交共用同一份幂等结算。"""
+        return self._finish(DialogResult(cancelled=True))
+
 
 class InlineSelectionWidget(InlineWidget):
     """内嵌权限确认与单选菜单。"""
@@ -298,16 +289,16 @@ class InlineSelectionWidget(InlineWidget):
         return self.request.options
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="dialog-shell", classes=f"dialog-{self.request.type}"):
+        with Vertical(id="inline-shell"):
             title = "工具请求权限" if isinstance(self.request, PermissionMenu) else "请选择"
-            yield SelectionStatic(title, classes="dialog-title", markup=False)
+            yield SelectionStatic(title, classes="inline-title", markup=False)
             source = _source_label(self.request)
             if source:
-                yield SelectionStatic(f"发起 Agent  {source}", classes="dialog-source", markup=False)
+                yield SelectionStatic(f"发起 Agent  {source}", classes="inline-source", markup=False)
             if isinstance(self.request, PermissionMenu):
                 yield SelectionStatic(
                     f"工具  {self.request.tool_name}\n内容  {self.request.detail}",
-                    classes="dialog-detail",
+                    classes="inline-detail",
                     markup=False,
                 )
             elif self.request.prompt:
@@ -321,7 +312,7 @@ class InlineSelectionWidget(InlineWidget):
                     ))
                     for index, (_value, label) in enumerate(self.options, 1)
                 ],
-                id="dialog-options",
+                id="inline-options",
                 markup=False,
             )
 
@@ -348,22 +339,17 @@ class InlineSelectionWidget(InlineWidget):
         self._choose(index - 1)
 
     def _choose(self, index: int) -> None:
-        if self._completed:
+        if self._completed or not 0 <= index < len(self.options):
             return
-        if 0 <= index < len(self.options):
-            self._completed = True
-            self._chosen_label = self.options[index][1]
-            self.post_message(self.Completed(DialogResult(value=self.options[index][0])))
+        self._chosen_label = self.options[index][1]
+        self._finish(DialogResult(value=self.options[index][0]))
 
     def action_cancel(self) -> None:
-        if self._completed:
-            return
-        self._completed = True
         if isinstance(self.request, PermissionMenu):
-            self._chosen_label = "拒绝"
-            self.post_message(self.Completed(DialogResult(value="deny")))
+            if self._finish(DialogResult(value="deny")):
+                self._chosen_label = "拒绝"
         else:
-            self.post_message(self.Completed(DialogResult(cancelled=True)))
+            self._cancel()
 
     def build_summary(self, result: DialogResult) -> str:
         if result.cancelled:
@@ -395,18 +381,18 @@ class InlineModelSelectionWidget(InlineWidget):
         self.state = _ModelMenuState(request)
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="dialog-shell", classes="dialog-model-menu"):
-            yield SelectionStatic("选择模型与推理强度", classes="dialog-title", markup=False)
+        with Vertical(id="inline-shell"):
+            yield SelectionStatic("选择模型与推理强度", classes="inline-title", markup=False)
             source = _source_label(self.request)
             if source:
-                yield SelectionStatic(f"发起 Agent  {source}", classes="dialog-source", markup=False)
+                yield SelectionStatic(f"发起 Agent  {source}", classes="inline-source", markup=False)
             if self.request.prompt:
                 yield _prompt_widget(self.request)
             yield SelectionStatic("", id="model-menu-slots", markup=False)
             with VerticalScroll(id="model-menu-scroll"):
                 yield KeyboardNavigation("", id="model-menu-body", markup=False)
             yield SelectionStatic("", id="model-menu-effort", markup=False)
-            yield SelectionStatic(_MODEL_MENU_HINT, classes="dialog-hint", markup=False)
+            yield SelectionStatic(_MODEL_MENU_HINT, classes="inline-hint", markup=False)
 
     def on_mount(self) -> None:
         self._render_menu()
@@ -467,17 +453,11 @@ class InlineModelSelectionWidget(InlineWidget):
 
     def action_submit(self) -> None:
         """一次提交三键 payload（default、fast、reasoning_effort）。"""
-        if not self._completed and self.state.submittable:
-            self._completed = True
-            self.post_message(
-                self.Completed(DialogResult(value=_model_menu_payload(self.state)))
-            )
+        if self.state.submittable:
+            self._finish(DialogResult(value=_model_menu_payload(self.state)))
 
     def action_cancel(self) -> None:
-        if self._completed:
-            return
-        self._completed = True
-        self.post_message(self.Completed(DialogResult(cancelled=True)))
+        self._cancel()
 
 class InlineChoiceInputWidget(InlineWidget):
     """内嵌选项与自由输入互斥的交互。"""
@@ -502,24 +482,24 @@ class InlineChoiceInputWidget(InlineWidget):
         self._result_summary = ""
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="dialog-shell", classes="dialog-choice-input"):
-            yield SelectionStatic("请选择或输入", classes="dialog-title", markup=False)
+        with Vertical(id="inline-shell"):
+            yield SelectionStatic("请选择或输入", classes="inline-title", markup=False)
             source = _source_label(self.request)
             if source:
-                yield SelectionStatic(f"发起 Agent  {source}", classes="dialog-source", markup=False)
+                yield SelectionStatic(f"发起 Agent  {source}", classes="inline-source", markup=False)
             if self.request.prompt:
                 yield _prompt_widget(self.request)
             yield KeyboardNavigation("", id="choice-input-options", markup=False)
             yield KeyboardTextArea(
                 "",
-                id="dialog-input",
+                id="inline-input",
                 soft_wrap=True,
                 show_line_numbers=False,
                 placeholder=self.request.input_placeholder,
             )
             yield SelectionStatic(
                 "↑↓ 选择 · Enter/数字 确认 · Shift+Enter 换行 · Esc 取消",
-                classes="dialog-hint",
+                classes="inline-hint",
                 markup=False,
             )
 
@@ -539,7 +519,7 @@ class InlineChoiceInputWidget(InlineWidget):
         self.query_one("#choice-input-options", KeyboardNavigation).update(
             "\n".join(lines)
         )
-        input_widget = self.query_one("#dialog-input", TextArea)
+        input_widget = self.query_one("#inline-input", TextArea)
         input_widget.read_only = self.row != len(self.request.options)
         input_widget.show_cursor = not input_widget.read_only
         self.restore_focus()
@@ -547,7 +527,7 @@ class InlineChoiceInputWidget(InlineWidget):
     def restore_focus(self) -> None:
         if self._completed:
             return
-        input_widget = self.query_one("#dialog-input", TextArea)
+        input_widget = self.query_one("#inline-input", TextArea)
         if input_widget.read_only:
             self.query_one("#choice-input-options", KeyboardNavigation).focus()
         else:
@@ -558,7 +538,7 @@ class InlineChoiceInputWidget(InlineWidget):
         self._render_rows()
 
     def action_choose_number(self, index: int) -> None:
-        input_widget = self.query_one("#dialog-input", TextArea)
+        input_widget = self.query_one("#inline-input", TextArea)
         if self.row == len(self.request.options) and not input_widget.read_only:
             input_widget.insert(str(index))
             return
@@ -573,32 +553,27 @@ class InlineChoiceInputWidget(InlineWidget):
             self._result_summary = f"选择：{label}"
             self._submit_choice(self.request.options[self.row][0])
             return
-        text = self.query_one("#dialog-input", TextArea).text.strip()
+        text = self.query_one("#inline-input", TextArea).text.strip()
         if text:
-            self._completed = True
             self._result_summary = f"输入：{text[:60]}"
-            self.post_message(self.Completed(DialogResult(value=json.dumps(
+            self._finish(DialogResult(value=json.dumps(
                 {"choice": "", "text": text}, ensure_ascii=False
-            ))))
+            )))
 
     def action_newline(self) -> None:
-        input_widget = self.query_one("#dialog-input", TextArea)
+        input_widget = self.query_one("#inline-input", TextArea)
         if not input_widget.read_only:
             input_widget.insert("\n")
 
     def _submit_choice(self, value: str) -> None:
         if self._completed:
             return
-        self._completed = True
-        self.post_message(self.Completed(DialogResult(value=json.dumps(
+        self._finish(DialogResult(value=json.dumps(
             {"choice": value, "text": ""}, ensure_ascii=False
-        ))))
+        )))
 
     def action_cancel(self) -> None:
-        if self._completed:
-            return
-        self._completed = True
-        self.post_message(self.Completed(DialogResult(cancelled=True)))
+        self._cancel()
 
     def build_summary(self, result: DialogResult) -> str:
         if result.cancelled:
@@ -655,17 +630,17 @@ class InlineFormWidget(InlineWidget):
         return SelectionStatic(source, id=widget_id, classes=classes, markup=False)
 
     def compose(self) -> ComposeResult:
-        classes = "dialog-form dialog-form-preview" if self._has_any_preview else "dialog-form"
-        with Vertical(id="dialog-shell", classes=classes):
+        classes = "inline-form-preview" if self._has_any_preview else ""
+        with Vertical(id="inline-shell", classes=classes):
             source = _form_source_label(self.request, self._task)
             if source:
                 yield SelectionStatic(
                     f"[#efc36a bold]问题[/]  ·  {source}",
-                    classes="dialog-title",
+                    classes="inline-title",
                 )
             else:
-                yield SelectionStatic("问题", classes="dialog-title", markup=False)
-            yield SelectionStatic("", id="form-hint", classes="dialog-hint", markup=False)
+                yield SelectionStatic("问题", classes="inline-title", markup=False)
+            yield SelectionStatic("", id="form-hint", classes="inline-hint", markup=False)
             yield SelectionStatic("", id="form-tabs", markup=False)
             for index, question in enumerate(self.request.questions):
                 yield self._content_widget(
@@ -989,7 +964,6 @@ class InlineFormWidget(InlineWidget):
     def _submit(self) -> None:
         if self._completed:
             return
-        self._completed = True
         payload = json.dumps(
             {
                 "answers": [self._answer(index) for index in range(len(self.request.questions))],
@@ -997,13 +971,10 @@ class InlineFormWidget(InlineWidget):
             },
             ensure_ascii=False,
         )
-        self.post_message(self.Completed(DialogResult(value=payload)))
+        self._finish(DialogResult(value=payload))
 
     def action_cancel(self) -> None:
-        if self._completed:
-            return
-        self._completed = True
-        self.post_message(self.Completed(DialogResult(cancelled=True)))
+        self._cancel()
 
     def build_summary(self, result: DialogResult) -> str:
         """构建提交后的回答摘要文本。"""
@@ -1020,7 +991,7 @@ class InlineFormWidget(InlineWidget):
         return "\n".join(lines)
 
 
-def _make_inline_widget(request: MenuRequest, task: str = "") -> InlineWidget:
+def make_inline_widget(request: MenuRequest, task: str = "") -> InlineWidget:
     if isinstance(request, FormMenu):
         return InlineFormWidget(request, task=task)
     if isinstance(request, ModelMenu):
@@ -1030,293 +1001,3 @@ def _make_inline_widget(request: MenuRequest, task: str = "") -> InlineWidget:
     if isinstance(request, (PermissionMenu, ChoiceMenu)):
         return InlineSelectionWidget(request)
     raise TypeError(f"unsupported inline request: {type(request)!r}")
-
-
-class InteractionCoordinator:
-    """管理普通输入、内嵌交互 FIFO、Transcript 和请求 Future 生命周期。"""
-
-    def __init__(self, app: AgentTuiApp, turn_clock: TurnClock) -> None:
-        self.app = app
-        self.turn_clock = turn_clock
-        self.active: MenuRequest | None = None
-        self.queue: deque[MenuRequest] = deque()
-        self.view_request: ViewRequest | None = None
-        self.inline_widget: InlineWidget | None = None
-        self._cleanup_tasks: set[asyncio.Future[None]] = set()
-        self._closed = False
-        self._detached = False
-        self._idle = asyncio.Event()
-        self._idle.set()
-
-    @property
-    def inline_widget_active(self) -> bool:
-        return self.inline_widget is not None
-
-    @property
-    def input_active(self) -> bool:
-        return isinstance(self.active, InputMenu)
-
-    @property
-    def pending_summary(self) -> tuple[int, str | None]:
-        self._drop_finished_queue_items()
-        if not self.queue:
-            return 0, None
-        request = self.queue[0]
-        return len(self.queue), request.caller_agent_type or request.source
-
-    @property
-    def is_idle(self) -> bool:
-        return self.active is None and not self.queue and not self._cleanup_tasks
-
-    async def submit(self, request: UiRequest) -> bool:
-        if request.future is None or request.future.done():
-            return False
-        if self._closed or self._detached:
-            request.cancel()
-            return False
-        request.future.add_done_callback(
-            lambda _future, item=request: self._schedule(self._request_settled(item))
-        )
-        if isinstance(request, ViewRequest):
-            await self._open_view(request)
-            return True
-        if not isinstance(request, MenuRequest):
-            raise TypeError(f"unsupported UI request: {type(request)!r}")
-        self.queue.append(request)
-        self._idle.clear()
-        await self._pump()
-        self.app.refresh_chrome()
-        return True
-
-    async def _pump(self) -> None:
-        if self._closed or self.active is not None:
-            self._sync_idle()
-            return
-        self._drop_finished_queue_items()
-        if not self.queue:
-            self._sync_idle()
-            return
-        request = self.queue.popleft()
-        self.active = request
-        await self.app.record_request_context(request)
-        if isinstance(request, InputMenu):
-            await self.app.begin_input(request)
-            self.app.refresh_chrome()
-            return
-        self.turn_clock.enter_human_wait()
-        try:
-            snapshot = self.app.agent_view_store.agent_snapshot(request.caller_uuid or "")
-            task = snapshot.task if snapshot else ""
-            self.inline_widget = _make_inline_widget(request, task=task)
-            await self.app.mount_inline_widget(self.inline_widget)
-        except BaseException as exc:
-            self.turn_clock.exit_human_wait()
-            self.active = None
-            self.inline_widget = None
-            request.fail(exc)
-            await self._pump()
-            raise
-        self.app.refresh_chrome()
-
-    async def complete_input(self, text: str) -> bool:
-        request = self.active
-        if not isinstance(request, InputMenu) or not text.strip():
-            return False
-        await self.app.finish_input(text)
-        self.active = None
-        request.complete(text)
-        await self._pump()
-        self.app.refresh_chrome()
-        return True
-
-    def cancel_input_for_exit(self) -> bool:
-        request = self.active
-        if not isinstance(request, InputMenu):
-            return False
-        self.app.finish_input_cancelled()
-        self.active = None
-        request.cancel()
-        self._schedule(self._pump())
-        self.app.refresh_chrome()
-        return True
-
-    async def _finish_inline_widget(self, result: DialogResult) -> None:
-        """内嵌交互完成后：按 Widget 策略写摘要并结算 Future。"""
-        request = self.active
-        if request is None or isinstance(request, InputMenu):
-            return
-        widget = self.inline_widget
-        self.inline_widget = None
-        self.turn_clock.exit_human_wait()
-        self.active = None
-        if widget is not None:
-            summary = widget.build_summary(result)
-            await self.app.unmount_inline_widget(widget)
-            if summary:
-                await self.app.append_output(summary)
-        await asyncio.sleep(0)
-        if request.future is not None and not request.future.done():
-            if result.cancelled:
-                request.complete("")
-            else:
-                request.complete(result.value)
-        await self._pump()
-        self.app.restore_focus()
-        self.app.refresh_chrome()
-
-    async def _open_view(self, request: ViewRequest) -> None:
-        if not isinstance(request, TranscriptView):
-            raise TypeError(f"unsupported view request: {type(request)!r}")
-        previous = self.view_request
-        if previous is not None and previous is not request:
-            previous.cancel()
-        self.view_request = request
-        opened = await self.app.open_transcript(
-            request.uuid,
-            [snapshot.uuid for snapshot in self.app.agent_view_store.subagent_snapshots()],
-            invoked=True,
-        )
-        if not opened and self.view_request is request:
-            self.view_request = None
-            request.complete("")
-
-    async def open_live_transcript(self, uuid: str) -> bool:
-        if self._closed:
-            return False
-        ids = [
-            snapshot.uuid
-            for snapshot in self.app.agent_view_store.subagent_snapshots()
-        ]
-        return await self.app.open_transcript(uuid, ids, invoked=False)
-
-    def close_transcript(self) -> bool:
-        if self.app.viewing_agent_id is None:
-            return False
-        self.app.hide_transcript()
-        request = self.view_request
-        self.view_request = None
-        if request is not None:
-            request.complete("")
-        self.app.restore_focus()
-        return True
-
-    def cancel_all(self, *, render: bool = True) -> bool:
-        changed = bool(self.active or self.queue or self.view_request or self.app.viewing_agent_id)
-        queued = list(self.queue)
-        self.queue.clear()
-        for request in queued:
-            request.cancel()
-        if isinstance(self.active, InputMenu):
-            request = self.active
-            self.active = None
-            if render:
-                self.app.finish_input_cancelled()
-            request.cancel()
-        elif self.active is not None:
-            request = self.active
-            widget = self.inline_widget
-            self.active = None
-            self.inline_widget = None
-            if render:
-                self.turn_clock.exit_human_wait()
-            request.cancel()
-            if render and widget is not None:
-                self._schedule(self.app.unmount_inline_widget(widget))
-        if self.view_request is not None:
-            self.view_request.cancel()
-            self.view_request = None
-        if render and self.app.viewing_agent_id is not None:
-            self.app.hide_transcript()
-        if not render:
-            self.active = None
-            self.inline_widget = None
-            self.turn_clock.reset()
-        self._sync_idle()
-        if render:
-            self.app.refresh_chrome()
-        return changed
-
-    async def wait_idle(self) -> None:
-        while not self.is_idle:
-            await self._idle.wait()
-            await asyncio.sleep(0)
-
-    async def close(self) -> None:
-        self._closed = True
-        self.cancel_all()
-        await self.wait_idle()
-
-    def detach_for_fallback(self) -> PendingInteractions:
-        """脱离已退出的 Textual app，并把未完成请求交给文字前端。"""
-        snapshot = PendingInteractions(
-            active=self.active,
-            queue=list(self.queue),
-            view_request=self.view_request,
-        )
-        self._detached = True
-        for task in list(self._cleanup_tasks):
-            task.cancel()
-        self._cleanup_tasks.clear()
-        self.active = None
-        self.queue.clear()
-        self.view_request = None
-        self.inline_widget = None
-        self.turn_clock.reset()
-        self._sync_idle()
-        return snapshot
-
-    def _render_available(self) -> bool:
-        return bool(getattr(self.app, "is_running", False))
-
-    async def _request_settled(self, request: UiRequest) -> None:
-        if self._detached:
-            return
-        if request is self.view_request:
-            self.view_request = None
-            if self._render_available() and self.app.viewing_agent_id is not None:
-                self.app.hide_transcript()
-            return
-        if request is self.active:
-            if isinstance(request, InputMenu):
-                if self._render_available():
-                    self.app.finish_input_cancelled()
-                self.active = None
-                await self._pump()
-            elif self.inline_widget is not None:
-                if self._render_available() and self.inline_widget.is_mounted:
-                    self.inline_widget.action_cancel()
-            return
-        try:
-            self.queue.remove(request)  # type: ignore[arg-type]
-        except ValueError:
-            return
-        await self._pump()
-
-    def reset(self) -> None:
-        if self.is_idle and self.app.viewing_agent_id is not None:
-            self.close_transcript()
-
-    def _drop_finished_queue_items(self) -> None:
-        self.queue = deque(
-            request
-            for request in self.queue
-            if request.future is not None and not request.future.done()
-        )
-
-    def _schedule(self, awaitable: Awaitable[None]) -> None:
-        task = asyncio.ensure_future(awaitable)
-        self._cleanup_tasks.add(task)
-        self._idle.clear()
-        task.add_done_callback(self._cleanup_finished)
-
-    def _cleanup_finished(self, task: asyncio.Future[None]) -> None:
-        self._cleanup_tasks.discard(task)
-        if not task.cancelled():
-            task.exception()
-        self._sync_idle()
-
-    def _sync_idle(self) -> None:
-        if self.is_idle:
-            self._idle.set()
-        else:
-            self._idle.clear()

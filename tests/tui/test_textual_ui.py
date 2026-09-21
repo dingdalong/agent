@@ -15,7 +15,7 @@ from src.interfaces.agent_view_store import AgentViewStore
 from src.interfaces.textual_ui import TextualInterface, TuiTermination
 from src.interfaces.turn_clock import TurnClock
 from src.interfaces.tui.app import AgentTuiApp
-from src.interfaces.tui.dialogs import PendingInteractions
+from src.interfaces.tui.coordinator import PendingInteractions
 from src.interfaces.tui.history_journal import PlainHistoryJournal
 from src.interfaces.tui.render_policy import TuiRenderPolicy
 

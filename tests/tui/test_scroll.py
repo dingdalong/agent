@@ -15,20 +15,12 @@ from src.interfaces.tui.history_log import HistoryEntry, HistoryLog
 from src.interfaces.tui.render_policy import TuiRenderPolicy
 from src.interfaces.tui.widgets import PointerScrollMixin, TranscriptPanel
 
+from tests.tui.support import _follow_newest
+
 
 def _window(history: HistoryLog) -> tuple[int, int]:
     """测试辅助：返回当前渲染窗口的 [start, end)。"""
     return history._window_start, history._window_end
-
-
-async def _follow_newest(history: HistoryLog) -> None:
-    """测试辅助：沿滚到底部的用户路径翻到最新分页并跟随尾部。"""
-    while history.has_newer:
-        history._shift_page("newer")
-        await history.wait_for_reflow()
-    history.scroll_end(animate=False, immediate=True)
-    history.anchor()
-    await history.wait_for_reflow()
 
 
 class _TranscriptApp(App[None]):

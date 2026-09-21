@@ -30,6 +30,21 @@ from src.interfaces.tui.widgets import PointerScrollMixin
 _OMISSION_NOTICE = "\n\n[内容过长，中间部分未渲染]\n\n"
 
 
+def strip_trailing_newlines(message: str | Text) -> str | Text:
+    """去掉条目末尾的换行：间距改由条目自身的 spacing 给出。
+
+    只裁换行、保留行尾空格与样式；`Text` 不就地修改（调用方可能复用同一对象）。
+    """
+    if isinstance(message, Text):
+        excess = len(message.plain) - len(message.plain.rstrip("\n"))
+        if not excess:
+            return message
+        trimmed = message.copy()
+        trimmed.right_crop(excess)
+        return trimmed
+    return message.rstrip("\n")
+
+
 @dataclass(slots=True)
 class HistoryEntry:
     """一个可重排的逻辑历史条目。"""

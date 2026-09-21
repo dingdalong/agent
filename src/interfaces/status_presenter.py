@@ -16,6 +16,19 @@ from src.interfaces.agent_view_store import (
 _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 
+def present_spinner_frame(now: float, interval: float = 0.1) -> str:
+    """按固定间隔在 spinner 帧之间轮转。
+
+    Args:
+        now: 单调时间戳（秒）。
+        interval: 每帧保持的秒数，非正值按 0.001 处理。
+
+    Returns:
+        当前帧字符。
+    """
+    return _SPINNER[int(now / max(0.001, interval)) % len(_SPINNER)]
+
+
 def format_token_count(count: int) -> str:
     """把 token 数量格式化为共享的紧凑表示。
 
@@ -96,6 +109,22 @@ def _agent_status_label(snapshot: AgentSnapshot) -> str:
     return snapshot.activity or "运行中"
 
 
+def agent_label(agent_type: str | None, uuid: str | None) -> str:
+    """构建跨 TUI 与非 TTY 统一的 agent 身份标签。
+
+    Args:
+        agent_type: agent 类型；None 或空串表示无身份。
+        uuid: agent 实例 uuid，只取首段作为短标识。
+
+    Returns:
+        ``"type short"``；无 uuid 时为 ``"type"``；无 agent_type 时为空串。
+    """
+    if not agent_type:
+        return ""
+    short_uuid = uuid.split("-")[0] if uuid else ""
+    return f"{agent_type} {short_uuid}" if short_uuid else agent_type
+
+
 def present_agent_identity(
     snapshot: AgentSnapshot,
     base_style: str = "",
@@ -117,7 +146,7 @@ def present_agent_identity(
     # 状态图标：运行中用 spinner 动画帧，已完成用 ✔
     if snapshot.running:
         render_time = time.monotonic() if now is None else now
-        frame = _SPINNER[int(render_time * 10) % len(_SPINNER)]
+        frame = present_spinner_frame(render_time)
         icon = f"{frame} "
     else:
         icon = "✔ "

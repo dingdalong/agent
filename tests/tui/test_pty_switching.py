@@ -51,41 +51,48 @@ def test_vscode_pty_rapid_arrow_switching_stays_stable(tmp_path) -> None:
                 self.switch_count = 0
                 self.render_peak = 0
                 self._render_active = 0
+                original_render = self.transcript.render
 
-            async def _render_transcript_request(self, request):
-                self._render_active += 1
-                self.render_peak = max(self.render_peak, self._render_active)
-                try:
-                    return await super()._render_transcript_request(request)
-                finally:
-                    self._render_active -= 1
+                async def tracked_render(request):
+                    self._render_active += 1
+                    self.render_peak = max(self.render_peak, self._render_active)
+                    try:
+                        return await original_render(request)
+                    finally:
+                        self._render_active -= 1
+
+                self.transcript.render = tracked_render
+
+                original_switch = self.transcript.switch
+
+                def tracked_switch(delta):
+                    original_switch(delta)
+                    self.switch_count += 1
+                    if self.switch_count == 100:
+                        asyncio.create_task(self.finish_test())
+
+                self.transcript.switch = tracked_switch
 
             async def on_ready(self):
-                await self.open_transcript(
+                await self.transcript.open(
                     "worker-0",
                     ["worker-0", "worker-1"],
                     invoked=False,
                 )
                 await asyncio.to_thread(ready_path.write_text, "ready")
 
-            def switch_transcript(self, delta):
-                super().switch_transcript(delta)
-                self.switch_count += 1
-                if self.switch_count == 100:
-                    asyncio.create_task(self.finish_test())
-
             async def finish_test(self):
                 for _ in range(500):
                     if (
-                        self._transcript_pending is None
-                        and self._transcript_active_renders == 0
-                        and self._rendered_transcript_id == self.viewing_agent_id
+                        self.transcript.pending is None
+                        and self.transcript.active_renders == 0
+                        and self.transcript.rendered_id == self.transcript.viewing_agent_id
                     ):
                         break
                     await asyncio.sleep(0.01)
                 payload = {
                     "crash_count": int(self.fatal_error is not None),
-                    "target": self.viewing_agent_id,
+                    "target": self.transcript.viewing_agent_id,
                     "max_concurrent_renders": self.render_peak,
                 }
                 await asyncio.to_thread(result_path.write_text, json.dumps(payload))

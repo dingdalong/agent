@@ -1161,7 +1161,7 @@ def test_completed_agent_panel_keeps_error_diagnostics_without_stream_body_dupli
         lambda: None,
         native_clipboard=False,
     )
-    rendered = ui._transcript_source(subagent_uuid)
+    rendered = ui.transcript.source(subagent_uuid)
 
     assert "request_id=req-safe" in rendered
     assert "diagnostic_id=diag-safe" in rendered
