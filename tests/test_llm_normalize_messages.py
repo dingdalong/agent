@@ -289,7 +289,76 @@ def test_provider_only_assistant_carrier_is_preserved(
     provider = object.__new__(provider_type)
     message = {"role": "assistant", "content": "", **provider_extra}
 
-    assert provider.normalize_messages([message]) == [message]
+    expected = message
+    if "_response_output" in provider_extra or "_anthropic_content" in provider_extra:
+        # 有权威载体的 provider：正文只是载体的投影，不再随载体重复保存。
+        expected = {"role": "assistant", **provider_extra}
+    assert provider.normalize_messages([message]) == [expected]
+
+
+ANTHROPIC_CARRIER = {
+    "role": "assistant",
+    "_anthropic_content": [
+        {"type": "text", "text": "答案"},
+        {"type": "tool_use", "id": "call-1", "name": "read_file", "input": {"path": "a"}},
+    ],
+}
+
+RESPONSES_CARRIER = {
+    "role": "assistant",
+    "_response_output": [
+        {"type": "message", "content": [{"type": "output_text", "text": "答案"}]},
+        {
+            "type": "function_call",
+            "call_id": "call-1",
+            "name": "read_file",
+            "arguments": '{"path": "a"}',
+        },
+    ],
+}
+
+
+@pytest.mark.parametrize(
+    ("provider_type", "carrier"),
+    [
+        (OpenAIProvider, ANTHROPIC_CARRIER),
+        (DeepSeekProvider, ANTHROPIC_CARRIER),
+        (AnthropicProvider, RESPONSES_CARRIER),
+        (OllamaProvider, ANTHROPIC_CARRIER),
+        (MoonshotProvider, RESPONSES_CARRIER),
+    ],
+    ids=["openai", "deepseek", "anthropic", "ollama", "moonshot"],
+)
+def test_foreign_provider_carrier_is_materialized(
+    provider_type: type[LLMProvider],
+    carrier: dict,
+) -> None:
+    """切换模型后，其他 provider 的载体还原成通用字段而不是被丢掉。"""
+    provider = object.__new__(provider_type)
+    tool_message = {"role": "tool", "tool_call_id": "call-1", "content": "文件内容"}
+
+    normalized = provider.normalize_messages([carrier, tool_message])
+
+    assert normalized[0]["content"] == "答案"
+    assert normalized[0]["tool_calls"] == [{
+        "id": "call-1",
+        "type": "function",
+        "function": {"name": "read_file", "arguments": '{"path": "a"}'},
+    }]
+    assert normalized[1] == tool_message
+
+
+def test_own_provider_carrier_is_not_materialized() -> None:
+    """本 provider 的载体仍是唯一权威，正文与工具调用不写回归一化结果。"""
+    provider = object.__new__(AnthropicProvider)
+    tool_message = {"role": "tool", "tool_call_id": "call-1", "content": "文件内容"}
+
+    normalized = provider.normalize_messages([ANTHROPIC_CARRIER, tool_message])
+
+    assert normalized == [
+        {"role": "assistant", "_anthropic_content": ANTHROPIC_CARRIER["_anthropic_content"]},
+        tool_message,
+    ]
 
 
 @pytest.mark.parametrize(
@@ -359,3 +428,13 @@ def test_moonshot_preserves_reasoning_content_for_valid_tool_round_trip() -> Non
     assert normalized[0]["reasoning_content"] == "reasoning"
     assert normalized[0]["tool_calls"] == messages[0]["tool_calls"]
     assert normalized[1] == messages[1]
+
+
+def test_stored_text_matches_what_the_provider_will_send():
+    """写入状态用的正文形式必须与归一化后会发给模型的形式一致。"""
+    deepseek = DeepSeekProvider.__new__(DeepSeekProvider)
+    assert deepseek.normalize_stored_text("  正文\n") == "正文"
+    assert deepseek._normalize_content("  正文\n") == "正文"
+
+    stub = StubProvider.__new__(StubProvider)
+    assert stub.normalize_stored_text("  正文\n") == "  正文\n"

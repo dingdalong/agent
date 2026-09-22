@@ -20,6 +20,7 @@ dependencies = [
     "mcp>=1.8.0",
     "ripgrep>=15.1.0",
     "jsonschema>=4.26.0",
+    "zstandard>=0.25.0",
 ]
 
 [project.optional-dependencies]

@@ -23,7 +23,7 @@ from src.mgr.permission_mgr import (
     tool_sort_order,
 )
 from src.tools import ToolDict, ToolEntry
-from src.common.tool_display import ToolResult
+from src.common.tool_display import ToolResult, result_preview as tool_result_preview
 from src.common.tool_policy import AccessKind, PathRole, ToolPolicy
 
 if TYPE_CHECKING:
@@ -274,13 +274,6 @@ class ToolsMgr:
             if mode not in entry.availability.modes
         ))
 
-    def _result_preview(self, result: str, limit: int = 160) -> str:
-        """生成结果预览文本。"""
-        preview = " ".join(result.split())
-        if len(preview) <= limit:
-            return preview
-        return preview[: limit - 3] + "..."
-
     @staticmethod
     def _external_read_preview(result: str, status: str) -> str:
         """外部读取事件只记录状态和长度，不保留网页内容。"""
@@ -309,7 +302,11 @@ class ToolsMgr:
             data_guard = getattr(deps, "data_guard", None) if deps is not None else None
             safe_args = data_guard.redact(arguments) if data_guard is not None else arguments
             params_text = format_params(tool.name, safe_args)
-            display = ToolDisplay(title=title, content=params_text)
+            display = ToolDisplay(
+                title=title,
+                content=params_text,
+                render={"kind": "params"},
+            )
 
         caller_agent_type, caller_uuid = caller_identity(agent)
         await event_bus.emit(ToolCallStarted(
@@ -351,7 +348,7 @@ class ToolsMgr:
             display = ToolDisplay(title=title, content=result_preview)
         else:
             safe_result = result  # 已在统一输出整理前脱敏，不再改写文件源位置表示
-            result_preview = self._result_preview(str(safe_result))
+            result_preview = tool_result_preview(str(safe_result))
             if tool_display is not None:
                 # 来自 ToolResult 的展示数据，内容须经 DataGuard 脱敏
                 display = tool_display
@@ -363,7 +360,12 @@ class ToolsMgr:
                 if status in {"error", "cancelled"}:
                     title = f"✘ {title}"
                 content, display_truncated = format_result(str(safe_result))
-                display = ToolDisplay(title=title, content=content, truncated=display_truncated)
+                display = ToolDisplay(
+                    title=title,
+                    content=content,
+                    truncated=display_truncated,
+                    render={"kind": "result", "mode": "truncate"},
+                )
         caller_agent_type, caller_uuid = caller_identity(agent)
         await event_bus.emit(ToolCallCompleted(
             timestamp=time.time(),

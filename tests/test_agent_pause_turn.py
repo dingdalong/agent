@@ -79,6 +79,17 @@ class PauseNormalizer:
         """
         return list(messages)
 
+    def clear_reasoning_content(self, messages: object) -> None:
+        """本桩不建模思考载体，裁剪保持历史不变。
+
+        Args:
+            messages: 本轮新增历史消息。
+
+        Returns:
+            None。
+        """
+        del messages
+
 
 class RecordingEventBus:
     """按顺序记录 Agent 遥测事件的测试总线。"""
@@ -103,8 +114,19 @@ class RecordingEventBus:
         self.events.append(event)
 
 
+def _carrier_only(message: dict) -> dict:
+    """返回归一化后的 assistant 载体：派生正文与工具调用不再随载体保存。"""
+    return {
+        key: value
+        for key, value in message.items()
+        if key not in {"content", "tool_calls", "reasoning_content"}
+    }
+
+
 class ProtocolScriptedProvider(LLMProvider):
     """使用真实 LLMProvider 调用模板逐次返回协议响应的测试 provider。"""
+
+    _CARRIER_KEY = "_anthropic_content"
 
     _EFFORT_DOWNGRADE = {"max": "high", "high": "medium", "medium": "low"}
 
@@ -776,11 +798,11 @@ def test_protocol_continuations_preserve_request_and_emit_independent_usage() ->
     assert len(provider.requests) == 3
     assert provider.requests[1]["messages"] == [
         {"role": "user", "content": "执行服务端工具"},
-        first_carrier,
+        _carrier_only(first_carrier),
     ]
     assert provider.requests[2]["messages"] == [
         {"role": "user", "content": "执行服务端工具"},
-        second_carrier,
+        _carrier_only(second_carrier),
     ]
     assert all(
         request["prompt"] == provider.requests[0]["prompt"]
@@ -792,7 +814,7 @@ def test_protocol_continuations_preserve_request_and_emit_independent_usage() ->
     )
     assert agent.history == [
         {"role": "user", "content": "执行服务端工具"},
-        second_carrier,
+        _carrier_only(second_carrier),
         {"role": "assistant", "content": "后半句"},
     ]
     starts = [event for event in bus.events if isinstance(event, LLMCallStarted)]
@@ -960,7 +982,7 @@ def test_pause_length_stop_mixed_chain_commits_history_and_clears_state() -> Non
     assert result.final_text == "第一段第二段第三段"
     assert agent.history == [
         {"role": "user", "content": "执行混合续接"},
-        pause_carrier,
+        _carrier_only(pause_carrier),
         {"role": "assistant", "content": "第二段"},
         {
             "role": "developer",
@@ -1368,7 +1390,6 @@ def test_subagent_run_restores_automatic_snapshot_after_compact_pause_cancel() -
                     {"role": "user", "content": "压缩摘要"},
                     messages[-1],
                 ],
-                transcript_path=None,
                 summarized_message_count=2,
                 summary="摘要",
             )
@@ -1380,7 +1401,7 @@ def test_subagent_run_restores_automatic_snapshot_after_compact_pause_cancel() -
         asyncio.run(agent.run("当前问题"))
 
     assert len(provider.requests) == 2
-    assert provider.requests[1]["messages"][-1] == pause_carrier
+    assert provider.requests[1]["messages"][-1] == _carrier_only(pause_carrier)
     # 中断保留历史（不回滚）：compact 改写后历史为 [压缩摘要, 当前问题]，
     # 取消时回滚恢复链移除 pause 载体、补中断标记 assistant 消息。
     assert agent.history == [

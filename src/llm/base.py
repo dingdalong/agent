@@ -42,6 +42,7 @@ from src.llm.errors import (
     classify_llm_error,
     safe_exception_traceback,
 )
+from src.llm.message_view import has_carrier, materialize_assistant
 from src.llm.retry import RetryConfig, RetryPolicy
 from src.web.types import (
     NativeWebCapabilityError,
@@ -258,9 +259,10 @@ def classify_truncation(
         TruncationKind 之一的字符串值；优先级为工具 → 正文 → 思考 → 未知。
     """
     assistant_message = response.assistant_message or {}
+    view = materialize_assistant(assistant_message)
     has_tool = bool(
         response.tool_calls
-        or assistant_message.get("tool_calls")
+        or (isinstance(view, dict) and view.get("tool_calls"))
         or (call is not None and call.tool_fragment_state != "none")
     )
     if has_tool:
@@ -429,6 +431,9 @@ class LLMProvider(ABC):
 
     # 推理力度降档阶梯（当前档 → 下一更低档），各 provider 覆写；空表示无阶梯。
     _EFFORT_DOWNGRADE: ClassVar[dict[str, str]] = {}
+
+    # 本 provider 认识的 assistant 载体字段；None 表示只接受通用字段。
+    _CARRIER_KEY: ClassVar[str | None] = None
 
     def __post_init__(self) -> None:
         """初始化并发限制、分页预算与统一重试策略。
@@ -633,12 +638,20 @@ class LLMProvider(ABC):
                     )
                 role = "user"
 
-            content = self._normalize_content(msg.get("content", ""))
-            has_tool_calls = bool(msg.get("tool_calls"))
+            source = msg
+            owns_carrier = False
+            if role == "assistant" and has_carrier(msg):
+                # 载体消息的正文与工具调用按需重建，用于序列校验与空消息判定；
+                # 派生字段不会写回归一化结果，避免与载体重复。
+                source = self._materialize_foreign_carrier(msg)
+                owns_carrier = source is msg
+
+            content = self._normalize_content(source.get("content", ""))
+            has_tool_calls = bool(source.get("tool_calls"))
             norm_msg: dict = {"role": role, "content": content}
 
             if role == "assistant" and has_tool_calls and allow_tool_calls:
-                tool_calls = self._normalize_tool_calls(msg.get("tool_calls"))
+                tool_calls = self._normalize_tool_calls(source.get("tool_calls"))
                 # 空列表仅作为序列校验的内部非法标记，最终不会进入返回值。
                 norm_msg["tool_calls"] = tool_calls or []
 
@@ -652,7 +665,10 @@ class LLMProvider(ABC):
                     norm_msg.pop("tool_call_id", None)
 
             standard_keys = set(norm_msg)
-            self._normalize_assistant_extra(msg, norm_msg, role)
+            self._normalize_assistant_extra(source, norm_msg, role)
+            if owns_carrier:
+                norm_msg.pop("content", None)
+                norm_msg.pop("tool_calls", None)
             has_provider_extra = bool(set(norm_msg) - standard_keys)
             if (
                 not content
@@ -669,7 +685,57 @@ class LLMProvider(ABC):
 
         if not allow_tool_calls:
             return normalized
-        return self._normalize_tool_message_sequence(normalized, strict)
+        paired = self._normalize_tool_message_sequence(normalized, strict)
+        return [self._strip_derived_carrier_fields(message) for message in paired]
+
+    @staticmethod
+    def _sequence_view(message: dict) -> dict:
+        """返回工具序列校验用的视图：载体消息按需具体化。
+
+        Args:
+            message: 已完成字段归一化的消息。
+
+        Returns:
+            载体消息返回带 tool_calls 的具体化视图，其余消息原样返回。
+        """
+        return materialize_assistant(message) if has_carrier(message) else message
+
+    def _materialize_foreign_carrier(self, message: dict) -> dict:
+        """把不属于本 provider 的 assistant 载体按需具体化。
+
+        会话可以在中途切换模型：历史里只带原 provider 载体的消息对目标 provider
+        不可见，直接下发会被当成空消息丢弃，正文与工具往返随之丢失。此处对其他
+        provider 的载体重建通用字段；本 provider 的载体保持唯一权威。
+
+        Args:
+            message: 带载体的 assistant 消息。
+
+        Returns:
+            本 provider 载体消息原样返回；其他 provider 的载体消息返回具体化视图。
+        """
+        if self._CARRIER_KEY is not None and message.get(self._CARRIER_KEY):
+            return message
+        return materialize_assistant(message)
+
+    @staticmethod
+    def _strip_derived_carrier_fields(message: dict) -> dict:
+        """移除载体消息上的派生字段，保持「载体唯一权威」不变式。
+
+        Args:
+            message: 已完成工具序列校验的消息。
+
+        Returns:
+            载体消息返回去掉 content/tool_calls/reasoning_content 的新字典，
+            其余消息原样返回。
+        """
+        if not has_carrier(message):
+            return message
+        stripped = dict(message)
+        stripped.pop("content", None)
+        stripped.pop("tool_calls", None)
+        stripped.pop("reasoning_content", None)
+        stripped.pop("reasoning", None)
+        return stripped
 
     def _normalize_tool_message_sequence(
         self,
@@ -693,7 +759,8 @@ class LLMProvider(ABC):
 
         while idx < len(messages):
             message = messages[idx]
-            if message.get("role") == "assistant" and "tool_calls" in message:
+            view = self._sequence_view(message)
+            if message.get("role") == "assistant" and "tool_calls" in view:
                 end_idx = idx + 1
                 while (
                     end_idx < len(messages)
@@ -702,7 +769,7 @@ class LLMProvider(ABC):
                     end_idx += 1
 
                 tool_messages = messages[idx + 1:end_idx]
-                error = self._tool_message_sequence_error(message, tool_messages)
+                error = self._tool_message_sequence_error(view, tool_messages)
                 if error is None:
                     repaired.extend(messages[idx:end_idx])
                 elif strict:
@@ -715,7 +782,7 @@ class LLMProvider(ABC):
                         len(tool_messages),
                         error,
                     )
-                    content = message.get("content")
+                    content = view.get("content")
                     if content:
                         repaired.append({"role": "assistant", "content": content})
                 idx = end_idx
@@ -792,6 +859,21 @@ class LLMProvider(ABC):
         if content is not None and not isinstance(content, str):
             return str(content)
         return content
+
+    def normalize_stored_text(self, text: str) -> str:
+        """返回写入会话状态时使用的正文形式。
+
+        默认原样返回。provider 若在消息归一化时改写字符串正文（例如去除首尾空白），
+        应在这里复用同一规则：首次落盘的内容就是之后会发给模型的内容，否则同一段
+        正文会先以未规范化形式落盘、再被改写后落盘成第二份。
+
+        Args:
+            text: 待写入状态的正文。
+
+        Returns:
+            规范化后的正文。
+        """
+        return text
 
     def _normalize_tool_calls(self, tool_calls) -> list[dict] | None:
         if not tool_calls or not isinstance(tool_calls, list):

@@ -10,7 +10,6 @@ from types import SimpleNamespace
 import pytest
 
 from src.agent import Agent
-from src.mgr.compact_mgr import CompactMgr
 from src.common.data_guard import DataGuard, REDACTED
 from src.mgr.hooks_mgr import HookRunResult, HooksMgr
 from src.mgr.memory_mgr import MemoryMgr
@@ -37,7 +36,7 @@ def test_session_memory_and_task_persistence_redact_and_use_owner_only_files(tmp
     sessions = SessionMgr(global_dir, workdir, guard)
     state = SessionState()
     state.append_context({"role": "assistant", "content": SECRET})
-    sessions.save_state("session", state)
+    sessions.append_state("session", state)
     sessions.save_metadata("session", is_new=True, topic=f"topic {SECRET}")
 
     memory = MemoryMgr(workdir, data_guard=guard)
@@ -51,7 +50,7 @@ def test_session_memory_and_task_persistence_redact_and_use_owner_only_files(tmp
     )
 
     files = [
-        global_dir / "sessions" / "session.state.json",
+        global_dir / "sessions" / "session.jsonl",
         global_dir / "sessions" / "session.json",
         next((workdir / ".agent" / "memory").glob("*.md")),
         global_dir / "tasks" / "session" / "1.json",
@@ -64,21 +63,6 @@ def test_session_memory_and_task_persistence_redact_and_use_owner_only_files(tmp
     assert SECRET not in repr(sessions.load_state("session"))
     assert SECRET not in memory.read("security")
     assert SECRET not in repr(tasks.get_task("1"))
-
-
-def test_compact_transcript_and_input_are_redacted(tmp_path):
-    guard = _guard()
-    manager = CompactMgr(llm=SimpleNamespace(), workdir=tmp_path, data_guard=guard)
-    messages = [{
-        "role": "assistant",
-        "tool_calls": [{"arguments": json.dumps({"token": SECRET})}],
-    }]
-
-    path = asyncio.run(manager.write_transcript(messages))
-
-    assert SECRET not in path.read_text()
-    assert REDACTED in path.read_text()
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
 def test_agent_history_redacts_assistant_tool_call_arguments():

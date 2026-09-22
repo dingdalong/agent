@@ -458,8 +458,7 @@ def test_compact_clears_loaded_skill_deduplication() -> None:
         ) -> SimpleNamespace:
             del bootstrap_message_count
             return SimpleNamespace(
-                messages=list(messages), transcript_path=None,
-                summarized_message_count=1, summary="摘要",
+                messages=list(messages), summarized_message_count=1, summary="摘要",
             )
 
     agent = _runtime_agent(SequenceLLM([]))
@@ -523,7 +522,7 @@ def test_paginated_compact_summary_failure_reaches_turn_boundary(tmp_path: Path)
             raise error
 
     paged_llm = PagedSummaryLLM()
-    compact_mgr = CompactMgr(llm=paged_llm, workdir=tmp_path)
+    compact_mgr = CompactMgr(llm=paged_llm)
     agent = _runtime_agent(SequenceLLM([]))
 
     async def summarize_handler(ctx: RunContext) -> AgentState:

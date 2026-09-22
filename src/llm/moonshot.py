@@ -22,6 +22,7 @@ from src.llm.base import (
     validate_chat_completion_stream,
 )
 from src.llm.errors import LLMStreamResponseError
+from src.llm.message_view import materialize_assistant
 
 if TYPE_CHECKING:
     from src.tools import ToolDict
@@ -166,8 +167,8 @@ class MoonshotProvider(LLMProvider):
             归一化后的 LLMResponse。
         """
         request_messages = [
-            {**message, "role": "system"}
-            if message.get("role") == "developer" else message
+            {**materialize_assistant(message), "role": "system"}
+            if message.get("role") == "developer" else materialize_assistant(message)
             for message in (prompt or []) + messages
         ]
         kwargs: dict = {

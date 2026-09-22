@@ -28,7 +28,7 @@ async def submit_plan(title, content, agent, deps, authorization):
         return ToolResult.failure('plan_save_failed', str(exc))
     state = {'path': str(path), 'title': title, 'approved': False}
     if deps.session.state is not None:
-        deps.session.state.plan = state
+        deps.session.state.update_plan(state)
     await deps.event_bus.request_output(f'计划：{title}\n{path}\n')
     await deps.event_bus.request_output(content, markdown=True)
     caller_type, caller_uuid = caller_identity(agent)
@@ -40,9 +40,20 @@ async def submit_plan(title, content, agent, deps, authorization):
     )
     if choice in {'auto', 'manual'} and not feedback.strip():
         state['approved'] = True
+        if deps.session.state is not None:
+            deps.session.state.update_plan(state)
         deps.plan_mgr.exit_mode(agent)
     if deps.session_mgr is not None and deps.session.state is not None:
-        await asyncio.to_thread(deps.session_mgr.save_state, deps.session.id, deps.session.state)
+        async with deps.session.commit_lock:
+            commit = deps.session.state.prepare_commit()
+            if commit is not None:
+                success = await asyncio.to_thread(
+                    deps.session_mgr.append_batch, deps.session.id, commit.payload,
+                )
+                if success:
+                    deps.session.state.ack_commit(commit)
+                else:
+                    deps.session.state.requeue_commit(commit)
     if feedback.strip():
         return ToolResult(f'修改意见：{feedback.strip()}\n请修订后再次 submit_plan；路径：{path}')
     if choice == 'auto':

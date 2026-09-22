@@ -20,6 +20,7 @@ from src.mgr.common.subagent_port import ParentAgentFacts, SubagentSpawnRequest
 from src.events import NoEventSubscribers, emit_telemetry_safely
 from src.llm.base import TruncationKind, classify_truncation
 from src.llm.errors import LLMCallError, LLMConfigurationError, LLMErrorInfo, LLMErrorKind
+from src.llm.message_view import materialize_assistant
 from src.prompt_tags import (
     ExternalContextItem,
     PromptTag,
@@ -138,6 +139,7 @@ class SessionContext:
     state: "SessionState | None" = None
     context: list[ExternalContextItem] = field(default_factory=list)
     env_baseline: str = ""
+    commit_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
 
 @dataclass(frozen=True)
@@ -503,8 +505,7 @@ class Agent:
             ctx.user_input = input
             result = await self._run_single_turn(ctx, AgentState.CHECK_COMPACT)
             if not ctx.has_tool_calls:
-                self.assembly.llm.clear_reasoning_content(self.history[ctx.round_start_idx:])
-                self._sync_context_from_history()
+                self._finish_round_reasoning(ctx)
             await self._cleanup_tasks_at_turn_end(ctx)
             return result
 
@@ -512,14 +513,13 @@ class Agent:
             ctx = RunContext(messages=self.history, round_start_idx=len(self.history))
             result = await self._run_single_turn(ctx, AgentState.REQUEST_INPUT)
             if not ctx.has_tool_calls:
-                self.assembly.llm.clear_reasoning_content(self.history[ctx.round_start_idx:])
-                self._sync_context_from_history()
+                self._finish_round_reasoning(ctx)
             # 流式事件完成归并后再保存与下一次 LLM 输入一致的会话状态。
             event_bus = getattr(self.deps, "event_bus", None)
             if event_bus is not None and hasattr(event_bus, "join"):
                 await event_bus.join()
             await self._cleanup_tasks_at_turn_end(ctx)
-            await self._persist_session(ctx.user_input)
+            await self._commit_session(ctx.user_input)
             if result.exit_requested or result.command is not None:
                 return result
 
@@ -588,7 +588,8 @@ class Agent:
         pending = {}
         for message in messages:
             if message.get("role") == "assistant":
-                pending = {tc["id"]: tc for tc in message.get("tool_calls", [])}
+                view = materialize_assistant(message)
+                pending = {tc["id"]: tc for tc in view.get("tool_calls", [])}
             elif message.get("role") == "tool":
                 pending.pop(message.get("tool_call_id"), None)
             else:
@@ -753,6 +754,7 @@ class Agent:
             record_id=ctx.user_record_id,
             kind="user",
         )
+        await self._commit_session(user_input)
 
         return AgentState.CHECK_COMPACT
 
@@ -881,11 +883,10 @@ class Agent:
             ),
         )
         self._replace_messages(ctx.messages, result.messages)
+        await self._commit_session()
         ctx.loaded_skills.clear()
         ctx.auto_compact_summarized_message_count = result.summarized_message_count
         ctx.auto_compact_has_summary = bool(result.summary.strip())
-        if result.transcript_path:
-            await self.deps.event_bus.request_output(f"[transcript saved: {result.transcript_path}]\n")
         return AgentState.CHECK_COMPACT
 
     def _base_reasoning_effort(self) -> str:
@@ -958,9 +959,12 @@ class Agent:
             correlation_id=response.call_id or None,
             kind="assistant",
         )
-
         if response.tool_calls:
+            await self._commit_session()
             return AgentState.EXECUTE_TOOLS
+        # 无工具响应在提交前就裁掉思考，保证同一记录只以最终形态落盘一次。
+        self._finish_round_reasoning(ctx)
+        await self._commit_session()
         return AgentState.CHECK_STOP
 
     async def _on_length_retry(self, ctx: RunContext) -> AgentState:
@@ -1227,6 +1231,7 @@ class Agent:
                 end_turn = end_turn or result.end_turn
                 self._append_message(ctx.messages, {"role": "tool", "tool_call_id": tc["id"], "content": str(result)}, correlation_id=tc["id"], kind="tool")
         self.assembly.reminder_mgr.notify_tool_round([tc["name"] for tc in calls if tc["id"] in completed])
+        await self._commit_session()
         return AgentState.DONE if end_turn else AgentState.POST_ROUND
 
     async def _on_check_stop(self, ctx: RunContext) -> AgentState:
@@ -1295,6 +1300,7 @@ class Agent:
             correlation_id=response.call_id or None,
             kind="assistant",
         )
+        await self._commit_session()
         return AgentState.DONE
 
     async def _on_context_overflow(self, ctx: RunContext) -> AgentState:
@@ -1391,6 +1397,33 @@ class Agent:
         data_guard = getattr(getattr(self, "deps", None), "data_guard", None)
         return data_guard.redact(value) if data_guard is not None else value
 
+    def _normalize_stored_text(self, message: dict) -> dict:
+        """把消息正文规范成 provider 之后会写入的形式。
+
+        归一化会改写字符串正文的 provider（例如 DeepSeek 去掉首尾空白）若先落盘
+        原样、下一轮再把归一化结果回写，同一段正文会在日志里留下两份。这里在首次
+        写入前就使用同一规则，模型看到的字节不变。
+
+        Args:
+            message: 待写入的模型消息。
+
+        Returns:
+            正文已规范化的消息；无需改动时返回原对象。
+        """
+        content = message.get("content")
+        if not isinstance(content, str) or not content:
+            return message
+        if "_response_output" in message or "_anthropic_content" in message:
+            return message
+        llm = getattr(getattr(self, "assembly", None), "llm", None)
+        normalize = getattr(llm, "normalize_stored_text", None)
+        if normalize is None:
+            return message
+        normalized = normalize(content)
+        if not isinstance(normalized, str) or normalized == content:
+            return message
+        return {**message, "content": normalized}
+
     def _session_state(self) -> "SessionState | None":
         if getattr(self, "is_subagent", False):
             return None
@@ -1406,7 +1439,7 @@ class Agent:
         correlation_id: str | None = None,
         kind: str = "internal",
     ) -> None:
-        safe_message = self._safe_history_value(message)
+        safe_message = self._normalize_stored_text(self._safe_history_value(message))
         state = self._session_state() if messages is getattr(self, "history", None) else None
         if state is not None:
             state.bind_model_message(
@@ -1437,50 +1470,91 @@ class Agent:
         del messages[length:]
 
     def _set_message(self, messages: list[dict], index: int, message: dict) -> None:
-        safe_message = self._safe_history_value(message)
+        safe_message = self._normalize_stored_text(self._safe_history_value(message))
         state = self._session_state() if messages is getattr(self, "history", None) else None
         if state is not None:
             state.set_context_message(index, safe_message)
         messages[index] = safe_message
 
-    def _sync_context_from_history(self) -> None:
-        state = self._session_state()
-        if state is not None:
-            state.replace_context(self.history, preserve_positions=True)
+    async def _commit_session(self, user_input: str = "") -> None:
+        """把自上次提交以来的会话状态增量追加到日志（仅主 agent，子 agent 跳过）。
 
-    async def _persist_session(self, user_input: str = "") -> None:
-        """持久化当前会话历史和元数据（仅主 agent，子 agent 跳过）。
-
-        首次持久化时写入 is_new=True 并将用户首条消息设为 topic。
-        无实际对话时（history 为空）跳过元数据写入，避免保存空会话。
+        增量在事件循环线程取出，写盘与元数据更新在工作线程完成；首次提交时写入
+        is_new=True 并把用户首条消息设为 topic。无变更且无需更新元数据时零写入。
 
         Args:
             user_input: 用户本轮原始输入，首次调用时作为会话主题。
         """
-        if self.spec.is_subagent or self.deps.session_mgr is None:
+        target = self._session_target()
+        if target is None:
             return
-        session_id = self.deps.session.id
-        if not session_id:
-            return
+        session_mgr, session_id, state = target
+        async with self.deps.session.commit_lock:
+            commit = state.prepare_commit()
+            if commit is None and not user_input:
+                return
+            has_history = bool(self.history)
+            mode = self.mode
+
+            def save() -> bool:
+                success = commit is None or session_mgr.append_batch(session_id, commit.payload)
+                if user_input and has_history:
+                    is_new = session_mgr.get_metadata(session_id) is None
+                    session_mgr.save_metadata(
+                        session_id,
+                        is_new=is_new,
+                        topic=user_input if is_new else "",
+                        mode=mode,
+                    )
+                return success
+
+            success = await asyncio.to_thread(save)
+            if commit is not None and success:
+                state.ack_commit(commit)
+            elif commit is not None:
+                state.requeue_commit(commit)
+
+    def _mark_context_dirty(self, start: int) -> None:
+        """标记被 provider 就地裁剪过的上下文记录，使其重新落盘。
+
+        Args:
+            start: 被修改区间在上下文中的起始下标。
+        """
         state = self._session_state()
-        if state is None:
-            return
-        session_mgr = self.deps.session_mgr
-        has_history = bool(self.history)
-        mode = self.mode
+        if state is not None:
+            state.mark_context_dirty(start)
 
-        def save() -> None:
-            session_mgr.save_state(session_id, state)
-            if user_input and has_history:
-                is_new = session_mgr.get_metadata(session_id) is None
-                session_mgr.save_metadata(
-                    session_id,
-                    is_new=is_new,
-                    topic=user_input if is_new else "",
-                    mode=mode,
-                )
+    def _finish_round_reasoning(self, ctx: RunContext) -> None:
+        """裁掉本轮已定稿的思考并标脏，使记录只以最终形态提交。
 
-        await asyncio.to_thread(save)
+        无工具响应提交前就调用本方法，避免同一 assistant 记录先带思考落一次盘、
+        轮末裁剪后再写第二份；工具轮需要保留思考以维持 provider 的工具续接协议。
+
+        Args:
+            ctx: 当前运行上下文，其本轮消息区间为待裁剪范围。
+
+        Returns:
+            None。
+        """
+        self.assembly.llm.clear_reasoning_content(ctx.messages[ctx.round_start_idx:])
+        self._mark_context_dirty(ctx.round_start_idx)
+
+    def _session_target(self) -> tuple[Any, str, "SessionState"] | None:
+        """返回可提交的 (session_mgr, session_id, state)。
+
+        未接线完整的 Agent（子 agent、最小化测试实例或缺少会话管理器）返回 None，
+        使提交点在所有路径上都是安全的空操作。
+        """
+        spec = getattr(self, "spec", None)
+        if spec is None or spec.is_subagent:
+            return None
+        session = getattr(getattr(self, "deps", None), "session", None)
+        session_mgr = getattr(getattr(self, "deps", None), "session_mgr", None)
+        state = getattr(session, "state", None)
+        session_id = getattr(session, "id", "")
+        if session_mgr is None or state is None or not session_id:
+            return None
+        return session_mgr, session_id, state
 
     async def _emit_state_changed(self, from_state: AgentState, to_state: AgentState) -> None:
         if self.deps.event_bus is None:

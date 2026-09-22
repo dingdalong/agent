@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from functools import cached_property
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from openai import AsyncOpenAI
 from tokenizers import Tokenizer
@@ -17,6 +17,7 @@ from src.llm.responses import (
     response_output_text,
     response_web_sources,
 )
+from src.llm.message_view import demote_carrier
 from src.web.types import WebSearchResponse, WebSource
 
 if TYPE_CHECKING:
@@ -25,6 +26,8 @@ if TYPE_CHECKING:
 
 class DeepSeekProvider(ResponsesStreamMixin, LLMProvider):
     """基于 OpenAI SDK Responses API 的 DeepSeek Provider。"""
+
+    _CARRIER_KEY: ClassVar[str] = "_response_output"
 
     _EFFORT_DOWNGRADE = {"max": "high"}
     _RESPONSE_REASONING_DELTA_EVENTS = frozenset({"response.reasoning_text.delta"})
@@ -96,7 +99,7 @@ class DeepSeekProvider(ResponsesStreamMixin, LLMProvider):
             if retained_items:
                 message["_response_output"] = retained_items
             else:
-                message.pop("_response_output", None)
+                demote_carrier(message)
 
     def estimate_tokens(
         self,
@@ -155,10 +158,14 @@ class DeepSeekProvider(ResponsesStreamMixin, LLMProvider):
                     parts.append({"type": "text", "text": part})
             return parts if parts else ""
         if isinstance(content, str):
-            return content.strip()
+            return self.normalize_stored_text(content)
         if content is not None:
             return str(content)
         return ""
+
+    def normalize_stored_text(self, text: str) -> str:
+        """DeepSeek 归一化会去掉字符串正文的首尾空白，写入状态时使用同一形式。"""
+        return text.strip()
 
     def _normalize_assistant_extra(
         self,

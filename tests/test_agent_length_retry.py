@@ -29,6 +29,17 @@ class IdentityNormalizer:
         """
         return list(messages)
 
+    def clear_reasoning_content(self, messages: object) -> None:
+        """本桩不建模思考载体，裁剪保持历史不变。
+
+        Args:
+            messages: 本轮新增历史消息。
+
+        Returns:
+            None。
+        """
+        del messages
+
     def next_lower_effort(self, current: str) -> str | None:
         """返回比当前档位更低的推理力度档位。
 

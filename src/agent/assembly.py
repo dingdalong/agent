@@ -129,7 +129,6 @@ class AgentAssembler:
         """
         llm, display_name = self._resolve_llm(model)
         compact_mgr = self.build_compact_mgr(spec, llm, agent_uuid=agent_uuid)
-        compact_mgr.recent_files = list(assembly.compact_mgr.recent_files)
         compact_mgr.has_compacted = assembly.compact_mgr.has_compacted
         return replace(
             assembly, llm=llm, model=display_name, compact_mgr=compact_mgr,
@@ -152,7 +151,6 @@ class AgentAssembler:
         context_limit = llm.context_limit
         return CompactMgr(
             llm=llm,
-            workdir=self.deps.workdir,
             caller_agent_type=spec.agent_type,
             caller_uuid=str(agent_uuid),
             auto_compact_size=int(context_limit * compact_cfg["auto_compact_rate"]),

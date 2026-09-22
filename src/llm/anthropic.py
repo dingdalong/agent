@@ -6,7 +6,7 @@ import asyncio
 from copy import deepcopy
 import json
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 import tiktoken
 from anthropic import AsyncAnthropic
 from src.llm.base import (
@@ -17,6 +17,7 @@ from src.llm.base import (
     validate_chat_completion_stream,
 )
 from src.llm.errors import LLMStreamResponseError
+from src.llm.message_view import demote_carrier
 from src.prompt_tags import PromptTag, render_prompt_tag
 from src.web.types import WebFetchResponse, WebSearchResponse, WebSource
 
@@ -105,6 +106,8 @@ def _dump_anthropic_content_block(block: Any) -> dict[str, Any]:
 
 class AnthropicProvider(LLMProvider):
     """Anthropic Provider (Messages API)"""
+
+    _CARRIER_KEY: ClassVar[str] = "_anthropic_content"
 
     # 降档阶梯用 pre-map 档名，实际下发前仍经 _map_effort 二次映射。
     _EFFORT_DOWNGRADE = {"max": "high", "xhigh": "high", "high": "medium", "medium": "low"}
@@ -404,10 +407,14 @@ class AnthropicProvider(LLMProvider):
             if isinstance(msg, dict) and msg.get("role") == "assistant":
                 msg.pop("reasoning_content", None)
                 if "_anthropic_content" in msg:
-                    msg["_anthropic_content"] = [
+                    retained = [
                         b for b in msg["_anthropic_content"]
                         if b.get("type") != "thinking"
                     ]
+                    if retained:
+                        msg["_anthropic_content"] = retained
+                    else:
+                        demote_carrier(msg)
 
     def _normalize_assistant_extra(self, msg: dict, norm_msg: dict, role: str) -> None:
         if role != "assistant":
@@ -863,14 +870,17 @@ class AnthropicProvider(LLMProvider):
             valid_finish_reasons={"stop", "tool_calls", "length", "pause_turn"},
         )
 
-        assistant_message: dict = {
-            "role": "assistant",
-            "content": content or None,
-            "_anthropic_content": anthropic_content,
-        }
-        if thinking:
-            assistant_message["reasoning_content"] = thinking
-        if tool_calls:
+        if anthropic_content:
+            # 载体是唯一权威：content/tool_calls/reasoning_content 由 message_view 重建。
+            assistant_message: dict = {
+                "role": "assistant",
+                "_anthropic_content": anthropic_content,
+            }
+        else:
+            assistant_message = {"role": "assistant", "content": content or None}
+            if thinking:
+                assistant_message["reasoning_content"] = thinking
+        if tool_calls and "_anthropic_content" not in assistant_message:
             assistant_message["tool_calls"] = [
                 {
                     "id": tc["id"],

@@ -98,6 +98,9 @@ class _TranscriptSegment:
         return self.chunks[0] if self.chunks else ""
 
 
+_TRANSCRIPT_ONLY_KINDS = frozenset({"retry", "error"})
+
+
 @dataclass(slots=True)
 class _AgentState:
     """Mutable state backing one immutable agent snapshot."""
@@ -726,6 +729,35 @@ class AgentViewStore:
             state.messages = list(event.messages)
             state.messages_revision += 1
             state.messages_length = sum(len(str(message)) for message in state.messages)
+            if state.messages:
+                self._prune_superseded_transcript(state)
+
+    @staticmethod
+    def _prune_superseded_transcript(state: _AgentState) -> None:
+        """删除已被完整消息记录覆盖的转录片段，只保留消息里没有的重试与错误行。
+
+        子 agent 结束时会同时拿到增量转录和完整消息快照，两者是同一段对话的两个
+        投影；保留消息后，正文/思考/工具片段只会在磁盘与内存里重复一份。
+
+        Args:
+            state: 已写入完整消息快照的 agent 状态。
+
+        Returns:
+            None。
+        """
+        retained = [
+            segment for segment in state.transcript
+            if segment.kind in _TRANSCRIPT_ONLY_KINDS
+        ]
+        if len(retained) == len(state.transcript):
+            return
+        removed = sum(segment.length for segment in state.transcript) - sum(
+            segment.length for segment in retained
+        )
+        state.transcript.clear()
+        state.transcript.extend(retained)
+        state.transcript_length = max(0, state.transcript_length - removed)
+        state.transcript_revision += 1
 
     def _append_stream(self, event: Event, kind: str, content: str) -> None:
         """Append or merge one streaming transcript delta.

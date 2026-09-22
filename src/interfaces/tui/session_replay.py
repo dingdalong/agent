@@ -13,11 +13,23 @@ from src.interfaces.tui.event_lines import blocks_for_view
 from src.interfaces.tui.history_log import HistoryEntry, strip_trailing_newlines
 
 
-def history_entries(records: Sequence[SessionRecord]) -> list[HistoryEntry]:
-    """把会话记录投影为单控件历史源，条目 id 由记录 id 派生。"""
+def history_entries(
+    records: Sequence[SessionRecord],
+    *,
+    resolver: object | None = None,
+) -> list[HistoryEntry]:
+    """把会话记录投影为单控件历史源，条目 id 由记录 id 派生。
+
+    Args:
+        records: 会话记录序列。
+        resolver: 可选内容解析器，用于重建被引用化的展示正文。
+
+    Returns:
+        历史条目列表。
+    """
     entries: list[HistoryEntry] = []
     for record in records:
-        for block in blocks_for_view(record):
+        for block in blocks_for_view(record, resolver=resolver):
             content = strip_trailing_newlines(block.content)
             if isinstance(content, str) and not content:
                 continue
@@ -31,11 +43,19 @@ def history_entries(records: Sequence[SessionRecord]) -> list[HistoryEntry]:
     return entries
 
 
-def plain_lines(records: Sequence[SessionRecord]) -> list[str]:
-    """把会话记录投影为无 ANSI 的纯文本行。"""
+def plain_lines(records: Sequence[SessionRecord], *, resolver: object | None = None) -> list[str]:
+    """把会话记录投影为无 ANSI 的纯文本行。
+
+    Args:
+        records: 会话记录序列。
+        resolver: 可选内容解析器，用于重建被引用化的展示正文。
+
+    Returns:
+        纯文本行列表。
+    """
     lines: list[str] = []
     for record in records:
-        for block in blocks_for_view(record):
+        for block in blocks_for_view(record, resolver=resolver):
             text = strip_trailing_newlines(block.plain)
             if text:
                 lines.append(text)

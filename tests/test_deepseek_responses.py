@@ -291,7 +291,6 @@ def test_deepseek_stream_emits_reasoning_and_preserves_unknown_output_items() ->
     assert call.partial_thinking == "think"
     assert response.assistant_message == {
         "role": "assistant",
-        "content": "answer",
         "_response_output": [item.value for item in output],
     }
 

@@ -19,11 +19,17 @@ from typing import Any, Literal
 
 @dataclass
 class ToolDisplay:
-    """工具展示数据 — 传入事件供 UI 消费，不影响 LLM 结果。"""
+    """工具展示数据 — 传入事件供 UI 消费，不影响 LLM 结果。
+
+    ``render`` 是展示内容的生成配方：当 ``content`` 只是工具结果等既有数据的投影时，
+    持久化只保留配方与 ``render`` 元信息，正文在渲染时按引用取回，避免同一段文本
+    （尤其是长结果）在会话日志里存两份。
+    """
     title: str          # 中文动作标题，如"执行命令"、"• 已编辑 path (+3 -1)"
     content: str = ""   # 格式化的参数或结果文本
     content_type: str = "text"  # "text" | "diff" | "json"
     truncated: bool = False
+    render: dict | None = None  # 展示正文的生成配方；None 表示 content 是唯一来源
 
 
 @dataclass
@@ -247,6 +253,24 @@ def format_result(content: str, budget_lines: int = 60,
     if not content:
         return "", False
     return _truncate_text_with_flag(content, budget_lines, budget_bytes)
+
+
+def result_preview(text: str, limit: int = 160) -> str:
+    """返回工具结果的单行预览（折叠空白后截断）。
+
+    预览只是工具结果的投影，落盘时不再保存，渲染时按引用从唯一一份结果正文重建。
+
+    Args:
+        text: 工具结果正文。
+        limit: 预览最大字符数。
+
+    Returns:
+        单行预览文本。
+    """
+    preview = " ".join(text.split())
+    if len(preview) <= limit:
+        return preview
+    return preview[: limit - 3] + "..."
 
 
 # ---------------------------------------------------------------------------

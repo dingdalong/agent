@@ -11,6 +11,7 @@ from src.common.tool_display import (
     format_params,
     format_result,
     permission_line,
+    result_preview,
     tool_title,
 )
 
@@ -350,3 +351,11 @@ def test_tool_titles_all_have_values():
     for name, title in TOOL_TITLES.items():
         assert title, f"TOOL_TITLES['{name}'] 不应为空"
         assert isinstance(title, str)
+
+
+def test_result_preview_folds_whitespace_and_truncates():
+    assert result_preview("结果  正文\n第二行") == "结果 正文 第二行"
+    long_text = "x" * 400
+    preview = result_preview(long_text)
+    assert len(preview) == 160
+    assert preview.endswith("...")

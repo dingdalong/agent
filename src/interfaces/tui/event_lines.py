@@ -12,7 +12,7 @@ from types import SimpleNamespace
 from rich.text import Text
 
 from src.common.session_state import SessionRecord
-from src.common.tool_display import permission_line
+from src.common.tool_display import format_params, format_result, permission_line, result_preview
 from src.events.types import (
     CompactDelta,
     LLMCallFailed,
@@ -232,8 +232,17 @@ def blocks_for_event(event: object, *, retry_countdown: int | None = None) -> li
     return []
 
 
-def blocks_for_view(record: SessionRecord) -> list[DisplayBlock]:
-    """会话记录回放的展示块，与实时路径共用同一批构建函数。"""
+def blocks_for_view(record: SessionRecord, *, resolver: object | None = None) -> list[DisplayBlock]:
+    """会话记录回放的展示块，与实时路径共用同一批构建函数。
+
+    Args:
+        record: 待渲染的会话记录。
+        resolver: 可选的内容解析器（通常是 SessionState），用于把展示配方解析回
+            唯一一份源文本；缺省时只显示配方自带的标题与摘要。
+
+    Returns:
+        展示块列表。
+    """
     view = record.view
     if view is None:
         return []
@@ -248,7 +257,11 @@ def blocks_for_view(record: SessionRecord) -> list[DisplayBlock]:
     if view.kind == "assistant":
         return _assistant_blocks(data)
     if view.kind == "tool":
-        return [DisplayBlock(round_entry_text(_round_entry_from_view(data)))]
+        return [DisplayBlock(round_entry_text(_round_entry_from_view(
+            data,
+            resolver=resolver,
+            tool_call_id=record.correlation_id,
+        )))]
     if view.kind == "event":
         return _event_blocks(data)
     return []
@@ -314,16 +327,24 @@ def _event_blocks(data: dict) -> list[DisplayBlock]:
     return []
 
 
-def _round_entry_from_view(data: dict) -> RoundEntry:
+def _round_entry_from_view(
+    data: dict,
+    *,
+    resolver: object | None = None,
+    tool_call_id: str | None = None,
+) -> RoundEntry:
     started = data.get("started", {})
     completed = data.get("completed", {})
     started = started if isinstance(started, dict) else {}
     completed = completed if isinstance(completed, dict) else {}
-    start_display = started.get("display")
-    result_display = completed.get("display")
+    tool_name = str(started.get("tool_name") or completed.get("tool_name") or "tool")
+    start_display = _display_view(started.get("display"), resolver, tool_call_id, tool_name)
+    result_display = _display_view(completed.get("display"), resolver, tool_call_id)
     return RoundEntry(
-        tool_name=str(started.get("tool_name") or completed.get("tool_name") or "tool"),
-        tool_call_id=str(started.get("tool_call_id") or completed.get("tool_call_id") or ""),
+        tool_name=tool_name,
+        tool_call_id=str(
+            started.get("tool_call_id") or completed.get("tool_call_id") or tool_call_id or ""
+        ),
         detail=str(started.get("detail", "")),
         started_monotonic=0.0,
         status=(
@@ -331,15 +352,70 @@ def _round_entry_from_view(data: dict) -> RoundEntry:
             if completed.get("status") == "success"
             else "error" if completed else "running"
         ),
-        preview=str(completed.get("result_preview", "")),
+        preview=_preview_text(completed, resolver, tool_call_id),
         duration=float(completed.get("duration_seconds", 0.0) or 0.0),
-        start_display=(
-            SimpleNamespace(**start_display) if isinstance(start_display, dict) else None
-        ),
-        result_display=(
-            SimpleNamespace(**result_display) if isinstance(result_display, dict) else None
-        ),
+        start_display=start_display,
+        result_display=result_display,
     )
+
+
+def _display_view(
+    value: object,
+    resolver: object | None,
+    tool_call_id: str | None,
+    tool_name: str | None = None,
+) -> SimpleNamespace | None:
+    """把持久化的展示数据还原成带正文的展示对象。"""
+    if not isinstance(value, dict):
+        return None
+    display = dict(value)
+    if not display.get("content") and display.get("render"):
+        display["content"] = _render_content(display["render"], resolver, tool_call_id, tool_name)
+    return SimpleNamespace(**display)
+
+
+def _render_content(
+    render: object,
+    resolver: object | None,
+    tool_call_id: str | None,
+    tool_name: str | None = None,
+) -> str:
+    """按展示配方从唯一一份源数据重建正文。"""
+    if not isinstance(render, dict) or resolver is None:
+        return ""
+    if render.get("kind") == "params":
+        lookup_args = getattr(resolver, "tool_call_arguments", None)
+        arguments = lookup_args(tool_call_id) if lookup_args is not None else None
+        if not isinstance(arguments, dict) or not tool_name:
+            return ""
+        return format_params(tool_name, arguments)
+    if render.get("kind") != "result":
+        return ""
+    lookup = getattr(resolver, "tool_result_text", None)
+    if lookup is None:
+        return ""
+    text = lookup(tool_call_id)
+    if not isinstance(text, str) or not text:
+        return ""
+    return format_result(text)[0]
+
+
+def _preview_text(
+    completed: dict,
+    resolver: object | None,
+    tool_call_id: str | None,
+) -> str:
+    """返回工具结果预览：优先用存储值，投影被剥离时按引用重建。"""
+    stored = completed.get("result_preview")
+    if isinstance(stored, str) and stored:
+        return stored
+    display = completed.get("display")
+    render = display.get("render") if isinstance(display, dict) else None
+    if not isinstance(render, dict) or render.get("kind") != "result":
+        return ""
+    lookup = getattr(resolver, "tool_result_text", None) if resolver is not None else None
+    text = lookup(tool_call_id) if lookup is not None else None
+    return result_preview(text) if isinstance(text, str) else ""
 
 
 def round_entry_text(entry: RoundEntry) -> Text:

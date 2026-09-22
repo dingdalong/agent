@@ -187,6 +187,14 @@ Chat Completions 风格的通用校验（`base.py:179-283`）要求：
 
 assistant 的 provider 专属字段在判断“真正为空”之前由 `_normalize_assistant_extra()` 保存。因此 OpenAI 与 DeepSeek 的 `_response_output`、Anthropic `_anthropic_content`，以及 Ollama、Moonshot 的 reasoning-only carrier 即使正文为空也会保留；没有正文、工具调用或任何专属载体的空 assistant 才会删除。
 
+**载体唯一权威**：provider 归一化后的 assistant 消息只保留一个权威载体——Responses API 是 `_response_output`，Anthropic 是 `_anthropic_content`，Moonshot/Ollama 直接保留 `content`/`tool_calls`/`reasoning_content`。带载体的消息不再同时存 `content`、`tool_calls` 或 `reasoning_content`：这些是载体的派生物，同时落库等于同一段正文在上下文里存两份，且两份会各自漂移（`clear_reasoning_content` 只改载体、展示只读派生物）。
+
+需要派生字段的调用方通过 `src/llm/message_view.py` 按需重建：`materialize_messages()` 用于序列化与展示，`materialize_assistant()` 用于单条消息，`has_carrier()` 判断消息是否带载体。`normalize_messages()` 自身也用具体化视图校验工具往返序列，并在请求副本里剥掉载体消息上残留的派生字段；provider 在 `clear_reasoning_content` 裁空载体时调用 `demote_carrier()` 把派生字段降级写回，避免整条消息被当成空消息丢弃。Ollama、Moonshot 在构造请求时同样先具体化，防止自定义 messages 载荷把载体直接发给不认识它的服务端。
+
+**跨 provider 切换**：会话可以在中途换模型，历史里的载体只有原 provider 认识。每个 provider 用 `_CARRIER_KEY` 声明自己认识的载体（OpenAI/DeepSeek 为 `_response_output`，Anthropic 为 `_anthropic_content`，Chat Completions 类为 `None`）；`normalize_messages()` 遇到其他 provider 的载体时先具体化成 `content`/`tool_calls`/`reasoning_content` 再归一化，本 provider 的载体则保持「载体唯一权威」。没有这条规则，切换 provider 后 `normalize_messages()` 的输出会替换掉共享历史，原载体既发不出去、派生字段又已被剥离，正文与工具往返就永久丢失。
+
+**规范化必须与落盘一致**：归一化会改写字符串正文的 provider（DeepSeek 的 `_normalize_content()` 会 `strip()`，供 `normalize_messages()` 使用）同时实现 `normalize_stored_text()`。Agent 在把工具与用户消息写入会话状态前先调用它，使首次落盘的内容就是之后会发给模型的内容。否则同一段工具结果会先以原样落盘、下一轮再以 strip 后的形式落盘，内容池的两个指纹各存一份，同一份结果在日志里出现两次。
+
 工具输出预算由 ToolOutput 独立管理，不随 provider 上下文窗口放大，见 [tools.md](tools.md)。
 
 ## 7. 五个 provider 的差异

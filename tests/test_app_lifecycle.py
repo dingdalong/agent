@@ -347,7 +347,7 @@ def test_slow_interrupt_save_does_not_block_event_loop_and_is_awaited() -> None:
             self.saved = False
             self.thread_id: int | None = None
 
-        def save_state(self, _session_id, _state) -> None:
+        def append_batch(self, _session_id, _payload) -> None:
             self.thread_id = threading.get_ident()
             time.sleep(0.12)
             self.saved = True
@@ -358,7 +358,9 @@ def test_slow_interrupt_save_does_not_block_event_loop_and_is_awaited() -> None:
         app = _app(ui, event_bus)
         sessions = SlowSessions()
         app.deps.session_mgr = sessions
-        app.deps.session.state = SessionState()
+        state = SessionState()
+        state.append_user("中断前", {"role": "user", "content": "中断前"})
+        app.deps.session.state = state
         app.deps.session.id = "session"
         main_thread = threading.get_ident()
         beats = 0
@@ -391,7 +393,7 @@ def test_agent_round_persistence_serializes_in_worker_thread() -> None:
             self.calls: list[str] = []
             self.thread_ids: list[int] = []
 
-        def save_state(self, _session_id, _state) -> None:
+        def append_batch(self, _session_id, _payload) -> None:
             self.thread_ids.append(threading.get_ident())
             time.sleep(0.05)
             self.calls.append("state")
@@ -407,6 +409,7 @@ def test_agent_round_persistence_serializes_in_worker_thread() -> None:
     async def scenario() -> None:
         sessions = SlowSessions()
         state = SessionState()
+        state.append_context({"role": "user", "content": "hello"})
         agent = object.__new__(Agent)
         agent.spec = AgentSpec(agent_type="main", description="")
         agent.deps = SimpleNamespace(
@@ -426,7 +429,7 @@ def test_agent_round_persistence_serializes_in_worker_thread() -> None:
                 await asyncio.sleep(0.005)
 
         heartbeat_task = asyncio.create_task(heartbeat())
-        await agent._persist_session("hello")
+        await agent._commit_session("hello")
         running = False
         await heartbeat_task
 

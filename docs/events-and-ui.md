@@ -71,7 +71,7 @@ LLM 调用使用 `emit_telemetry_safely()`（`src/events/bus.py:36-65`）发布�
 
 ## 4. `AgentViewStore`
 
-`AgentViewStore` 是状态栏与子 agent 读模型。它维护会话累计 token、前台 UUID、活动与历史 Agent、每 Agent 的窗口/活动/生命周期以及子 agent 分段转录；主聊天历史来自 `SessionState.records[].view`，Store 不保存第二份主聊天副本。子 agent 快照会以隐藏的 `subagent` view 投影写入当前 `SessionState`，恢复后重新水合为只读历史。
+`AgentViewStore` 是状态栏与子 agent 读模型。它维护会话累计 token、前台 UUID、活动与历史 Agent、每 Agent 的窗口/活动/生命周期以及子 agent 分段转录；主聊天历史来自 `SessionState.records[].view`，Store 不保存第二份主聊天副本。子 agent 快照会以隐藏的 `subagent` view 投影写入当前 `SessionState`，恢复后重新水合为只读历史。快照里的 `messages` 是该子 agent 上下文的唯一副本，同一快照的 `transcript` 只保留 `retry`/`error` 行，不与消息重复存正文。
 
 `record()`（`agent_view_store.py:139-165`）对 LLM 事件的处理：
 
@@ -138,6 +138,8 @@ TTY 只缓冲前台 Agent 当前一轮的工具。实时区优先级为”重试
 
 **隐私边界**：`display` 只供 UI 和 Store 消费，不进入 LLM 历史。`ToolCallStarted.display` 的参数内容经 `DataGuard.redact()` 脱敏；`EXTERNAL_READ` 工具（web_search/web_fetch）不生成参数展示。`ToolCallCompleted.display` 中来自 `ToolResult` 的文件差异内容同样经 `DataGuard` 脱敏；`EXTERNAL_READ` 工具不生成结果展示（`display=None`）。
 
+**展示配方**：结果类展示的正文就是 tool 消息里的同一段文本，因此持久化只保留配方——`ToolDisplay.render={"kind": "result", "mode": "truncate"}` 且 `content` 置空；回放时由 `SessionState.tool_result_text(tool_call_id)` 取回唯一一份 tool 消息正文，再按 `format_result()` 截断，与实时路径产出一致。diff、错误和预览等由工具自己构造的展示没有配方，`content` 仍是唯一来源。实时流（`event_lines.blocks_for_event`）不做这次还原，因为展示对象就在内存里。
+
 **历史区逐工具渲染**：`flush_round()` 将每个工具调用渲染为独立 Rich Text 块，包含标题行（状态标记 + 中文标题 + 耗时）、参数摘要（bright_black）和结果内容（diff 行 `|+` 绿色、`|-` 红色，普通文本 bright_black）。截断时附截断提示。
 
 **非 TTY 与 Store 转录**：非 TTY 输出使用 `display.title` 和内容的前 20 行（含截断提示）。`AgentViewStore` 转录使用 `display.title` 和前 10 行内容，回退到 `result_preview`。
@@ -152,8 +154,8 @@ TTY 只缓冲前台 Agent 当前一轮的工具。实时区优先级为”重试
 |---|---|
 | `app.py` | Textual App 组装、历史/流输出、回合状态与跨区域键盘分派 |
 | `input_area.py` | 主输入框、斜杠命令补全菜单与输入历史回溯 |
-| `event_lines.py` | 事件与会话记录到展示块的唯一投影；实时、非 TTY 与回放共用同一措辞 |
-| `session_replay.py` | 会话记录到历史条目与纯文本行的回放投影 |
+| `event_lines.py` | 事件与会话记录到展示块的唯一投影；实时、非 TTY 与回放共用同一措辞，回放时按 `render` 配方从 `SessionState` 取回展示正文 |
+| `session_replay.py` | 会话记录到历史条目与纯文本行的回放投影；`history_entries()`/`plain_lines()` 接受可选的 `resolver`（通常是 `SessionState`）解析展示配方 |
 | `chrome.py` | 活动区、回合状态行、输入状态行与分隔线的分段渲染与内容签名缓存 |
 | `transcript.py` | Agent 转录面板的挂载、常驻渲染 worker、目标切换与每 Agent 滚动位置 |
 | `coordinator.py` | 内嵌交互 FIFO、转录请求与 Future 生命周期 |

@@ -18,7 +18,7 @@ from src.events.types import InterruptRequested
 from src.common.data_guard import register_runtime_secrets
 from src.common.env_baseline import collect_env_baseline
 from src.common.features import resolve_features
-from src.mgr.session_mgr import ResumeResult
+from src.mgr.session_mgr import ResumeResult, SessionMgr
 from src.common.session_state import SessionState
 from src.mode import RunMode
 from src.prompt_tags import ExternalContextItem
@@ -40,6 +40,7 @@ class AgentApp:
     output_router: OutputRouter = field(repr=False)
     _work_task: asyncio.Task | None = field(default=None, init=False, repr=False)
     _plan_mode_controller: PlanModeController | None = field(default=None, init=False, repr=False)
+    _checkpoint_task: asyncio.Task | None = field(default=None, init=False, repr=False)
 
     async def run(self) -> None:
         """启动主 REPL 循环。
@@ -51,6 +52,7 @@ class AgentApp:
         try:
             await self.deps.ui.start()
             consumer_task = asyncio.create_task(self._consume_events())
+            self._checkpoint_task = asyncio.create_task(self._session_checkpoint_loop())
             await asyncio.sleep(0)
 
             agent = await self.reset_session(source="startup")
@@ -80,11 +82,17 @@ class AgentApp:
                     )
                 except Exception:
                     pass
+            if self._checkpoint_task is not None:
+                self._checkpoint_task.cancel()
+                await asyncio.gather(self._checkpoint_task, return_exceptions=True)
+                self._checkpoint_task = None
             if self.deps.event_bus:
+                await self.deps.event_bus.join()
                 self.deps.event_bus.close()
             if consumer_task:
                 consumer_task.cancel()
                 await asyncio.gather(consumer_task, return_exceptions=True)
+            await self._flush_active_session()
             await self.deps.ui.stop()
 
     async def _consume_events(self) -> None:
@@ -210,10 +218,8 @@ class AgentApp:
                     old_state = self.deps.session.state
                     session_mgr = getattr(self.deps, "session_mgr", None)
                     if old_session_id and old_state is not None and session_mgr is not None:
-                        await asyncio.to_thread(
-                            session_mgr.save_state,
-                            old_session_id,
-                            old_state,
+                        await self._append_session_state(
+                            session_mgr, old_session_id, old_state, force=True,
                         )
                     if getattr(self.deps, "process_mgr", None):
                         await self.deps.process_mgr.close()
@@ -337,10 +343,8 @@ class AgentApp:
                 source_id = self.deps.session.id
                 source_state = self.deps.session.state
                 if session_mgr is not None and source_id and source_state is not None:
-                    await asyncio.to_thread(
-                        session_mgr.save_state,
-                        source_id,
-                        source_state,
+                    await self._append_session_state(
+                        session_mgr, source_id, source_state, force=True,
                     )
 
                 if getattr(self.deps, "process_mgr", None):
@@ -417,6 +421,64 @@ class AgentApp:
         self._cancel_current_work()
         self.deps.ui.cancel_active_input()
 
+    async def _append_session_state(
+        self,
+        session_mgr: SessionMgr,
+        session_id: str,
+        state: SessionState,
+        *,
+        force: bool = False,
+    ) -> None:
+        """提交一份会话增量：事件循环线程取增量，线程池负责编码与追加。
+
+        取增量会改动状态上的脏标记，必须留在事件循环线程；只有编码与写盘卸载到
+        线程池，避免与仍在运行的事件处理竞争同一份状态。
+
+        Args:
+            session_mgr: 会话管理器。
+            session_id: 目标会话 ID。
+            state: 当前会话状态。
+
+        Returns:
+            None。
+        """
+        if not state.checkpoint_due(force=force):
+            return
+        async with self.deps.session.commit_lock:
+            commit = state.prepare_commit()
+            if commit is None:
+                return
+            success = await asyncio.to_thread(
+                session_mgr.append_batch, session_id, commit.payload,
+            )
+            if success:
+                state.ack_commit(commit)
+            else:
+                state.requeue_commit(commit)
+
+    async def _session_checkpoint_loop(self) -> None:
+        """以有界延迟把流式会话投影追加到日志。"""
+        while True:
+            await asyncio.sleep(0.1)
+            try:
+                session_mgr = getattr(self.deps, "session_mgr", None)
+                state = getattr(self.deps.session, "state", None)
+                session_id = getattr(self.deps.session, "id", "")
+                if session_mgr is not None and state is not None and session_id:
+                    await self._append_session_state(session_mgr, session_id, state)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # 后台检查点不得因一次 I/O 或序列化异常而永久停止。
+                logger.exception("会话检查点失败，将在下一周期重试")
+
+    async def _flush_active_session(self) -> None:
+        session_mgr = getattr(self.deps, "session_mgr", None)
+        state = getattr(self.deps.session, "state", None)
+        session_id = getattr(self.deps.session, "id", "")
+        if session_mgr is not None and state is not None and session_id:
+            await self._append_session_state(session_mgr, session_id, state, force=True)
+
     def _cancel_current_work(self) -> bool:
         """取消当前正在执行的 agent 任务。"""
         if self._work_task is None or self._work_task.done():
@@ -447,7 +509,7 @@ class AgentApp:
         session_state = self.deps.session.state
         session_id = self.deps.session.id
         if session_mgr is not None and session_state is not None and session_id:
-            await asyncio.to_thread(session_mgr.save_state, session_id, session_state)
+            await self._append_session_state(session_mgr, session_id, session_state, force=True)
         await self.deps.ui.wait_interactions_idle()
 
     async def shutdown(self) -> None:
@@ -465,7 +527,7 @@ class AgentApp:
         session_state = self.deps.session.state
         session_id = self.deps.session.id
         if session_mgr is not None and session_state is not None and session_id:
-            await asyncio.to_thread(session_mgr.save_state, session_id, session_state)
+            await self._append_session_state(session_mgr, session_id, session_state, force=True)
         if self.deps.mcp_mgr is not None:
             await self.deps.mcp_mgr.stop()
 

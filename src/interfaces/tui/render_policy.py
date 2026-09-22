@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from src.common.stream_policy import StreamFlushPolicy
+
 
 @dataclass(frozen=True, slots=True)
-class TuiRenderPolicy:
+class TuiRenderPolicy(StreamFlushPolicy):
     """集中管理只影响前台渲染的固定保护参数。"""
 
     history_page_entries: int = 80
@@ -19,15 +21,5 @@ class TuiRenderPolicy:
     history_reflow_slice: float = 0.008
     journal_chars: int = 250_000
     activity_interval: float = 0.25
-    stream_medium_chars: int = 16_000
-    stream_large_chars: int = 64_000
-    stream_short_interval: float = 0.25
-    stream_medium_interval: float = 0.5
-    stream_large_interval: float = 1.0
-
     def stream_interval(self, length: int) -> float:
-        if length > self.stream_large_chars:
-            return self.stream_large_interval
-        if length > self.stream_medium_chars:
-            return self.stream_medium_interval
-        return self.stream_short_interval
+        return self.interval(length)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from src.common.session_state import SessionRecord, ViewPayload
+from src.common.session_state import SessionState
 from src.events.types import (
     CompactDelta,
     LLMCallFailed,
@@ -233,6 +234,40 @@ def test_tool_view_renders_completed_title_and_duration() -> None:
     assert blocks[0].plain.startswith("✔ read_file src/app.py  (1.50s)")
 
 
+def test_tool_view_recipe_rebuilds_result_from_single_source() -> None:
+    state = SessionState()
+    state.append_context(
+        {"role": "tool", "tool_call_id": "call-1", "content": "结果正文"},
+        kind="tool",
+    )
+    record = _record(
+        "r1",
+        ViewPayload("tool", {
+            "completed": {
+                "tool_name": "read_file",
+                "tool_call_id": "call-1",
+                "status": "success",
+                "duration_seconds": 1.5,
+                "display": {
+                    "title": "读取文件",
+                    "content": "",
+                    "content_type": "text",
+                    "truncated": False,
+                    "render": {"kind": "result", "mode": "truncate"},
+                },
+            },
+        }),
+        kind="tool",
+    )
+    record.correlation_id = "call-1"
+
+    unresolved = blocks_for_view(record)
+    assert "结果正文" not in unresolved[0].plain
+
+    resolved = blocks_for_view(record, resolver=state)
+    assert "结果正文" in resolved[0].plain
+
+
 def test_event_view_projects_compact_and_permission() -> None:
     compact = blocks_for_view(_record(
         "r1",
@@ -272,3 +307,101 @@ def test_output_view_carries_markdown_flag() -> None:
 
 def test_unknown_view_kind_yields_no_block() -> None:
     assert blocks_for_view(_record("r1", ViewPayload("subagent", {"uuid": "u1"}))) == []
+
+
+def test_tool_view_rebuilds_params_from_tool_call_arguments() -> None:
+    """参数展示是工具调用参数的投影，回放时按引用重建。"""
+    state = SessionState()
+    state.append_context({
+        "role": "assistant",
+        "tool_calls": [{
+            "id": "call-1",
+            "type": "function",
+            "function": {
+                "name": "exec_command",
+                "arguments": '{"cmd": "ls -la"}',
+            },
+        }],
+    })
+    record = _record(
+        "r1",
+        ViewPayload("tool", {
+            "started": {
+                "tool_name": "exec_command",
+                "tool_call_id": "call-1",
+                "display": {
+                    "title": "执行命令",
+                    "content": "",
+                    "content_type": "text",
+                    "truncated": False,
+                    "render": {"kind": "params"},
+                },
+            },
+            "completed": {
+                "tool_name": "exec_command",
+                "tool_call_id": "call-1",
+                "status": "success",
+                "duration_seconds": 0.5,
+            },
+        }),
+        kind="tool",
+    )
+    record.correlation_id = "call-1"
+
+    unresolved = blocks_for_view(record)
+    assert "ls -la" not in unresolved[0].plain
+
+    resolved = blocks_for_view(record, resolver=state)
+    assert "ls -la" in resolved[0].plain
+
+
+def test_tool_view_prefers_stored_preview_when_present() -> None:
+    """没有展示配方的工具（外部读取）继续使用已存储的预览。"""
+    from src.interfaces.tui.event_lines import _round_entry_from_view
+
+    entry = _round_entry_from_view(
+        {
+            "completed": {
+                "tool_name": "web_fetch",
+                "tool_call_id": "call-1",
+                "status": "success",
+                "result_preview": "status=success, length=12",
+            },
+        },
+        resolver=SessionState(),
+        tool_call_id="call-1",
+    )
+
+    assert entry.preview == "status=success, length=12"
+
+
+def test_tool_view_rebuilds_preview_when_projection_was_stripped() -> None:
+    """预览被剥离后，回放按唯一一份结果正文重建同一个预览。"""
+    from src.interfaces.tui.event_lines import _round_entry_from_view
+
+    state = SessionState()
+    state.append_context(
+        {"role": "tool", "tool_call_id": "call-1", "content": "结果  正文"},
+        kind="tool",
+    )
+    entry = _round_entry_from_view(
+        {
+            "completed": {
+                "tool_name": "read_file",
+                "tool_call_id": "call-1",
+                "status": "success",
+                "result_preview": "",
+                "display": {
+                    "title": "读取文件",
+                    "content": "",
+                    "content_type": "text",
+                    "truncated": False,
+                    "render": {"kind": "result", "mode": "truncate"},
+                },
+            },
+        },
+        resolver=state,
+        tool_call_id="call-1",
+    )
+
+    assert entry.preview == "结果 正文"

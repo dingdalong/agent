@@ -40,7 +40,7 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 | `PermissionManager` (`permission_mgr.py`) | 路径解析、代码硬拒绝、Plan 约束、智能权限和一次性确认 | 否 | 无 |
 | `ProcessMgr` (`process_mgr.py`) | 进程会话与工作区读写租约的唯一所有者 | 否 | 无（进程不跨重启） |
 | `WebAccessMgr` (`web_access_mgr.py`) | 按当前模型和统一配置路由本地或 provider 原生 Web 能力 | 否 | 无 |
-| `CompactMgr` (`compact_mgr.py`) | 上下文压缩与 transcript 落盘 | 否 | 无 |
+| `CompactMgr` (`compact_mgr.py`) | 上下文压缩 | 否 | 无 |
 | `PromptMgr` (`prompt_mgr.py`) | 构建固定 system、模式指令与初始外部上下文 | 否 | 无 |
 | `SubAgentMgr` (`subagent_mgr.py`) | 四层扫描子 agent，调度委派 | `subagent` | 无 |
 | `SkillMgr` (`skill_mgr.py`) | 多层扫描技能，按需注入全文 | `skill` | 无 |
@@ -183,11 +183,11 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 
 `src/mgr/compact_mgr.py`
 
-**单一职责**：判断是否需要压缩，按原子消息块无损切分历史，用 LLM 滚动生成摘要，拼装压缩后的上下文前缀，并把完整原始历史写入 transcript。
+**单一职责**：判断是否需要压缩，按原子消息块无损切分历史，用 LLM 滚动生成摘要，拼装压缩后的上下文前缀。
 
 **构造参数**（每 agent 层，由 `AgentAssembler.build_compact_mgr()` `assembly.py:138-164` 从 `compact` 配置换算）：
 - `llm`：本 agent 的 provider（估算 token、生成摘要）。
-- `workdir`：transcript 落盘目录 `workdir/.agent/transcripts/`。
+- `workdir`：所属工作目录（摘要调用不落盘，仅用于身份与路径归属）。
 - `caller_agent_type`、`caller_uuid`：摘要 LLM 调用沿用的 agent 类型与实例标识。
 - `auto_compact_size` = `context_limit * compact.auto_compact_rate`；非正数禁用自动压缩。
 - `keep_recent_user_turns` = `compact.keep_recent_user_turns`（缺省 3），定义优先保留近期原文的用户轮次范围。
@@ -198,18 +198,18 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 | 方法 | 关键参数 | 返回 | 作用 |
 |---|---|---|---|
 | `is_need_compact` | `messages`, `prompt`, `tools`, `estimated_tokens` | `bool` | 判断完整 provider 输入估算是否超 `auto_compact_size`；可复用调用方估算，非正阈值直接返回 `False` |
-| `track_recent_file` (async) | `path: str` | `None` | 维护最近文件列表（上限 5，去重后置尾） |
-| `write_transcript` (async) | `messages: list` | `Path` | 在线程中以 UTF-8/Unicode JSONL 写入 `.agent/transcripts/transcript_{time_ns}.jsonl`，排他创建避免并发覆盖 |
 | `split_history_for_compaction` | `messages`, `bootstrap_message_count` | `CompactionPartition` | 切分为初始化及首个真实轮次前缀、待摘要中段和预算内近期原文 |
 | `summarize_history` (async) | `preserved_messages`, `messages_to_summarize`, `recent_messages` | `str` | 完整输入不超过上下文 95% 时一次摘要；超限则按原子块滚动摘要，单块仍超限时无损分页 |
-| `build_compacted_context_prefix` | `summary`, `recent_files_hint` | `str` | 拼装摘要和近期文件提示消息 |
-| `compact_history` (async) | `messages`, `bootstrap_message_count` | `CompactResult` | 端到端自动压缩；返回消息、transcript、摘要消息数及摘要正文，无可摘要消息或空摘要时保留原历史 |
+| `build_compacted_context_prefix` | `summary` | `str` | 把摘要拼装成压缩后的 user 前缀消息 |
+| `compact_history` (async) | `messages`, `bootstrap_message_count` | `CompactResult` | 端到端自动压缩；返回消息、摘要消息数及摘要正文，无可摘要消息或空摘要时保留原历史 |
 
 **feature 门控**：否。 **reload**：无（随新 Agent 重建）。
 
-Agent 显式传入初始化消息数量，CompactMgr 原文保留该 bootstrap、首个真实 user 及其前置 developer，并至少保留当前用户轮次。最近 N 个用户轮次超过硬预算时向当前轮收缩，但不会摘要这些强制前缀。中段旧 developer 不进入摘要；最新 `<collaboration_mode>` 若落在中段，会原样移动到近期后缀之前，保证压缩后的当前模式仍明确。序列化、token 计算、分页与 transcript 文件 I/O 均卸载到线程，且不做字符截断。
+Agent 显式传入初始化消息数量，CompactMgr 原文保留该 bootstrap、首个真实 user 及其前置 developer，并至少保留当前用户轮次。最近 N 个用户轮次超过硬预算时向当前轮收缩，但不会摘要这些强制前缀。中段旧 developer 不进入摘要；最新 `<collaboration_mode>` 若落在中段，会原样移动到近期后缀之前，保证压缩后的当前模式仍明确。序列化、token 计算与分页均卸载到线程，且不做字符截断。
 
-**持有的关键状态**：`recent_files`（最近文件路径，上限 5）、`has_compacted`（是否已完成过有效压缩）。
+压缩不再另写 transcript 文件：压缩前的完整对话已由会话日志（追加式、内容引用去重）保存，再写一份就是同一段文本落盘两次。序列化的消息先经 `materialize_messages()` 还原 provider 载体，保证摘要读到的正文完整。
+
+**持有的关键状态**：`has_compacted`（是否已完成过有效压缩）。
 
 摘要调用使用 CompactMgr 自己的固定 system，包含压缩职责和仅供压缩模型读取的标签说明；待压缩历史、原文参照、重点和滚动摘要作为动态 user 消息。token 预算按同一份 system + user 请求估算。它只复用所属 Agent 的 Provider 和事件归属标识，不读取 `PromptMgr` 的固定 system 或工作历史。压缩结果中的摘要边界标签随后作为 user 历史回灌工作 Agent。
 
@@ -445,9 +445,17 @@ MCP 连接配置和授权边界见 [mcp-and-hooks.md](mcp-and-hooks.md)。
 
 `src/mgr/session_mgr.py`
 
-**单一职责**：持久化会话元数据与单一 `SessionState` 快照，支持 `/resume` 恢复。
+**单一职责**：持久化会话元数据与单一 `SessionState` 的追加式日志，支持 `/resume` 恢复。
 
-**消费的配置或文件**：`{global_dir}/sessions/` 下——`{id}.json`（元数据：`workdir`/时间戳/`topic`/`mode`）、`{id}.state.json`（version 2：`records`、`context_ids` 与 attempt 级 `llm_calls`，经 DataGuard 脱敏并原子写）。旧格式不读取、不迁移。
+**消费的配置或文件**：`{global_dir}/sessions/` 下——`{id}.json`（元数据：`workdir`/时间戳/`topic`/`mode`）、`{id}.jsonl`（当前格式的追加式日志）、`{id}.jsonl.zst` / `{id}.jsonl.xz`（冷会话压缩归档，读取时透明解压）。
+
+日志每行是一条批记录：`{"v":1,"seq":N,"ts":…,"contents":{…},"records":[…],"record_deltas":[…],"context":{"keep":n,"append":[…]},…}`。长度 ≥ `POOL_MIN_CHARS`（256）的文本在写入前抽取到本批 `contents`，正文位置只留 `{"$ref": "<内容指纹>"}`；同一段文本在整个会话中只落一份。上下文只提交增量：`keep` 是相对上次提交保留的公共前缀长度，`append` 是新增尾部，截断与整体替换同样用这一形式表达，因此同一批 ID 不会随轮次反复落盘。
+
+记录有两种落盘形态。首次写入是整份 `records` 快照；此后只要视图键集合没有收缩、正文仍能在已落盘正文上追加，就只提交 `record_deltas`：`fields` 恒带 timestamp/kind/model_message/raw_input/recallable/correlation_id 全部静态字段，`view.set` 是按键整体覆盖（末次写胜）的非正文视图数据，`view.append` 是本次未确认的 `content`/`thinking` 尾部，`stream_boundaries` 给出这段正文的 `base`/`after` 摘要供写入端链式校验。正文被替换、被截断，或视图键被删除（`set` 无法表达删除）时无法用增量表达，回退整份快照。`fold_log()` 按 `seq` 顺序先覆盖 `records` 再合并 `record_deltas`，恢复后可继续追加。
+
+写入端还保证「同一份数据只落一次」：`append_batch` 逐块比对上次落盘投影的内容摘要（16 字节 blake2b，比较用规范化 JSON，落盘字节不变），丢弃与上次相同的 record、`llm_calls`、`plan` 和空上下文增量；过滤后没有真实变更时整批不写，内容池与批序号也不动。`_written` 因此只随记录条数增长，不再为每个会话保留一份完整编码副本。恢复会话时用折叠结果预热这份摘要（含每条记录的正文摘要与静态投影摘要），避免续写第一轮把整段上下文重写一遍。
+
+记录增量按同一套摘要去重。正文只用 `stream_boundaries` 判断「是否已经在盘上」：`after` 与上次落盘摘要相同表示重复提交，直接丢弃该段；`after` 不同而 `base` 与上次落盘摘要不符时说明无法对位，写侧只告警并拒绝把这段正文追加进日志（正常路径不会出现，状态层已按同一基线保证可追加）。静态部分用归一化投影（字段 + 非正文视图数据）的摘要判断是否真的变了，没有正文也没有静态变化时整条增量丢弃。整份快照写入同样登记正文摘要与静态投影摘要，因此「整份快照之后的第一条增量」不会再有无基线的放行捷径。
 
 `SessionRecord` 可同时包含模型消息、可见 `ViewPayload`、原始输入和关联 ID。`SessionState` 分别投影 LLM 上下文、TUI 历史与输入回溯，并以 `LLMCallRecord` 持久化每次 provider attempt 的模型、调用者、阶段、结果和原始 usage；compact 只更新上下文投影。
 
@@ -456,16 +464,20 @@ MCP 连接配置和授权边界见 [mcp-and-hooks.md](mcp-and-hooks.md)。
 | 方法 | 关键参数 | 返回 | 作用 |
 |---|---|---|---|
 | `save_metadata` | `session_id`, `is_new`, `topic`, `mode` | `None` | 原子写/更新元数据（首次写 `created_at`，后续更 `updated_at`） |
-| `save_state` | `session_id`, `state` | `None` | DataGuard 脱敏后原子覆写 `.state.json` |
-| `load_state` | `session_id` | `SessionState \| None` | 加载并完整校验 version、record 与 context 引用 |
+| `append_state` | `session_id`, `state` | `bool` | 准备增量并在追加成功后确认；失败返回 `False` 并保留待重试状态 |
+| `append_batch` | `session_id`, `payload` | `bool` | 在会话级内容池与序号上编码并追加一条批记录；丢弃与上次落盘摘要相同的区块，无真实变更时零写入（可在工作线程调用） |
+| `load_state` | `session_id` | `SessionState \| None` | 读取并折叠当前格式日志，校验 record 与 context 引用；日志缺失、损坏或无法恢复时返回 `None`，成功时同时恢复内容池与序号供后续追加复用 |
+| `start_cold_compression` | — | `threading.Thread` | 启动守护线程，压缩够冷的会话日志 |
 | `list_sessions` | `limit` | `list[dict]` | 按 `updated_at` 降序列出会话元数据 |
-| `list_resumable` | `current_session_id`, `limit` | `list[dict]` | 只列有有效 `.state.json` 的非当前会话 |
+| `list_resumable` | `current_session_id`, `limit` | `list[dict]` | 只列存在有效日志（含冷归档）的非当前会话 |
 | `resolve_resume` | `cmd_args`, `current_session_id`, `current_workdir` | `str \| ResumeResult` | 解析 `/resume` 目标（序号或 id 前缀）、加载校验；**拒绝跨 workdir 恢复** |
 | `get_metadata` | `session_id` | `dict \| None` | 取指定会话元数据 |
 
 **feature 门控**：否。 **reload**：无。
 
-**持有的关键状态**：`_sessions_dir`、`_workdir`（无可变会话状态，`SessionState` 的生命周期所有者是 app 层）。
+**持有的关键状态**：`_sessions_dir`、`_workdir`、每会话的内容池 `_pools`、下一批序号 `_seqs` 与已落盘投影摘要 `_written`（记录摘要、记录增量静态摘要、调用摘要、计划摘要、上下文增量，以及每条记录 `content`/`thinking` 的正文摘要；无可变会话状态，`SessionState` 的生命周期所有者是 app 层）。
+
+冷压缩把 7 天未更新的 `{id}.jsonl` 压成同名归档：先写临时文件、校验可完整解压回原文，再原子替换并删除原日志；编码器优先 zstandard（`.jsonl.zst`），环境未安装时回退标准库 lzma（`.jsonl.xz`）。启动时由 `start_cold_compression()` 在守护线程里执行一次，6 小时内的重复扫描由 `.cold-compress.marker` 跳过。续写一个已归档会话时，`append_batch` 先把归档还原成活跃日志再追加，保证归档与活跃文件不会各自成为半份历史。
 
 会话与 `/resume` 流程见 [agent-runtime.md](agent-runtime.md)。
 

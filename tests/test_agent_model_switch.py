@@ -58,7 +58,6 @@ def test_switch_model_rebinds_model_state_without_replacing_history(tmp_path: Pa
         subagent_mgr=None,
         system_prompt=[],
     )
-    agent.assembly.compact_mgr.recent_files = ["src/old.py"]
     agent.assembly.compact_mgr.has_compacted = True
 
     agent.switch_model("new-model", "xhigh")
@@ -74,7 +73,6 @@ def test_switch_model_rebinds_model_state_without_replacing_history(tmp_path: Pa
     assert agent.assembly.compact_mgr.llm is new_llm
     assert agent.assembly.compact_mgr.auto_compact_size == 1600
     assert agent.assembly.compact_mgr.recent_messages_token_limit == 500
-    assert agent.assembly.compact_mgr.recent_files == ["src/old.py"]
     assert agent.assembly.compact_mgr.has_compacted is True
 
 

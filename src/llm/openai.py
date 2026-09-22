@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 import tiktoken
 from openai import AsyncOpenAI
 from src.llm.base import (
@@ -69,6 +69,8 @@ def _contains_refusal_block(value: Any) -> bool:
 
 class OpenAIProvider(ResponsesStreamMixin, LLMProvider):
     """OpenAI Provider (Responses API)"""
+
+    _CARRIER_KEY: ClassVar[str] = "_response_output"
 
     _EFFORT_DOWNGRADE = {"max": "xhigh", "xhigh": "high", "high": "medium", "medium": "low"}
     _RESPONSE_REASONING_DELTA_EVENTS = frozenset({

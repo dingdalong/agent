@@ -55,7 +55,6 @@ def test_partition_preserves_bootstrap_first_request_and_latest_mode(tmp_path) -
     """初始化前缀和首个真实轮次保留，最新模式移动到当前上下文。"""
     manager = CompactMgr(
         llm=_Provider(),
-        workdir=tmp_path,
         keep_recent_user_turns=1,
         recent_messages_token_limit=2,
     )
@@ -86,7 +85,6 @@ def test_compact_history_keeps_framework_roles_outside_summary(tmp_path) -> None
     provider = _Provider()
     manager = CompactMgr(
         llm=provider,
-        workdir=tmp_path,
         keep_recent_user_turns=1,
         recent_messages_token_limit=2,
     )

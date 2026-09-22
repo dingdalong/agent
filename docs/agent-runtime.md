@@ -10,7 +10,7 @@
 
 `reset_session()` 是首次启动与 `/clear` 共用的新会话生命周期。处理 `/clear` 时先检查工作目录信任；确认结束后进入 UI reset gate，取消活跃、排队和只读请求并等待窗口 runner 清理。随后拒绝新的 `UiRequest`，用 `EventBus.join()` 收束已投递事件并保存源 `SessionState`，在 `deps.session` 上生成新 `id` 和空状态；`/clear` 再更新信任状态并重载配置、角色、Hook、模型与 MCP。最后重置 `AgentViewStore`，从激活角色 manifest 构造新主 Agent，替换 UI 会话状态，运行 `SessionStart` Hook，输出使用重载后模型、角色、Plan 状态和工作目录的启动 Banner，并在重新开放 gate 前完成最终事件 drain。重建失败时不输出 Banner。
 
-`resume_session()` 使用同一组 UI/EventBus gate：保存源状态后绑定目标 `.state.json`，清空旧 metrics 和瞬态 UI，按目标 session 重建任务与 Plan，并从隐藏的 `subagent` view 投影恢复 `/agents` 只读记录，再从其他 `SessionRecord.view` 水合聊天。旧子 agent 不会继续运行。`/resume` 是 app 层命令，不能在 Agent 状态机内直接替换共享状态。
+`resume_session()` 使用同一组 UI/EventBus gate：保存源状态后绑定目标会话状态（`SessionMgr.load_state()` 折叠目标会话的追加式日志），清空旧 metrics 和瞬态 UI，按目标 session 重建任务与 Plan，并从隐藏的 `subagent` view 投影恢复 `/agents` 只读记录，再从其他 `SessionRecord.view` 水合聊天。旧子 agent 不会继续运行。`/resume` 是 app 层命令，不能在 Agent 状态机内直接替换共享状态。
 
 主会话只有一个状态权威写入点 `SessionState`（`src/common/session_state.py`）：
 
@@ -24,6 +24,12 @@ SessionState.llm_calls
 ```
 
 用户记录同时保存原始输入和注入 hook/reminder 后的模型消息；assistant 以 LLM `call_id` 合并流与最终消息，工具以 `tool_call_id` 合并展示和 tool message。每次实际 provider attempt 的开始与完成事件归并进 `llm_calls`，前台和后台 agent 使用同一核账路径；失败或取消且 provider 未给 usage 时保留 unknown 记录。compact 只替换 `context_ids`，不会删除已有可见记录。子 Agent 仍使用独立的纯内存 history。
+
+`records[].model_message` 与 `Agent.history` 的元素是同一批 dict 对象：状态机追加消息时只构造一份并同时交给两个投影，不存在第二份副本需要同步。落盘走 `SessionState.prepare_commit()` 生成稳定增量，由 `SessionMgr.append_batch()` 追加成功后调用 `ack_commit()`；失败提交保持待重试状态。流式内容按自适应检查点追加进 `{id}.jsonl`：流式正文 ≤16K 字符用 250ms、≤64K 用 500ms、更大用 1s，没有流式内容时用 250ms，`force=True`（会话切换、中断与退出前）始终立即提交。长文本在写入前抽取到内容池，正文位置只留内容引用；记录首次写入是整份快照，此后只提交可追加的正文与静态字段增量（写入期间到达的正文保持待写状态，直到真正写盘）。
+
+展示投影（`records[].view`）不与模型上下文共享对象：它是「用户看到过什么」的独立事实，包含流式增量、被截断或被中断的尝试正文、重试与错误行，这些内容在模型消息里可能并不存在。同一段正文同时出现在两个投影时，日志层的内容池会把它们折叠成一条引用，因此磁盘上仍只有一份。
+
+provider 会在 `clear_reasoning_content()` 里就地裁剪共享消息（清掉无工具轮次的思考载体）。这类修改不经过 `SessionState` 的写入 API，因此 `Agent` 在裁剪后调用 `SessionState.mark_context_dirty()` 标记对应记录，避免磁盘保留已清除的思考正文。无工具响应在 `_on_process_response` 提交前就完成裁剪（`_finish_round_reasoning`），同一 assistant 记录只以最终形态落盘一次；工具轮保留思考以维持 provider 的工具续接协议，轮末裁剪是同内容的幂等兜底。
 
 ## 2. 状态枚举与流转
 
@@ -118,7 +124,7 @@ LLM_CALL → PROCESS_RESPONSE ──length────→ LENGTH_RETRY ──可
 
 `_on_context_overflow()` 与 `_on_llm_failure()` 只设置 `ctx.final_text`，不改写 `ctx.messages`（`agent.py:1130-1166`）。`_format_llm_failure_text()` 按错误类别生成安全摘要和可操作建议：上下文/输出要求缩小范围，内容政策要求调整内容，认证/权限/额度要求检查凭据、权限或额度，瞬时错误建议稍后重试（`agent.py:40-97`）。
 
-失败不会终止主 REPL。主 Agent 的当前单轮到 `DONE` 后，`Agent.run(input=None)` 先等待 EventBus 完成流式归并，再原子保存 `SessionState` 并继续下一次 `REQUEST_INPUT`；用户可在保留原请求的会话中继续输入。
+失败不会终止主 REPL。主 Agent 的当前单轮到 `DONE` 后，`Agent.run(input=None)` 先等待 EventBus 完成流式归并，再追加提交 `SessionState` 增量并继续下一次 `REQUEST_INPUT`；用户可在保留原请求的会话中继续输入。
 
 ## 5. 主要 handler
 
@@ -189,7 +195,7 @@ handler 映射在 `Agent.__post_init__` 建立（`src/agent/agent.py:212-245`）
 2. `AgentAssembler.assemble()`（`src/agent/assembly.py:62`）按 spec 解析模型与 feature、校验声明的工具，创建带调用方身份的 `CompactMgr`，再按 feature 创建 `SkillMgr`、`SubAgentMgr`、`TaskManager`，并构造 `PromptMgr`、`ReminderMgr` 与固定 system，产出 `AgentAssembly`。装配器是 `bootstrap.create_app()` 之外唯一的 Manager 具体实现实例化点；`is_subagent=True` 的 spec 不构造 `SubAgentMgr`（`task_delegator` 是 MAIN_ONLY），省掉每个子 agent 一次四层目录扫描与工具校验。
 3. `Agent.__post_init__()` 只做状态初始化：镜像 spec 的初始模式与装配产物的模型名、水合会话历史、建立 handler 表。它不构造任何 Manager，也不持有或过滤工具 schema。
 
-`AgentAssembly` 与 `AgentSpec` 都是 frozen dataclass。切换模型时 `AgentAssembler.rebuild_model()` 重新装配模型相关部件并**整体替换** `assembly` 字段，保留 `CompactMgr` 的压缩进展（`recent_files`/`has_compacted`），避免就地修改留下两份权威。
+`AgentAssembly` 与 `AgentSpec` 都是 frozen dataclass。切换模型时 `AgentAssembler.rebuild_model()` 重新装配模型相关部件并**整体替换** `assembly` 字段，保留 `CompactMgr` 的压缩进展（`has_compacted`），避免就地修改留下两份权威。
 
 外部协作者（`ToolsMgr`、工具实现、UI 与委派路径）通过 `Agent` 的只读查询面读取事实——`agent_type`、`is_subagent`、`features`、`tools`、`enable_thinking`、`llm`、`task_mgr`、`skill_mgr`、`subagent_mgr`（`src/agent/agent.py:250-294`），而不是自行 `getattr` 猜测字段位置。
 

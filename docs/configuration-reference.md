@@ -441,15 +441,9 @@ OPENAI_API_KEY=sk-yyyyyyyyyyyyyyyy
 | `{workdir}/.agent/plans/` | plan 文件 | `PlanMgr`（`plan_mgr.py:70`，`workdir / ".agent" / "plans"`） |
 | `{workdir}/.agent/logs/agent.log` | 运行日志，含逐次授权裁决（`授权 …` / `judge 裁决 …` / `转人工确认 …`）；2 MiB 轮转保留两个备份，目录 `0700`、文件 `0600` | `bootstrap.create_app` 配 `RotatingFileHandler`，级别见 `logging.level` |
 
-### 运行产物
-
-| 路径 | 内容 | 来源 |
-|------|------|------|
-| `{workdir}/.agent/transcripts/transcript_<time_ns>.jsonl` | 压缩前完整 Unicode 对话备份 | `CompactMgr.write_transcript`（`compact_mgr.py:279`，`project_data_dir(workdir) / "transcripts"`） |
-
 TUI 诊断路径随 `$AGENT_HOME` 改写，不提供独立配置项。`tui.jsonl` 及 `.1`、`.2` 总上限约 6 MiB；日志不包含对话正文、Markdown、用户输入或工具参数，异常文本和 traceback 在写入前经运行时 `DataGuard` 脱敏。
 
-> 落盘目录要点：会话（`sessions/`）、主 agent 任务（`tasks/`）和 TUI 诊断（`logs/`）在**全局** `~/.agent/` 下；记忆（`memory/`）、plan（`plans/`）、transcript（`transcripts/`）和运行日志（`logs/`）在**项目** `{workdir}/.agent/` 下。子 agent 的 `TaskManager` 为纯内存模式（`tasks_dir=None`），不落盘（`assembly.py:193-195`、`task_mgr.py:82`）。目录路径体系见 [architecture.md](architecture.md)。
+> 落盘目录要点：会话（`sessions/`，含 `{id}.jsonl` 追加式日志与冷归档）、主 agent 任务（`tasks/`）和 TUI 诊断（`logs/`）在**全局** `~/.agent/` 下；记忆（`memory/`）、plan（`plans/`）和运行日志（`logs/`）在**项目** `{workdir}/.agent/` 下。子 agent 的 `TaskManager` 为纯内存模式（`tasks_dir=None`），不落盘（`assembly.py:193-195`、`task_mgr.py:82`）。目录路径体系见 [architecture.md](architecture.md)。
 
 ---
 

@@ -3,15 +3,11 @@ from __future__ import annotations
 import asyncio
 import json
 import math
-import time
-import uuid
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 from src.llm.base import LLMProvider
-from src.common.paths import project_data_dir
-from src.common.secure_io import atomic_write_text
+from src.llm.message_view import materialize_messages
 from src.prompt_tags import (
     PromptConsumer,
     PromptTag,
@@ -23,7 +19,6 @@ from src.prompt_tags import (
 @dataclass
 class CompactResult:
     messages: list[dict]
-    transcript_path: Path | None = None
     summarized_message_count: int = 0
     summary: str = ""
 
@@ -225,7 +220,6 @@ class CompactMgr:
 
     Args:
         llm: LLM 提供方实例，用于估算 token 和生成摘要。
-        workdir: 用户工作目录，对话记录存放在 workdir/.agent/transcripts/。
         caller_agent_type: 所属 agent 类型，透传给内部摘要调用事件。
         caller_uuid: 所属 agent UUID，透传给内部摘要调用事件。
         auto_compact_size: 自动压缩的绝对输入 token 阈值；非正数表示禁用。
@@ -234,14 +228,12 @@ class CompactMgr:
     """
 
     llm: LLMProvider = field(repr=False)
-    workdir: Path = field(repr=False)
     caller_agent_type: str | None = None
     caller_uuid: str | None = None
     auto_compact_size: int = 0
     keep_recent_user_turns: int = 3
     recent_messages_token_limit: int = 0
     data_guard: Any = field(default=None, repr=False)
-    recent_files: list[str] = field(init=False, default_factory=list)
     has_compacted: bool = False
 
     def is_need_compact(
@@ -268,50 +260,6 @@ class CompactMgr:
         if input_tokens is None:
             input_tokens = self.llm.estimate_tokens(messages, prompt, tools)
         return input_tokens > self.auto_compact_size
-
-    async def track_recent_file(self, path: str) -> None:
-        """记录一条近期对话记录文件路径。
-
-        Args:
-            path: 相对于工作目录的对话记录文件路径。
-
-        Returns:
-            无返回值。
-        """
-        if path in self.recent_files:
-            self.recent_files.remove(path)
-        self.recent_files.append(path)
-        if len(self.recent_files) > 5:
-            self.recent_files[:] = self.recent_files[-5:]
-
-    def _write_transcript_sync(self, messages: list[dict]) -> Path:
-        """以独占且可避免名称冲突的方式写入对话记录文件。
-
-        Args:
-            messages: 以 JSON Lines 格式写入的源对话消息。
-
-        Returns:
-            已创建对话记录文件的绝对路径。
-        """
-        transcript_dir = project_data_dir(self.workdir) / "transcripts"
-        path = transcript_dir / f"transcript_{time.time_ns()}_{uuid.uuid4().hex}.jsonl"
-        safe_messages = self.data_guard.redact(messages) if self.data_guard is not None else messages
-        content = "".join(_serialize_json(message) + "\n" for message in safe_messages)
-        atomic_write_text(path, content)
-        return path
-
-    async def write_transcript(self, messages: list[dict]) -> Path:
-        """将对话历史写入对话记录文件。
-
-        Args:
-            messages: 待写入的消息列表。
-
-        Returns:
-            对话记录文件路径。
-        """
-        path = await asyncio.to_thread(self._write_transcript_sync, messages)
-        await self.track_recent_file(path.relative_to(self.workdir).as_posix())
-        return path
 
     def split_history_for_compaction(
         self,
@@ -487,7 +435,9 @@ class CompactMgr:
         best: tuple[int, _SummaryRequest] | None = None
         for block_index in range(start_block, len(spans)):
             source_end = spans[block_index][1]
-            history_text = _serialize_json(messages[source_start:source_end])
+            history_text = _serialize_json(
+                materialize_messages(messages[source_start:source_end])
+            )
             request = self._create_summary_request(
                 preserved_reference=preserved_reference,
                 history_text=history_text,
@@ -604,9 +554,15 @@ class CompactMgr:
             return ""
 
         preserved_reference, recent_reference, full_history_text = await asyncio.gather(
-            asyncio.to_thread(_serialize_json, preserved_messages),
-            asyncio.to_thread(_serialize_json, recent_messages),
-            asyncio.to_thread(_serialize_json, messages_to_summarize),
+            asyncio.to_thread(
+                lambda: _serialize_json(materialize_messages(preserved_messages))
+            ),
+            asyncio.to_thread(
+                lambda: _serialize_json(materialize_messages(recent_messages))
+            ),
+            asyncio.to_thread(
+                lambda: _serialize_json(materialize_messages(messages_to_summarize))
+            ),
         )
         full_request = await asyncio.to_thread(
             self._create_summary_request,
@@ -649,8 +605,9 @@ class CompactMgr:
 
             start, end = spans[block_index]
             serialized_block = await asyncio.to_thread(
-                _serialize_json,
-                messages_to_summarize[start:end],
+                lambda: _serialize_json(
+                    materialize_messages(messages_to_summarize[start:end])
+                ),
             )
             paged_summary = await self._summarize_serialized_pages(
                 serialized_block=serialized_block,
@@ -668,13 +625,11 @@ class CompactMgr:
     def build_compacted_context_prefix(
         self,
         summary: str,
-        recent_files_hint: str = "",
     ) -> str:
         """构建放在原文前缀与近期原文之间的摘要消息。
 
         Args:
             summary: 压缩历史的非空摘要。
-            recent_files_hint: 后续可能重新打开的可选文件路径提示。
 
         Returns:
             放置在权威近期原文历史之前的用户消息内容。
@@ -684,7 +639,6 @@ class CompactMgr:
             "这不是完整对话；摘要之后的未压缩近期原文应优先作为当前状态依据。\n"
             "如果摘要与后续原文冲突，以后续原文为准。\n\n"
             + render_prompt_tag(PromptTag.COMPACTED_HISTORY_SUMMARY, summary)
-            + recent_files_hint
         )
 
     async def compact_history(
@@ -692,18 +646,20 @@ class CompactMgr:
         messages: list[dict],
         bootstrap_message_count: int = 0,
     ) -> CompactResult:
-        """持久化、划分、摘要并安全压缩对话历史。
+        """划分、摘要并安全压缩对话历史。
+
+        压缩前的完整历史已由会话日志（追加式、内容池去重）保存，这里不再另写
+        对话记录文件，避免同一段对话存两份。
 
         Args:
             messages: 源对话消息。
             bootstrap_message_count: 开头不可压缩的初始化外部消息数量。
 
         Returns:
-            包含压缩后消息、对话记录路径、尝试摘要的消息数和摘要结果的对象。
+            包含压缩后消息、尝试摘要的消息数和摘要结果的对象。
         """
         if self.data_guard is not None:
             messages = self.data_guard.redact(messages)
-        transcript_path = await self.write_transcript(messages)
         partition = await asyncio.to_thread(
             self.split_history_for_compaction,
             messages,
@@ -711,10 +667,7 @@ class CompactMgr:
         )
         attempted_count = len(partition.messages_to_summarize)
         if attempted_count == 0:
-            return CompactResult(
-                messages=messages,
-                transcript_path=transcript_path,
-            )
+            return CompactResult(messages=messages)
 
         summary = await self.summarize_history(
             preserved_messages=partition.prefix_messages,
@@ -725,26 +678,19 @@ class CompactMgr:
         if not summary:
             return CompactResult(
                 messages=messages,
-                transcript_path=transcript_path,
                 summarized_message_count=attempted_count,
             )
 
-        recent_files_hint = ""
-        if self.recent_files:
-            recent_lines = "\n".join(f"- {path}" for path in self.recent_files)
-            recent_files_hint = f"\n\n如有需要，可重新打开这些近期文件：\n{recent_lines}"
         self.has_compacted = True
         context_prefix = await asyncio.to_thread(
             self.build_compacted_context_prefix,
             summary,
-            recent_files_hint,
         )
         return CompactResult(
             messages=partition.prefix_messages + [{
                 "role": "user",
                 "content": context_prefix,
             }] + partition.recent_messages,
-            transcript_path=transcript_path,
             summarized_message_count=attempted_count,
             summary=summary,
         )

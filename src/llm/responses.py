@@ -314,13 +314,15 @@ class ResponsesStreamMixin:
             call.mark_tool_fragments_complete()
 
         content = "".join(content_parts)
-        assistant_message: dict = {
-            "role": "assistant",
-            "content": content or None,
-        }
         if output_items:
-            assistant_message["_response_output"] = output_items
-        if tool_calls:
+            # 载体是唯一权威：content/tool_calls 由 message_view 按需重建。
+            assistant_message: dict = {
+                "role": "assistant",
+                "_response_output": output_items,
+            }
+        else:
+            assistant_message = {"role": "assistant", "content": content or None}
+        if tool_calls and "_response_output" not in assistant_message:
             assistant_message["tool_calls"] = [
                 {
                     "id": tool_call["id"],

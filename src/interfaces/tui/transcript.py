@@ -17,6 +17,7 @@ from textual.widgets import Markdown
 
 from src.interfaces.status_presenter import present_agent_identity, present_ended_agent
 from src.interfaces.tui.widgets import SelectionStatic, TranscriptPanel
+from src.llm.message_view import materialize_assistant
 
 if TYPE_CHECKING:
     from src.interfaces.tui.app import AgentTuiApp
@@ -389,6 +390,7 @@ class TranscriptController:
     def _message_blocks(self, message: dict) -> list[str]:
         if not isinstance(message, dict):
             return [f"### [消息]\n\n{message!s}"]
+        message = materialize_assistant(message)
         role = message.get("role", "")
         blocks: list[str] = []
         if role == "user":

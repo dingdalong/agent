@@ -874,7 +874,6 @@ def test_compact_summary_events_keep_agent_identity_and_reach_foreground(
     )
     manager = CompactMgr(
         llm=provider,
-        workdir=tmp_path,
         caller_agent_type="main",
         caller_uuid="foreground",
     )

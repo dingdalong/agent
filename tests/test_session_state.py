@@ -23,7 +23,8 @@ from src.interfaces.agent_view_store import AgentViewStore
 from src.interfaces.output_router import OutputRouter
 from src.mgr.session_mgr import SessionMgr
 from src.mgr.session_mgr import ResumeResult
-from src.common.session_state import SessionState
+from src.common.session_state import SessionState, ViewPayload
+from src.common.tool_display import ToolDisplay
 from src.mode import RunMode
 
 
@@ -157,6 +158,32 @@ def test_tool_events_and_model_result_merge_by_tool_call_id() -> None:
     assert state.context_messages() == [message]
 
 
+def test_tool_display_recipe_keeps_result_text_only_in_model_message() -> None:
+    state = SessionState()
+    state.record_event(ToolCallCompleted(
+        timestamp=2.0, source="tools", tool_name="read_file", tool_call_id="tool-1",
+        status="success", result_preview="结果正文", duration_seconds=0.2,
+        display=ToolDisplay(
+            title="读取文件",
+            content="结果正文",
+            render={"kind": "result", "mode": "truncate"},
+        ),
+    ))
+    state.bind_model_message(
+        {"role": "tool", "tool_call_id": "tool-1", "content": "结果正文"},
+        correlation_id="tool-1",
+        kind="tool",
+    )
+
+    record = state.records[0]
+    assert record.view is not None
+    display = record.view.data["completed"]["display"]
+    assert display["content"] == ""
+    assert display["render"] == {"kind": "result", "mode": "truncate"}
+    assert record.model_message == {"role": "tool", "tool_call_id": "tool-1", "content": "结果正文"}
+    assert state.tool_result_text("tool-1") == "结果正文"
+
+
 def test_router_persists_and_restores_subagent_snapshot() -> None:
     async def scenario() -> None:
         state = SessionState()
@@ -205,7 +232,8 @@ def test_router_persists_and_restores_subagent_snapshot() -> None:
         assert snapshot.agent_type == "worker"
         assert not snapshot.running
         assert restored.transcript_messages("worker-id")[-1]["content"] == "子 agent 回答"
-        assert restored.transcript_segments("worker-id") == [("response", "子 agent 回答")]
+        # 完整消息快照已覆盖增量转录，转录不再保留同一段正文的第二份副本。
+        assert restored.transcript_segments("worker-id") == []
 
     asyncio.run(scenario())
 
@@ -258,9 +286,10 @@ def test_router_exports_subagent_snapshot_only_at_end() -> None:
 
         assert exports == 1
         assert len(state.subagent_views()) == 1
-        assert state.subagent_views()[0]["transcript"] == [
-            {"kind": "response", "text": "x" * 1_000}
+        assert state.subagent_views()[0]["messages"] == [
+            {"role": "assistant", "content": "x" * 1_000}
         ]
+        assert state.subagent_views()[0]["transcript"] == []
 
     asyncio.run(scenario())
 
@@ -358,22 +387,16 @@ def test_truncate_context_releases_only_removed_model_payloads() -> None:
     assert by_id[second].model_message is None
 
 
-def test_session_manager_only_lists_valid_state_sessions_and_writes_no_legacy_files(tmp_path) -> None:
+def test_session_manager_only_lists_valid_sessions_and_writes_current_files(tmp_path) -> None:
     manager = SessionMgr(tmp_path, tmp_path)
     valid = SessionState()
     valid.append_user("hello", {"role": "user", "content": "hello"})
     manager.save_metadata("valid", is_new=True, topic="hello")
-    manager.save_state("valid", valid)
-    manager.save_metadata("legacy", is_new=True, topic="old")
-    sessions_dir = tmp_path / "sessions"
-    (sessions_dir / "legacy.hist.json").write_text(
-        json.dumps([{"role": "user", "content": "old"}]), encoding="utf-8"
-    )
-
+    manager.append_state("valid", valid)
     assert [item["session_id"] for item in manager.list_resumable("current")] == ["valid"]
     assert manager.load_state("valid").context_messages() == valid.context_messages()
-    assert not (sessions_dir / "valid.hist.json").exists()
-    assert not (sessions_dir / "valid.input.json").exists()
+    sessions_dir = tmp_path / "sessions"
+    assert (sessions_dir / "valid.jsonl").exists()
 
 
 def test_app_resume_switches_state_inside_gates_and_resets_transient_store() -> None:
@@ -409,14 +432,15 @@ def test_app_resume_switches_state_inside_gates_and_resets_transient_store() -> 
         def __init__(self) -> None:
             self.saved = []
 
-        def save_state(self, session_id, state) -> None:
-            self.saved.append((session_id, state))
+        def append_batch(self, session_id, payload) -> None:
+            self.saved.append((session_id, payload))
 
     class Router:
         def bind_session_state(self, state) -> None:
             self.state = state
 
     source = SessionState()
+    source.append_user("旧会话", {"role": "user", "content": "旧会话"})
     target = SessionState()
     target.append_user("恢复", {"role": "user", "content": "恢复"})
     target.record_subagent_snapshot({
@@ -467,7 +491,11 @@ def test_app_resume_switches_state_inside_gates_and_resets_transient_store() -> 
 
     asyncio.run(scenario())
 
-    assert sessions.saved == [("source", source)]
+    assert [item[0] for item in sessions.saved] == ["source"]
+    assert sessions.saved[0][1]["records"][0]["model_message"] == {
+        "role": "user",
+        "content": "旧会话",
+    }
     assert deps.session.id == "target"
     assert deps.session.state is target
     assert router.state is target
@@ -476,3 +504,271 @@ def test_app_resume_switches_state_inside_gates_and_resets_transient_store() -> 
     assert [s.uuid for s in app.agent_view_store.subagent_snapshots()] == ["worker-target"]
     assert deps.session.context != ["old"]
     assert bus.joins == 2
+
+
+def test_taken_commit_is_stable_against_later_streaming() -> None:
+    """已取出的增量是稳定快照：后续流式增量不能改写待落盘内容。"""
+    state = SessionState()
+    state.record_view(
+        ViewPayload("assistant", {"content": "第一批"}),
+        kind="assistant",
+        correlation_id="call-1",
+        merge=True,
+    )
+
+    payload = state.take_commit()
+    assert payload is not None
+    state.record_view(
+        ViewPayload("assistant", {"content": "追加"}),
+        kind="assistant",
+        correlation_id="call-1",
+        merge=True,
+    )
+
+    assert payload["records"][0]["view"]["data"]["content"] == "第一批"
+    assert state.to_dict()["records"][0]["view"]["data"]["content"] == "第一批追加"
+
+
+def test_prepared_commit_ack_preserves_streaming_arriving_during_write() -> None:
+    """写入期间到达的正文不会随确认丢掉：它继续留在待写增量里。"""
+    state = SessionState()
+    state.record_view(
+        ViewPayload("assistant", {"content": "第一批"}),
+        kind="assistant",
+        correlation_id="call-1",
+        merge=True,
+    )
+    commit = state.prepare_commit()
+    assert commit is not None
+    state.record_view(
+        ViewPayload("assistant", {"content": "追加"}),
+        kind="assistant",
+        correlation_id="call-1",
+        merge=True,
+    )
+    state.ack_commit(commit)
+
+    assert state.checkpoint_due(force=True)
+    next_commit = state.prepare_commit()
+    assert next_commit is not None
+    assert "records" not in next_commit.payload
+    delta = next_commit.payload["record_deltas"][0]
+    assert delta["view"]["append"]["content"] == "追加"
+    assert delta["stream_boundaries"]["content"]["after"] == next_commit.stream_state[
+        (state.records[0].id, "content")
+    ]
+
+
+def test_checkpoint_interval_follows_pending_stream_size() -> None:
+    """检查点按未确认正文的长度选档：正文越长越稀疏，无流式内容时最短。"""
+    state = SessionState()
+    started = state._last_checkpoint_at
+    state.record_view(
+        ViewPayload("assistant", {"content": "x" * 400}),
+        kind="assistant",
+        correlation_id="call-1",
+        merge=True,
+    )
+    assert state.checkpoint_due(now=started + 0.1) is False
+    assert state.checkpoint_due(now=started + 0.3) is True
+    assert state.checkpoint_due(force=True) is True
+
+    state.record_view(
+        ViewPayload("assistant", {"content": "y" * 70_000}),
+        kind="assistant",
+        correlation_id="call-1",
+        merge=True,
+    )
+    assert state.checkpoint_due(now=started + 0.6) is False
+    assert state.checkpoint_due(now=started + 1.1) is True
+    assert state._stream_length() == 70_400
+
+    assert SessionState().checkpoint_due(force=True) is False
+
+
+def test_mark_context_dirty_persists_in_place_message_edits(tmp_path) -> None:
+    """provider 就地裁剪共享消息后，重新提交才能让磁盘与内存一致。"""
+    manager = SessionMgr(tmp_path, tmp_path)
+    state = SessionState()
+    message = {"role": "assistant", "content": "答案", "reasoning_content": "想一想"}
+    state.append_context(message)
+    manager.append_state("session", state)
+
+    message.pop("reasoning_content")
+    assert state.take_commit() is None
+
+    state.mark_context_dirty()
+    manager.append_state("session", state)
+
+    restored = manager.load_state("session")
+    assert restored is not None
+    assert restored.context_messages() == [{"role": "assistant", "content": "答案"}]
+
+
+def test_equal_context_messages_do_not_mark_records_dirty() -> None:
+    """provider 每轮回写归一化结果：内容相同时不产生新的待提交增量。"""
+    state = SessionState()
+    state.append_context({"role": "assistant", "content": "答案"})
+    assert state.take_commit() is not None
+
+    replacement = {"role": "assistant", "content": "答案"}
+    state.set_context_message(0, replacement)
+    assert state.records[0].model_message is replacement
+    assert state.take_commit() is None
+
+    state.replace_context(
+        [{"role": "assistant", "content": "答案"}], preserve_positions=True,
+    )
+    assert state.take_commit() is None
+
+    state.replace_context(
+        [{"role": "assistant", "content": "改过的答案"}], preserve_positions=True,
+    )
+    changed = state.take_commit()
+    assert changed is not None
+    assert len(changed["records"]) == 1
+
+
+def test_context_delta_only_commits_the_growing_tail() -> None:
+    """上下文只提交增量：公共前缀不重复落盘，截断用更小的 keep 表达。"""
+    state = SessionState()
+    first = state.append_context({"role": "user", "content": "一"})
+    second = state.append_context({"role": "assistant", "content": "二"})
+
+    payload = state.take_commit()
+    assert payload is not None
+    assert payload["context"] == {"keep": 0, "append": [first, second]}
+
+    third = state.append_context({"role": "user", "content": "三"})
+    payload = state.take_commit()
+    assert payload is not None
+    assert payload["context"] == {"keep": 2, "append": [third]}
+
+    state.truncate_context(1)
+    payload = state.take_commit()
+    assert payload is not None
+    assert payload["context"] == {"keep": 1, "append": []}
+
+
+def test_view_reuses_the_model_message_text_object() -> None:
+    """同一段正文同时服务模型与前台展示时，内存里只保留一份对象。"""
+    state = SessionState()
+    state.record_view(
+        ViewPayload("assistant", {"content": "答案"}),
+        kind="assistant",
+        correlation_id="call-1",
+        merge=True,
+    )
+    state.record_view(
+        ViewPayload("assistant", {"thinking": "想一想"}),
+        kind="assistant",
+        correlation_id="call-1",
+        merge=True,
+    )
+    message = {
+        "role": "assistant",
+        "_response_output": [
+            {"type": "message", "content": [{"text": "答案"}]},
+            {"type": "reasoning", "summary": [{"text": "想一想"}]},
+        ],
+    }
+    state.bind_model_message(message, correlation_id="call-1", kind="assistant")
+
+    view = state.records[0].view
+    assert view is not None
+    assert view.data["content"] is message["_response_output"][0]["content"][0]["text"]
+    assert view.data["thinking"] is message["_response_output"][1]["summary"][0]["text"]
+
+
+def test_user_view_reuses_the_model_message_text_object() -> None:
+    state = SessionState()
+    record_id = state.append_user("用户输入")
+    message = {"role": "user", "content": "用户" + "输入"}
+    state.bind_model_message(message, record_id=record_id, kind="user")
+
+    record = state.records[0]
+    assert record.view is not None
+    assert record.view.data["text"] is message["content"]
+    assert record.raw_input is message["content"]
+
+
+def test_tool_call_arguments_reads_the_single_stored_copy() -> None:
+    """工具参数只从 assistant 消息里取回，展示正文按同一份数据重建。"""
+    state = SessionState()
+    state.append_context({
+        "role": "assistant",
+        "tool_calls": [{
+            "id": "call-1",
+            "type": "function",
+            "function": {"name": "exec_command", "arguments": json.dumps({"cmd": "ls"})},
+        }],
+    })
+    state.append_context({
+        "role": "assistant",
+        "_response_output": [{
+            "type": "function_call",
+            "call_id": "call-2",
+            "name": "exec_command",
+            "arguments": json.dumps({"cmd": "pwd"}),
+        }],
+    })
+
+    assert state.tool_call_arguments("call-1") == {"cmd": "ls"}
+    assert state.tool_call_arguments("call-2") == {"cmd": "pwd"}
+    assert state.tool_call_arguments("call-3") is None
+
+
+def test_tool_result_projection_is_stripped_but_rebuildable() -> None:
+    """工具结果的展示正文与预览都是投影，落盘只保留展示配方。"""
+    state = SessionState()
+    state.record_event(ToolCallCompleted(
+        timestamp=2.0, source="tools", tool_name="read_file", tool_call_id="tool-1",
+        status="success", result_preview="结果正文", duration_seconds=0.2,
+        display=ToolDisplay(
+            title="读取文件",
+            content="结果正文",
+            render={"kind": "result", "mode": "truncate"},
+        ),
+    ))
+
+    completed = state.records[0].view.data["completed"]
+    assert completed["display"]["content"] == ""
+    assert completed["result_preview"] == ""
+    assert state.tool_result_text("tool-1") is None
+
+
+def test_external_read_preview_keeps_its_privacy_summary() -> None:
+    """没有展示配方的工具（外部读取）保留自己的摘要，不参与重建。"""
+    state = SessionState()
+    state.record_event(ToolCallCompleted(
+        timestamp=2.0, source="tools", tool_name="web_fetch", tool_call_id="tool-1",
+        status="success", result_preview="status=success, length=12", duration_seconds=0.2,
+        display=ToolDisplay(title="获取网页", content="status=success, length=12"),
+    ))
+
+    completed = state.records[0].view.data["completed"]
+    assert completed["display"]["content"] == "status=success, length=12"
+    assert completed["result_preview"] == "status=success, length=12"
+
+
+def test_agent_stores_provider_normalized_text() -> None:
+    """写入会话状态前先按 provider 规则规范化正文，避免先写原样再改写。"""
+    from src.agent.agent import Agent
+
+    state = SessionState()
+    agent = object.__new__(Agent)
+    agent.history = []
+    agent.deps = SimpleNamespace(session=SessionContext(id="s", state=state))
+    agent.assembly = SimpleNamespace(
+        llm=SimpleNamespace(normalize_stored_text=lambda text: text.strip()),
+    )
+
+    agent._append_message(
+        agent.history,
+        {"role": "tool", "tool_call_id": "call-1", "content": "结果正文\n"},
+        correlation_id="call-1",
+        kind="tool",
+    )
+
+    assert agent.history[0]["content"] == "结果正文"
+    assert state.context_messages()[0]["content"] == "结果正文"

@@ -433,10 +433,12 @@ class TextualInterface(UserInterface):
         """切换聊天历史的数据源并水合当前前台。"""
         records = state.visible_records()
         if self._ui_alive() and self._app is not None:
-            await self._app.invoke(lambda: self._app.replace_session_history(records))
+            await self._app.invoke(
+                lambda: self._app.replace_session_history(records, resolver=state)
+            )
             return
         self.history_journal.clear()
-        for line in session_replay.plain_lines(records):
+        for line in session_replay.plain_lines(records, resolver=state):
             self.history_journal.append_entry(line)
 
     def cancel_active_input(self) -> bool:

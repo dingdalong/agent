@@ -90,7 +90,7 @@ def test_compactor_uses_its_own_fixed_system_and_dynamic_user_input(tmp_path) ->
             return SimpleNamespace(content="压缩结果")
 
     provider = Provider()
-    manager = CompactMgr(llm=provider, workdir=tmp_path)
+    manager = CompactMgr(llm=provider)
     request = manager._create_summary_request(
         preserved_reference="保留原文",
         history_text="DYNAMIC_HISTORY_SENTINEL",

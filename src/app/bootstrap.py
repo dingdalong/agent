@@ -195,6 +195,7 @@ async def create_app(
     )
     await mcp_mgr.start()
     session_mgr = SessionMgr(global_dir=global_dir, workdir=work_dir, data_guard=data_guard)
+    session_mgr.start_cold_compression()
     llm_mgr = LLMMgr(config_mgr=config_mgr, role_mgr=role_mgr, event_bus=event_bus)
 
     async def confirm_once(tool_name: str, detail: str, reason: str = "") -> bool:

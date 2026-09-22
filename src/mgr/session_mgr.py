@@ -1,24 +1,100 @@
-"""会话管理器 — 管理会话元数据和单一状态快照的持久化与恢复。
+"""会话管理器 — 管理会话元数据和单一状态日志的持久化与恢复。
 
 会话数据存储在 {global_dir}/sessions/ 下：
 - {session_id}.json     — 元数据（workdir、时间戳、主题）
-- {session_id}.state.json — SessionState 原子快照
+- {session_id}.jsonl    — SessionState 追加式日志（内容池引用去重）
+- {session_id}.jsonl.zst / {session_id}.jsonl.xz — 冷会话的压缩日志（读取时透明解压）
+
+状态只在内存保存一份，落盘按安全点追加增量批次；同一段长文本在整个会话日志中
+只写一次，其余位置存内容指纹引用。
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
-from src.common.secure_io import atomic_write_text
+from src.common.secure_io import append_text, atomic_write_text
+from src.common.session_compress import COLD_SUFFIXES, decompress_log, run_cold_compression
+from src.common.session_log import (
+    LOG_VERSION,
+    build_batch,
+    fold_log,
+    iter_batch_lines,
+    text_digest,
+)
 from src.mode import RunMode
 from src.common.session_state import SessionState
 
 logger = logging.getLogger(__name__)
+
+_DIGEST_SIZE = 16
+_EMPTY_DIGEST = text_digest("")
+_STATIC_FIELDS = ("timestamp", "kind", "model_message", "raw_input", "recallable", "correlation_id")
+_STREAM_KEYS = ("content", "thinking")
+_STREAM_KEY_SET = frozenset(_STREAM_KEYS)
+
+
+def _digest(value: Any) -> bytes:
+    """返回一个值的规范化比较摘要。
+
+    只服务于「是否与上次落盘相同」的判断：排序键后的紧凑 JSON 让字典字段顺序
+    不影响比较、列表顺序敏感，语义与逐字节比较一致；无法 JSON 编码时退化为
+    ``repr`` 摘要，保证过滤路径不抛异常。
+
+    Args:
+        value: 待比较的 JSON 兼容值。
+
+    Returns:
+        16 字节 blake2b 摘要。
+    """
+    try:
+        encoded = json.dumps(
+            value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        )
+    except (TypeError, ValueError):
+        encoded = repr(value)
+    return hashlib.blake2b(encoded.encode("utf-8"), digest_size=_DIGEST_SIZE).digest()
+
+
+def _static_projection(value: Mapping[str, Any]) -> dict[str, Any]:
+    """把整份记录快照或记录增量归一成同一份静态投影，用于去重比较。
+
+    两种载荷的字段位置不同（快照在顶层、增量在 ``fields``），但表达的是同一份
+    「字段 + 非正文视图数据」；归一后才能用同一个摘要判断「这条记录是否已经按
+    当前形态落盘过」。
+
+    Args:
+        value: 整份记录快照或一条 ``record_deltas`` 条目。
+
+    Returns:
+        形状固定的静态投影字典（不含 ``content``/``thinking``）。
+    """
+    view = value.get("view")
+    view = view if isinstance(view, dict) else {}
+    fields = value.get("fields")
+    if isinstance(fields, Mapping):
+        static_fields = {key: fields.get(key) for key in _STATIC_FIELDS}
+        data = view.get("set")
+    else:
+        static_fields = {key: value.get(key) for key in _STATIC_FIELDS}
+        data = view.get("data")
+    data = data if isinstance(data, Mapping) else {}
+    return {
+        "id": value.get("id"),
+        "fields": static_fields,
+        "view": {
+            "kind": view.get("kind") if isinstance(view.get("kind"), str) else "",
+            "set": {key: item for key, item in data.items() if key not in _STREAM_KEY_SET},
+        },
+    }
 
 
 @dataclass
@@ -33,6 +109,29 @@ class ResumeResult:
     session_id: str
     state: SessionState
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class _WrittenState:
+    """某个会话已经落盘的投影摘要，用于丢弃与上次相同的重复提交。
+
+    只保留 16 字节内容摘要，不保留整份编码副本，运行期内存不再随会话正文增长。
+
+    Attributes:
+        records: 记录 ID → 已落盘记录投影的摘要。
+        deltas: 记录 ID → 已落盘静态投影（字段 + 非正文视图数据）的摘要。
+        calls: ``(call_id, attempt)`` → 已落盘调用记录的摘要。
+        plan: 已落盘计划载荷的摘要。
+        context_length: 已落盘的上下文长度（用于识别空增量）。
+    """
+
+    records: dict[str, bytes] = field(default_factory=dict)
+    deltas: dict[str, bytes] = field(default_factory=dict)
+    calls: dict[tuple[Any, Any], bytes] = field(default_factory=dict)
+    plan: bytes | None = None
+    context_length: int = -1
+    context_ids: tuple[str, ...] = ()
+    streams: dict[tuple[str, str], str] = field(default_factory=dict)
 
 
 class SessionMgr:
@@ -53,6 +152,31 @@ class SessionMgr:
         self._sessions_dir: Path = global_dir / "sessions"
         self._workdir: Path = workdir
         self._data_guard = data_guard
+        self._pools: dict[str, dict[str, str]] = {}
+        self._seqs: dict[str, int] = {}
+        self._written: dict[str, _WrittenState] = {}
+        self._log_lock = threading.Lock()
+
+    def start_cold_compression(self) -> threading.Thread:
+        """在后台线程压缩长期未更新的会话日志。
+
+        Returns:
+            已启动的守护线程；压缩能力缺失或无候选文件时立即结束。
+        """
+        def work() -> None:
+            try:
+                with self._log_lock:
+                    run_cold_compression(self._sessions_dir)
+            except Exception as e:  # pragma: no cover - 后台任务不得影响主流程
+                logger.warning("冷压缩会话日志失败: %s", e)
+
+        thread = threading.Thread(
+            target=work,
+            name="session-cold-compress",
+            daemon=True,
+        )
+        thread.start()
+        return thread
 
     def save_metadata(
         self,
@@ -96,32 +220,376 @@ class SessionMgr:
         try:
             safe_meta = self._data_guard.redact(meta) if self._data_guard is not None else meta
             atomic_write_text(meta_path, json.dumps(safe_meta, ensure_ascii=False, indent=2))
-        except OSError as e:
+        except (OSError, UnicodeError) as e:
             logger.warning("写入会话元数据失败: %s", e)
 
-    def save_state(self, session_id: str, state: SessionState) -> None:
-        """原子保存单一会话状态快照，空状态也会写入。"""
-        self._sessions_dir.mkdir(parents=True, exist_ok=True)
-        state_path = self._sessions_dir / f"{session_id}.state.json"
+    def append_state(self, session_id: str, state: SessionState) -> bool:
+        """把会话状态自上次提交以来的增量追加到日志。
+
+        无变更时不产生任何写入；空状态同样表示「无增量」，不会写入空文件。
+        状态快照在调用线程准备，只有追加成功后才确认 dirty 基线；写盘失败会保留
+        待提交内容供下一次调用重试。
+
+        Args:
+            session_id: 会话 UUID。
+            state: 内存中的唯一会话状态。
+        """
+        commit = state.prepare_commit()
+        if commit is None:
+            return True
+        success = self.append_batch(session_id, commit.payload)
+        if success:
+            state.ack_commit(commit)
+        else:
+            state.requeue_commit(commit)
+        return success
+
+    def append_batch(self, session_id: str, payload: dict[str, Any]) -> bool:
+        """把一批已取出的状态增量编码后追加到日志。
+
+        编码在会话级内容池上完成，可安全地在工作线程调用。与上次落盘逐字节相同的
+        区块会被丢弃；过滤后没有真实变更时整批不写，也不改动内容池与批序号，因此
+        日志里不会出现同一份记录的重复提交。
+
+        Args:
+            session_id: 会话 UUID。
+            payload: ``SessionState.prepare_commit()`` 返回的增量载荷。
+        """
         try:
-            payload = state.to_dict()
-            safe_payload = self._data_guard.redact(payload) if self._data_guard is not None else payload
-            atomic_write_text(state_path, json.dumps(safe_payload, ensure_ascii=False))
-        except OSError as e:
+            self._sessions_dir.mkdir(parents=True, exist_ok=True)
+            safe_payload = (
+                self._data_guard.redact(payload) if self._data_guard is not None else payload
+            )
+            log_path = self._log_path(session_id)
+            with self._log_lock:
+                self._restore_active_log(session_id)
+                self._hydrate_projection_locked(session_id)
+                pool = self._pools.setdefault(session_id, {})
+                written = self._written.setdefault(session_id, _WrittenState())
+                filtered, next_written = self._filter_payload(safe_payload, written)
+                if filtered is None:
+                    return True
+                seq = self._seqs.get(session_id, self._last_seq(session_id))
+                seq += 1
+                candidate_pool = dict(pool)
+                batch = build_batch(
+                    seq=seq,
+                    timestamp=time.time(),
+                    payload=filtered,
+                    pool=candidate_pool,
+                )
+                append_text(log_path, json.dumps(batch, ensure_ascii=False) + "\n")
+                pool.clear()
+                pool.update(candidate_pool)
+                self._written[session_id] = next_written
+                self._seqs[session_id] = seq
+                return True
+        except (OSError, UnicodeError) as e:
+            with self._log_lock:
+                self._pools.pop(session_id, None)
+                self._written.pop(session_id, None)
+                self._seqs.pop(session_id, None)
             logger.warning("写入会话状态失败: %s", e)
+            return False
+
+    def _hydrate_projection_locked(self, session_id: str) -> None:
+        """从现有日志恢复追加端的内容池、序号和去重摘要。"""
+        if session_id in self._pools and session_id in self._written and session_id in self._seqs:
+            return
+        text = self._read_log(session_id)
+        if text is None:
+            return
+        payload, contents, last_seq = fold_log(iter_batch_lines(text))
+        self._pools[session_id] = contents
+        self._seqs[session_id] = last_seq
+        self._written[session_id] = self._prime_written(payload)
+
+    def _filter_payload(
+        self,
+        payload: dict[str, Any],
+        written: _WrittenState,
+    ) -> tuple[dict[str, Any] | None, _WrittenState]:
+        """丢弃与上次落盘相同的区块，返回（待写入载荷, 已落盘摘要）。
+
+        比较只在 16 字节摘要上进行，因此不需要为每个会话保留整份编码副本。
+        记录增量同样按摘要去重：正文部分用 ``stream_boundaries`` 校验链式关系，
+        静态部分用归一化投影的摘要判断是否真的变了；只丢弃「已经在盘上」的内容，
+        不会丢弃无法对位的正文（那种情况由状态层回退成整份快照）。
+
+        Args:
+            payload: 待写入的状态增量。
+            written: 该会话已落盘的投影摘要。
+
+        Returns:
+            过滤后的载荷与更新后的已落盘摘要；没有真实变更时载荷为 None，
+            已落盘摘要原样返回。
+        """
+        next_written = _WrittenState(
+            records=dict(written.records),
+            deltas=dict(written.deltas),
+            calls=dict(written.calls),
+            plan=written.plan,
+            context_length=written.context_length,
+            context_ids=written.context_ids,
+            streams=dict(written.streams),
+        )
+        result: dict[str, Any] = {}
+        records = payload.get("records")
+        if isinstance(records, list):
+            kept_records: list[Any] = []
+            for record in records:
+                record_id = record.get("id") if isinstance(record, dict) else None
+                if isinstance(record_id, str):
+                    digest = _digest(record)
+                    if next_written.records.get(record_id) == digest:
+                        continue
+                    next_written.records[record_id] = digest
+                    next_written.deltas[record_id] = _digest(_static_projection(record))
+                    view = record.get("view")
+                    data = view.get("data") if isinstance(view, dict) else None
+                    for key in _STREAM_KEYS:
+                        text = data.get(key) if isinstance(data, Mapping) else None
+                        next_written.streams[(record_id, key)] = text_digest(
+                            text if isinstance(text, str) else "",
+                        )
+                kept_records.append(record)
+            if kept_records:
+                result["records"] = kept_records
+        plan = payload.get("plan")
+        if isinstance(plan, dict):
+            digest = _digest(plan)
+            if digest != next_written.plan:
+                next_written.plan = digest
+                result["plan"] = plan
+        context = payload.get("context")
+        if isinstance(context, dict):
+            keep = context.get("keep")
+            append = context.get("append")
+            if isinstance(keep, int) and keep >= 0 and isinstance(append, list):
+                target = next_written.context_ids[:keep] + tuple(
+                    item for item in append if isinstance(item, str) and item
+                )
+                if target != next_written.context_ids:
+                    next_written.context_ids = target
+                    next_written.context_length = len(target)
+                    result["context"] = {"keep": keep, "append": list(append)}
+        calls = payload.get("llm_calls")
+        if isinstance(calls, list):
+            kept_calls: list[Any] = []
+            for call in calls:
+                key = (
+                    (call.get("call_id"), call.get("attempt"))
+                    if isinstance(call, dict) else None
+                )
+                if isinstance(key, tuple):
+                    digest = _digest(call)
+                    if next_written.calls.get(key) == digest:
+                        continue
+                    next_written.calls[key] = digest
+                kept_calls.append(call)
+            if kept_calls:
+                result["llm_calls"] = kept_calls
+        deltas = payload.get("record_deltas")
+        if isinstance(deltas, list):
+            kept_deltas: list[Any] = []
+            for delta in deltas:
+                if not isinstance(delta, dict) or not isinstance(delta.get("id"), str):
+                    continue
+                record_id = delta["id"]
+                static_digest = _digest(_static_projection(delta))
+                raw_view = delta.get("view")
+                view = raw_view if isinstance(raw_view, dict) else {}
+                boundaries = delta.get("stream_boundaries")
+                kept_append: dict[str, str] = {}
+                kept_boundaries: dict[str, Any] = {}
+                append_view = view.get("append")
+                if isinstance(append_view, dict) and isinstance(boundaries, dict):
+                    for key, value in append_view.items():
+                        if not isinstance(key, str) or not isinstance(value, str):
+                            continue
+                        boundary = boundaries.get(key)
+                        if not isinstance(boundary, dict):
+                            continue
+                        base = boundary.get("base")
+                        after = boundary.get("after")
+                        if not isinstance(after, str):
+                            continue
+                        stream_key = (record_id, key)
+                        current = next_written.streams.get(stream_key, _EMPTY_DIGEST)
+                        if current == after:
+                            continue
+                        if current != base:
+                            logger.warning(
+                                "会话增量基线不匹配，丢弃该段正文: %s/%s", record_id, key,
+                            )
+                            continue
+                        kept_append[key] = value
+                        kept_boundaries[key] = boundary
+                        next_written.streams[stream_key] = after
+                if not kept_append and next_written.deltas.get(record_id) == static_digest:
+                    continue
+                next_written.deltas[record_id] = static_digest
+                filtered = dict(delta)
+                filtered_view = dict(view)
+                filtered_view["append"] = kept_append
+                filtered["view"] = filtered_view
+                filtered["stream_boundaries"] = kept_boundaries
+                kept_deltas.append(filtered)
+            if kept_deltas:
+                result["record_deltas"] = kept_deltas
+        if not result:
+            return None, written
+        return result, next_written
+
+    def _prime_written(self, payload: dict[str, Any]) -> _WrittenState:
+        """用已加载的会话状态预热已落盘投影摘要。
+
+        恢复会话后如果不预热，下一次提交会把整段上下文当成新内容重写一遍。
+
+        Args:
+            payload: ``fold_log`` 折叠出的完整状态载荷。
+
+        Returns:
+            与该日志当前内容一致的已落盘摘要。
+        """
+        written = _WrittenState()
+        for record in payload.get("records") or []:
+            if not isinstance(record, dict):
+                continue
+            record_id = record.get("id")
+            if not isinstance(record_id, str):
+                continue
+            written.records[record_id] = _digest(record)
+            written.deltas[record_id] = _digest(_static_projection(record))
+            view = record.get("view")
+            data = view.get("data") if isinstance(view, dict) else None
+            if isinstance(data, Mapping):
+                for key in _STREAM_KEYS:
+                    value = data.get(key)
+                    if isinstance(value, str):
+                        written.streams[(record_id, key)] = text_digest(value)
+        plan = payload.get("plan")
+        if isinstance(plan, dict):
+            written.plan = _digest(plan)
+        for call in payload.get("llm_calls") or []:
+            if isinstance(call, dict):
+                written.calls[(call.get("call_id"), call.get("attempt"))] = _digest(call)
+        written.context_length = len(payload.get("context_ids") or [])
+        written.context_ids = tuple(
+            item for item in payload.get("context_ids") or [] if isinstance(item, str)
+        )
+        return written
 
     def load_state(self, session_id: str) -> SessionState | None:
-        """加载并校验单一会话状态；文件缺失或损坏时返回 None。"""
-        state_path = self._sessions_dir / f"{session_id}.state.json"
-        if not state_path.exists():
-            return None
+        """加载并校验单一会话状态；日志缺失、损坏或无法恢复时返回 None。"""
         try:
-            payload = json.loads(state_path.read_text(encoding="utf-8"))
-            safe_payload = self._data_guard.redact(payload) if self._data_guard is not None else payload
-            return SessionState.from_dict(safe_payload)
-        except (json.JSONDecodeError, OSError) as e:
+            with self._log_lock:
+                text = self._read_log(session_id)
+                if text is None:
+                    return None
+                payload, contents, last_seq = fold_log(iter_batch_lines(text))
+                if last_seq == 0:
+                    logger.warning(
+                        "会话日志没有当前格式（v%s）的批记录，按不可恢复处理: %s",
+                        LOG_VERSION, session_id,
+                    )
+                    return None
+                safe_payload = self._data_guard.redact(payload) if self._data_guard is not None else payload
+                state = SessionState.from_dict(safe_payload)
+                if state is None:
+                    logger.warning("会话日志损坏，无法重建状态: %s", session_id)
+                    return None
+                self._pools[session_id] = contents
+                self._seqs[session_id] = max(self._seqs.get(session_id, 0), last_seq)
+                self._written[session_id] = self._prime_written(payload)
+        except (OSError, UnicodeError) as e:
             logger.warning("加载会话状态失败: %s", e)
             return None
+        return state
+
+    def _restore_active_log(self, session_id: str) -> None:
+        """把冷归档还原成可追加的活跃日志，保证续写不丢历史。
+
+        归档文件与活跃文件同名不同后缀，直接续写会让读取端只看到新日志；这里先
+        把归档解压回活跃文件，再删除归档，续写后整个会话仍是一条连续日志。
+
+        Args:
+            session_id: 会话 UUID。
+
+        Returns:
+            None。
+        """
+        log_path = self._log_path(session_id)
+        if log_path.exists():
+            return
+        for suffix in COLD_SUFFIXES:
+            cold_path = self._sessions_dir / f"{session_id}{suffix}"
+            if not cold_path.exists():
+                continue
+            atomic_write_text(log_path, decompress_log(cold_path))
+            cold_path.unlink(missing_ok=True)
+            return
+
+    def _log_path(self, session_id: str) -> Path:
+        """返回会话日志的活跃路径。"""
+        return self._sessions_dir / f"{session_id}.jsonl"
+
+    def _read_log(self, session_id: str) -> str | None:
+        """读取会话日志原文，必要时透明解压冷日志。"""
+        log_path = self._log_path(session_id)
+        if log_path.exists():
+            return log_path.read_text(encoding="utf-8")
+        for suffix in COLD_SUFFIXES:
+            cold_path = self._sessions_dir / f"{session_id}{suffix}"
+            if cold_path.exists():
+                return decompress_log(cold_path)
+        return None
+
+    def _last_seq(self, session_id: str) -> int:
+        """从日志恢复最后一条批记录的序号。"""
+        log_path = self._log_path(session_id)
+        if not log_path.exists():
+            return 0
+        seq = 0
+        try:
+            with log_path.open("r", encoding="utf-8") as stream:
+                for line in stream:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        value = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(value, dict) and isinstance(value.get("seq"), int):
+                        seq = max(seq, value["seq"])
+        except OSError as e:
+            logger.warning("读取会话日志序号失败: %s", e)
+        return seq
+
+    def _has_state(self, session_id: str) -> bool:
+        """快速扫描日志，判断会话是否包含当前格式的批记录。"""
+        log_path = self._log_path(session_id)
+        if log_path.exists():
+            try:
+                with log_path.open("r", encoding="utf-8") as stream:
+                    for line in stream:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            value = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if isinstance(value, dict) and value.get("v") == LOG_VERSION:
+                            return True
+            except (json.JSONDecodeError, OSError, UnicodeError):
+                return False
+            return False
+        return any(
+            (self._sessions_dir / f"{session_id}{suffix}").exists()
+            for suffix in COLD_SUFFIXES
+        )
 
     def list_sessions(self, limit: int = 10) -> list[dict[str, Any]]:
         """列出最近的会话，按 updated_at 降序排列。
@@ -136,8 +604,6 @@ class SessionMgr:
             return []
         sessions: list[dict[str, Any]] = []
         for f in self._sessions_dir.glob("*.json"):
-            if f.name.endswith((".hist.json", ".input.json", ".state.json")):
-                continue
             try:
                 meta = json.loads(f.read_text(encoding="utf-8"))
                 if "session_id" in meta:
@@ -162,7 +628,7 @@ class SessionMgr:
             session
             for session in self.list_sessions(limit=10_000)
             if session.get("session_id") != current_session_id
-            and self.load_state(str(session.get("session_id", ""))) is not None
+            and self._has_state(str(session.get("session_id", "")))
         ][:limit]
 
     def resolve_resume(

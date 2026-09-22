@@ -792,13 +792,26 @@ class AgentTuiApp(App[None]):
         self.input_area.reset_history()
         self.refresh_chrome()
 
-    async def replace_session_history(self, records: list[SessionRecord]) -> None:
-        """把 SessionRecord.view 批量转换成单控件历史源。"""
+    async def replace_session_history(
+        self,
+        records: list[SessionRecord],
+        *,
+        resolver: object | None = None,
+    ) -> None:
+        """把 SessionRecord.view 批量转换成单控件历史源。
+
+        Args:
+            records: 会话记录序列。
+            resolver: 可选内容解析器，用于重建被引用化的展示正文。
+
+        Returns:
+            None。
+        """
         await self.end_thinking()
         await self.end_response()
         await self.flush_round()
         self._round_entries.clear()
-        entries = session_replay.history_entries(records)
+        entries = session_replay.history_entries(records, resolver=resolver)
         self._history.replace_entries(entries)
         await self._history.wait_for_reflow()
         self.history_journal.clear()
