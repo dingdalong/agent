@@ -23,7 +23,7 @@ class RecordingEventBus:
     async def emit(self, event: object) -> None:
         self.events.append(event)
 
-    async def request_input(self, prompt: str, default: str = "") -> str:
+    async def request_input(self, prompt: str) -> str:
         return next(self.inputs)
 
     async def request_output(self, content: str, **kwargs: object) -> None:

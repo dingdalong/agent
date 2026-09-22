@@ -252,14 +252,13 @@ class EventBus:
         return answer
 
     async def request_input(
-        self, prompt: str, source: str = "ui", default: str = "", markdown: bool = False
+        self, prompt: str, source: str = "ui", markdown: bool = False
     ) -> str:
         """通过事件队列请求 UI 串行输入。
 
         Args:
             prompt: 上文提示（末行为输入标签，由输入框前缀代替）。
             source: 事件来源标识。
-            default: 预填默认值。
             markdown: 上文提示是否按 Markdown 渲染。
         Returns:
             用户提交的文本。
@@ -269,7 +268,6 @@ class EventBus:
                 timestamp=time.time(),
                 source=source,
                 prompt=prompt,
-                default=default,
                 markdown=markdown,
             ),
             "input",

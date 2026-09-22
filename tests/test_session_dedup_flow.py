@@ -337,3 +337,68 @@ def test_no_tool_round_prunes_thinking_before_single_commit(tmp_path) -> None:
     assert restored is not None
     assert restored.context_messages() == agent.history
     assert agent.history[-1] is assistant_message
+
+
+def test_interrupt_commit_is_idempotent_and_round_trips(tmp_path) -> None:
+    """中断收尾的增量重复提交只写一次，折叠结果与内存历史一致。"""
+    provider = DeepSeekProvider(
+        api_key="test",
+        base_url="https://api.example.test",
+        model="deepseek-test",
+        event_bus=None,
+        max_attempts=1,
+    )
+    agent, manager = _scripted_agent(tmp_path, provider)
+    log_path = tmp_path / "sessions" / "session.jsonl"
+    call_id = "call_1"
+
+    agent._append_message(agent.history, {"role": "user", "content": USER_INPUT}, kind="user")
+    asyncio.run(agent._commit_session(USER_INPUT))
+    agent._append_message(
+        agent.history,
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{
+                "id": call_id,
+                "name": "exec_command",
+                "arguments": json.dumps({"cmd": COMMANDS[0]}, ensure_ascii=False),
+            }],
+        },
+        kind="assistant",
+        correlation_id=call_id,
+    )
+    asyncio.run(agent._commit_session())
+
+    ctx = RunContext(messages=agent.history, user_message_index=0)
+    agent._finalize_interrupted_turn(ctx)
+    asyncio.run(agent._commit_session())
+
+    state = agent.deps.session.state
+    batches = _log_lines(log_path)
+    payload, _contents, _seq = fold_log(iter_batch_lines(log_path.read_text(encoding="utf-8")))
+    restored = SessionState.from_dict(payload)
+    assert restored is not None
+    assert restored.to_dict() == state.to_dict()
+    assert restored.context_messages() == state.context_messages()
+
+    # 中断收尾写入的是模型可见的未执行结果与标记，且标记不进可见转录。
+    assert [message["role"] for message in agent.history] == [
+        "user", "assistant", "tool", "user",
+    ]
+    marker = agent.history[-1]
+    assert marker["role"] == "user"
+    assert "<turn_aborted>" in marker["content"]
+    assert json.loads(agent.history[2]["content"].split("\n", 1)[0])["error_code"] == (
+        "not_executed"
+    )
+    assert restored.records[-1].kind == "turn_aborted"
+    assert restored.records[-1].view is None
+    assert all(
+        record.kind != "turn_aborted" for record in restored.visible_records()
+    )
+
+    # 重复提交同一份中断增量（检查点重跑）不再新增批，也不改写内容。
+    assert manager.append_batch("session", batches[-1]) is True
+    assert len(_log_lines(log_path)) == len(batches)
+    assert log_path.read_text(encoding="utf-8").count("<turn_aborted>") == 1

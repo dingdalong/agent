@@ -26,6 +26,7 @@ from src.prompt_tags import (
     PromptTag,
     render_external_context,
     render_prompt_tag,
+    render_turn_aborted,
 )
 
 if TYPE_CHECKING:
@@ -74,6 +75,29 @@ _COMPRESS_REASONING_INSTRUCTION = (
     "请大幅压缩思考过程：只保留必要的关键推理，直接产出面向用户的答复或工具调用，"
     "不要展开冗长的内部推理。"
 )
+
+
+def _tool_result_status(content: object) -> str | None:
+    """读取工具消息首行元数据里的执行状态。
+
+    工具结果由 ``ToolResult.__str__`` 序列化为「元数据 JSON + 正文」，只有元数据
+    行能区分正常完成与被中止；解析失败（例如 hook 注入的纯文本）按未知状态处理。
+
+    Args:
+        content: 工具消息的 content 字段。
+
+    Returns:
+        status 字段值；缺失或无法解析时为 None。
+    """
+    head, _, _body = str(content).partition("\n")
+    try:
+        metadata = json.loads(head)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(metadata, dict):
+        return None
+    status = metadata.get("status")
+    return status if isinstance(status, str) else None
 
 
 def _llm_failure_advice(kind: LLMErrorKind) -> str:
@@ -207,7 +231,6 @@ class Agent:
     _initial_context_added: bool = field(init=False, default=False, repr=False)
     _initial_context_message_count: int = field(init=False, default=0, repr=False)
     _manager_guidance_injected: bool = field(init=False, default=False, repr=False)
-    _pending_input: str = field(init=False, default="")
     _queued_user_action: str = field(init=False, default="", repr=False)
     _handlers: dict[AgentState, Callable] = field(init=False, repr=False)
 
@@ -494,14 +517,11 @@ class Agent:
             if data_guard is not None:
                 input = str(data_guard.redact(input))
             self._append_initial_context_messages()
-            ctx = RunContext(
-                messages=self.history,
-                turn_start_messages=list(self.history),
-                round_start_idx=len(self.history),
-            )
+            ctx = RunContext(messages=self.history, round_start_idx=len(self.history))
             self.assembly.reminder_mgr.queue_turn_start(self.mode, self.spec.is_subagent)
             self._append_pending_framework_message(ctx)
             self._append_message(self.history, {"role": "user", "content": input})
+            ctx.user_message_index = len(self.history) - 1
             ctx.user_input = input
             result = await self._run_single_turn(ctx, AgentState.CHECK_COMPACT)
             if not ctx.has_tool_calls:
@@ -548,6 +568,7 @@ class Agent:
                         else AgentState.LLM_FAILURE
                     )
                 await self._emit_state_changed(prev, state)
+            self._settle_stream_views()
             return RunResult(
                 final_text=ctx.final_text,
                 command=ctx.command,
@@ -556,19 +577,91 @@ class Agent:
                 llm_error=ctx.llm_error,
             )
         except (asyncio.CancelledError, KeyboardInterrupt):
-            self._rollback_response_recovery(ctx)
-            if ctx.turn_start_messages is not None:
-                # 不回滚本轮，保留已生成内容，仅裁掉悬空的
-                # tool_use 尾部，再补一条中断标记 assistant 消息，保证历史连续合法。
-                self._complete_interrupted_tool_results()
-                self._append_message(self.history, {
-                    "role": "assistant",
-                    "content": "⏸ 本轮已被用户中断。",
-                })
-            else:
-                self._truncate_messages(self.history, ctx.round_start_idx)
-            self._pending_input = ctx.user_input  # 保留预填，方便改完重发
+            self._finalize_interrupted_turn(ctx)
             raise
+
+    def _finalize_interrupted_turn(self, ctx: RunContext) -> None:
+        """在取消边界把本轮收束成合法的模型历史。
+
+        顺序固定为：回滚长度恢复链的临时残片 → 按整段复核脱敏 → 收束被中断的
+        LLM 尝试 → 为本轮悬空工具调用补中止结果 → 按需追加 ``<turn_aborted>``。
+
+        被中断的 LLM 尝试按部件完整度分两类：provider 已给出结束标记的部件
+        （Anthropic ``content_block_stop``、Responses ``output_item.done``）可以
+        原样回放，收束成一条绑定到本轮展示记录的助手消息；没有任何完整部件时，
+        本轮没有可安全回放的模型输出，只丢弃本次调用尚未产出内容的模型输出，
+        用户输入保留，避免把半截思考或半截工具调用发给 provider。
+
+        「助手消息」只是历史里的 role 外壳，模型输出在历史中只能挂在 assistant
+        角色下；思考仍以推理载体原样存放（Anthropic ``_anthropic_content`` 的
+        thinking 块、Responses ``_response_output`` 的 reasoning 项、其余
+        ``reasoning_content``），不会并入 ``content`` 正文，展示投影也仍按
+        thinking 呈现。
+
+        收尾会改动会话状态，但不在取消处理器里写盘：调用方（``AgentApp``）在
+        任务真正结束后按事务路径强制提交。方法可安全重复调用：``ctx`` 上的
+        守卫保证重复进入不会新增任何消息。
+
+        Args:
+            ctx: 被取消轮次的运行上下文。
+        """
+        if ctx.interrupt_finalized:
+            return
+        ctx.interrupt_finalized = True
+        self._rollback_response_recovery(ctx)
+        self._settle_stream_views()
+        if ctx.user_message_index is None:
+            return
+        self._settle_interrupted_parts(ctx)
+        self._complete_interrupted_tool_results(ctx)
+        if not self._turn_has_aborted_tool_call(ctx):
+            return
+        self._append_message(
+            self.history,
+            {"role": "user", "content": render_turn_aborted()},
+            kind="turn_aborted",
+        )
+
+    def _settle_interrupted_parts(self, ctx: RunContext) -> None:
+        """把被中断的 LLM 尝试收束成模型可见的助手消息或一次回滚。
+
+        provider 在取消时登记本次尝试上下文；没有登记说明取消发生在 LLM 调用
+        之外（工具执行、提交或等待输入），此时历史已经一致，不做任何改动。
+
+        Args:
+            ctx: 被取消轮次的运行上下文。
+        """
+        llm = getattr(self.assembly, "llm", None)
+        take_call = getattr(llm, "take_interrupted_call", None)
+        call = take_call() if callable(take_call) else None
+        if call is None:
+            return
+        message = llm.interrupted_assistant_message(call)
+        if message is None:
+            self._rollback_unfinished_turn(ctx)
+            return
+        self._append_message(
+            self.history,
+            message,
+            correlation_id=call.call_id or None,
+            kind="assistant",
+        )
+
+    def _rollback_unfinished_turn(self, ctx: RunContext) -> None:
+        """丢弃本次调用没有完整模型输出的临时上下文，保留用户输入。
+
+        回滚点固定为本次调用开始处：本次调用注入的框架消息与未完成尝试一起丢弃，
+        用户输入保留在模型历史里——被中断的是模型的回答，不是用户说过的话；多轮次
+        回合里已完成轮次的助手与工具消息同样保持可见。展示投影与磁盘不受影响，
+        用户仍然能看到已产出的流式残片，下一条用户消息会与保留的输入一起交给模型。
+
+        Args:
+            ctx: 被取消轮次的运行上下文。
+        """
+        state = self._session_state()
+        del self.history[ctx.llm_call_start_idx:]
+        if state is not None:
+            state.truncate_context(ctx.llm_call_context_start)
 
     async def _cleanup_tasks_at_turn_end(self, ctx: RunContext) -> None:
         """轮末收尾：turn 正常结束且全部任务 completed 时清空任务。
@@ -582,11 +675,57 @@ class Agent:
             return
         await asyncio.to_thread(self.assembly.task_mgr.cleanup_if_all_completed)
 
-    def _complete_interrupted_tool_results(self) -> None:
-        """保留已完成工具轮；只为悬空调用补中断结果。"""
+    def _settle_stream_views(self) -> None:
+        """把本轮已产出的流式正文按整段复核一次脱敏。
+
+        分块脱敏看不到跨块的敏感模式；整段复核发现改写时，状态层会以整段结果
+        为准并让该记录退回整份快照，保证显示、内存与磁盘一致。
+
+        Returns:
+            None。
+        """
+        state = self._session_state()
+        if state is None:
+            return
+        data_guard = getattr(self.deps, "data_guard", None)
+        redact = getattr(data_guard, "redact", None)
+        state.settle_view_text(redact if callable(redact) else None)
+
+    def _turn_has_aborted_tool_call(self, ctx: RunContext) -> bool:
+        """判断被中止的回合是否需要 ``<turn_aborted>`` 标记。
+
+        标记只提醒「工具或命令可能已部分生效」：本轮存在被中止（含未执行即被
+        中止）的工具调用时才追加。全部工具正常返回、或本轮没有动过工具时标记
+        没有信息量，只会让上下文堆叠重复的用户消息。
+
+        Args:
+            ctx: 被中止轮次的运行上下文。
+
+        Returns:
+            本轮存在未执行完就被中止的工具调用时为 True。
+        """
+        start = ctx.user_message_index or 0
+        for message in self.history[start:]:
+            if message.get("role") != "tool":
+                continue
+            if _tool_result_status(message.get("content")) == "cancelled":
+                return True
+        return False
+
+    def _complete_interrupted_tool_results(self, ctx: RunContext) -> None:
+        """保留已完成工具轮；只为本轮悬空调用补未执行结果。
+
+        已派发但被取消的调用由 ``_on_execute_tools`` 的收尾补中止结果，这里
+        只处理还没交给工具执行器的调用（例如取消发生在助手消息提交之后、
+        工具轮开始之前）。回溯范围限制在本轮用户消息之后，不改写历史轮次。
+
+        Args:
+            ctx: 被取消轮次的运行上下文。
+        """
         messages = self.history
+        start = ctx.user_message_index or 0
         pending = {}
-        for message in messages:
+        for message in messages[start:]:
             if message.get("role") == "assistant":
                 view = materialize_assistant(message)
                 pending = {tc["id"]: tc for tc in view.get("tool_calls", [])}
@@ -595,8 +734,39 @@ class Agent:
             else:
                 pending = {}
         for ident in pending:
-            self._append_message(messages, {"role": "tool", "tool_call_id": ident,
-                                           "content": "用户中断；工具可能已经产生部分副作用。"}, correlation_id=ident, kind="tool")
+            self._append_message(
+                messages,
+                {
+                    "role": "tool",
+                    "tool_call_id": ident,
+                    "content": str(self._not_executed_tool_result()),
+                },
+                correlation_id=ident,
+                kind="tool",
+            )
+
+    @staticmethod
+    def _aborted_tool_result(started_at: float) -> "ToolResult":
+        """构造已派发但被用户中止的工具结果。"""
+        from src.common.tool_display import ToolResult
+
+        elapsed = max(0.0, time.monotonic() - started_at)
+        return ToolResult(
+            f"已运行 {elapsed:.1f}s 后被用户中止；该工具可能已经产生部分副作用。",
+            status="cancelled",
+            error_code="aborted_by_user",
+        )
+
+    @staticmethod
+    def _not_executed_tool_result() -> "ToolResult":
+        """构造尚未派发就被用户中止的工具结果。"""
+        from src.common.tool_display import ToolResult
+
+        return ToolResult(
+            "该调用未执行即被用户中止。",
+            status="cancelled",
+            error_code="not_executed",
+        )
 
     def _rollback_response_recovery(self, ctx: RunContext) -> None:
         """移除当前响应恢复链写入的临时消息并清空恢复状态。
@@ -685,7 +855,6 @@ class Agent:
             try:
                 user_input = await self.deps.event_bus.request_input(
                     "\n\n你: ",
-                    default=self._pending_input,
                 )
             except (asyncio.CancelledError, KeyboardInterrupt, NoEventSubscribers):
                 ctx.exit_requested = True
@@ -695,7 +864,9 @@ class Agent:
                         current_task.uncancel()
                 return AgentState.DONE
 
-        self._pending_input = ""
+        data_guard = getattr(self.deps, "data_guard", None)
+        if data_guard is not None:
+            user_input = str(data_guard.redact(user_input))
         ctx.user_input = user_input
 
         state = self._session_state()
@@ -740,12 +911,10 @@ class Agent:
                     ))
                 )
 
-        data_guard = getattr(self.deps, "data_guard", None)
         if data_guard is not None:
             user_input = str(data_guard.redact(user_input))
         self._append_initial_context_messages()
         self.assembly.reminder_mgr.queue_turn_start(self.mode, self.spec.is_subagent)
-        ctx.turn_start_messages = list(self.history)
         ctx.round_start_idx = len(self.history)
         self._append_pending_framework_message(ctx)
         self._append_message(
@@ -754,6 +923,7 @@ class Agent:
             record_id=ctx.user_record_id,
             kind="user",
         )
+        ctx.user_message_index = len(self.history) - 1
         await self._commit_session(user_input)
 
         return AgentState.CHECK_COMPACT
@@ -909,6 +1079,12 @@ class Agent:
         Raises:
             LLMCallError: 调用不可继续时交由单轮状态机边界收口。
         """
+        ctx.llm_call_count += 1
+        state = self._session_state()
+        ctx.llm_call_start_idx = len(ctx.messages)
+        ctx.llm_call_context_start = (
+            len(state.context_ids) if state is not None else 0
+        )
         self._append_pending_framework_message(ctx)
         self._replace_messages(
             ctx.messages,
@@ -937,6 +1113,7 @@ class Agent:
             与响应终态对应的下一个 Agent 状态。
         """
         response = ctx.response
+        self._settle_stream_views()
         if ctx.response_recovery_start_idx is None:
             ctx.final_text = response.content
         elif response.content:
@@ -1177,22 +1354,28 @@ class Agent:
 
     async def _on_execute_tools(self, ctx: RunContext) -> AgentState:
         """并发独立读取；修改和交互形成屏障。取消保留已完成调用结果。"""
-        from src.common.tool_display import ToolResult
         ctx.has_tool_calls = True
         calls = list(ctx.response.tool_calls.values())
         completed = {}
+        started: dict[str, float] = {}
         end_turn = False
 
         async def run_one(tc):
             name, ident = tc["name"], tc["id"]
+            started[ident] = time.monotonic()
             try:
-                args = json.loads(tc["arguments"])
-                if not isinstance(args, dict):
-                    raise ValueError("工具参数必须为 JSON 对象")
-            except (ValueError, TypeError):
-                completed[ident] = await self.deps.tools_mgr.execute(name, tc["arguments"], current_tool_call_id=ident, deps=self.deps, agent=self, run_context=ctx)
-                return
-            completed[ident] = await self.deps.tools_mgr.execute(name, args, current_tool_call_id=ident, deps=self.deps, agent=self, run_context=ctx)
+                try:
+                    args = json.loads(tc["arguments"])
+                    if not isinstance(args, dict):
+                        raise ValueError("工具参数必须为 JSON 对象")
+                except (ValueError, TypeError):
+                    completed[ident] = await self.deps.tools_mgr.execute(name, tc["arguments"], current_tool_call_id=ident, deps=self.deps, agent=self, run_context=ctx)
+                    return
+                completed[ident] = await self.deps.tools_mgr.execute(name, args, current_tool_call_id=ident, deps=self.deps, agent=self, run_context=ctx)
+            except asyncio.CancelledError:
+                # 已派发的调用被取消：给模型一条带时长的中止结果，避免它以为工具从未运行。
+                completed[ident] = self._aborted_tool_result(started[ident])
+                raise
 
         async def parallel(tc):
             tool = self.deps.tools_mgr.get(tc["name"])
@@ -1227,7 +1410,7 @@ class Agent:
             await flush(batch)
         finally:
             for tc in calls:
-                result = completed.get(tc["id"], ToolResult('工具调用未完成或未执行', status='cancelled', error_code='cancelled'))
+                result = completed.get(tc["id"]) or self._not_executed_tool_result()
                 end_turn = end_turn or result.end_turn
                 self._append_message(ctx.messages, {"role": "tool", "tool_call_id": tc["id"], "content": str(result)}, correlation_id=tc["id"], kind="tool")
         self.assembly.reminder_mgr.notify_tool_round([tc["name"] for tc in calls if tc["id"] in completed])
@@ -1490,6 +1673,8 @@ class Agent:
             return
         session_mgr, session_id, state = target
         async with self.deps.session.commit_lock:
+            # 提交前按整段复核一次流式正文，保证内存、显示与磁盘是同一份脱敏文本。
+            self._settle_stream_views()
             commit = state.prepare_commit()
             if commit is None and not user_input:
                 return
@@ -1497,7 +1682,9 @@ class Agent:
             mode = self.mode
 
             def save() -> bool:
-                success = commit is None or session_mgr.append_batch(session_id, commit.payload)
+                success = commit is None or session_mgr.append_batch(
+                    session_id, commit.payload, commit.resync,
+                )
                 if user_input and has_history:
                     is_new = session_mgr.get_metadata(session_id) is None
                     session_mgr.save_metadata(

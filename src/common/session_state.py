@@ -13,7 +13,7 @@ import json
 import time
 import uuid
 from dataclasses import asdict, dataclass, field, is_dataclass
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from src.common.session_log import LOG_VERSION, text_digest
 from src.common.stream_policy import StreamFlushPolicy
@@ -243,6 +243,7 @@ class PreparedCommit:
     record_delta_snapshots: dict[str, dict[str, Any]] = field(default_factory=dict)
     stream_state: dict[tuple[str, str], str] = field(default_factory=dict)
     view_keys: dict[str, frozenset[str]] = field(default_factory=dict)
+    resync: set[str] = field(default_factory=set)
 
 
 @dataclass(slots=True)
@@ -278,6 +279,7 @@ class SessionState:
     _committed_view_keys: dict[str, frozenset[str]] = field(
         default_factory=dict, init=False, repr=False,
     )
+    _streamed_records: set[str] = field(default_factory=set, init=False, repr=False)
     _last_checkpoint_at: float = field(default_factory=time.monotonic, init=False, repr=False)
     stream_policy: StreamFlushPolicy = field(
         default_factory=StreamFlushPolicy, repr=False,
@@ -404,7 +406,11 @@ class SessionState:
         )
 
     def ack_commit(self, commit: PreparedCommit) -> None:
-        """确认已经成功追加的快照，保留提交期间发生的新修改。"""
+        """确认已经成功追加的快照，保留提交期间发生的新修改。
+
+        写侧无法按增量对位时会登记 ``commit.resync``：那段正文虽已写入，但只有
+        整份快照才能让磁盘与内存收敛，因此在这里退回整份重写，调用方不必分别处理。
+        """
         for key, chunks in commit.stream_deltas.items():
             pending = self._stream_pending.get(key, [])
             if pending[:len(chunks)] == chunks:
@@ -447,6 +453,8 @@ class SessionState:
             )
             if call is not None and call.to_dict() == snapshot:
                 self._dirty_calls.discard(key)
+        if commit.resync:
+            self.invalidate_append_baseline(commit.resync)
         self._last_checkpoint_at = time.monotonic()
 
     def requeue_commit(self, _commit: PreparedCommit) -> None:
@@ -582,6 +590,63 @@ class SessionState:
             for record in self.records
             if record.view is not None and record.view.kind != "subagent"
         ]
+
+    def settle_view_text(self, redact: Callable[[str], object] | None = None) -> set[str]:
+        """按整段文本复核流式正文的脱敏结果，必要时整份重写该记录。
+
+        流式正文按块脱敏，看不到跨块的敏感模式与 URL 改写；回合结束后按整段
+        复核一次，让显示、内存与磁盘收敛到同一份脱敏文本。改写的记录会退回整份
+        快照（正文已被整段结果替换，不能再按增量对位）。
+
+        Args:
+            redact: 脱敏函数；None 时只物化正文缓冲，不做改写。
+
+        Returns:
+            正文被整段复核改写的记录 ID 集合。
+        """
+        self._materialize_all_view_streams()
+        settled: set[str] = set()
+        for record_id in sorted(self._streamed_records):
+            record = self._find(record_id=record_id)
+            if record is None or record.view is None:
+                continue
+            changed = False
+            for key in _STREAM_KEYS:
+                value = record.view.data.get(key)
+                if not isinstance(value, str) or not value:
+                    continue
+                safe = redact(value) if redact is not None else value
+                if isinstance(safe, str) and safe != value:
+                    record.view.data[key] = safe
+                    changed = True
+            if changed:
+                self.invalidate_append_baseline([record.id])
+                settled.add(record.id)
+        self._streamed_records.clear()
+        return settled
+
+    def invalidate_append_baseline(self, record_ids: Iterable[str]) -> None:
+        """让指定记录的下一次提交退回整份快照。
+
+        用于正文被整体替换（整段脱敏、外部重写）后无法再按增量对位的情况；
+        快照会把完整正文重新写入日志，同时刷新写侧的内容摘要基线。
+
+        Args:
+            record_ids: 需要整份重写的记录 ID。
+
+        Returns:
+            None。
+        """
+        for record_id in record_ids:
+            if not isinstance(record_id, str) or not record_id:
+                continue
+            self._committed_records.discard(record_id)
+            self._committed_view_keys.pop(record_id, None)
+            for key in _STREAM_KEYS:
+                self._committed_streams.pop((record_id, key), None)
+                self._stream_pending.pop((record_id, key), None)
+            self._clear_record_view_streams(record_id)
+            self._dirty_records.add(record_id)
 
     def subagent_views(self) -> list[dict[str, Any]]:
         """Return persisted read-only projections for the session's subagents."""
@@ -1067,6 +1132,7 @@ class SessionState:
     def _append_view_stream(self, record_id: str, key: str, value: str) -> None:
         stream_key = (record_id, key)
         self._dirty_records.add(record_id)
+        self._streamed_records.add(record_id)
         buffer = self._view_streams.get(stream_key)
         if buffer is None:
             record = self._record_by_id(record_id)

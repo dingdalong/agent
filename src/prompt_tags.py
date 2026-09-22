@@ -36,6 +36,7 @@ class PromptTag(StrEnum):
     HISTORY_REFERENCE = "history_reference"
     HISTORY_TO_SUMMARIZE = "history_to_summarize"
     FRAMEWORK_INSTRUCTION = "framework_instruction"
+    TURN_ABORTED = "turn_aborted"
 
 
 @dataclass(frozen=True)
@@ -114,7 +115,19 @@ PROMPT_TAGS: dict[PromptTag, PromptTagSpec] = {
         PromptTrust.FRAMEWORK,
         frozenset({PromptConsumer.WORKING_AGENT}),
     ),
+    PromptTag.TURN_ABORTED: PromptTagSpec(
+        "用户主动中断上一轮、且存在被中止的工具调用时追加的标记；"
+        "提示被中止的工具可能已部分执行，要求结合最新指示接着继续。",
+        "user",
+        PromptTrust.FRAMEWORK,
+        frozenset({PromptConsumer.WORKING_AGENT}),
+    ),
 }
+
+_TURN_ABORTED_TEXT = (
+    "上一轮由用户主动中断。被中止的工具或命令可能已经部分执行，后台也可能仍有"
+    "残留进程；不要假设它们没有生效。请结合用户最新指示从中断的位置继续。"
+)
 
 _ATTRIBUTE_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_.:-]*$")
 _RESERVED_BOUNDARY = re.compile(
@@ -171,6 +184,11 @@ def render_external_context(item: ExternalContextItem) -> str:
     if item.layer:
         attributes["layer"] = item.layer
     return render_prompt_tag(PromptTag.EXTERNAL_CONTEXT, item.content, **attributes)
+
+
+def render_turn_aborted() -> str:
+    """渲染用户主动中断上一轮后追加的模型可见标记。"""
+    return render_prompt_tag(PromptTag.TURN_ABORTED, _TURN_ABORTED_TEXT)
 
 
 def render_tag_guide(consumer: PromptConsumer) -> str:

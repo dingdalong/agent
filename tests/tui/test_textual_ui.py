@@ -420,7 +420,6 @@ def test_pending_interactions_restart_in_plain_mode(monkeypatch) -> None:
             timestamp=2.0,
             source="test",
             prompt="输入",
-            default="旧草稿",
             future=asyncio.get_running_loop().create_future(),
         )
         view = TranscriptView(

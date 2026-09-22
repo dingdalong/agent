@@ -453,9 +453,9 @@ MCP 连接配置和授权边界见 [mcp-and-hooks.md](mcp-and-hooks.md)。
 
 记录有两种落盘形态。首次写入是整份 `records` 快照；此后只要视图键集合没有收缩、正文仍能在已落盘正文上追加，就只提交 `record_deltas`：`fields` 恒带 timestamp/kind/model_message/raw_input/recallable/correlation_id 全部静态字段，`view.set` 是按键整体覆盖（末次写胜）的非正文视图数据，`view.append` 是本次未确认的 `content`/`thinking` 尾部，`stream_boundaries` 给出这段正文的 `base`/`after` 摘要供写入端链式校验。正文被替换、被截断，或视图键被删除（`set` 无法表达删除）时无法用增量表达，回退整份快照。`fold_log()` 按 `seq` 顺序先覆盖 `records` 再合并 `record_deltas`，恢复后可继续追加。
 
-写入端还保证「同一份数据只落一次」：`append_batch` 逐块比对上次落盘投影的内容摘要（16 字节 blake2b，比较用规范化 JSON，落盘字节不变），丢弃与上次相同的 record、`llm_calls`、`plan` 和空上下文增量；过滤后没有真实变更时整批不写，内容池与批序号也不动。`_written` 因此只随记录条数增长，不再为每个会话保留一份完整编码副本。恢复会话时用折叠结果预热这份摘要（含每条记录的正文摘要与静态投影摘要），避免续写第一轮把整段上下文重写一遍。
+写入端还保证「同一份数据只落一次」：`append_batch` 逐块比对上次落盘投影的内容摘要（16 字节 blake2b，比较用规范化 JSON，落盘字节不变），丢弃与上次相同的 record、`llm_calls`、`plan` 和空上下文增量；过滤后没有真实变更时整批不写，内容池与批序号也不动。`_written` 因此只随记录条数增长，不再为每个会话保留一份完整编码副本。恢复会话时用折叠结果预热这份摘要（含每条记录的正文摘要与静态投影摘要），避免续写第一轮把整段上下文重写一遍。脱敏已在文本入口完成，`append_batch` 只对载荷做漏网检测：若仍被改写，说明入口漏了一条路径，记录告警后按脱敏结果写入。
 
-记录增量按同一套摘要去重。正文只用 `stream_boundaries` 判断「是否已经在盘上」：`after` 与上次落盘摘要相同表示重复提交，直接丢弃该段；`after` 不同而 `base` 与上次落盘摘要不符时说明无法对位，写侧只告警并拒绝把这段正文追加进日志（正常路径不会出现，状态层已按同一基线保证可追加）。静态部分用归一化投影（字段 + 非正文视图数据）的摘要判断是否真的变了，没有正文也没有静态变化时整条增量丢弃。整份快照写入同样登记正文摘要与静态投影摘要，因此「整份快照之后的第一条增量」不会再有无基线的放行捷径。
+记录增量按同一套摘要去重。正文只用 `stream_boundaries` 判断「是否已经在盘上」：`after` 与上次落盘摘要相同表示重复提交，直接丢弃该段；`after` 不同而 `base` 与上次落盘摘要不符时说明无法对位，写侧绝不丢弃这段正文——保留正文写入并把记录 ID 登记到 `commit.resync`，`SessionState.ack_commit()` 确认提交时对该记录退回整份快照（`invalidate_append_baseline`），保证用户已经看到的正文不会在磁盘上被静默截断。静态部分用归一化投影（字段 + 非正文视图数据）的摘要判断是否真的变了，没有正文也没有静态变化时整条增量丢弃。整份快照写入同样登记正文摘要与静态投影摘要，因此「整份快照之后的第一条增量」不会再有无基线的放行捷径。
 
 `SessionRecord` 可同时包含模型消息、可见 `ViewPayload`、原始输入和关联 ID。`SessionState` 分别投影 LLM 上下文、TUI 历史与输入回溯，并以 `LLMCallRecord` 持久化每次 provider attempt 的模型、调用者、阶段、结果和原始 usage；compact 只更新上下文投影。
 
@@ -464,8 +464,8 @@ MCP 连接配置和授权边界见 [mcp-and-hooks.md](mcp-and-hooks.md)。
 | 方法 | 关键参数 | 返回 | 作用 |
 |---|---|---|---|
 | `save_metadata` | `session_id`, `is_new`, `topic`, `mode` | `None` | 原子写/更新元数据（首次写 `created_at`，后续更 `updated_at`） |
-| `append_state` | `session_id`, `state` | `bool` | 准备增量并在追加成功后确认；失败返回 `False` 并保留待重试状态 |
-| `append_batch` | `session_id`, `payload` | `bool` | 在会话级内容池与序号上编码并追加一条批记录；丢弃与上次落盘摘要相同的区块，无真实变更时零写入（可在工作线程调用） |
+| `append_state` | `session_id`, `state` | `bool` | 准备增量并在追加成功后确认（确认时按写侧登记的 `resync` 退回整份快照）；失败返回 `False` 并保留待重试状态 |
+| `append_batch` | `session_id`, `payload`, `resync=None` | `bool` | 在会话级内容池与序号上编码并追加一条批记录；丢弃与上次落盘摘要相同的区块，无真实变更时零写入（可在工作线程调用）；无法对位的正文保留写入并把记录 ID 登记到 `resync`（调用方通常传 `commit.resync`） |
 | `load_state` | `session_id` | `SessionState \| None` | 读取并折叠当前格式日志，校验 record 与 context 引用；日志缺失、损坏或无法恢复时返回 `None`，成功时同时恢复内容池与序号供后续追加复用 |
 | `start_cold_compression` | — | `threading.Thread` | 启动守护线程，压缩够冷的会话日志 |
 | `list_sessions` | `limit` | `list[dict]` | 按 `updated_at` 降序列出会话元数据 |

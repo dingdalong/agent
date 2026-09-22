@@ -17,6 +17,7 @@ from src.prompt_tags import (
     render_external_context,
     render_prompt_tag,
     render_tag_guide,
+    render_turn_aborted,
 )
 
 
@@ -70,6 +71,22 @@ def test_tag_guides_only_include_tags_visible_to_each_model_call() -> None:
     assert "`<compacted_history_summary>`" not in compact_guide
     assert "`<collaboration_mode>`" not in compact_guide
     assert PROMPT_TAGS[PromptTag.EXTERNAL_CONTEXT].trust is PromptTrust.EXTERNAL
+
+
+def test_turn_aborted_marker_is_registered_for_the_working_agent() -> None:
+    """中断标记按注册契约渲染：user 角色、框架信任、只对工作 Agent 可见。"""
+    rendered = render_turn_aborted()
+    spec = PROMPT_TAGS[PromptTag.TURN_ABORTED]
+
+    assert rendered.startswith("<turn_aborted>\n")
+    assert rendered.endswith("\n</turn_aborted>")
+    assert "上一轮由用户主动中断" in rendered
+    assert "可能已经部分执行" in rendered
+    assert spec.canonical_role == "user"
+    assert spec.trust is PromptTrust.FRAMEWORK
+    assert spec.consumers == frozenset({PromptConsumer.WORKING_AGENT})
+    assert "`<turn_aborted>`" in render_tag_guide(PromptConsumer.WORKING_AGENT)
+    assert "`<turn_aborted>`" not in render_tag_guide(PromptConsumer.COMPACTOR)
 
 
 def test_compactor_uses_its_own_fixed_system_and_dynamic_user_input(tmp_path) -> None:

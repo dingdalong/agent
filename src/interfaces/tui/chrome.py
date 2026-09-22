@@ -240,6 +240,10 @@ class ChromeRenderer:
                 status.append("  ·  Ctrl+C 中断", style="bright_black")
             elif app.coordinator.input_active and app._has_sub_agents():
                 status.append("  ·  ↓查看 agent", style="bright_black")
+            if app._quit_deadline is not None and not processing:
+                label = app._quit_shortcut or "Ctrl+C"
+                status.append("  ·  ", style="bright_black")
+                status.append(f"再按一次 {label} 退出", style="bright_black")
         pending_count, pending_source = app.coordinator.pending_summary
         if pending_count:
             status.append("  ·  ", style="bright_black")

@@ -42,7 +42,7 @@
 | `has_partial_data` | 本次成功尝试是否曾接收正文、思考或工具片段 |
 | `truncation_kind` | 仅 `finish_reason="length"` 时非空；`classify_truncation` 按 **工具 → 正文 → 思考 → 未知**（`tool_call`/`content`/`thinking`/`unknown`）判定的截断阶段，供 Agent 恢复链选择续写或丢弃重生成 |
 
-`classify_truncation(response, call=None)` 与 `_has_reasoning_carrier(assistant_message)`（`src/llm/base.py`）集中处理跨 provider 的截断分类：`has_tool` 看 `tool_calls` 或 `call.tool_fragment_state`；`has_content` 看正文或 `call.response_parts`；`has_thinking` 看各家推理载体（`reasoning_content` / `reasoning` 文本、Anthropic `_anthropic_content` 的 `thinking` 块、Responses provider `_response_output` 的 `reasoning` 项）或 `call.thinking_parts`。`chat()` 是唯一同时持有成品 `LLMResponse` 与 `LLMCallContext` 的位置，故分类只在此计算，五个 provider 的 `_build_response` 无需改动。
+`classify_truncation(response, call=None)` 与 `_has_reasoning_carrier(assistant_message)`（`src/llm/base.py`）集中处理跨 provider 的截断分类：`has_tool` 看 `tool_calls` 或 `call.tool_fragment_state`；`has_content` 看正文或 `call.partial_output`；`has_thinking` 看各家推理载体（`reasoning_content` / `reasoning` 文本、Anthropic `_anthropic_content` 的 `thinking` 块、Responses provider `_response_output` 的 `reasoning` 项）或 `call.partial_thinking`。`chat()` 是唯一同时持有成品 `LLMResponse` 与 `LLMCallContext` 的位置，故分类只在此计算，五个 provider 的 `_build_response` 无需改动。
 
 token 用量统一为 `input_tokens`、`output_tokens`、`total_tokens`、`cache_read_input_tokens`、`cache_creation_input_tokens`。Anthropic 将未缓存输入、缓存读取和缓存创建相加作为统一 `input_tokens`；OpenAI 与 DeepSeek 从 Responses `input_tokens_details.cached_tokens` 读取缓存命中量；其余实现按各 SDK 的输入总量字段归一（检索各 provider 的 `_extract_token_usage`）。
 
@@ -173,6 +173,10 @@ Chat Completions 风格的通用校验（`base.py:179-283`）要求：
 - 非 `length` 响应的每个工具调用必须有非空且唯一的 ID、非空名称、JSON object 参数。
 
 `length` 允许保留尚未完整的工具片段，交给 Agent 的 `LENGTH_RETRY` 丢弃并重新生成；其他终态都必须通过完整工具校验。
+
+**部件账本与中断回放**：`LLMCallContext.parts`（`src/llm/base.py`）按到达顺序记录本次尝试的思考、正文与工具调用部件，每个部件只在 provider 给出块级结束标记后才置 `complete`：Anthropic 是 `content_block_stop`（思考块同时累计 `signature_delta` 的签名，`redacted_thinking` 保存原始 `data`），Responses API 是 `response.output_item.done`（消息项、reasoning 项与函数调用项都保存 `model_dump` 后的原始载体）。没有结束标记的 provider（Moonshot、Ollama 的 Chat Completions 流）永远不会产出完整部件。
+
+`plan_interrupted_history()` 决定哪些完整部件可以回放：正文与工具调用始终保留；推理载体只要 `replayable_reasoning` 为真（有 provider 原始载体，或 Anthropic thinking 块同时具备明文与签名）就保留，不区分是否伴随完整工具调用，也没有 provider 级能力位。实测结论（2026-09-22，探针 `tests/test_interrupt_history_probe.py`，deepseek-flash）：DeepSeek 的 reasoning 项自带 `encrypted_content`，六种收束形状——孤立推理、原始轮带工具调用的孤立推理、推理+完整工具调用+未执行结果、推理+正文、只有正文、只有工具调用——全部被接受，模型都接着发起新的工具调用；Anthropic 与 OpenAI 的接受度可按需在线复核。Anthropic 在没有原始载体的 fallback 路径上还要求思考块同时具备明文与签名，否则整体丢弃该部件。`LLMProvider.interrupted_assistant_message()` 把筛选后的部件组装成本 provider 认识的载体（Anthropic 用 `_anthropic_content`，Responses 用 `_response_output`，其余用通用 `content`/`tool_calls`/`reasoning_content`）；返回 None 表示本次尝试没有任何可安全回放的内容，Agent 据此丢弃本次调用尚未产出内容的模型输出（用户输入保留）。取消登记由 `_INTERRUPTED_LLM_CALL` 这个 ContextVar 承载：`chat()` 只在 `CancelledError`/`KeyboardInterrupt`/`SystemExit` 时登记当前尝试，`LLMProvider.take_interrupted_call()` 取出即清空，保证中断收尾幂等；取消发生在 LLM 调用之外（工具执行、提交、等待输入）时登记为空，收尾不改动历史。
 
 各 provider 还验证自身终态：
 

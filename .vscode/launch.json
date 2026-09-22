@@ -12,7 +12,7 @@
             "console": "integratedTerminal",
             "onTerminate": "KeyboardInterrupt",
             "env": {
-                "AGENT_WORKDIR": "/Users/dingdalong/agent-workspace"
+                "AGENT_WORKDIR": "/Users/dingdalong/github/agent"
             }
         }
     ]

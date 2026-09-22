@@ -35,11 +35,113 @@ _PRIVATE_KEY = re.compile(
     re.DOTALL,
 )
 _URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s<>\"']+")
+_AUTH_SCHEMES = {"bearer", "basic"}
+
 _CURL_VALUE_OPTIONS = {
     "-b", "--cookie", "-H", "--header", "-d", "--data", "--data-ascii",
     "--data-binary", "--data-raw", "--data-urlencode", "-F", "--form",
     "--form-string", "-T", "--upload-file", "--json",
 }
+
+
+_MEASURE_PREFIX = re.compile(r"(?:[/／]|(?<![A-Za-z])per\s*|每\s*)$", re.IGNORECASE)
+# 计量右侧允许：货币符号、千分位、科学计数、数量级后缀（100M）、单位斜杠（¥5.024/M）
+# 与白名单单位词。凭据形状（hunter2、JWT、URL）不在此列，仍按赋值脱敏。
+_MEASURE_VALUE = re.compile(
+    r"^[¥￥$€]?[+-]?(?:\d[\d,_]*(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?"
+    r"(?:[KkMmBb万亿])?\s*%?"
+    r"(?:/\s*[A-Za-z0-9]+)?(?:元|美元|人民币|tokens?|个|次|万|亿)?$"
+)
+# Markdown 列表/引用等结构符号不是赋值右侧，命中即跳过。
+_STRUCTURAL_VALUE = re.compile(r"^[-*+•|>#]+$")
+
+
+def _is_measure_key(prefix: str) -> bool:
+    """判断 ``key = value`` 里的 key 是否处在计量语境中。
+
+    形如 ``credits/token = 100``、``price per token = 0.000025`` 的写法是速率或
+    单价的算式，key 只是一个计量单位名，右侧不是凭据，脱敏会误伤正常文本。
+    URL 路径里同样可能出现 ``/token=`` 形状，那属于普通 URL，不算计量语境。
+
+    Args:
+        prefix: key 之前已经过脱敏的文本。
+
+    Returns:
+        处于计量语境时为 True，调用方跳过本次赋值替换。
+    """
+    tail = prefix.rsplit(maxsplit=1)[-1] if prefix.strip() else ""
+    if "://" in tail:
+        return False
+    return _MEASURE_PREFIX.search(prefix) is not None
+
+
+def _is_measure_value(value: str) -> bool:
+    """判断赋值右侧是否是计量数值。
+
+    计量语境的豁免必须同时看右侧形状：``token = hunter2`` 或 URL 路径里的
+    ``token=abc`` 只是借用了同样的 key，右侧是凭据时必须照常脱敏。
+
+    Args:
+        value: ``key = value`` 里匹配到的右侧原文（可能带引号）。
+
+    Returns:
+        右侧是纯数值（可带货币符号、千分位、科学计数与白名单单位后缀）时为 True。
+    """
+    text = value.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+        text = text[1:-1]
+    return _MEASURE_VALUE.match(text) is not None
+
+
+def _is_measure_assignment(text: str, match: re.Match[str]) -> bool:
+    """判断一次 ``key = value`` 匹配是否只是计量算式而非凭据赋值。
+
+    检测（``contains_secret``）与脱敏共用同一判定，避免同一段文本在一处被当成
+    普通计量、在另一处又被当成秘密，导致外发硬拒绝等误伤。
+
+    Args:
+        text: 被扫描的完整文本。
+        match: ``_ASSIGNMENT`` 的一次匹配。
+
+    Returns:
+        认定为计量算式时为 True。
+    """
+    return _is_measure_key(text[: match.start(1)]) and _is_measure_value(
+        match.group(2),
+    )
+
+
+def _is_structural_value(value: str) -> bool:
+    """判断匹配到的右侧是否只是 Markdown 结构符号而非赋值内容。
+
+    ``per token:\n- mimo-v2.6-pro`` 里的 ``-`` 是列表符号，把它当值替换会吃掉
+    换行并破坏正文；这类匹配必须整体跳过。
+
+    Args:
+        value: ``_ASSIGNMENT`` 匹配到的右侧原文。
+
+    Returns:
+        右侧仅由结构符号组成时为 True。
+    """
+    return _STRUCTURAL_VALUE.match(value) is not None
+
+
+def _should_redact_assignment(text: str, match: re.Match[str]) -> bool:
+    """判断一次赋值匹配是否应按凭据脱敏。
+
+    Args:
+        text: 被扫描的完整文本。
+        match: ``_ASSIGNMENT`` 的一次匹配。
+
+    Returns:
+        右侧是结构符号、认证方案或计量算式时为 False，否则为 True。
+    """
+    value = match.group(2)
+    if _is_structural_value(value):
+        return False
+    if value.lower() in _AUTH_SCHEMES:
+        return False
+    return not _is_measure_assignment(text, match)
 
 
 class DataGuard:
@@ -91,7 +193,15 @@ class DataGuard:
             return False
         if any(secret in value for secret in self._secrets):
             return True
-        return any(pattern.search(value) for pattern in (_ASSIGNMENT, _BEARER, _JWT, _PLATFORM_TOKEN, _PRIVATE_KEY))
+        if any(
+            _should_redact_assignment(value, match)
+            for match in _ASSIGNMENT.finditer(value)
+        ):
+            return True
+        return any(
+            pattern.search(value)
+            for pattern in (_BEARER, _JWT, _PLATFORM_TOKEN, _PRIVATE_KEY)
+        )
 
     def redact(self, value: Any) -> Any:
         if isinstance(value, Mapping):
@@ -122,8 +232,16 @@ class DataGuard:
         for secret in sorted(self._secrets, key=len, reverse=True):
             text = text.replace(secret, replacement(secret))
         text = _PRIVATE_KEY.sub(lambda m: replacement(m.group()), text)
-        for pattern in (_ASSIGNMENT, _BEARER):
-            text = pattern.sub(lambda m: m.group(1) + replacement(m.group()[len(m.group(1)):]), text)
+
+        def redact_assignment(match: re.Match[str]) -> str:
+            if not _should_redact_assignment(text, match):
+                return match.group(0)
+            # 只替换右侧值本身，保留 key、分隔符与空白，避免破坏正文排版。
+            head = match.group(0)[: match.start(2) - match.start(0)]
+            return head + replacement(match.group(2))
+
+        text = _ASSIGNMENT.sub(redact_assignment, text)
+        text = _BEARER.sub(lambda m: m.group(1) + replacement(m.group()[len(m.group(1)):]), text)
         for pattern in (_JWT, _PLATFORM_TOKEN):
             text = pattern.sub(lambda m: replacement(m.group()), text)
         if preserve_positions:

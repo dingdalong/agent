@@ -396,7 +396,6 @@ def _runtime_agent(
         }
     ]
     agent.mode = RunMode.EXECUTE
-    agent._pending_input = ""
     agent.assembly = _assembly(
         llm=llm,
         prompt_mgr=StaticPromptMgr(),
@@ -460,7 +459,8 @@ def test_run_context_uses_generic_response_recovery_state() -> None:
     assert getattr(ctx, "response_recovery_response_count", "missing") == 0
     assert getattr(ctx, "pause_turn_message_idx", "missing") is None
     assert getattr(ctx, "pause_turn_continuations", "missing") == 0
-    assert getattr(ctx, "turn_start_messages", "missing") is None
+    assert getattr(ctx, "user_message_index", "missing") is None
+    assert getattr(ctx, "interrupt_finalized", "missing") is False
     assert not hasattr(ctx, "length_recovery_start_idx")
 
 
@@ -1226,8 +1226,8 @@ def test_new_recovery_chain_attempts_ignore_prior_length_recoveries() -> None:
     assert failure.attempts == 1
 
 
-def test_cancel_after_compact_restores_turn_start_history_and_recovery_state() -> None:
-    """compact 改写历史后的取消应保留本轮消息并补中断标记。
+def test_cancel_after_compact_keeps_turn_history_without_abort_marker() -> None:
+    """compact 改写历史后的取消保留本轮消息；纯等待模型时中断不补标记。
 
     Returns:
         None。
@@ -1235,10 +1235,6 @@ def test_cancel_after_compact_restores_turn_start_history_and_recovery_state() -
     bus = RecordingEventBus()
     provider = ProtocolScriptedProvider(bus, [])
     agent = _runtime_agent(provider, bus)
-    turn_start_messages = [
-        {"role": "user", "content": "旧问题"},
-        {"role": "assistant", "content": "旧答案"},
-    ]
     agent.history = [
         {"role": "user", "content": "压缩摘要"},
         {"role": "user", "content": "当前问题"},
@@ -1246,8 +1242,8 @@ def test_cancel_after_compact_restores_turn_start_history_and_recovery_state() -
     ]
     ctx = RunContext(
         messages=agent.history,
-        round_start_idx=100,
-        turn_start_messages=list(turn_start_messages),
+        round_start_idx=1,
+        user_message_index=1,
         user_input="当前问题",
         response_recovery_start_idx=2,
         response_recovery_response_count=1,
@@ -1275,22 +1271,25 @@ def test_cancel_after_compact_restores_turn_start_history_and_recovery_state() -
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(agent._run_single_turn(ctx, AgentState.LLM_CALL))
 
-    # 中断保留历史（不回滚）：回滚恢复链后到干净尾部 [压缩摘要, 当前问题]，
-    # 再补一条中断标记 assistant 消息。
-    assert agent.history == [
+    # 中断不回滚本轮：回滚恢复链的临时载体后保留 [压缩摘要, 当前问题]。
+    # 本轮既没动工具也没产出可见正文，按需标记规则不追加 ``<turn_aborted>``。
+    assert agent.history[:2] == [
         {"role": "user", "content": "压缩摘要"},
         {"role": "user", "content": "当前问题"},
-        {"role": "assistant", "content": "⏸ 本轮已被用户中断。"},
     ]
-    assert agent._pending_input == "当前问题"
+    assert len(agent.history) == 2
+
+    # 收尾幂等：重复进入不再新增消息。
+    agent._finalize_interrupted_turn(ctx)
+    assert len(agent.history) == 2
     assert ctx.response_recovery_start_idx is None
     assert ctx.response_recovery_response_count == 0
     assert ctx.pause_turn_message_idx is None
     assert ctx.pause_turn_continuations == 0
 
 
-def test_subagent_run_restores_automatic_snapshot_after_compact_pause_cancel() -> None:
-    """直接输入路径在 compact 与 pause 取消后保留本轮消息并补中断标记。
+def test_subagent_run_keeps_history_after_compact_pause_cancel() -> None:
+    """直接输入路径在 compact 与 pause 取消后保留本轮消息且不补多余标记。
 
     Returns:
         None。
@@ -1314,11 +1313,10 @@ def test_subagent_run_restores_automatic_snapshot_after_compact_pause_cancel() -
         pause_turn_limit=2,
     )
     agent = _runtime_agent(provider, bus)
-    turn_start_messages = [
+    agent.history.extend([
         {"role": "user", "content": "旧问题"},
         {"role": "assistant", "content": "旧答案"},
-    ]
-    agent.history.extend(turn_start_messages)
+    ])
 
     class RewritingCompact:
         """首次调用时重写历史并关闭后续自动 compact。"""
@@ -1403,10 +1401,10 @@ def test_subagent_run_restores_automatic_snapshot_after_compact_pause_cancel() -
     assert len(provider.requests) == 2
     assert provider.requests[1]["messages"][-1] == _carrier_only(pause_carrier)
     # 中断保留历史（不回滚）：compact 改写后历史为 [压缩摘要, 当前问题]，
-    # 取消时回滚恢复链移除 pause 载体、补中断标记 assistant 消息。
-    assert agent.history == [
+    # 取消时回滚恢复链移除 pause 载体；本轮没有工具活动也没有可见正文，
+    # 因而不再追加没有信息量的中断标记。
+    assert agent.history[:2] == [
         {"role": "user", "content": "压缩摘要"},
         {"role": "user", "content": "当前问题"},
-        {"role": "assistant", "content": "⏸ 本轮已被用户中断。"},
     ]
-    assert agent._pending_input == "当前问题"
+    assert len(agent.history) == 2

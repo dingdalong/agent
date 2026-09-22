@@ -89,7 +89,7 @@ LLM_CALL → PROCESS_RESPONSE ──length────→ LENGTH_RETRY ──可
 | 字段组 | 字段 |
 |---|---|
 | 消息与输出 | `messages`、`prompt`、`final_text`、`response` |
-| 轮次回滚 | `turn_start_messages`（追加本轮 user 前的浅快照）、`round_start_idx`（无快照上下文的兼容回退） |
+| 轮次定位 | `round_start_idx`（本轮消息起始下标）、`llm_call_start_idx`（本次调用开始前的历史下标；中断回滚点，用户输入保留）、`llm_call_context_start`（本次调用开始前的上下文记录数）、`llm_call_count`（本轮已发起的调用次数）、`user_message_index`（本轮 user 消息下标）、`interrupt_finalized`（中断收尾幂等守卫） |
 | 轮次与工具 | `has_tool_calls` |
 | 自动压缩 | `compact_streak`、`max_compact_streak=3`、压缩前 token、摘要消息数、摘要是否非空 |
 | 响应恢复 | `length_recoveries`、`max_length_recoveries=3`、`response_recovery_start_idx`、`response_recovery_response_count`、`pause_turn_message_idx`、`pause_turn_continuations`、`length_effort_override`（思考截断重生成时的临时降档 effort）、`pending_framework_instructions`（下一次 chat 前合并为 developer，发送后清空） |
@@ -108,7 +108,9 @@ LLM_CALL → PROCESS_RESPONSE ──length────→ LENGTH_RETRY ──可
 4. 仍发出本次状态变更事件；
 5. 到 `DONE` 后把结构化错误放进 `RunResult.llm_error`。
 
-控制流取消不走 LLM 失败状态：CancelledError / KeyboardInterrupt 先回滚未完成的响应恢复链；已有轮次快照时保留已完成历史，补齐悬空工具结果并追加中断标记，没有快照时裁到 round_start_idx。当前输入通过 _pending_input 回填后原样抛出。流式未完成正文是否进入模型历史由响应提交边界决定，不能将 UI 显示等同于已持久化消息。
+控制流取消不走 LLM 失败状态，也不再把本轮一律丢掉或一律保留：`_finalize_interrupted_turn()` 先回滚未完成的响应恢复链（length/pause 临时残片）、按整段复核脱敏（`SessionState.settle_view_text`，必要时退回整份快照），再按**部件完整度**收束被中断的 LLM 尝试。provider 的结束标记（Anthropic `content_block_stop`、Responses `output_item.done`）是部件完整的唯一依据：收到标记的正文、工具调用与完整推理载体会组装进同一条 `role=assistant` 的历史消息并绑定到本轮展示记录。「助手消息」只是承载外壳——模型历史里模型输出只能挂在 assistant 角色下，思考仍按推理载体原样存放（Anthropic 的 `_anthropic_content` thinking 块、Responses 的 `_response_output` reasoning 项、Chat Completions 的 `reasoning_content`），不并入 `content` 正文，展示投影也仍按 thinking 呈现；只有推理载体的轮次同样保留完整载体（DeepSeek 六种形状 2026-09-22 实测接受）。随后为悬空工具调用补“未执行即被用户中止”的结果；没有任何完整部件时，本轮没有可安全回放的模型输出，收尾只丢弃本次调用尚未产出内容的模型输出，用户输入保留在模型历史里——被中断的是模型的回答，不是用户说过的话，下一条用户消息会与它一起交给模型。多轮次回合里回滚只到本次调用开始处，已完成轮次的助手与工具消息保持可见。展示投影与磁盘始终保留全部流式残片，用户仍能看到已产出的内容，只有模型上下文按完整度取舍。
+
+`<turn_aborted>` 标记只在本轮存在未执行完就被中止的工具调用时追加（`not_executed` 与 `aborted_by_user` 两种结果都算）；全部工具正常返回或本轮没有动过工具时不写，避免堆叠没有信息量的重复 user 消息。已派发后被取消的调用由 `_on_execute_tools` 补“已运行 Xs 后被用户中止”（`aborted_by_user`）。正常终止的回合在 `_run_single_turn` 返回前同样执行整段复核，因此 LLM 失败等终止路径也不会留下分块脱敏的残差。收尾可重复调用而不新增消息，输入框不回填上一条消息。流式未完成正文是否进入模型历史由响应提交边界决定，不能将 UI 显示等同于已持久化消息；被取消的流式正文只留在展示投影中。
 
 ### 分类到状态与操作建议
 
@@ -132,7 +134,7 @@ handler 映射在 `Agent.__post_init__` 建立（`src/agent/agent.py:212-245`）
 
 ### 输入与命令
 
-`_on_request_input()` 读取输入；处理 `exit` / `quit`；分派 `/plan`、`/clear`、`/agents`、`/resume`、`/models`；运行 `UserPromptSubmit` Hook；首次输入前追加外部上下文 user 消息，排队 turn-start reminder，最后保存 `turn_start_messages` 并追加真实 user 消息。Hook 附加文本使用带来源标记的外部 user 上下文，不进入 system/developer。
+`_on_request_input()` 读取输入；处理 `exit` / `quit`；分派 `/plan`、`/clear`、`/agents`、`/resume`、`/models`；运行 `UserPromptSubmit` Hook；首次输入前追加外部上下文 user 消息，排队 turn-start reminder，最后追加真实 user 消息并记录 `user_message_index`（中断收尾据此定位本轮消息）。Hook 附加文本使用带来源标记的外部 user 上下文，不进入 system/developer。
 
 ### 压缩检查
 
@@ -177,7 +179,7 @@ handler 映射在 `Agent.__post_init__` 建立（`src/agent/agent.py:212-245`）
 
 普通终态或完整工具调用会清 checkpoint、响应计数和 pause 状态并提交历史。恢复耗尽由 `_fail_response_recovery()` 统一构造一次安全 `LLMCallFailed`；续接调用抛出的终态 `LLMCallError` 则已由 provider 发出失败事件，Agent 只调用 `_rollback_response_recovery()`，不会重复遥测（`src/agent/agent.py:381-486`）。两条路径都会删除 checkpoint 之后的全部 length/pause 临时消息，保留原始 user 与此前合法历史。
 
-恢复期间已显示的正文是真实模型输出，不是错误占位消息；若最终失败，这些残片只保留在 UI/Store 转录中。取消或键盘中断还会用本轮开始快照恢复 compact 前历史，防止重复 user 与孤立载体（`src/agent/agent.py:413-437`）。
+恢复期间已显示的正文是真实模型输出，不是错误占位消息；若最终失败，这些残片只保留在 UI/Store 转录中。取消或键盘中断同样不恢复 compact 前历史：保留 compact 后的摘要，只回滚恢复链的临时载体，避免重复 user 与孤立载体；本轮 user 消息始终保留，已完整部件是否回放由 `_finalize_interrupted_turn()` 按部件完整度决定（见 §4）。
 
 ## 7. 退出总结与 compact 错误
 

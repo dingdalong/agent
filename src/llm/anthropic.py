@@ -14,6 +14,7 @@ from src.llm.base import (
     LLMProvider,
     LLMResponse,
     iter_llm_stream,
+    plan_interrupted_history,
     validate_chat_completion_stream,
 )
 from src.llm.errors import LLMStreamResponseError
@@ -104,6 +105,47 @@ def _dump_anthropic_content_block(block: Any) -> dict[str, Any]:
     return dumped
 
 
+def _streamed_block_carrier(part: Any) -> dict[str, Any] | None:
+    """把已结束的流式内容块还原为可回放的 provider 载体。
+
+    Args:
+        part: ``LLMCallContext.parts`` 中的部件。
+
+    Returns:
+        可直接放回下一次请求 content 列表的块字典；块内容不完整或无法回放时为 None。
+    """
+    if part is None:
+        return None
+    if part.kind == "thinking":
+        if part.carrier is not None:
+            return part.carrier
+        if not part.text or not part.signature:
+            return None
+        return {
+            "type": "thinking",
+            "thinking": part.text,
+            "signature": part.signature,
+        }
+    if part.kind == "content":
+        return {"type": "text", "text": part.text} if part.text else None
+    if part.kind == "tool_call":
+        if not part.call_id or not part.name:
+            return None
+        try:
+            parsed = json.loads(part.text or "{}")
+        except (TypeError, json.JSONDecodeError):
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        return {
+            "type": "tool_use",
+            "id": part.call_id,
+            "name": part.name,
+            "input": parsed,
+        }
+    return None
+
+
 class AnthropicProvider(LLMProvider):
     """Anthropic Provider (Messages API)"""
 
@@ -111,6 +153,25 @@ class AnthropicProvider(LLMProvider):
 
     # 降档阶梯用 pre-map 档名，实际下发前仍经 _map_effort 二次映射。
     _EFFORT_DOWNGRADE = {"max": "high", "xhigh": "high", "high": "medium", "medium": "low"}
+
+    def interrupted_assistant_message(self, call: LLMCallContext) -> dict | None:
+        """用完整块的原始载体组装被中断尝试的助手消息。
+
+        只有收到 ``content_block_stop`` 的块才带载体，因此不完整的思考或工具块
+        不会进入结果；没有原始载体的 thinking 块仍需同时具备明文与签名，否则由
+        ``plan_interrupted_history`` 整体丢弃。
+
+        Args:
+            call: 在流式调用内部被取消的尝试上下文。
+
+        Returns:
+            以 ``_anthropic_content`` 为载体的助手消息；无可回放内容时为 None。
+        """
+        parts = plan_interrupted_history(call.parts)
+        blocks = [part.carrier for part in parts if part.carrier]
+        if not blocks:
+            return None
+        return {"role": "assistant", "_anthropic_content": blocks}
 
     @classmethod
     async def list_models(
@@ -714,9 +775,8 @@ class AnthropicProvider(LLMProvider):
         Returns:
             归一化后的 LLM 响应。
         """
-        content_parts: list[str] = []
-        thinking_parts: list[str] = []
         client_tool_indices: set[int] = set()
+        block_anchors: dict[int, str] = {}
         saw_message_stop = False
 
         async with self._client.messages.stream(**kwargs) as stream:
@@ -738,18 +798,36 @@ class AnthropicProvider(LLMProvider):
                     block = event.content_block
                     if block.type == "tool_use":
                         client_tool_indices.add(event.index)
+                        block_anchors[event.index] = f"call:{event.index}"
                         call.record_tool_fragment(
                             event.index,
                             call_id=block.id or "",
                             name=block.name or "",
                         )
+                    elif block.type == "thinking":
+                        block_anchors[event.index] = f"block:{event.index}"
+                    elif block.type == "redacted_thinking":
+                        block_anchors[event.index] = f"block:{event.index}"
+                        call.open_part("thinking", f"block:{event.index}").carrier = {
+                            "type": "redacted_thinking",
+                            "data": getattr(block, "data", "") or "",
+                        }
+                    elif block.type == "text":
+                        block_anchors[event.index] = f"block:{event.index}"
                 elif event.type == "content_block_delta":
+                    anchor = f"block:{event.index}"
                     if event.delta.type == "thinking_delta":
-                        thinking_parts.append(event.delta.thinking)
-                        await self.emit_thinking_delta(event.delta.thinking, call=call)
+                        await self.emit_thinking_delta(
+                            event.delta.thinking, call=call, anchor=anchor,
+                        )
+                    elif event.delta.type == "signature_delta":
+                        call.record_thinking_signature(
+                            event.delta.signature or "", anchor=anchor,
+                        )
                     elif event.delta.type == "text_delta":
-                        content_parts.append(event.delta.text)
-                        await self.emit_response_delta(event.delta.text, call=call)
+                        await self.emit_response_delta(
+                            event.delta.text, call=call, anchor=anchor,
+                        )
                     elif (
                         event.delta.type == "input_json_delta"
                         and event.index in client_tool_indices
@@ -757,6 +835,13 @@ class AnthropicProvider(LLMProvider):
                         call.record_tool_fragment(
                             event.index,
                             arguments=event.delta.partial_json or "",
+                        )
+                elif event.type == "content_block_stop":
+                    block_anchor = block_anchors.get(event.index)
+                    if block_anchor is not None:
+                        call.complete_part(
+                            block_anchor,
+                            carrier=_streamed_block_carrier(call.part_at(block_anchor)),
                         )
 
             final = await stream.get_final_message()
@@ -772,8 +857,8 @@ class AnthropicProvider(LLMProvider):
                 code="invalid_response",
             )
 
-        content = "".join(content_parts)
-        thinking = "".join(thinking_parts)
+        content = call.partial_output
+        thinking = call.partial_thinking
         response = self._build_response(final, content, thinking)
         if response.finish_reason != "length":
             call.mark_tool_fragments_complete()

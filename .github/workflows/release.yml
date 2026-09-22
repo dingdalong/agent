@@ -40,7 +40,7 @@ jobs:
           sudo ninja -C "$RUNNER_TEMP/bubblewrap/build" install
 
       - name: 安装依赖
-        run: uv sync --extra dev
+        run: uv sync
 
       - name: 构建可执行包
         run: uv run python scripts/build_exe.py

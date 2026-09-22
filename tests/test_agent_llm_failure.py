@@ -50,17 +50,16 @@ class RecordingEventBus:
         """
         self.events.append(event)
 
-    async def request_input(self, prompt: str, default: str = "") -> str:
+    async def request_input(self, prompt: str) -> str:
         """返回下一条预设输入。
 
         Args:
             prompt: 输入提示文本。
-            default: 输入默认值。
 
         Returns:
             下一条预设输入。
         """
-        del prompt, default
+        del prompt
         return next(self.inputs)
 
     async def request_output(self, content: str, **kwargs: object) -> None:
@@ -291,7 +290,6 @@ def _runtime_agent(
     agent.spec = AgentSpec(agent_type="main", description="", enable_thinking=True)
     agent.history = []
     agent.mode = RunMode.EXECUTE
-    agent._pending_input = ""
     agent.assembly = SimpleNamespace(
         llm=llm,
         model="test/model",
@@ -592,8 +590,8 @@ def test_main_agent_accepts_retry_input_after_failed_turn() -> None:
     ]
 
 
-def test_request_input_snapshots_history_immediately_before_user_message() -> None:
-    """交互输入路径应在追加本轮用户消息前保存历史浅快照。
+def test_request_input_records_user_message_index_after_appending() -> None:
+    """交互输入路径应记录本轮用户消息下标，供中断收尾定位本轮消息。
 
     Returns:
         None。
@@ -610,8 +608,8 @@ def test_request_input_snapshots_history_immediately_before_user_message() -> No
     state = asyncio.run(agent._on_request_input(ctx))
 
     assert state is AgentState.CHECK_COMPACT
-    assert ctx.turn_start_messages == original_messages
-    assert ctx.turn_start_messages is not agent.history
+    assert ctx.user_message_index == len(original_messages)
+    assert ctx.interrupt_finalized is False
     assert agent.history == [
         *original_messages,
         {"role": "user", "content": "当前问题"},

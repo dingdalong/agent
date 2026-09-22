@@ -10,7 +10,13 @@ import httpx
 import pytest
 
 from src.llm.anthropic import AnthropicProvider
-from src.llm.base import LLMCallContext, LLMProvider, LLMResponse
+from src.llm.base import (
+    LLMCallContext,
+    LLMProvider,
+    LLMResponse,
+    TurnPart,
+    plan_interrupted_history,
+)
 from src.llm.deepseek import DeepSeekProvider
 from src.llm.errors import LLMErrorKind, LLMStreamResponseError, classify_llm_error
 from src.llm.moonshot import MoonshotProvider
@@ -2251,3 +2257,289 @@ def test_anthropic_keeps_partial_tool_json_when_stream_breaks(
     assert call.tool_fragments == {
         0: {"id": "toolu_1", "name": "lookup", "arguments": '{"q":'}
     }
+
+# ---------------------------------------------------------------------------
+# 中断部件账本：只有 provider 结束标记能确认完整部件
+# ---------------------------------------------------------------------------
+
+
+def _anthropic_block_events(
+    index: int,
+    *,
+    start: SimpleNamespace,
+    deltas: list[SimpleNamespace],
+) -> list[SimpleNamespace]:
+    """构造一个块的开始、增量和结束事件序列。"""
+    return [
+        SimpleNamespace(type="content_block_start", index=index, content_block=start),
+        *[
+            SimpleNamespace(type="content_block_delta", index=index, delta=delta)
+            for delta in deltas
+        ],
+        SimpleNamespace(type="content_block_stop", index=index),
+    ]
+
+
+def test_anthropic_marks_blocks_complete_at_content_block_stop() -> None:
+    """Anthropic 以 content_block_stop 作为思考/正文/工具块的完整依据。"""
+    events = [
+        *_anthropic_block_events(
+            0,
+            start=SimpleNamespace(type="thinking"),
+            deltas=[
+                SimpleNamespace(type="thinking_delta", thinking="先想"),
+                SimpleNamespace(type="signature_delta", signature="sig-1"),
+            ],
+        ),
+        *_anthropic_block_events(
+            1,
+            start=SimpleNamespace(type="text"),
+            deltas=[SimpleNamespace(type="text_delta", text="答案")],
+        ),
+        *_anthropic_block_events(
+            2,
+            start=SimpleNamespace(type="tool_use", id="toolu_1", name="lookup"),
+            deltas=[SimpleNamespace(type="input_json_delta", partial_json='{"q": "x"}')],
+        ),
+        _anthropic_message_stop(),
+    ]
+    final = _anthropic_message("tool_use", content=[DumpableBlock({
+        "type": "tool_use",
+        "id": "toolu_1",
+        "name": "lookup",
+        "input": {"q": "x"},
+    })])
+    provider = _anthropic_provider(
+        FakeAnthropicStream(events, final_message=final)
+    )
+    call = _call()
+
+    asyncio.run(provider._stream_chat(call=call, model="stream-test"))
+
+    assert [part.kind for part in call.parts] == ["thinking", "content", "tool_call"]
+    assert all(part.complete for part in call.parts)
+    assert call.completed_parts[0].replayable_reasoning is True
+    assert call.completed_parts[2].carrier == {
+        "type": "tool_use",
+        "id": "toolu_1",
+        "name": "lookup",
+        "input": {"q": "x"},
+    }
+    message = provider.interrupted_assistant_message(call)
+    assert message == {
+        "role": "assistant",
+        "_anthropic_content": [
+            {"type": "thinking", "thinking": "先想", "signature": "sig-1"},
+            {"type": "text", "text": "答案"},
+            {
+                "type": "tool_use",
+                "id": "toolu_1",
+                "name": "lookup",
+                "input": {"q": "x"},
+            },
+        ],
+    }
+
+
+def test_anthropic_drops_unsigned_thinking_and_incomplete_blocks() -> None:
+    """未收到签名或结束标记的块不得进入中断回放。"""
+    events = [
+        *_anthropic_block_events(
+            0,
+            start=SimpleNamespace(type="thinking"),
+            deltas=[SimpleNamespace(type="thinking_delta", thinking="无签名思考")],
+        ),
+        SimpleNamespace(
+            type="content_block_start",
+            index=1,
+            content_block=SimpleNamespace(type="text"),
+        ),
+        SimpleNamespace(
+            type="content_block_delta",
+            index=1,
+            delta=SimpleNamespace(type="text_delta", text="没结束的正文"),
+        ),
+        _anthropic_message_stop(),
+    ]
+    provider = _anthropic_provider(
+        FakeAnthropicStream(events, final_message=_anthropic_message("end_turn"))
+    )
+    call = _call()
+
+    asyncio.run(provider._stream_chat(call=call, model="stream-test"))
+
+    assert provider.interrupted_assistant_message(call) is None
+
+
+def test_responses_marks_items_complete_at_output_item_done() -> None:
+    """Responses 以 output_item.done 作为消息、推理和函数调用项的完整依据。"""
+    events = [
+        _response_event(
+            "response.output_item.added",
+            output_index=0,
+            item=DumpableBlock({"type": "reasoning", "id": "rs_1"}),
+        ),
+        _response_event(
+            "response.reasoning_text.delta",
+            output_index=0,
+            delta="思考",
+        ),
+        _response_event(
+            "response.output_item.done",
+            output_index=0,
+            item=DumpableBlock({
+                "type": "reasoning",
+                "id": "rs_1",
+                "content": [{"type": "reasoning_text", "text": "思考"}],
+                "encrypted_content": "enc-1",
+            }),
+        ),
+        _response_event(
+            "response.output_item.added",
+            output_index=1,
+            item=DumpableBlock({"type": "message", "id": "msg_1"}),
+        ),
+        _response_event("response.output_text.delta", output_index=1, delta="答案"),
+        _response_event(
+            "response.output_item.done",
+            output_index=1,
+            item=DumpableBlock({
+                "type": "message",
+                "id": "msg_1",
+                "content": [{"type": "output_text", "text": "答案"}],
+            }),
+        ),
+        _response_event(
+            "response.output_item.added",
+            output_index=2,
+            item=DumpableBlock({
+                "type": "function_call",
+                "id": "fc_1",
+                "call_id": "call_1",
+                "name": "lookup",
+                "arguments": "",
+            }),
+        ),
+        _response_event(
+            "response.function_call_arguments.delta",
+            output_index=2,
+            item_id="fc_1",
+            delta='{"q": "x"}',
+        ),
+        _response_event(
+            "response.output_item.done",
+            output_index=2,
+            item=DumpableBlock({
+                "type": "function_call",
+                "id": "fc_1",
+                "call_id": "call_1",
+                "name": "lookup",
+                "arguments": '{"q": "x"}',
+            }),
+        ),
+        _response_event("response.completed", response=_openai_response("completed")),
+    ]
+    # 完整部件按到达顺序全部保留，推理项仍是 reasoning 载体，不会并入消息项的正文。
+    expected_message = {
+        "role": "assistant",
+        "_response_output": [
+            {
+                "type": "reasoning",
+                "id": "rs_1",
+                "content": [{"type": "reasoning_text", "text": "思考"}],
+                "encrypted_content": "enc-1",
+            },
+            {
+                "type": "message",
+                "id": "msg_1",
+                "content": [{"type": "output_text", "text": "答案"}],
+            },
+            {
+                "type": "function_call",
+                "id": "fc_1",
+                "call_id": "call_1",
+                "name": "lookup",
+                "arguments": '{"q": "x"}',
+            },
+        ],
+    }
+    deepseek = _bare_provider(DeepSeekProvider)
+    deepseek_call = _call()
+
+    asyncio.run(deepseek._parse_stream(FakeAsyncStream(events), call=deepseek_call))
+
+    assert [part.kind for part in deepseek_call.parts] == [
+        "thinking",
+        "content",
+        "tool_call",
+    ]
+    assert all(part.complete for part in deepseek_call.parts)
+    assert [part.text for part in deepseek_call.parts] == ["思考", "答案", '{"q": "x"}']
+    assert deepseek.interrupted_assistant_message(deepseek_call) == expected_message
+
+    # OpenAI 的假流未使用它认识的 reasoning 增量事件名，思考正文为空；推理项自带
+    # encrypted_content 时仍属可回放载体，于是 OpenAI 与 DeepSeek 输出一致。
+    openai = _bare_provider(OpenAIProvider)
+    openai_call = _call()
+
+    asyncio.run(openai._parse_stream(FakeAsyncStream(events), call=openai_call))
+
+    assert openai.interrupted_assistant_message(openai_call) == expected_message
+
+
+def test_responses_incomplete_message_item_is_not_kept() -> None:
+    """没有 output_item.done 的正文项在中断时不可回放。"""
+    events = [
+        _response_event(
+            "response.output_item.added",
+            output_index=0,
+            item=DumpableBlock({"type": "message", "id": "msg_1"}),
+        ),
+        _response_event("response.output_text.delta", output_index=0, delta="半截正文"),
+        _response_event("response.completed", response=_openai_response("completed")),
+    ]
+    provider = _bare_provider(DeepSeekProvider)
+    call = _call()
+
+    asyncio.run(provider._parse_stream(FakeAsyncStream(events), call=call))
+
+    assert [part.complete for part in call.parts] == [False]
+    assert provider.interrupted_assistant_message(call) is None
+
+
+def test_plan_interrupted_history_keeps_complete_replayable_parts() -> None:
+    """部件筛选保持到达顺序，完整推理载体一律保留，不要求工具调用陪伴。"""
+    thinking = TurnPart("thinking", text="思考", complete=True, signature="sig")
+    content = TurnPart("content", text="答案", complete=True)
+    tool = TurnPart("tool_call", text="{}", complete=True, call_id="call_1", name="lookup")
+    partial = TurnPart("content", text="半截", complete=False)
+
+    # 完整部件按到达顺序全部保留，未完成的正文被丢弃。
+    assert plan_interrupted_history([thinking, content, tool, partial]) == (
+        thinking,
+        content,
+        tool,
+    )
+    # 没有工具调用陪伴的孤立推理载体同样保留。
+    assert plan_interrupted_history([thinking, content]) == (thinking, content)
+    assert plan_interrupted_history([thinking]) == (thinking,)
+    # 不完整的工具调用不构成可回放部件，也不影响推理载体的保留。
+    assert plan_interrupted_history(
+        [thinking, TurnPart("tool_call", text="{", complete=False, call_id="call_2")]
+    ) == (thinking,)
+    # 没有载体也没有签名的思考块不可回放。
+    assert plan_interrupted_history(
+        [TurnPart("thinking", text="无签名", complete=True)]
+    ) == ()
+
+
+def test_chat_completion_parts_never_complete_without_end_marker() -> None:
+    """Chat Completions 流没有块级结束事件，工具片段只标记序列状态。"""
+    call = _call()
+    call.record_response_delta("正文")
+    call.record_thinking_delta("思考")
+    call.record_tool_fragment(0, call_id="call_1", name="lookup", arguments="{}")
+    call.mark_tool_fragments_complete()
+
+    assert [part.complete for part in call.parts] == [False, False, True]
+    assert call.tool_fragment_state == "complete"

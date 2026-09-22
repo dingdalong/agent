@@ -417,7 +417,11 @@ class AgentApp:
                 return agent, summary
 
     def _handle_interrupt_requested(self) -> None:
-        """处理中断请求：取消工作任务和活跃输入。"""
+        """处理中断请求：取消工作任务和活跃输入。
+
+        取消动作本身幂等（没有活动任务或输入时为 no-op），因此重复的中断请求
+        不会触发重复收尾。
+        """
         self._cancel_current_work()
         self.deps.ui.cancel_active_input()
 
@@ -428,7 +432,7 @@ class AgentApp:
         state: SessionState,
         *,
         force: bool = False,
-    ) -> None:
+    ) -> bool:
         """提交一份会话增量：事件循环线程取增量，线程池负责编码与追加。
 
         取增量会改动状态上的脏标记，必须留在事件循环线程；只有编码与写盘卸载到
@@ -440,21 +444,27 @@ class AgentApp:
             state: 当前会话状态。
 
         Returns:
-            None。
+            True 表示无待提交内容或提交成功；False 表示本次写盘失败，增量已保留
+            待下次检查点重试。
         """
         if not state.checkpoint_due(force=force):
-            return
+            return True
         async with self.deps.session.commit_lock:
+            # 提交前按整段复核一次流式正文，保证内存、显示与磁盘是同一份脱敏文本。
+            guard = getattr(self.deps, "data_guard", None)
+            redact = getattr(guard, "redact", None)
+            state.settle_view_text(redact if callable(redact) else None)
             commit = state.prepare_commit()
             if commit is None:
-                return
+                return True
             success = await asyncio.to_thread(
-                session_mgr.append_batch, session_id, commit.payload,
+                session_mgr.append_batch, session_id, commit.payload, commit.resync,
             )
             if success:
                 state.ack_commit(commit)
             else:
                 state.requeue_commit(commit)
+            return success
 
     async def _session_checkpoint_loop(self) -> None:
         """以有界延迟把流式会话投影追加到日志。"""
@@ -465,19 +475,26 @@ class AgentApp:
                 state = getattr(self.deps.session, "state", None)
                 session_id = getattr(self.deps.session, "id", "")
                 if session_mgr is not None and state is not None and session_id:
-                    await self._append_session_state(session_mgr, session_id, state)
+                    if not await self._append_session_state(
+                        session_mgr, session_id, state,
+                    ):
+                        logger.warning("会话检查点写入失败，增量保留到下一周期重试")
             except asyncio.CancelledError:
                 raise
             except Exception:
                 # 后台检查点不得因一次 I/O 或序列化异常而永久停止。
                 logger.exception("会话检查点失败，将在下一周期重试")
 
-    async def _flush_active_session(self) -> None:
+    async def _flush_active_session(self) -> bool:
+        """强制提交当前会话增量（无会话或无需提交时按成功处理）。"""
         session_mgr = getattr(self.deps, "session_mgr", None)
         state = getattr(self.deps.session, "state", None)
         session_id = getattr(self.deps.session, "id", "")
         if session_mgr is not None and state is not None and session_id:
-            await self._append_session_state(session_mgr, session_id, state, force=True)
+            return await self._append_session_state(
+                session_mgr, session_id, state, force=True,
+            )
+        return True
 
     def _cancel_current_work(self) -> bool:
         """取消当前正在执行的 agent 任务。"""
@@ -494,7 +511,11 @@ class AgentApp:
             await asyncio.gather(task, return_exceptions=True)
 
     async def _handle_interrupted_turn(self) -> None:
-        """收束当前工作与输入任务并输出中断提示。
+        """收束当前工作与输入任务，保留本轮产出、落盘后再提示用户。
+
+        顺序固定为：取消并等待 → 关闭进程会话 → 取消活跃输入 → 排空事件 →
+        强制落盘 → 结算本轮界面 → 输出中断提示 → 再次落盘。中断提示必须晚于
+        第一次落盘，保证用户看到提示时本轮内容已经持久化。
 
         Returns:
             None.
@@ -503,13 +524,19 @@ class AgentApp:
         if getattr(self.deps, "process_mgr", None):
             await self.deps.process_mgr.close()
         self.deps.ui.cancel_active_input()
-        await self.deps.event_bus.request_output("\n已中断当前任务。\n")
         await self.deps.event_bus.join()
-        session_mgr = getattr(self.deps, "session_mgr", None)
-        session_state = self.deps.session.state
-        session_id = self.deps.session.id
-        if session_mgr is not None and session_state is not None and session_id:
-            await self._append_session_state(session_mgr, session_id, session_state, force=True)
+        saved = await self._flush_active_session()
+        await self.deps.ui.finish_interrupted_turn()
+        await self.deps.event_bus.request_output(
+            "\n已中断本轮任务，已产出的内容已保留。\n"
+        )
+        await self.deps.event_bus.join()
+        saved = await self._flush_active_session() and saved
+        if not saved:
+            await self.deps.event_bus.request_output(
+                "\n会话保存失败，将在下次检查点重试。\n"
+            )
+            await self.deps.event_bus.join()
         await self.deps.ui.wait_interactions_idle()
 
     async def shutdown(self) -> None:

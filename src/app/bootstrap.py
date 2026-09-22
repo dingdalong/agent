@@ -146,6 +146,7 @@ async def create_app(
         store=agent_view_store,
         passthrough=not ui.is_tty,
         session_state=session_state,
+        data_guard=data_guard,
     )
     tools_mgr = ToolsMgr(output_config=config_mgr.get_config("tool"))
     from src.common.sandbox import SandboxBackend

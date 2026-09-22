@@ -166,7 +166,7 @@ REQUEST_INPUT → CHECK_COMPACT → [COMPACT →] LLM_CALL → PROCESS_RESPONSE
 
 ```bash
 # 安装依赖（含 pytest 等开发工具）
-uv sync --extra dev
+uv sync
 
 uv run pytest                        # 运行全部测试
 uv run pytest -k "test_name"         # 运行匹配名称的测试

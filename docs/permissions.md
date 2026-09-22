@@ -103,7 +103,7 @@ Web 外部读取走另一条路径：`WebPrivacyGuard` 本地预检拒绝秘密�
 
 EXTERNAL 工具在执行前发现秘密即 Hard Deny；DYNAMIC Shell 还会运行结构性外传检测。读取层允许读取凭证文件，但正文在离开读取层前脱敏。Shell、Hook 和 stdio MCP 子进程使用 `safe_environment()`，模型 key、token、cookie 和密码不会从父进程环境继承；MCP 只额外获得可信配置显式声明的 env。
 
-工具开始/完成事件、权限通知、授权日志、UI 预览、PostToolUse、临时结果日志、Agent history、子 Agent transcript、session 和 compact 只能接收已经脱敏的数据。会话日志、元数据与信任库使用原子写入（日志按批追加）和 owner-only 权限。
+工具开始/完成事件、权限通知、授权日志、UI 预览、PostToolUse、临时结果日志、Agent history、子 Agent transcript、session 和 compact 只能接收已经脱敏的数据。脱敏只发生在文本入口：用户输入、工具结果、模型流式增量（`OutputRouter` 在 `dispatch()` 入口改写 `ResponseDelta`/`ThinkingDelta`/`CompactDelta`）与助手最终消息共用同一个 `DataGuard`，因此显示、内存、磁盘和下一轮请求是同一份脱敏文本；分块看不见的跨块模式由回合结束时的整段复核补齐。磁盘写入端不做第二遍脱敏，只做漏网检测并告警。会话日志、元数据与信任库使用原子写入（日志按批追加）和 owner-only 权限。
 
 ## 项目启动信任
 

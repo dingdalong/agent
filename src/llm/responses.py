@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, AsyncIterable, ClassVar
 
-from src.llm.base import iter_llm_stream, validate_chat_completion_stream
+from src.llm.base import (
+    iter_llm_stream,
+    plan_interrupted_history,
+    validate_chat_completion_stream,
+)
 from src.llm.errors import LLMStreamResponseError
 
 if TYPE_CHECKING:
@@ -15,19 +19,87 @@ if TYPE_CHECKING:
 _RESPONSE_FINISH_REASONS = frozenset({"stop", "tool_calls"})
 
 
+def _item_anchor(event: Any) -> str | None:
+    """返回 Responses 事件中输出项的部件锚点。
+
+    ``output_index`` 在同一响应的 added/delta/done 事件间稳定，优先使用；缺失时
+    退回输出项 ID，保证测试替身或旧事件结构仍能配对同一部件。
+
+    Args:
+        event: Responses SSE 事件。
+
+    Returns:
+        部件锚点；事件不携带任何标识时为 None。
+    """
+    index = getattr(event, "output_index", None)
+    if isinstance(index, int):
+        return f"output:{index}"
+    item = getattr(event, "item", None)
+    for candidate in (getattr(event, "item_id", None), getattr(item, "id", None)):
+        if isinstance(candidate, str) and candidate:
+            return f"item:{candidate}"
+    return None
+
+
+def _item_kind(item: Any) -> str | None:
+    """返回输出项对应的部件类别。
+
+    Args:
+        item: Responses 输出项。
+
+    Returns:
+        reasoning 项为 thinking，message 项为 content，其余为 None（不参与回放）。
+    """
+    item_type = getattr(item, "type", None)
+    if item_type == "reasoning":
+        return "thinking"
+    if item_type == "message":
+        return "content"
+    return None
+
+
+def _message_item_text(item: dict[str, Any]) -> str:
+    """提取 message 输出项的可见正文。
+
+    Args:
+        item: 已序列化的 message 输出项。
+
+    Returns:
+        按内容块顺序拼接的文本。
+    """
+    parts: list[str] = []
+    for block in item.get("content", []) or []:
+        if isinstance(block, dict) and isinstance(block.get("text"), str):
+            parts.append(block["text"])
+    return "".join(parts)
+
+
 def dump_response_output(response: Any) -> list[dict[str, Any]]:
     """将非流式 Responses 输出项转换为独立字典。"""
     output: list[dict[str, Any]] = []
     for item in getattr(response, "output", None) or []:
-        if hasattr(item, "model_dump"):
-            dumped = item.model_dump(exclude_none=True)
-        elif isinstance(item, dict):
-            dumped = dict(item)
-        else:
-            continue
+        dumped = dump_response_item(item)
         if isinstance(dumped, dict):
             output.append(dumped)
     return output
+
+
+def dump_response_item(item: Any) -> dict[str, Any] | None:
+    """把单个 Responses 输出项转换为独立字典。
+
+    Args:
+        item: SDK 输出项对象或已是字典的输出项。
+
+    Returns:
+        独立字典；无法序列化时为 None。
+    """
+    if hasattr(item, "model_dump"):
+        dumped = item.model_dump(exclude_none=True)
+    elif isinstance(item, dict):
+        dumped = dict(item)
+    else:
+        return None
+    return dumped if isinstance(dumped, dict) else None
 
 
 def response_output_text(response: Any, output: list[dict[str, Any]]) -> str:
@@ -132,6 +204,24 @@ class ResponsesStreamMixin:
     _RESPONSE_REASONING_DELTA_EVENTS: ClassVar[frozenset[str]] = frozenset()
     _RESPONSE_REFUSAL_EVENTS: ClassVar[frozenset[str]] = frozenset()
 
+    def interrupted_assistant_message(self, call: LLMCallContext) -> dict | None:
+        """用完整输出项的原始载体组装被中断尝试的助手消息。
+
+        只有收到 ``response.output_item.done`` 的输出项才带载体，不完整的消息、
+        思考或函数调用项都不会进入结果。
+
+        Args:
+            call: 在流式调用内部被取消的尝试上下文。
+
+        Returns:
+            以 ``_response_output`` 为载体的助手消息；无可回放内容时为 None。
+        """
+        parts = plan_interrupted_history(call.parts)
+        items = [part.carrier for part in parts if part.carrier]
+        if not items:
+            return None
+        return {"role": "assistant", "_response_output": items}
+
     def _response_refusal_error(self, source: Any) -> LLMStreamResponseError:
         """构造 provider 对应的拒绝异常。"""
         return LLMStreamResponseError(
@@ -176,13 +266,20 @@ class ResponsesStreamMixin:
 
             if event_type == "response.output_text.delta":
                 content_parts.append(event.delta)
-                await self.emit_response_delta(event.delta, call=call)
+                await self.emit_response_delta(
+                    event.delta, call=call, anchor=_item_anchor(event),
+                )
 
             elif event_type in self._RESPONSE_REASONING_DELTA_EVENTS:
-                await self.emit_thinking_delta(event.delta, call=call)
+                await self.emit_thinking_delta(
+                    event.delta, call=call, anchor=_item_anchor(event),
+                )
 
             elif event_type == "response.output_item.added":
                 item = event.item
+                part_kind = _item_kind(item)
+                if part_kind is not None:
+                    call.open_part(part_kind, _item_anchor(event))
                 if item.type == "function_call":
                     item_id = getattr(item, "id", None)
                     if not isinstance(item_id, str) or not item_id:
@@ -212,6 +309,24 @@ class ResponsesStreamMixin:
                         name=name,
                         arguments=arguments,
                     )
+
+            elif event_type == "response.output_item.done":
+                dumped = dump_response_item(event.item)
+                if dumped is not None:
+                    if dumped.get("type") == "function_call":
+                        index = function_call_indexes.get(dumped.get("id"))
+                        if index is not None:
+                            call.complete_part(f"call:{index}", carrier=dumped)
+                    else:
+                        anchor = _item_anchor(event)
+                        if dumped.get("type") == "message" and anchor is not None:
+                            text = _message_item_text(dumped)
+                            part = call.adopt_part("content", anchor)
+                            if text:
+                                part.text = text
+                        elif dumped.get("type") == "reasoning":
+                            call.adopt_part("thinking", anchor)
+                        call.complete_part(anchor, carrier=dumped)
 
             elif event_type == "response.function_call_arguments.delta":
                 index = function_call_indexes.get(event.item_id)

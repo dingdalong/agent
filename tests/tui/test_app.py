@@ -27,6 +27,8 @@ from src.events.types import (
     ResponseDelta,
     SubagentLifecycle,
     ThinkingDelta,
+    ToolCallCompleted,
+    ToolCallStarted,
 )
 from src.interfaces.agent_view_store import AgentViewStore
 from src.interfaces.turn_clock import TurnClock
@@ -142,9 +144,100 @@ def test_responsive_input_history_and_ctrl_c() -> None:
                 source="test",
                 future=exit_future,
             ))
+            # 空闲退出改为双击：首次只提示，窗口内第二次才退出。
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+            assert not exit_future.cancelled()
+            assert app._quit_shortcut == "Ctrl+C"
             await pilot.press("ctrl+c")
             await pilot.pause()
             assert exit_future.cancelled()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_idle_quit_shortcut_requires_second_press_and_shows_hint() -> None:
+    async def scenario() -> None:
+        app = _app()
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            future = asyncio.get_running_loop().create_future()
+            await app.coordinator.submit(InputMenu(
+                timestamp=1.0,
+                source="test",
+                future=future,
+            ))
+            await pilot.pause()
+
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+            assert not future.cancelled()
+            assert app._quit_deadline is not None
+            assert "再按一次 Ctrl+C 退出" in app._status.render().plain
+
+            # 输入草稿出现后提示失效，Ctrl+C 回到"清空输入"语义。
+            app.input_area.composer.load_text("草稿")
+            await pilot.pause()
+            assert app._quit_deadline is None
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+            assert app.input_area.composer.text == ""
+            assert not future.cancelled()
+
+            # 超时后提示消失，重新按键重新武装。
+            await pilot.press("ctrl+d")
+            await pilot.pause()
+            assert app._quit_deadline is not None
+            assert "再按一次 Ctrl+D 退出" in app._status.render().plain
+            app._quit_deadline = 0.0
+            app._expire_quit_shortcut()
+            await pilot.pause()
+            assert app._quit_deadline is None
+            assert "再按一次" not in app._status.render().plain
+            assert not future.cancelled()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_interrupt_finishes_turn_without_losing_tool_rows() -> None:
+    async def scenario() -> None:
+        app = _app()
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            await app.on_tool_call_started(ToolCallStarted(
+                timestamp=1.0,
+                source="test",
+                tool_name="exec_command",
+                tool_call_id="call_1",
+                detail="echo hi",
+            ))
+            await app.on_tool_call_completed(ToolCallCompleted(
+                timestamp=2.0,
+                source="test",
+                tool_name="exec_command",
+                tool_call_id="call_1",
+                status="cancelled",
+                duration_seconds=1.25,
+            ))
+            await pilot.pause()
+            assert app.history_journal.snapshot() == ""
+
+            # 取消活跃输入不再清空工具行；收尾时才把已中止的行落进转录。
+            app.finish_input_cancelled()
+            assert len(app._round_entries) == 1
+            await app.finish_interrupted_turn()
+            await pilot.pause()
+
+            snapshot = app.history_journal.snapshot()
+            assert "exec_command" in snapshot
+            assert "echo hi" in snapshot
+            assert "✘" in snapshot
+            assert "1.25s" in snapshot
+            assert "进程运行中" not in snapshot
+            assert app._round_entries == []
+            assert app._turn_started is None
 
     asyncio.run(scenario())
 

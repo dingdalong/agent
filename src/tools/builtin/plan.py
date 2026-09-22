@@ -48,7 +48,10 @@ async def submit_plan(title, content, agent, deps, authorization):
             commit = deps.session.state.prepare_commit()
             if commit is not None:
                 success = await asyncio.to_thread(
-                    deps.session_mgr.append_batch, deps.session.id, commit.payload,
+                    deps.session_mgr.append_batch,
+                    deps.session.id,
+                    commit.payload,
+                    commit.resync,
                 )
                 if success:
                     deps.session.state.ack_commit(commit)

@@ -548,11 +548,10 @@ class TextualInterface(UserInterface):
     async def _read_input(
         self,
         prompt: str,
-        default: str = "",
         markdown: bool = False,
     ) -> str:
         del markdown
-        return await self._plain.read_input(prompt, default)
+        return await self._plain.read_input(prompt)
 
     async def _read_permission(self, tool_name: str, detail: str, reason: str = "") -> str:
         return await self._plain.read_permission(tool_name, detail, reason)
@@ -621,6 +620,12 @@ class TextualInterface(UserInterface):
         if self._plain_response_active:
             self._plain.write("\n")
             self._plain_response_active = False
+
+    async def finish_interrupted_turn(self) -> None:
+        if self.is_tty:
+            app = self._app
+            if app is not None and await self._invoke(app.finish_interrupted_turn):
+                return
 
     async def _end_thinking_if_needed(self) -> None:
         if self.is_tty:

@@ -25,8 +25,10 @@ from src.mode import RunMode
 class _RecordingUI:
     is_tty = True
 
-    def __init__(self) -> None:
+    def __init__(self, order: list[str] | None = None) -> None:
+        self.order = order if order is not None else []
         self.cancel_count = 0
+        self.finish_count = 0
         self.wait_count = 0
 
     @contextmanager
@@ -35,19 +37,27 @@ class _RecordingUI:
 
     def cancel_active_input(self) -> bool:
         self.cancel_count += 1
+        self.order.append("cancel")
         return True
+
+    async def finish_interrupted_turn(self) -> None:
+        self.finish_count += 1
+        self.order.append("finish_interrupted")
 
     async def wait_interactions_idle(self) -> None:
         self.wait_count += 1
+        self.order.append("wait")
 
 
 class _RecordingBus:
-    def __init__(self) -> None:
+    def __init__(self, order: list[str] | None = None) -> None:
+        self.order = order if order is not None else []
         self.outputs: list[str] = []
         self.join_count = 0
 
     async def request_output(self, message: str) -> None:
         self.outputs.append(message)
+        self.order.append("notice")
 
     async def join(self) -> None:
         self.join_count += 1
@@ -333,10 +343,74 @@ def test_work_task_cancellation_remains_a_turn_interrupt() -> None:
 
         assert agent.finished.is_set()
         assert app._work_task is None
-        assert event_bus.outputs == ["\n已中断当前任务。\n"]
-        assert event_bus.join_count == 1
+        assert event_bus.outputs == ["\n已中断本轮任务，已产出的内容已保留。\n"]
+        assert event_bus.join_count == 2
         assert ui.cancel_count == 1
+        assert ui.finish_count == 1
         assert ui.wait_count == 1
+
+    asyncio.run(scenario())
+
+
+def test_interrupt_saves_session_before_user_notice() -> None:
+    """中断提示必须晚于首次强制落盘，且界面收尾发生在落盘之后。"""
+
+    class Sessions:
+        def __init__(self, order: list[str]) -> None:
+            self.order = order
+
+        def append_batch(self, _session_id, _payload, resync=None) -> bool:
+            self.order.append("save")
+            return True
+
+    async def scenario() -> None:
+        order: list[str] = []
+        ui = _RecordingUI(order)
+        event_bus = _RecordingBus(order)
+        app = _app(ui, event_bus)
+        app.deps.session_mgr = Sessions(order)
+        state = SessionState()
+        state.append_user("中断前", {"role": "user", "content": "中断前"})
+        app.deps.session.state = state
+        app.deps.session.id = "session"
+
+        await app._handle_interrupted_turn()
+
+        assert order == ["cancel", "save", "finish_interrupted", "notice", "wait"]
+
+    asyncio.run(scenario())
+
+
+def test_interrupt_save_failure_warns_and_keeps_pending_delta() -> None:
+    """落盘失败时如实提示，并保留增量等待下次检查点重试。"""
+
+    class FailingSessions:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def append_batch(self, _session_id, _payload, resync=None) -> bool:
+            self.calls += 1
+            return False
+
+    async def scenario() -> None:
+        ui = _RecordingUI()
+        event_bus = _RecordingBus()
+        app = _app(ui, event_bus)
+        sessions = FailingSessions()
+        app.deps.session_mgr = sessions
+        state = SessionState()
+        state.append_user("中断前", {"role": "user", "content": "中断前"})
+        app.deps.session.state = state
+        app.deps.session.id = "session"
+
+        await app._handle_interrupted_turn()
+
+        assert sessions.calls == 2
+        assert event_bus.outputs == [
+            "\n已中断本轮任务，已产出的内容已保留。\n",
+            "\n会话保存失败，将在下次检查点重试。\n",
+        ]
+        assert state.checkpoint_due(force=True) is True
 
     asyncio.run(scenario())
 
@@ -347,10 +421,11 @@ def test_slow_interrupt_save_does_not_block_event_loop_and_is_awaited() -> None:
             self.saved = False
             self.thread_id: int | None = None
 
-        def append_batch(self, _session_id, _payload) -> None:
+        def append_batch(self, _session_id, _payload, resync=None) -> bool:
             self.thread_id = threading.get_ident()
             time.sleep(0.12)
             self.saved = True
+            return True
 
     async def scenario() -> None:
         ui = _RecordingUI()
@@ -393,7 +468,7 @@ def test_agent_round_persistence_serializes_in_worker_thread() -> None:
             self.calls: list[str] = []
             self.thread_ids: list[int] = []
 
-        def append_batch(self, _session_id, _payload) -> None:
+        def append_batch(self, _session_id, _payload, resync=None) -> None:
             self.thread_ids.append(threading.get_ident())
             time.sleep(0.05)
             self.calls.append("state")

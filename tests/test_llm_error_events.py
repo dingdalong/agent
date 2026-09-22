@@ -277,12 +277,11 @@ class StreamOrderUI(UserInterface):
         """
         del message, markdown
 
-    async def _read_input(self, prompt: str, default: str = "", markdown: bool = False) -> str:
+    async def _read_input(self, prompt: str, markdown: bool = False) -> str:
         """返回固定输入。
 
         Args:
             prompt: 输入提示。
-            default: 默认文本。
             markdown: 是否按 Markdown 渲染提示。
 
         Returns:

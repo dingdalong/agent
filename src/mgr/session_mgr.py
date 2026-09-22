@@ -42,6 +42,59 @@ _STREAM_KEYS = ("content", "thinking")
 _STREAM_KEY_SET = frozenset(_STREAM_KEYS)
 
 
+def _leaked_record_ids(guard: Any, payload: dict[str, Any]) -> set[str]:
+    """返回载荷中落盘前仍需脱敏的记录 ID。
+
+    Args:
+        guard: 数据保护器；调用方已确认可用。
+        payload: 待写入的状态增量。
+
+    Returns:
+        快照或增量正文被脱敏改写的记录 ID 集合。
+    """
+    leaked: set[str] = set()
+    for key in ("records", "record_deltas"):
+        for entry in payload.get(key) or []:
+            if not isinstance(entry, dict):
+                continue
+            record_id = entry.get("id")
+            if not isinstance(record_id, str) or not record_id:
+                continue
+            if guard.redact(entry) != entry:
+                leaked.add(record_id)
+    return leaked
+
+
+def _without_record_deltas(payload: dict[str, Any], record_ids: set[str]) -> dict[str, Any]:
+    """丢弃指定记录的正文增量，只保留整份快照。
+
+    增量里的流式边界摘要描述的是改写前的正文，继续写入会让磁盘与内存错位；
+    这些记录由调用方登记 ``resync``，下一轮以整份快照收敛。
+
+    Args:
+        payload: 已脱敏的待写入载荷。
+        record_ids: 需要丢弃增量的记录 ID 集合。
+
+    Returns:
+        丢弃增量后的载荷；无需丢弃时返回原对象。
+    """
+    deltas = payload.get("record_deltas")
+    if not record_ids or not isinstance(deltas, list):
+        return payload
+    kept = [
+        delta for delta in deltas
+        if not (isinstance(delta, dict) and delta.get("id") in record_ids)
+    ]
+    if len(kept) == len(deltas):
+        return payload
+    result = dict(payload)
+    if kept:
+        result["record_deltas"] = kept
+    else:
+        result.pop("record_deltas", None)
+    return result
+
+
 def _digest(value: Any) -> bytes:
     """返回一个值的规范化比较摘要。
 
@@ -237,36 +290,63 @@ class SessionMgr:
         commit = state.prepare_commit()
         if commit is None:
             return True
-        success = self.append_batch(session_id, commit.payload)
+        success = self.append_batch(session_id, commit.payload, commit.resync)
         if success:
             state.ack_commit(commit)
         else:
             state.requeue_commit(commit)
         return success
 
-    def append_batch(self, session_id: str, payload: dict[str, Any]) -> bool:
+    def append_batch(
+        self,
+        session_id: str,
+        payload: dict[str, Any],
+        resync: set[str] | None = None,
+    ) -> bool:
         """把一批已取出的状态增量编码后追加到日志。
 
         编码在会话级内容池上完成，可安全地在工作线程调用。与上次落盘逐字节相同的
         区块会被丢弃；过滤后没有真实变更时整批不写，也不改动内容池与批序号，因此
         日志里不会出现同一份记录的重复提交。
 
+        文本脱敏发生在文本进入系统时（用户输入、工具结果、模型流式增量），这里
+        只做漏网检测：仍被改写说明入口漏了一条路径，记录告警后按脱敏结果写入。
+
         Args:
             session_id: 会话 UUID。
             payload: ``SessionState.prepare_commit()`` 返回的增量载荷。
+            resync: 可选集合；写入端无法按增量对位的记录 ID 会登记在这里。生产
+                调用方直接传 ``commit.resync``，由 ``SessionState.ack_commit()``
+                据此让这些记录退回整份快照。
+
+        Returns:
+            True 表示无待写入内容或写入成功。
         """
         try:
             self._sessions_dir.mkdir(parents=True, exist_ok=True)
-            safe_payload = (
-                self._data_guard.redact(payload) if self._data_guard is not None else payload
-            )
+            safe_payload = payload
+            if self._data_guard is not None:
+                redacted = self._data_guard.redact(payload)
+                if redacted != payload:
+                    # 入口脱敏漏了一条路径：整份快照按脱敏结果写入（绝不泄漏），
+                    # 对不上基线的增量整段丢弃，登记 resync 由状态层下一轮按
+                    # 整段复核后的规范文本重写；禁止写出与内存不一致的正文。
+                    logger.warning("会话载荷在落盘前仍需脱敏，入口脱敏可能漏了一条路径")
+                    leaked = _leaked_record_ids(self._data_guard, payload)
+                    if leaked:
+                        if resync is not None:
+                            resync |= leaked
+                        redacted = _without_record_deltas(redacted, leaked)
+                safe_payload = redacted
             log_path = self._log_path(session_id)
             with self._log_lock:
                 self._restore_active_log(session_id)
                 self._hydrate_projection_locked(session_id)
                 pool = self._pools.setdefault(session_id, {})
                 written = self._written.setdefault(session_id, _WrittenState())
-                filtered, next_written = self._filter_payload(safe_payload, written)
+                filtered, next_written = self._filter_payload(
+                    safe_payload, written, resync=resync,
+                )
                 if filtered is None:
                     return True
                 seq = self._seqs.get(session_id, self._last_seq(session_id))
@@ -308,17 +388,22 @@ class SessionMgr:
         self,
         payload: dict[str, Any],
         written: _WrittenState,
+        *,
+        resync: set[str] | None = None,
     ) -> tuple[dict[str, Any] | None, _WrittenState]:
         """丢弃与上次落盘相同的区块，返回（待写入载荷, 已落盘摘要）。
 
         比较只在 16 字节摘要上进行，因此不需要为每个会话保留整份编码副本。
         记录增量同样按摘要去重：正文部分用 ``stream_boundaries`` 校验链式关系，
         静态部分用归一化投影的摘要判断是否真的变了；只丢弃「已经在盘上」的内容，
-        不会丢弃无法对位的正文（那种情况由状态层回退成整份快照）。
+        永远不会丢弃无法对位的正文——对不上时保留正文并登记到 ``resync``，由
+        ``SessionState.ack_commit()`` 整份重写该记录，避免用户已经看到的内容在
+        日志里被静默截断。
 
         Args:
             payload: 待写入的状态增量。
             written: 该会话已落盘的投影摘要。
+            resync: 可选集合；登记无法按增量对位、需要整份重写的记录 ID。
 
         Returns:
             过滤后的载荷与更新后的已落盘摘要；没有真实变更时载荷为 None，
@@ -420,9 +505,11 @@ class SessionMgr:
                             continue
                         if current != base:
                             logger.warning(
-                                "会话增量基线不匹配，丢弃该段正文: %s/%s", record_id, key,
+                                "会话增量基线不匹配，保留该段正文并安排整份快照: %s/%s",
+                                record_id, key,
                             )
-                            continue
+                            if resync is not None:
+                                resync.add(record_id)
                         kept_append[key] = value
                         kept_boundaries[key] = boundary
                         next_written.streams[stream_key] = after

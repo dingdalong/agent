@@ -122,9 +122,8 @@ class PlainFrontend:
         self.stream.write(value + end)
         self.stream.flush()
 
-    async def read_input(self, prompt: str, default: str = "") -> str:
-        value = await self.reader(prompt)
-        return value if value else default
+    async def read_input(self, prompt: str) -> str:
+        return await self.reader(prompt)
 
     async def read_permission(self, tool_name: str, detail: str, reason: str = "") -> str:
         prompt = f"\n工具请求权限\n工具: {tool_name}\n内容: {detail}\n"

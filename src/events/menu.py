@@ -98,11 +98,10 @@ class InputMenu(MenuRequest):
         › Alice▮
         ──────────────────────────────
 
-    prompt 的上下文打印在上方；default 作预填文本而非占位符。
+    prompt 的上下文打印在上方；输入框始终以空文本开始。
     这是文本输入而非选项菜单，作为交互事件与其它菜单同属控制面。
     """
     prompt: str = ""
-    default: str = ""
     markdown: bool = False  # 上文提示是否按 Markdown 渲染（如 ask_user 的问题）
     level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
     type: Literal["input_menu"] = field(default="input_menu", init=False)

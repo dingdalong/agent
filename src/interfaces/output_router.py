@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace as replace_dataclass
+
 from src.events.menu import (
     ChoiceInputMenu,
     ChoiceMenu,
@@ -14,6 +16,8 @@ from src.events.menu import (
 from src.events.types import (
     CompactDelta,
     Event,
+    ResponseDelta,
+    ThinkingDelta,
     InteractionCompleted,
     LLMCallCompleted,
     LLMCallFailed,
@@ -39,6 +43,7 @@ class OutputRouter:
         store: AgentViewStore,
         passthrough: bool = False,
         session_state: SessionState | None = None,
+        data_guard: object | None = None,
     ) -> None:
         """Initialize an event router.
 
@@ -46,6 +51,8 @@ class OutputRouter:
             ui: User interface receiving visible events.
             store: Shared agent/session UI read model.
             passthrough: Whether body events should remain visible for plain output.
+            session_state: Session state receiving persisted view records.
+            data_guard: Shared sensitive-data guard applied at the redaction boundary.
 
         Returns:
             None.
@@ -54,6 +61,31 @@ class OutputRouter:
         self.store = store
         self.passthrough = passthrough
         self.session_state = session_state
+        self.data_guard = data_guard
+
+    def _redact(self, event: Event) -> Event:
+        """在文本进入展示、状态层与磁盘之前完成统一脱敏。
+
+        流式正文是唯一由模型实时产出、又要同时进入前台展示与会话日志的文本，
+        因此脱敏必须发生在消费端入口，使「显示 / 内存 / 磁盘 / 下一轮请求」共用
+        同一份脱敏文本。已在入口脱敏的消息不受影响（脱敏本身幂等）。
+
+        Args:
+            event: 事件总线投递的事件。
+
+        Returns:
+            脱敏后的等价事件；无需改写时返回原对象。
+        """
+        guard = self.data_guard
+        if guard is None or not isinstance(event, _TEXT_DELTA_EVENTS):
+            return event
+        content = getattr(event, "content", "")
+        if not isinstance(content, str) or not content:
+            return event
+        safe = guard.redact(content)
+        if not isinstance(safe, str) or safe == content:
+            return event
+        return replace_dataclass(event, content=safe)
 
     def bind_session_state(self, state: SessionState) -> None:
         """切换当前前台会话的可见事件写入目标。"""
@@ -68,6 +100,7 @@ class OutputRouter:
         Returns:
             None.
         """
+        event = self._redact(event)
         self.store.record(event)
         if self.session_state is not None and isinstance(event, _LLM_ACCOUNTING_EVENTS):
             self.session_state.record_llm_event(event)
@@ -144,5 +177,6 @@ _CONTROL_EVENTS = (
     InteractionCompleted,
 )
 
+_TEXT_DELTA_EVENTS = (ResponseDelta, ThinkingDelta, CompactDelta)
 _LLM_BOUNDARY_EVENTS = (LLMCallStarted, LLMRetrying, LLMLengthRetrying, LLMCallFailed)
 _LLM_ACCOUNTING_EVENTS = (LLMCallStarted, LLMCallCompleted, LLMCallFailed)

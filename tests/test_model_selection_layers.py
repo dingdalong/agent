@@ -111,8 +111,8 @@ class _ChoiceOnlyUI(UserInterface):
     async def _write(self, message: str | Text, markdown: bool = False) -> None:
         del message, markdown
 
-    async def _read_input(self, prompt: str, default: str = "", markdown: bool = False) -> str:
-        del prompt, default, markdown
+    async def _read_input(self, prompt: str, markdown: bool = False) -> str:
+        del prompt, markdown
         return ""
 
     async def _read_permission(self, tool_name: str, detail: str, reason: str = "") -> str:

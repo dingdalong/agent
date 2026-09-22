@@ -52,11 +52,16 @@ class RunContext:
 
     Attributes:
         messages: 当前会话消息列表。
-        turn_start_messages: 本轮追加用户消息前的历史浅快照；没有快照时为 None。
         prompt: 当前完整系统提示词。
         final_text: 本轮最终输出文本。
         has_tool_calls: 本轮是否执行过工具调用。
         round_start_idx: 本轮消息在历史中的起始下标。
+        llm_call_start_idx: 当前 LLM 调用开始前的历史下标；中断回滚只丢弃本次调用
+            新增的临时消息，用户输入与已完成轮次都保留。
+        llm_call_context_start: 当前 LLM 调用开始前的会话上下文记录数。
+        llm_call_count: 本轮已发起的 LLM 调用次数。
+        user_message_index: 本轮用户消息在历史中的下标；尚未写入时为 None。
+        interrupt_finalized: 本轮是否已经执行过中断收尾（幂等守卫）。
         compact_streak: 连续有效但仍不足的自动 compact 次数。
         max_compact_streak: 自动 compact 有效但仍不足的保护上限。
         auto_compact_before_tokens: 最近一次自动 compact 前的输入 token 估算；
@@ -86,11 +91,15 @@ class RunContext:
         llm_error: 本轮终态 LLM 错误的安全结构化信息。
     """
     messages: list[dict]
-    turn_start_messages: list[dict] | None = None
     prompt: list[dict] | None = None
     final_text: str = ""
     has_tool_calls: bool = False
     round_start_idx: int = 0
+    llm_call_start_idx: int = 0
+    llm_call_context_start: int = 0
+    llm_call_count: int = 0
+    user_message_index: int | None = None
+    interrupt_finalized: bool = False
     compact_streak: int = 0
     max_compact_streak: int = 3
     auto_compact_before_tokens: int | None = None

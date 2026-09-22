@@ -432,7 +432,7 @@ def test_app_resume_switches_state_inside_gates_and_resets_transient_store() -> 
         def __init__(self) -> None:
             self.saved = []
 
-        def append_batch(self, session_id, payload) -> None:
+        def append_batch(self, session_id, payload, resync=None) -> None:
             self.saved.append((session_id, payload))
 
     class Router:

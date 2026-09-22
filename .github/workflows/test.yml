@@ -24,7 +24,7 @@ jobs:
           enable-cache: true
 
       - name: 安装依赖
-        run: uv sync --extra dev
+        run: uv sync
 
       - name: 单元测试与结构不变式
         run: uv run pytest -q

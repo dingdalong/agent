@@ -95,6 +95,7 @@ class AgentTuiApp(App[None]):
     SELECT_AUTO_SCROLL_SPEED = 60.0
     HORIZONTAL_BREAKPOINTS = [(0, "compact"), (96, "wide")]
     VERTICAL_BREAKPOINTS = [(0, "short"), (32, "tall")]
+    QUIT_SHORTCUT_WINDOW_SECONDS = 2.0
 
     BINDINGS = [
         Binding("ctrl+c", "ctrl_c", show=False, priority=True),
@@ -163,6 +164,8 @@ class AgentTuiApp(App[None]):
         self._round_entries: list[RoundEntry] = []
         self._response_stream: Any = None
         self._thinking_stream: Any = None
+        self._quit_deadline: float | None = None
+        self._quit_shortcut = ""
 
         self._agent_ids: list[str] = []
         self._agent_signature: tuple[Any, ...] | None = None
@@ -267,6 +270,7 @@ class AgentTuiApp(App[None]):
     def _tick(self) -> None:
         if not self._screen_stack:
             return
+        self._expire_quit_shortcut()
         self.chrome.update_separators()
         self._schedule_agent_refresh()
         self.transcript.schedule_refresh()
@@ -378,20 +382,31 @@ class AgentTuiApp(App[None]):
         context = "\n".join(lines[:-1]).strip("\n") if len(lines) > 1 else ""
         if context.strip():
             await self.append_output(context, markdown=request.markdown)
-        self.input_area.load_text(request.default, cursor_to_end=True)
+        self.input_area.clear()
         self.input_area.sync_state()
         self.call_after_refresh(self.restore_focus)
 
     async def finish_input(self, text: str) -> None:
         await self.append_user(text)
         self.input_area.clear()
+        self._clear_quit_shortcut()
         self._reset_turn_status()
         self.input_area.sync_state()
 
     def finish_input_cancelled(self) -> None:
+        """用户取消输入：清空输入框与轮次状态，但保留本轮工具行等待收尾落定。"""
         self.input_area.clear()
-        self._reset_turn_status()
+        self._clear_quit_shortcut()
+        self._reset_turn_status(clear_round=False)
         self.input_area.sync_state()
+
+    async def finish_interrupted_turn(self) -> None:
+        """中断收尾：先把本轮工具行写进转录，再重置轮次状态。"""
+        await self.flush_round()
+        self._reset_turn_status()
+        self.input_area.clear()
+        self.input_area.sync_state()
+        self.refresh_chrome()
 
     def focus_composer(self) -> None:
         self._main_focus_target = "composer"
@@ -437,6 +452,8 @@ class AgentTuiApp(App[None]):
         if event.text_area is not self.input_area.composer:
             return
         self.input_area.on_text_changed(event.text_area.text)
+        if event.text_area.text:
+            self._clear_quit_shortcut()
 
     async def on_composer_submitted(self, event: Composer.Submitted) -> None:
         if self.input_area.read_only or not event.text.strip():
@@ -741,7 +758,7 @@ class AgentTuiApp(App[None]):
         self._retry_attempt = 0
         self._retry_max = 0
 
-    def _reset_turn_status(self) -> None:
+    def _reset_turn_status(self, *, clear_round: bool = True) -> None:
         self._turn_started = None
         self._activity_started = None
         self._activity_pause_baseline = 0.0
@@ -750,7 +767,8 @@ class AgentTuiApp(App[None]):
         self._clear_retry()
         self._current_agent_type = None
         self._current_agent_uuid = None
-        self._round_entries = []
+        if clear_round:
+            self._round_entries = []
 
     def _turn_elapsed(self, now: float) -> float:
         if self._turn_started is None:
@@ -882,7 +900,7 @@ class AgentTuiApp(App[None]):
             if self.input_area.text:
                 self.input_area.clear()
             else:
-                self.coordinator.cancel_input_for_exit()
+                self._press_quit_shortcut("Ctrl+C")
             return
         self.request_interrupt()
 
@@ -893,7 +911,31 @@ class AgentTuiApp(App[None]):
             and not self.coordinator.inline_widget_active
             and not self.input_area.text
         ):
+            self._press_quit_shortcut("Ctrl+D")
+
+    def _press_quit_shortcut(self, label: str) -> None:
+        """空闲态退出快捷键：窗口内二次按下才退出（对齐 codex 的空闲双击退出）。"""
+        now = time.monotonic()
+        if self._quit_deadline is not None and now <= self._quit_deadline:
+            self._clear_quit_shortcut()
             self.coordinator.cancel_input_for_exit()
+            return
+        self._quit_shortcut = label
+        self._quit_deadline = now + self.QUIT_SHORTCUT_WINDOW_SECONDS
+        self.refresh_chrome()
+
+    def _clear_quit_shortcut(self) -> None:
+        if self._quit_deadline is None:
+            return
+        self._quit_deadline = None
+        self._quit_shortcut = ""
+        self.refresh_chrome()
+
+    def _expire_quit_shortcut(self) -> None:
+        """退出提示到期后清除提示，等待下一次首击重新武装。"""
+        if self._quit_deadline is None or time.monotonic() <= self._quit_deadline:
+            return
+        self._clear_quit_shortcut()
 
     def action_copy_selection(self) -> None:
         self._copy_current_selection()

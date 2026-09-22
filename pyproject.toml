@@ -23,7 +23,9 @@ dependencies = [
     "zstandard>=0.25.0",
 ]
 
-[project.optional-dependencies]
+[dependency-groups]
+# 开发工具放在默认 dev 组：`uv sync` / `uv run` 默认包含，避免 `uv run pytest`
+# 因环境里没有 pytest 而回退到系统安装的 pytest（那会缺项目依赖）。
 dev = ["pytest>=9.0.3", "pyinstaller>=6.22"]
 
 [build-system]

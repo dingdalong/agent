@@ -17,6 +17,7 @@ from typing import (
     Collection,
     Mapping,
     Optional,
+    Sequence,
 )
 import asyncio
 from contextvars import ContextVar
@@ -74,6 +75,55 @@ def normalize_reasoning_effort(text: str) -> str | None:
 
 
 @dataclass(slots=True)
+class TurnPart:
+    """一次 LLM 尝试中按到达顺序记录的输出部件。
+
+    provider 的结束标记（Anthropic ``content_block_stop``、Responses
+    ``response.output_item.done``）是部件完整的唯一依据：没有结束标记的
+    provider（Chat Completions、Ollama）永远只有不完整部件，中断时无法安全回放。
+    ``carrier`` 保存 provider 原始块或输出项，只在完整后写入，用于把推理载体按
+    原样交回模型。
+
+    Attributes:
+        kind: 部件类别，取 content、thinking 或 tool_call。
+        text: content/thinking 正文；tool_call 保存参数 JSON 文本。
+        complete: 是否已收到 provider 结束标记。
+        signature: Anthropic thinking 块的签名；其他 provider 为空。
+        call_id: tool_call 的调用 ID。
+        name: tool_call 的工具名。
+        carrier: provider 原始块或输出项字典；没有原始载体时为 None。
+    """
+
+    kind: str
+    text: str = ""
+    complete: bool = False
+    signature: str = ""
+    call_id: str = ""
+    name: str = ""
+    carrier: dict[str, Any] | None = None
+
+    @property
+    def replayable_reasoning(self) -> bool:
+        """返回本部件是否是可原样回放的完整推理载体。
+
+        有 provider 原始载体的部件按载体回放；没有载体的 Anthropic thinking 块
+        必须同时具备明文与签名，否则回放会被 provider 拒绝。
+
+        Returns:
+            完整、且具备回放所需原始信息的推理部件为 True。
+        """
+        if self.kind != "thinking" or not self.complete:
+            return False
+        if self.carrier is None:
+            return bool(self.text and self.signature)
+        return bool(
+            self.text
+            or self.carrier.get("data")
+            or self.carrier.get("encrypted_content")
+        )
+
+
+@dataclass(slots=True)
 class LLMCallContext:
     """单次 chat 尝试独占的流式输出与调用方状态。"""
 
@@ -86,9 +136,9 @@ class LLMCallContext:
     response_displayed: bool = False
     thinking_displayed: bool = False
     tool_fragment_state: str = "none"
-    response_parts: list[str] = field(default_factory=list)
-    thinking_parts: list[str] = field(default_factory=list)
+    parts: list[TurnPart] = field(default_factory=list)
     tool_fragments: dict[int, dict[str, str]] = field(default_factory=dict)
+    _part_anchors: dict[str, TurnPart] = field(default_factory=dict, repr=False)
 
     @property
     def partial_output(self) -> str:
@@ -97,7 +147,7 @@ class LLMCallContext:
         Returns:
             按到达顺序拼接的正文。
         """
-        return "".join(self.response_parts)
+        return "".join(part.text for part in self.parts if part.kind == "content")
 
     @property
     def partial_thinking(self) -> str:
@@ -106,7 +156,7 @@ class LLMCallContext:
         Returns:
             按到达顺序拼接的思考文本。
         """
-        return "".join(self.thinking_parts)
+        return "".join(part.text for part in self.parts if part.kind == "thinking")
 
     @property
     def has_partial_data(self) -> bool:
@@ -115,39 +165,145 @@ class LLMCallContext:
         Returns:
             已收到正文、思考或工具片段时为 True。
         """
-        return bool(
-            self.response_parts
-            or self.thinking_parts
-            or self.tool_fragment_state != "none"
-        )
+        return bool(self.parts or self.tool_fragment_state != "none")
 
-    def record_response_delta(self, content: str) -> None:
+    @property
+    def completed_parts(self) -> tuple[TurnPart, ...]:
+        """返回已收到 provider 结束标记的部件（保持到达顺序）。
+
+        Returns:
+            仅含完整部件的元组。
+        """
+        return tuple(part for part in self.parts if part.complete)
+
+    def part_at(self, anchor: str | None) -> TurnPart | None:
+        """返回 provider 锚点对应的部件。
+
+        Args:
+            anchor: provider 块或输出项的稳定锚点；为 None 时返回 None。
+
+        Returns:
+            对应部件；该锚点尚未记录部件时为 None。
+        """
+        if anchor is None:
+            return None
+        return self._part_anchors.get(anchor)
+
+    def adopt_part(self, kind: str, anchor: str | None) -> TurnPart:
+        """返回锚点对应的部件，必要时收养末尾同类未完成部件。
+
+        provider 的增量事件可能不带 ``output_index`` 之类的标识，此时增量落在末尾
+        的匿名部件上；结束事件仍带标识，收养可避免同一内容被登记成两个部件。
+
+        Args:
+            kind: 部件类别。
+            anchor: provider 锚点；为 None 时等同于 ``open_part``。
+
+        Returns:
+            锚点部件、被收养的末尾部件或新建部件。
+        """
+        if anchor is None:
+            return self.open_part(kind, None)
+        part = self._part_anchors.get(anchor)
+        if part is not None:
+            return part
+        tail = self.parts[-1] if self.parts else None
+        if (
+            tail is not None
+            and tail.kind == kind
+            and not tail.complete
+            and tail not in self._part_anchors.values()
+        ):
+            self._part_anchors[anchor] = tail
+            return tail
+        return self.open_part(kind, anchor)
+
+    def open_part(self, kind: str, anchor: str | None = None) -> TurnPart:
+        """开启或复用部件。
+
+        Args:
+            kind: 部件类别。
+            anchor: provider 锚点；为 None 时把同类未完成部件并入上一个部件。
+
+        Returns:
+            新部件或可继续追加的同锚点/同类部件。
+        """
+        if anchor is not None:
+            part = self._part_anchors.get(anchor)
+            if part is None:
+                part = TurnPart(kind=kind)
+                self.parts.append(part)
+                self._part_anchors[anchor] = part
+            return part
+        if self.parts and self.parts[-1].kind == kind and not self.parts[-1].complete:
+            return self.parts[-1]
+        part = TurnPart(kind=kind)
+        self.parts.append(part)
+        return part
+
+    def record_response_delta(self, content: str, *, anchor: str | None = None) -> None:
         """记录当前尝试的正文增量。
 
         Args:
             content: 新收到的正文片段。
+            anchor: provider 块或输出项锚点；无锚点时并入同类未完成部件。
 
         Returns:
             None。
         """
         if not content:
             return
-        self.response_parts.append(content)
+        self.open_part("content", anchor).text += content
         self.response_displayed = True
 
-    def record_thinking_delta(self, content: str) -> None:
+    def record_thinking_delta(self, content: str, *, anchor: str | None = None) -> None:
         """记录当前尝试的思考增量。
 
         Args:
             content: 新收到的思考片段。
+            anchor: provider 块或输出项锚点；无锚点时并入同类未完成部件。
 
         Returns:
             None。
         """
         if not content:
             return
-        self.thinking_parts.append(content)
+        self.open_part("thinking", anchor).text += content
         self.thinking_displayed = True
+
+    def record_thinking_signature(self, signature: str, *, anchor: str | None = None) -> None:
+        """记录 Anthropic thinking 块签名。
+
+        Args:
+            signature: 增量携带的块签名。
+            anchor: 块锚点；无锚点时写入最后一个思考部件。
+
+        Returns:
+            None。
+        """
+        if not signature:
+            return
+        part = self._part_anchors.get(anchor) if anchor is not None else None
+        if part is None:
+            part = self.open_part("thinking", anchor)
+        part.signature = signature
+
+    def complete_part(self, anchor: str, *, carrier: dict[str, Any] | None = None) -> None:
+        """按 provider 结束标记把锚点对应的部件标记为完整。
+
+        Args:
+            anchor: provider 块或输出项锚点。
+            carrier: 该部件的 provider 原始载体；为 None 时保留已有载体。
+
+        Returns:
+            None。
+        """
+        part = self._part_anchors.get(anchor)
+        if part is None:
+            return
+        if carrier is not None:
+            part.carrier = carrier
+        part.complete = True
 
     def record_tool_fragment(
         self,
@@ -178,6 +334,13 @@ class LLMCallContext:
             fragment["id"] = call_id
         fragment["name"] += name
         fragment["arguments"] += arguments
+        part = self.open_part("tool_call", f"call:{index}")
+        if call_id:
+            part.call_id = call_id
+        part.name += name
+        part.text += arguments
+        if complete:
+            part.complete = True
         self.tool_fragment_state = "complete" if complete else "partial"
 
     def mark_tool_fragments_complete(self) -> None:
@@ -188,12 +351,48 @@ class LLMCallContext:
         """
         if self.tool_fragments:
             self.tool_fragment_state = "complete"
+            for index in self.tool_fragments:
+                part = self._part_anchors.get(f"call:{index}")
+                if part is not None:
+                    part.complete = True
 
 
 _ACTIVE_LLM_CALL: ContextVar[LLMCallContext | None] = ContextVar(
     "active_llm_call",
     default=None,
 )
+
+_INTERRUPTED_LLM_CALL: ContextVar[LLMCallContext | None] = ContextVar(
+    "interrupted_llm_call",
+    default=None,
+)
+
+
+def plan_interrupted_history(
+    parts: Sequence[TurnPart],
+) -> tuple[TurnPart, ...]:
+    """选出被中断尝试中可安全回放进模型上下文的部件。
+
+    只有 provider 明确给出结束标记的部件才可能入选；正文与工具调用按到达顺序
+    保留，推理载体则要求 ``replayable_reasoning`` 为真（有 provider 原始载体，
+    或 Anthropic thinking 块同时具备明文与签名），不区分是否伴随完整工具调用。
+
+    Args:
+        parts: 被中断尝试记录的部件。
+
+    Returns:
+        按到达顺序排列的可保留部件；没有可保留部件时为空元组。
+    """
+    return tuple(
+        part
+        for part in parts
+        if part.complete
+        and (
+            (part.kind == "content" and part.text)
+            or (part.kind == "tool_call" and part.call_id)
+            or part.replayable_reasoning
+        )
+    )
 
 class TruncationKind(str, Enum):
     """finish_reason == "length" 时响应被截断所处阶段的分类。"""
@@ -269,12 +468,12 @@ def classify_truncation(
         return TruncationKind.TOOL_CALL.value
     has_content = bool(
         (response.content or "").strip()
-        or (call is not None and call.response_parts)
+        or (call is not None and call.partial_output)
     )
     if has_content:
         return TruncationKind.CONTENT.value
     has_thinking = _has_reasoning_carrier(assistant_message) or bool(
-        call is not None and call.thinking_parts
+        call is not None and call.partial_thinking
     )
     if has_thinking:
         return TruncationKind.THINKING.value
@@ -469,6 +668,66 @@ class LLMProvider(ABC):
             非协议续接 provider 固定返回 0。
         """
         return 0
+
+    def take_interrupted_call(self) -> LLMCallContext | None:
+        """取出并清空最近一次在流式调用内部被取消的尝试上下文。
+
+        只在调用被取消（Ctrl+C 或任务取消）时登记，成功返回或普通失败的尝试都
+        不会留下记录；取出后立即清空，保证中断收尾重复调用时幂等。
+
+        Returns:
+            被取消的尝试上下文；取消发生在 LLM 调用之外时为 None。
+        """
+        call = _INTERRUPTED_LLM_CALL.get()
+        _INTERRUPTED_LLM_CALL.set(None)
+        return call
+
+    def interrupted_assistant_message(self, call: LLMCallContext) -> dict | None:
+        """把被取消尝试中可安全回放的部件组装成助手消息。
+
+        只使用带 provider 结束标记的完整部件；没有可保留部件时返回 None，调用方
+        据此丢弃本次调用尚未产出内容的模型输出，用户输入保留。
+
+        Args:
+            call: 在流式调用内部被取消的尝试上下文。
+
+        Returns:
+            助手消息；没有可安全回放的内容时为 None。
+        """
+        kept = plan_interrupted_history(call.parts)
+        return self._assemble_interrupted_message(kept)
+
+    @staticmethod
+    def _assemble_interrupted_message(parts: Sequence[TurnPart]) -> dict | None:
+        """按通用 Chat Completions 结构组装被中断尝试的助手消息。
+
+        Args:
+            parts: 已确认可保留的部件，保持到达顺序。
+
+        Returns:
+            助手消息；parts 为空时返回 None。
+        """
+        if not parts:
+            return None
+        content = "".join(part.text for part in parts if part.kind == "content")
+        reasoning = "".join(part.text for part in parts if part.kind == "thinking")
+        message: dict[str, Any] = {
+            "role": "assistant",
+            "content": content or None,
+        }
+        if reasoning:
+            message["reasoning_content"] = reasoning
+        tool_parts = [part for part in parts if part.kind == "tool_call"]
+        if tool_parts:
+            message["tool_calls"] = [
+                {
+                    "id": part.call_id,
+                    "type": "function",
+                    "function": {"name": part.name, "arguments": part.text},
+                }
+                for part in tool_parts
+            ]
+        return message
 
     async def native_web_search(
         self,
@@ -948,6 +1207,8 @@ class LLMProvider(ABC):
         )
         async with self._semaphore:
             for attempt in range(1, effective_max_attempts + 1):
+                # 每次尝试都清掉上一次取消的登记，避免陈旧上下文被中断收尾误用。
+                _INTERRUPTED_LLM_CALL.set(None)
                 call = LLMCallContext(
                     attempt=attempt,
                     caller_agent_type=caller_agent_type,
@@ -1000,6 +1261,9 @@ class LLMProvider(ABC):
                     )
                     return response
                 except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
+                    # 取消发生在流式调用内部时登记该尝试，供 Agent 收束本轮上下文；
+                    # 登记留在当前任务上下文中，取消异常向上传播后仍可读取。
+                    _INTERRUPTED_LLM_CALL.set(call)
                     await self._emit_llm_call_completed(
                         started_at=started_at,
                         usage={},
@@ -1102,6 +1366,7 @@ class LLMProvider(ABC):
         caller_uuid: str | None = None,
         *,
         call: LLMCallContext | None = None,
+        anchor: str | None = None,
     ) -> None:
         """记录并发出正文流增量。
 
@@ -1110,13 +1375,14 @@ class LLMProvider(ABC):
             caller_agent_type: 兼容调用方 agent 类型；call 存在时忽略。
             caller_uuid: 兼容调用方实例 UUID；call 存在时忽略。
             call: 当前独立调用尝试上下文。
+            anchor: provider 块或输出项锚点；无锚点时并入同类未完成部件。
 
         Returns:
             None。
         """
         call = call or _ACTIVE_LLM_CALL.get()
         if call is not None:
-            call.record_response_delta(content)
+            call.record_response_delta(content, anchor=anchor)
             caller_agent_type = call.caller_agent_type
             caller_uuid = call.caller_uuid
         await emit_telemetry_safely(self.event_bus, ResponseDelta(
@@ -1135,6 +1401,7 @@ class LLMProvider(ABC):
         caller_uuid: str | None = None,
         *,
         call: LLMCallContext | None = None,
+        anchor: str | None = None,
     ) -> None:
         """记录并发出思考流增量。
 
@@ -1143,13 +1410,14 @@ class LLMProvider(ABC):
             caller_agent_type: 兼容调用方 agent 类型；call 存在时忽略。
             caller_uuid: 兼容调用方实例 UUID；call 存在时忽略。
             call: 当前独立调用尝试上下文。
+            anchor: provider 块或输出项锚点；无锚点时并入同类未完成部件。
 
         Returns:
             None。
         """
         call = call or _ACTIVE_LLM_CALL.get()
         if call is not None:
-            call.record_thinking_delta(content)
+            call.record_thinking_delta(content, anchor=anchor)
             caller_agent_type = call.caller_agent_type
             caller_uuid = call.caller_uuid
         await emit_telemetry_safely(self.event_bus, ThinkingDelta(

@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import json
 
-from src.common.session_log import build_batch, content_id, fold_log, iter_batch_lines
+from src.common.session_log import (
+    build_batch,
+    content_id,
+    fold_log,
+    iter_batch_lines,
+    text_digest,
+)
 from src.common.session_state import SessionState, ViewPayload
 from src.mgr.session_mgr import SessionMgr
 
@@ -393,6 +399,56 @@ def test_chunk_arriving_during_write_lands_in_the_log(tmp_path) -> None:
     assert restored.records[0].view.data["content"] == "第一批追加"
 
 
+def test_stream_base_mismatch_keeps_body_and_requests_full_snapshot(tmp_path) -> None:
+    """写侧基线对不上时保留正文并登记整份重写，已展示内容不会在磁盘上被截断。"""
+    manager = SessionMgr(tmp_path, tmp_path)
+    state = SessionState()
+    state.record_view(
+        ViewPayload("assistant", {"content": "首段"}),
+        kind="assistant",
+        correlation_id="call-1",
+        merge=True,
+    )
+    manager.append_state("session", state)
+    state.record_view(
+        ViewPayload("assistant", {"content": "追加正文"}),
+        kind="assistant",
+        correlation_id="call-1",
+        merge=True,
+    )
+    commit = state.prepare_commit()
+    assert commit is not None
+    delta = commit.payload["record_deltas"][0]
+    delta["stream_boundaries"]["content"]["base"] = text_digest("错位基线")
+
+    record_id = state.records[0].id
+    assert manager.append_batch("session", commit.payload, commit.resync) is True
+
+    assert commit.resync == {record_id}
+    log_path = tmp_path / "sessions" / "session.jsonl"
+    appends = [
+        item["view"]["append"]["content"]
+        for line in _log_lines(log_path)
+        for item in line.get("record_deltas") or []
+    ]
+    assert "追加正文" in "".join(appends)
+
+    # 无法对位的正文按整份快照重写，磁盘与内存收敛到同一份完整文本。
+    state.ack_commit(commit)
+    assert manager.append_state("session", state)
+    lines = _log_lines(log_path)
+    snapshots = [record for line in lines for record in line.get("records") or []]
+    assert snapshots[-1]["id"] == record_id
+    assert snapshots[-1]["view"]["data"]["content"] == "首段追加正文"
+    restored = manager.load_state("session")
+    assert restored is not None
+    assert restored.records[0].view.data["content"] == "首段追加正文"
+
+    # 同一份增量重复提交仍然是零写入。
+    assert manager.append_batch("session", commit.payload) is True
+    assert len(_log_lines(log_path)) == len(lines)
+
+
 def test_view_key_removal_falls_back_to_full_snapshot(tmp_path) -> None:
     """视图被整份替换、键集合收缩时回退整份快照，避免旧键留在磁盘上。"""
     manager = SessionMgr(tmp_path, tmp_path)
@@ -433,3 +489,59 @@ def test_unchanged_context_rewrite_writes_nothing(tmp_path) -> None:
     manager.append_state("session", state)
 
     assert log_path.read_text(encoding="utf-8") == before
+
+class _RewritingGuard:
+    """模拟入口脱敏漏网的测试保护器：落盘前把密钥改写成占位符。"""
+
+    def redact(self, value: object) -> object:
+        """递归改写载荷中的敏感正文。"""
+        if isinstance(value, str):
+            return value.replace("sk-leak", "[REDACTED]")
+        if isinstance(value, list):
+            return [self.redact(item) for item in value]
+        if isinstance(value, dict):
+            return {key: self.redact(item) for key, item in value.items()}
+        return value
+
+
+def test_write_side_leak_keeps_redacted_snapshot_and_resyncs_record(tmp_path) -> None:
+    """写侧发现漏网敏感文本：整份快照按脱敏结果写入，错位增量丢弃并登记重写。"""
+    state = SessionState()
+    state.record_view(
+        ViewPayload("assistant", {"content": "首段"}),
+        kind="assistant",
+        correlation_id="call-1",
+        merge=True,
+    )
+    clean_manager = SessionMgr(tmp_path, tmp_path)
+    clean_manager.append_state("session", state)
+
+    state.record_view(
+        ViewPayload("assistant", {"content": "泄漏 sk-leak 的正文"}),
+        kind="assistant",
+        correlation_id="call-1",
+        merge=True,
+    )
+    commit = state.prepare_commit()
+    assert commit is not None
+    assert commit.payload["record_deltas"]
+
+    manager = SessionMgr(tmp_path, tmp_path, data_guard=_RewritingGuard())
+    assert manager.append_batch("session", commit.payload, commit.resync) is True
+
+    record_id = state.records[0].id
+    assert commit.resync == {record_id}
+    log_path = tmp_path / "sessions" / "session.jsonl"
+    text = log_path.read_text(encoding="utf-8")
+    assert "sk-leak" not in text
+    lines = _log_lines(log_path)
+    deltas = [delta for line in lines for delta in line.get("record_deltas") or []]
+    assert all(delta.get("id") != record_id for delta in deltas)
+
+    # 下一轮按整份快照收敛：ack 后重新提交，磁盘与内存都只有脱敏文本。
+    state.ack_commit(commit)
+    assert manager.append_state("session", state)
+    restored = manager.load_state("session")
+    assert restored is not None
+    assert restored.records[0].view.data["content"] == "首段泄漏 [REDACTED] 的正文"
+    assert "sk-leak" not in log_path.read_text(encoding="utf-8")

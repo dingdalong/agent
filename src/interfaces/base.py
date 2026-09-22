@@ -109,6 +109,16 @@ class UserInterface(ABC):
             None.
         """
 
+    async def finish_interrupted_turn(self) -> None:
+        """中断收尾：先把本轮已产生的转录内容落定，再重置轮次状态。
+
+        默认无操作；具体前端覆盖实现。轮次被取消时，正在运行的工具行等
+        临时展示内容必须在此处落定，不能被随后的状态重置丢弃。
+
+        Returns:
+            None.
+        """
+
     @asynccontextmanager
     async def reset_session_interactions(self) -> AsyncIterator[None]:
         """Reject new UI requests while cancelling and draining old interactions.
@@ -244,7 +254,7 @@ class UserInterface(ABC):
         ...
 
     @abstractmethod
-    async def _read_input(self, prompt: str, default: str = "", markdown: bool = False) -> str:
+    async def _read_input(self, prompt: str, markdown: bool = False) -> str:
         """读取用户输入（markdown 为真时上文提示按 Markdown 渲染）。"""
         ...
 
@@ -407,15 +417,13 @@ class UserInterface(ABC):
             Raw normalized result expected by the EventBus caller.
         """
         match request:
-            case InputMenu(prompt=prompt, default=default, markdown=markdown):
+            case InputMenu(prompt=prompt, markdown=markdown):
                 next_prompt = prompt
-                next_default = default
 
                 async def read_input() -> str:
-                    nonlocal next_prompt, next_default
-                    answer = await self._read_input(next_prompt, next_default, markdown)
+                    nonlocal next_prompt
+                    answer = await self._read_input(next_prompt, markdown)
                     next_prompt = ""
-                    next_default = ""
                     return answer
 
                 return await self._read_nonempty_answer(read_input)
