@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from src.llm.anthropic import AnthropicProvider
 from src.llm.message_view import (
-    demote_carrier,
     has_carrier,
     materialize_assistant,
     materialize_messages,
@@ -78,36 +77,3 @@ def test_normalize_drops_carrier_with_unpaired_tool_calls() -> None:
     # 无 tool 响应的工具调用组非法：丢弃工具调用，但保留可见正文。
     assert normalized == [{"role": "assistant", "content": "答案"}]
 
-
-def test_demote_carrier_keeps_message_when_reasoning_is_cleared() -> None:
-    message = {
-        "role": "assistant",
-        "_anthropic_content": [{"type": "thinking", "thinking": "只想不说"}],
-    }
-
-    demote_carrier(message)
-
-    assert message == {"role": "assistant", "reasoning_content": "只想不说"}
-    assert not has_carrier(message)
-
-
-def test_clear_reasoning_keeps_text_only_carrier_intact() -> None:
-    provider = object.__new__(AnthropicProvider)
-    messages = [dict(ANTHROPIC_CARRIER, content="答案", reasoning_content="先想一想")]
-
-    provider.clear_reasoning_content(messages)
-
-    blocks = messages[0]["_anthropic_content"]
-    assert [block["type"] for block in blocks] == ["text", "tool_use"]
-    assert "reasoning_content" not in messages[0]
-
-
-def test_clear_reasoning_demotes_thinking_only_message() -> None:
-    provider = object.__new__(AnthropicProvider)
-    messages = [{"role": "assistant", "_anthropic_content": [
-        {"type": "thinking", "thinking": "只想不说"},
-    ]}]
-
-    provider.clear_reasoning_content(messages)
-
-    assert messages[0] == {"role": "assistant", "reasoning_content": "只想不说"}

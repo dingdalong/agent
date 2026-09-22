@@ -218,18 +218,6 @@ class ScriptedProvider(LLMProvider):
             raise outcome
         return outcome
 
-    def clear_reasoning_content(self, message: object) -> None:
-        """满足 provider 接口且不修改消息。
-
-        Args:
-            message: 待处理消息。
-
-        Returns:
-            None。
-        """
-        del message
-
-
 class RecordingUI:
     """只保存路由转发事件的轻量 UI。"""
 

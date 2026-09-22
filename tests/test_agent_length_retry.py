@@ -29,17 +29,6 @@ class IdentityNormalizer:
         """
         return list(messages)
 
-    def clear_reasoning_content(self, messages: object) -> None:
-        """本桩不建模思考载体，裁剪保持历史不变。
-
-        Args:
-            messages: 本轮新增历史消息。
-
-        Returns:
-            None。
-        """
-        del messages
-
     def next_lower_effort(self, current: str) -> str | None:
         """返回比当前档位更低的推理力度档位。
 
@@ -286,7 +275,6 @@ def test_nonempty_text_at_recovery_limit_keeps_prior_history_and_current_user() 
     messages = [*prior_history, current_user]
     ctx = RunContext(
         messages=messages,
-        round_start_idx=len(prior_history),
         response=LLMResponse(
             content="仍未完成的终态正文",
             finish_reason="length",
@@ -315,7 +303,6 @@ def test_recovery_limit_removes_all_previous_continuation_scaffolding() -> None:
     messages = [*prior_history, current_user]
     ctx = RunContext(
         messages=messages,
-        round_start_idx=len(prior_history),
         response=LLMResponse(
             content="第一段截断正文",
             finish_reason="length",
@@ -357,7 +344,6 @@ def test_recovery_limit_uses_checkpoint_after_compact_rewrites_history() -> None
     ]
     ctx = RunContext(
         messages=compacted_messages,
-        round_start_idx=100,
         response=LLMResponse(
             content="压缩后第一段截断正文",
             finish_reason="length",

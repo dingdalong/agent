@@ -46,10 +46,8 @@ class MoonshotProvider(LLMProvider):
             default_headers=self._ua_headers(self.user_agent),
         )
 
-    # 有意不覆写基类的 clear_reasoning_content（无操作）：
-    # K3 的 Preserved Thinking 恒开，要求跨轮保留历史 reasoning_content。
-    # agent 在轮末调用 clear_reasoning_content 时保持无操作，reasoning_content
-    # 便持续留在 history 并随每轮回传，精准匹配 K3 语义。切勿改成 DeepSeek 式剥离。
+    # K3 的 Preserved Thinking 恒开，要求跨轮保留历史 reasoning_content；
+    # 框架统一保留并回传思考载体，这里无需任何裁剪。
 
     def estimate_tokens(
         self,

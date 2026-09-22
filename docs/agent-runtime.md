@@ -29,7 +29,7 @@ SessionState.llm_calls
 
 展示投影（`records[].view`）不与模型上下文共享对象：它是「用户看到过什么」的独立事实，包含流式增量、被截断或被中断的尝试正文、重试与错误行，这些内容在模型消息里可能并不存在。同一段正文同时出现在两个投影时，日志层的内容池会把它们折叠成一条引用，因此磁盘上仍只有一份。
 
-provider 会在 `clear_reasoning_content()` 里就地裁剪共享消息（清掉无工具轮次的思考载体）。这类修改不经过 `SessionState` 的写入 API，因此 `Agent` 在裁剪后调用 `SessionState.mark_context_dirty()` 标记对应记录，避免磁盘保留已清除的思考正文。无工具响应在 `_on_process_response` 提交前就完成裁剪（`_finish_round_reasoning`），同一 assistant 记录只以最终形态落盘一次；工具轮保留思考以维持 provider 的工具续接协议，轮末裁剪是同内容的幂等兜底。
+provider 不再就地裁剪共享历史：思考载体一律保留并随每轮回传（DeepSeek 只在请求带 tools 时要求回传，而框架恒带完整工具目录；Anthropic 官方同样建议跨轮原样回传），因此没有「先带思考落盘、裁剪后再写第二份」的问题，assistant 记录一次提交即为最终形态。
 
 ## 2. 状态枚举与流转
 
@@ -89,7 +89,7 @@ LLM_CALL → PROCESS_RESPONSE ──length────→ LENGTH_RETRY ──可
 | 字段组 | 字段 |
 |---|---|
 | 消息与输出 | `messages`、`prompt`、`final_text`、`response` |
-| 轮次定位 | `round_start_idx`（本轮消息起始下标）、`llm_call_start_idx`（本次调用开始前的历史下标；中断回滚点，用户输入保留）、`llm_call_context_start`（本次调用开始前的上下文记录数）、`llm_call_count`（本轮已发起的调用次数）、`user_message_index`（本轮 user 消息下标）、`interrupt_finalized`（中断收尾幂等守卫） |
+| 轮次定位 | `llm_call_start_idx`（本次调用开始前的历史下标；中断回滚点，用户输入保留）、`llm_call_context_start`（本次调用开始前的上下文记录数）、`llm_call_count`（本轮已发起的调用次数）、`user_message_index`（本轮 user 消息下标）、`interrupt_finalized`（中断收尾幂等守卫） |
 | 轮次与工具 | `has_tool_calls` |
 | 自动压缩 | `compact_streak`、`max_compact_streak=3`、压缩前 token、摘要消息数、摘要是否非空 |
 | 响应恢复 | `length_recoveries`、`max_length_recoveries=3`、`response_recovery_start_idx`、`response_recovery_response_count`、`pause_turn_message_idx`、`pause_turn_continuations`、`length_effort_override`（思考截断重生成时的临时降档 effort）、`pending_framework_instructions`（下一次 chat 前合并为 developer，发送后清空） |
@@ -156,7 +156,7 @@ handler 映射在 `Agent.__post_init__` 建立（`src/agent/agent.py:212-245`）
 
 ## 6. 响应恢复链
 
-`length` 与 Anthropic `pause_turn` 共用 `response_recovery_start_idx`，checkpoint 在第一份待恢复响应写入历史前建立，不依赖可能被 compact 改写的 `round_start_idx`。`response_recovery_response_count` 只统计当前链成功返回的恢复响应，供合成的 `LLMCallFailed.attempts` 使用；provider 请求内部的网络重试仍由 `LLMProvider.chat()` 独立计数（`src/agent/states.py:79-113`、`src/agent/agent.py:872-989`）。
+`length` 与 Anthropic `pause_turn` 共用 `response_recovery_start_idx`，checkpoint 在第一份待恢复响应写入历史前建立。`response_recovery_response_count` 只统计当前链成功返回的恢复响应，供合成的 `LLMCallFailed.attempts` 使用；provider 请求内部的网络重试仍由 `LLMProvider.chat()` 独立计数（`src/agent/states.py:79-113`、`src/agent/agent.py:872-989`）。
 
 ### `length`
 

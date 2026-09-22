@@ -55,7 +55,6 @@ class RunContext:
         prompt: 当前完整系统提示词。
         final_text: 本轮最终输出文本。
         has_tool_calls: 本轮是否执行过工具调用。
-        round_start_idx: 本轮消息在历史中的起始下标。
         llm_call_start_idx: 当前 LLM 调用开始前的历史下标；中断回滚只丢弃本次调用
             新增的临时消息，用户输入与已完成轮次都保留。
         llm_call_context_start: 当前 LLM 调用开始前的会话上下文记录数。
@@ -94,7 +93,6 @@ class RunContext:
     prompt: list[dict] | None = None
     final_text: str = ""
     has_tool_calls: bool = False
-    round_start_idx: int = 0
     llm_call_start_idx: int = 0
     llm_call_context_start: int = 0
     llm_call_count: int = 0

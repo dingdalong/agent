@@ -26,6 +26,11 @@ def _log_lines(path) -> list[dict]:
     ]
 
 
+def _mark_records_dirty(state: SessionState) -> None:
+    """把上下文记录标记为待重提交，用于验证日志按内容去重。"""
+    state._dirty_records.update(state.context_ids)
+
+
 def test_same_long_text_is_stored_once_across_batches(tmp_path) -> None:
     manager = SessionMgr(tmp_path, tmp_path)
     state = SessionState()
@@ -195,7 +200,7 @@ def test_log_skips_records_identical_to_the_last_written_copy(tmp_path) -> None:
     log_path = tmp_path / "sessions" / "session.jsonl"
     before = _log_lines(log_path)
 
-    state.mark_context_dirty()
+    _mark_records_dirty(state)
     manager.append_state("session", state)
 
     assert _log_lines(log_path) == before
@@ -225,7 +230,7 @@ def test_written_projection_keeps_only_content_digests(tmp_path) -> None:
     reopened = SessionMgr(tmp_path, tmp_path)
     resumed = reopened.load_state("session")
     assert resumed is not None
-    resumed.mark_context_dirty()
+    _mark_records_dirty(resumed)
     reopened.append_state("session", resumed)
 
     assert _log_lines(log_path) == before
@@ -254,13 +259,13 @@ def test_log_keeps_writing_real_changes_after_skipping(tmp_path) -> None:
     record_id = state.append_context({"role": "assistant", "content": LONG_TEXT})
     manager.append_state("session", state)
 
-    state.mark_context_dirty()
+    _mark_records_dirty(state)
     manager.append_state("session", state)
 
     record = next(item for item in state.records if item.id == record_id)
     assert record.model_message is not None
     record.model_message["content"] = LONG_TEXT + "补充"
-    state.mark_context_dirty()
+    _mark_records_dirty(state)
     manager.append_state("session", state)
 
     restored = manager.load_state("session")
@@ -485,7 +490,7 @@ def test_unchanged_context_rewrite_writes_nothing(tmp_path) -> None:
     log_path = tmp_path / "sessions" / "session.jsonl"
     before = log_path.read_text(encoding="utf-8")
 
-    state.mark_context_dirty()
+    _mark_records_dirty(state)
     manager.append_state("session", state)
 
     assert log_path.read_text(encoding="utf-8") == before

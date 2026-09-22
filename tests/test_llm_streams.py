@@ -1557,6 +1557,42 @@ def test_anthropic_request_uses_128k_output_limit() -> None:
     assert messages.requests[0]["max_tokens"] == 128_000
 
 
+@pytest.mark.parametrize("enable_thinking", [True, False])
+def test_anthropic_replays_thinking_blocks_of_tool_free_turns(
+    enable_thinking: bool,
+) -> None:
+    """无工具轮次的 thinking 块原样回传，关闭思考的请求同样不过滤历史。"""
+    messages = FakeAnthropicMessages(
+        FakeAnthropicStream(
+            [_anthropic_message_stop()],
+            final_message=_anthropic_message("end_turn"),
+        )
+    )
+    provider = _bare_provider(AnthropicProvider)
+    provider.reasoning_effort = "high"
+    provider._client = SimpleNamespace(messages=messages)
+    carrier = [
+        {"type": "thinking", "thinking": "先想一想", "signature": "sig"},
+        {"type": "text", "text": "答案"},
+    ]
+    history = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "_anthropic_content": carrier},
+        {"role": "user", "content": "next"},
+    ]
+
+    asyncio.run(
+        provider._do_chat(history, enable_thinking=enable_thinking, call=_call())
+    )
+
+    request = messages.requests[0]
+    assert request["thinking"] == (
+        {"type": "adaptive"} if enable_thinking else {"type": "disabled"}
+    )
+    assert request["messages"][1] == {"role": "assistant", "content": carrier}
+    assert history[1]["_anthropic_content"] is carrier
+
+
 @pytest.mark.parametrize(
     "provider_type",
     [OpenAIProvider, DeepSeekProvider, OllamaProvider, MoonshotProvider],

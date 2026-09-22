@@ -191,9 +191,9 @@ Chat Completions 风格的通用校验（`base.py:179-283`）要求：
 
 assistant 的 provider 专属字段在判断“真正为空”之前由 `_normalize_assistant_extra()` 保存。因此 OpenAI 与 DeepSeek 的 `_response_output`、Anthropic `_anthropic_content`，以及 Ollama、Moonshot 的 reasoning-only carrier 即使正文为空也会保留；没有正文、工具调用或任何专属载体的空 assistant 才会删除。
 
-**载体唯一权威**：provider 归一化后的 assistant 消息只保留一个权威载体——Responses API 是 `_response_output`，Anthropic 是 `_anthropic_content`，Moonshot/Ollama 直接保留 `content`/`tool_calls`/`reasoning_content`。带载体的消息不再同时存 `content`、`tool_calls` 或 `reasoning_content`：这些是载体的派生物，同时落库等于同一段正文在上下文里存两份，且两份会各自漂移（`clear_reasoning_content` 只改载体、展示只读派生物）。
+**载体唯一权威**：provider 归一化后的 assistant 消息只保留一个权威载体——Responses API 是 `_response_output`，Anthropic 是 `_anthropic_content`，Moonshot/Ollama 直接保留 `content`/`tool_calls`/`reasoning_content`。带载体的消息不再同时存 `content`、`tool_calls` 或 `reasoning_content`：这些是载体的派生物，同时落库等于同一段正文在上下文里存两份，展示只读派生物。载体全程保留并随每轮回传，框架不做任何就地裁剪。
 
-需要派生字段的调用方通过 `src/llm/message_view.py` 按需重建：`materialize_messages()` 用于序列化与展示，`materialize_assistant()` 用于单条消息，`has_carrier()` 判断消息是否带载体。`normalize_messages()` 自身也用具体化视图校验工具往返序列，并在请求副本里剥掉载体消息上残留的派生字段；provider 在 `clear_reasoning_content` 裁空载体时调用 `demote_carrier()` 把派生字段降级写回，避免整条消息被当成空消息丢弃。Ollama、Moonshot 在构造请求时同样先具体化，防止自定义 messages 载荷把载体直接发给不认识它的服务端。
+需要派生字段的调用方通过 `src/llm/message_view.py` 按需重建：`materialize_messages()` 用于序列化与展示，`materialize_assistant()` 用于单条消息，`has_carrier()` 判断消息是否带载体。`normalize_messages()` 自身也用具体化视图校验工具往返序列，并在请求副本里剥掉载体消息上残留的派生字段。Ollama、Moonshot 在构造请求时同样先具体化，防止自定义 messages 载荷把载体直接发给不认识它的服务端。
 
 **跨 provider 切换**：会话可以在中途换模型，历史里的载体只有原 provider 认识。每个 provider 用 `_CARRIER_KEY` 声明自己认识的载体（OpenAI/DeepSeek 为 `_response_output`，Anthropic 为 `_anthropic_content`，Chat Completions 类为 `None`）；`normalize_messages()` 遇到其他 provider 的载体时先具体化成 `content`/`tool_calls`/`reasoning_content` 再归一化，本 provider 的载体则保持「载体唯一权威」。没有这条规则，切换 provider 后 `normalize_messages()` 的输出会替换掉共享历史，原载体既发不出去、派生字段又已被剥离，正文与工具往返就永久丢失。
 
@@ -215,9 +215,9 @@ assistant 的 provider 专属字段在判断“真正为空”之前由 `_normal
 
 实现要点：
 
-- Anthropic 的固定 prompt 留在 Messages API `system`，历史 developer 在原位置映射为由集中标签注册表渲染的 `<framework_instruction>` user 内容；历史 `_anthropic_content` 使用深拷贝原样往返。工具目录末尾、固定 system 和最新消息设置缓存断点；消息断点只写入 SDK 明确允许 `cache_control` 的 block 类型。消息与标签职责见 [prompting.md](prompting.md)。
+- Anthropic 的固定 prompt 留在 Messages API `system`，历史 developer 在原位置映射为由集中标签注册表渲染的 `<framework_instruction>` user 内容；历史 `_anthropic_content` 使用深拷贝原样往返，`thinking`/`redacted_thinking` 块跨轮保留（官方建议跨轮原样回传：keep-all 模型计入上下文并按输入计费，仅保留末轮的模型由 API 自动 strip）。工具目录末尾、固定 system 和最新消息设置缓存断点；消息断点只写入 SDK 明确允许 `cache_control` 的 block 类型。消息与标签职责见 [prompting.md](prompting.md)。
 - OpenAI 把固定 prompt 合并为 Responses API 首条 developer input，历史 developer 保持原位置；`prompt_cache_key` 使用模型与 agent 类型构造稳定键；历史用 `_response_output` 原样往返（检索 `_convert_to_input`）。
-- DeepSeek 把固定 prompt 合并到 `instructions`，历史 developer 保持在 `input` 原位置，并把完整的 user/assistant/function call/function output 历史作为 `input` 发送；不使用 `previous_response_id` 或 conversation 状态。开启思考时下发 `reasoning.effort`，关闭时省略 `reasoning`。最终 `output` 通过 `_response_output` 原样往返，因而 reasoning、服务端工具和未来新增 item 都可跨轮保留；框架当前注册的 function schema 与指定工具选择会转换成 Responses 格式（检索 `_convert_to_input`、`convert_function_tools`、`convert_tool_choice`）。
+- DeepSeek 把固定 prompt 合并到 `instructions`，历史 developer 保持在 `input` 原位置，并把完整的 user/assistant/function call/function output 历史作为 `input` 发送；不使用 `previous_response_id` 或 conversation 状态。开启思考时下发 `reasoning.effort`，关闭时省略 `reasoning`。最终 `output` 通过 `_response_output` 原样往返，因而 reasoning、服务端工具和未来新增 item 都可跨轮保留；DeepSeek 只在请求带 tools 时要求回传思考，而 agent 调用恒带完整工具目录，故无工具轮次同样保留 reasoning 项，不做区分。框架当前注册的 function schema 与指定工具选择会转换成 Responses 格式（检索 `_convert_to_input`、`convert_function_tools`、`convert_tool_choice`）。
 - 原生 Web 调用与主对话隔离，不携带历史、系统提示词或 `previous_response_id`。OpenAI 用独立 Responses `web_search` 请求；Anthropic 用最多一次 server tool 的独立 Messages 请求并有限续接 `pause_turn`。它们复用 provider 并发、错误分类与重试，但不因认证、网络、限流、超时或协议错误转本地；只有 `NativeWebCapabilityError` 允许 `WebAccessMgr` 本地回退。DeepSeek 虽使用 Responses API，未声明 hosted Web 能力，故保持关闭。
 - Ollama 只在请求副本中把 developer 映射为 system，不改 canonical 历史；同时兼容 `reasoning` 与 `reasoning_content`，`preserve_thinking` 控制 chat template 历史思考保留。
 - Moonshot/Kimi K3 同样只在请求副本中把 developer 映射为 system；保留跨轮 `reasoning_content`，带工具调用的 assistant 即使无思考正文也补空字符串；不下发 temperature，思考力度走顶层字段。

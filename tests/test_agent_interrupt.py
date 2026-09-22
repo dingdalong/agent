@@ -120,7 +120,6 @@ def test_interrupt_finalize_records_aborted_and_not_executed_tools() -> None:
     ]
     ctx = RunContext(
         messages=agent.history,
-        round_start_idx=1,
         user_message_index=0,
         response=LLMResponse(content="", tool_calls={
             0: _call("call_slow", "slow"),
@@ -154,7 +153,7 @@ def test_interrupt_finalize_is_idempotent() -> None:
             {"id": "call_1", "name": "lookup", "arguments": "{}"},
         ]},
     ]
-    ctx = RunContext(messages=agent.history, round_start_idx=1, user_message_index=0)
+    ctx = RunContext(messages=agent.history, user_message_index=0)
 
     agent._finalize_interrupted_turn(ctx)
     finalized = [dict(message) for message in agent.history]
@@ -327,7 +326,6 @@ def _turn_context(
 ) -> RunContext:
     """构造与本轮记录对齐的运行上下文。"""
     fields: dict[str, object] = {
-        "round_start_idx": 0,
         "user_message_index": 1,
         "user_record_id": user_record_id,
         "llm_call_start_idx": len(agent.history),
@@ -663,7 +661,6 @@ def _prepare_turn(agent: Agent, state: SessionState) -> RunContext:
     )
     return RunContext(
         messages=agent.history,
-        round_start_idx=0,
         user_message_index=len(agent.history) - 1,
         user_record_id=user_record_id,
     )

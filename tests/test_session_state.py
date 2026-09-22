@@ -586,25 +586,6 @@ def test_checkpoint_interval_follows_pending_stream_size() -> None:
     assert SessionState().checkpoint_due(force=True) is False
 
 
-def test_mark_context_dirty_persists_in_place_message_edits(tmp_path) -> None:
-    """provider 就地裁剪共享消息后，重新提交才能让磁盘与内存一致。"""
-    manager = SessionMgr(tmp_path, tmp_path)
-    state = SessionState()
-    message = {"role": "assistant", "content": "答案", "reasoning_content": "想一想"}
-    state.append_context(message)
-    manager.append_state("session", state)
-
-    message.pop("reasoning_content")
-    assert state.take_commit() is None
-
-    state.mark_context_dirty()
-    manager.append_state("session", state)
-
-    restored = manager.load_state("session")
-    assert restored is not None
-    assert restored.context_messages() == [{"role": "assistant", "content": "答案"}]
-
-
 def test_equal_context_messages_do_not_mark_records_dirty() -> None:
     """provider 每轮回写归一化结果：内容相同时不产生新的待提交增量。"""
     state = SessionState()

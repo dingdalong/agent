@@ -79,18 +79,6 @@ class PauseNormalizer:
         """
         return list(messages)
 
-    def clear_reasoning_content(self, messages: object) -> None:
-        """本桩不建模思考载体，裁剪保持历史不变。
-
-        Args:
-            messages: 本轮新增历史消息。
-
-        Returns:
-            None。
-        """
-        del messages
-
-
 class RecordingEventBus:
     """按顺序记录 Agent 遥测事件的测试总线。"""
 
@@ -264,18 +252,6 @@ class ProtocolScriptedProvider(LLMProvider):
         if isinstance(outcome, BaseException):
             raise outcome
         return outcome
-
-    def clear_reasoning_content(self, messages: object) -> None:
-        """保持测试历史不变。
-
-        Args:
-            messages: 本轮新增历史消息。
-
-        Returns:
-            None。
-        """
-        del messages
-
 
 class StaticPromptMgr:
     """返回固定系统提示词的测试 prompt manager。"""
@@ -973,7 +949,6 @@ def test_pause_length_stop_mixed_chain_commits_history_and_clears_state() -> Non
     agent.history.append({"role": "user", "content": "执行混合续接"})
     ctx = RunContext(
         messages=agent.history,
-        round_start_idx=0,
         user_input="执行混合续接",
     )
 
@@ -1035,7 +1010,7 @@ def test_thinking_content_pause_mixed_chain_persists_effort_until_clean_terminal
     )
     agent = _runtime_agent(provider, bus)
     agent.history.append({"role": "user", "content": "执行混合恢复"})
-    ctx = RunContext(messages=agent.history, round_start_idx=0, user_input="执行混合恢复")
+    ctx = RunContext(messages=agent.history, user_input="执行混合恢复")
 
     result = asyncio.run(agent._run_single_turn(ctx, AgentState.CHECK_COMPACT))
 
@@ -1089,7 +1064,7 @@ def test_pause_length_provider_failure_rolls_back_entire_mixed_chain() -> None:
     agent = _runtime_agent(provider, bus)
     original_messages = [{"role": "user", "content": "执行混合续接"}]
     agent.history.extend(original_messages)
-    ctx = RunContext(messages=agent.history, round_start_idx=0)
+    ctx = RunContext(messages=agent.history)
 
     result = asyncio.run(agent._run_single_turn(ctx, AgentState.CHECK_COMPACT))
 
@@ -1128,7 +1103,6 @@ def test_pause_length_exhaustion_rolls_back_entire_mixed_chain() -> None:
     agent.history.extend(original_messages)
     ctx = RunContext(
         messages=agent.history,
-        round_start_idx=0,
         max_length_recoveries=0,
     )
 
@@ -1242,7 +1216,6 @@ def test_cancel_after_compact_keeps_turn_history_without_abort_marker() -> None:
     ]
     ctx = RunContext(
         messages=agent.history,
-        round_start_idx=1,
         user_message_index=1,
         user_input="当前问题",
         response_recovery_start_idx=2,

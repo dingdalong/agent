@@ -466,23 +466,44 @@ def test_deepseek_tool_fragment_survives_stream_failure() -> None:
     }
 
 
-def test_deepseek_clear_reasoning_keeps_other_response_output_items() -> None:
-    """清理无工具轮次思考时不得删除未知或正文输出项。"""
-    messages = [{
-        "role": "assistant",
-        "content": "answer",
-        "reasoning_content": "legacy",
-        "_response_output": [
-            {"type": "reasoning", "content": []},
-            {"type": "message", "content": []},
-            {"type": "future_output", "payload": "x"},
-        ],
-    }]
-
-    _bare_provider().clear_reasoning_content(messages)
-
-    assert "reasoning_content" not in messages[0]
-    assert messages[0]["_response_output"] == [
-        {"type": "message", "content": []},
+def test_deepseek_replays_reasoning_of_tool_free_turns() -> None:
+    """无工具轮次的 assistant 载体也必须原样回传（框架恒带 tools 参数）。"""
+    provider = _bare_provider()
+    create = CapturingCreate(_completed_stream())
+    provider._client = SimpleNamespace(responses=create)
+    previous_output = [
+        {"type": "reasoning", "id": "reasoning_1", "content": []},
+        {"type": "message", "content": [{"type": "output_text", "text": "answer"}]},
         {"type": "future_output", "payload": "x"},
     ]
+    messages = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "", "_response_output": previous_output},
+        {"role": "user", "content": "next"},
+    ]
+    tools = [{
+        "type": "function",
+        "function": {
+            "name": "lookup",
+            "description": "Lookup weather",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }]
+
+    asyncio.run(
+        provider._do_chat(
+            messages,
+            tools=tools,
+            enable_thinking=True,
+            call=_call(),
+        )
+    )
+
+    request = create.requests[0]
+    assert request["tools"]
+    assert request["input"] == [
+        {"role": "user", "content": "hello"},
+        *previous_output,
+        {"role": "user", "content": "next"},
+    ]
+    assert messages[1]["_response_output"] == previous_output

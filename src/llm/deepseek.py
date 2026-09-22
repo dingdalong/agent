@@ -17,7 +17,6 @@ from src.llm.responses import (
     response_output_text,
     response_web_sources,
 )
-from src.llm.message_view import demote_carrier
 from src.web.types import WebSearchResponse, WebSource
 
 if TYPE_CHECKING:
@@ -80,26 +79,9 @@ class DeepSeekProvider(ResponsesStreamMixin, LLMProvider):
             token_usage=self._extract_token_usage(getattr(response, "usage", None)),
         )
 
-    def clear_reasoning_content(self, messages: list[Any]) -> None:
-        """清除无工具轮次的已知思考载体并保留其他输出 item。"""
-        for message in messages:
-            if not isinstance(message, dict):
-                if hasattr(message, "reasoning_content"):
-                    message.reasoning_content = None
-                continue
-            message.pop("reasoning_content", None)
-            output_items = message.get("_response_output")
-            if not isinstance(output_items, list):
-                continue
-            retained_items = [
-                item
-                for item in output_items
-                if not isinstance(item, dict) or item.get("type") != "reasoning"
-            ]
-            if retained_items:
-                message["_response_output"] = retained_items
-            else:
-                demote_carrier(message)
+    # 有意不做无工具轮次的思考裁剪：DeepSeek 只在请求带 tools 时要求回传
+    # reasoning 项，而本框架的 agent 调用恒带完整工具目录，故 reasoning 项
+    # 一律随 _response_output 原样回传，不做工具/无工具区分。
 
     def estimate_tokens(
         self,

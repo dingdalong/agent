@@ -261,12 +261,12 @@ def test_scripted_tool_session_stores_each_payload_once(tmp_path) -> None:
     assert resumed[-1]["context"]["append"] == [reloaded.context_ids[-1]]
 
 
-def test_no_tool_round_prunes_thinking_before_single_commit(tmp_path) -> None:
-    """无工具轮次：assistant 记录只以裁剪思考后的最终形态落盘一次。
+def test_no_tool_round_keeps_thinking_and_commits_once(tmp_path) -> None:
+    """无工具轮次：思考载体保留，assistant 记录仍只落盘一次。
 
     回归场景：过去该记录先在 `_on_process_response` 带思考落一次盘，轮末裁剪
-    思考后又标脏写第二份，日志里留下同一记录的两个版本，磁盘版本也与内存及
-    下一次提交的上下文不一致。
+    思考后又标脏写第二份，日志里留下同一记录的两个版本。现在思考全程保留并
+    随每轮回传，同一记录只以首次提交的形态落盘。
     """
     provider = DeepSeekProvider(
         api_key="test",
@@ -286,8 +286,6 @@ def test_no_tool_round_prunes_thinking_before_single_commit(tmp_path) -> None:
     answer = "结论：每个逻辑输出只存一份。"
     assistant_message = {
         "role": "assistant",
-        "content": answer,
-        "reasoning_content": thinking,
         "_response_output": [
             {"type": "reasoning", "content": [{"type": "reasoning_text", "text": thinking}]},
             {"type": "message", "content": [{"type": "output_text", "text": answer}]},
@@ -295,7 +293,6 @@ def test_no_tool_round_prunes_thinking_before_single_commit(tmp_path) -> None:
     }
     ctx = RunContext(
         messages=agent.history,
-        round_start_idx=0,
         response=SimpleNamespace(
             content=answer,
             finish_reason="stop",
@@ -309,8 +306,7 @@ def test_no_tool_round_prunes_thinking_before_single_commit(tmp_path) -> None:
     state = agent.deps.session.state
     assert len(_log_lines(log_path)) == batches_before + 1
 
-    # 轮末兜底再次裁剪并提交：内容未变，零写入。
-    agent._finish_round_reasoning(ctx)
+    # 共享消息不再被裁剪：再次提交内容未变，零写入。
     asyncio.run(agent._commit_session(USER_INPUT))
     lines = _log_lines(log_path)
     assert len(lines) == batches_before + 1
@@ -328,11 +324,13 @@ def test_no_tool_round_prunes_thinking_before_single_commit(tmp_path) -> None:
     ]
     assert len(submissions) == 1
     stored = submissions[0]["model_message"]
-    assert "reasoning_content" not in stored
-    assert [item["type"] for item in stored["_response_output"]] == ["message"]
-    assert thinking not in log_path.read_text(encoding="utf-8")
+    assert [item["type"] for item in stored["_response_output"]] == [
+        "reasoning",
+        "message",
+    ]
+    assert thinking in log_path.read_text(encoding="utf-8")
 
-    # 折叠恢复后的上下文与内存历史逐字段一致，且不含思考载体。
+    # 折叠恢复后的上下文与内存历史逐字段一致，思考载体完整保留。
     restored = manager.load_state("session")
     assert restored is not None
     assert restored.context_messages() == agent.history

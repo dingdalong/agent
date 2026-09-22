@@ -781,8 +781,6 @@ class LLMProvider(ABC):
         """
         return {"User-Agent": user_agent} if user_agent else None
 
-    def clear_reasoning_content(self, message): ...
-
     @classmethod
     async def list_models(
         cls,

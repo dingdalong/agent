@@ -540,18 +540,6 @@ class SessionState:
         self.plan = copy.deepcopy(plan)
         self._dirty_plan = True
 
-    def mark_context_dirty(self, start: int = 0) -> None:
-        """标记被就地修改过的上下文记录，使其在下一次提交时重新落盘。
-
-        provider 会就地裁剪共享消息（例如清除无工具轮次的思考载体），这类修改
-        不经过本类的写入 API，需要调用方显式声明，否则内存与磁盘会各存一份。
-
-        Args:
-            start: 起始上下文下标；默认标记整段上下文。
-        """
-        for record_id in self.context_ids[max(0, start):]:
-            self._dirty_records.add(record_id)
-
     def tool_result_text(self, tool_call_id: str | None) -> str | None:
         """返回指定工具调用唯一一份结果正文。
 

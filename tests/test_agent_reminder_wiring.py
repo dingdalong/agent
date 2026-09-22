@@ -120,7 +120,7 @@ def _agent(*, is_subagent: bool, mode: RunMode) -> tuple[Agent, _RecordingRemind
     agent.deps = SimpleNamespace(data_guard=None, session=SessionContext())
     reminder = _RecordingReminder()
     agent.assembly = SimpleNamespace(
-        llm=SimpleNamespace(clear_reasoning_content=lambda _messages: None),
+        llm=SimpleNamespace(),
         reminder_mgr=reminder,
         prompt_mgr=_StubPromptMgr(),
         compact_mgr=None,

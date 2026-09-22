@@ -517,23 +517,19 @@ class Agent:
             if data_guard is not None:
                 input = str(data_guard.redact(input))
             self._append_initial_context_messages()
-            ctx = RunContext(messages=self.history, round_start_idx=len(self.history))
+            ctx = RunContext(messages=self.history)
             self.assembly.reminder_mgr.queue_turn_start(self.mode, self.spec.is_subagent)
             self._append_pending_framework_message(ctx)
             self._append_message(self.history, {"role": "user", "content": input})
             ctx.user_message_index = len(self.history) - 1
             ctx.user_input = input
             result = await self._run_single_turn(ctx, AgentState.CHECK_COMPACT)
-            if not ctx.has_tool_calls:
-                self._finish_round_reasoning(ctx)
             await self._cleanup_tasks_at_turn_end(ctx)
             return result
 
         while True:
-            ctx = RunContext(messages=self.history, round_start_idx=len(self.history))
+            ctx = RunContext(messages=self.history)
             result = await self._run_single_turn(ctx, AgentState.REQUEST_INPUT)
-            if not ctx.has_tool_calls:
-                self._finish_round_reasoning(ctx)
             # 流式事件完成归并后再保存与下一次 LLM 输入一致的会话状态。
             event_bus = getattr(self.deps, "event_bus", None)
             if event_bus is not None and hasattr(event_bus, "join"):
@@ -915,7 +911,6 @@ class Agent:
             user_input = str(data_guard.redact(user_input))
         self._append_initial_context_messages()
         self.assembly.reminder_mgr.queue_turn_start(self.mode, self.spec.is_subagent)
-        ctx.round_start_idx = len(self.history)
         self._append_pending_framework_message(ctx)
         self._append_message(
             self.history,
@@ -1139,8 +1134,6 @@ class Agent:
         if response.tool_calls:
             await self._commit_session()
             return AgentState.EXECUTE_TOOLS
-        # 无工具响应在提交前就裁掉思考，保证同一记录只以最终形态落盘一次。
-        self._finish_round_reasoning(ctx)
         await self._commit_session()
         return AgentState.CHECK_STOP
 
@@ -1700,31 +1693,6 @@ class Agent:
                 state.ack_commit(commit)
             elif commit is not None:
                 state.requeue_commit(commit)
-
-    def _mark_context_dirty(self, start: int) -> None:
-        """标记被 provider 就地裁剪过的上下文记录，使其重新落盘。
-
-        Args:
-            start: 被修改区间在上下文中的起始下标。
-        """
-        state = self._session_state()
-        if state is not None:
-            state.mark_context_dirty(start)
-
-    def _finish_round_reasoning(self, ctx: RunContext) -> None:
-        """裁掉本轮已定稿的思考并标脏，使记录只以最终形态提交。
-
-        无工具响应提交前就调用本方法，避免同一 assistant 记录先带思考落一次盘、
-        轮末裁剪后再写第二份；工具轮需要保留思考以维持 provider 的工具续接协议。
-
-        Args:
-            ctx: 当前运行上下文，其本轮消息区间为待裁剪范围。
-
-        Returns:
-            None。
-        """
-        self.assembly.llm.clear_reasoning_content(ctx.messages[ctx.round_start_idx:])
-        self._mark_context_dirty(ctx.round_start_idx)
 
     def _session_target(self) -> tuple[Any, str, "SessionState"] | None:
         """返回可提交的 (session_mgr, session_id, state)。

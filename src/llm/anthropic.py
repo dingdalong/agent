@@ -18,7 +18,6 @@ from src.llm.base import (
     validate_chat_completion_stream,
 )
 from src.llm.errors import LLMStreamResponseError
-from src.llm.message_view import demote_carrier
 from src.prompt_tags import PromptTag, render_prompt_tag
 from src.web.types import WebFetchResponse, WebSearchResponse, WebSource
 
@@ -462,20 +461,6 @@ class AnthropicProvider(LLMProvider):
             "cache_read_input_tokens": cache_read,
             "cache_creation_input_tokens": cache_creation,
         }
-
-    def clear_reasoning_content(self, messages):
-        for msg in messages:
-            if isinstance(msg, dict) and msg.get("role") == "assistant":
-                msg.pop("reasoning_content", None)
-                if "_anthropic_content" in msg:
-                    retained = [
-                        b for b in msg["_anthropic_content"]
-                        if b.get("type") != "thinking"
-                    ]
-                    if retained:
-                        msg["_anthropic_content"] = retained
-                    else:
-                        demote_carrier(msg)
 
     def _normalize_assistant_extra(self, msg: dict, norm_msg: dict, role: str) -> None:
         if role != "assistant":

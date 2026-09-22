@@ -74,35 +74,6 @@ def materialize_messages(messages: list[dict]) -> list[dict]:
     ]
 
 
-def demote_carrier(message: dict) -> None:
-    """载体被裁剪为空时，把派生字段降级写回消息。
-
-    ``clear_reasoning_content`` 可能删掉载体的全部内容（例如只含思考的消息），
-    此时若继续保留空载体，归一化会把整条消息当成空消息丢弃。本函数就地移除空载体
-    并按需写回 content/tool_calls/reasoning_content。
-
-    Args:
-        message: assistant 消息，就地修改。
-
-    Returns:
-        None。
-    """
-    if not has_carrier(message):
-        return
-    view = materialize_assistant(message)
-    if not isinstance(view, dict):
-        return
-    message.pop("_response_output", None)
-    message.pop("_anthropic_content", None)
-    if view.get("content") and not message.get("content"):
-        message["content"] = view["content"]
-    if view.get("tool_calls") and not message.get("tool_calls"):
-        message["tool_calls"] = view["tool_calls"]
-    reasoning = view.get("reasoning_content") or view.get("reasoning")
-    if reasoning and not message.get("reasoning_content"):
-        message["reasoning_content"] = reasoning
-
-
 def _from_response_output(
     items: list[Any],
 ) -> tuple[str, list[dict[str, Any]], str]:

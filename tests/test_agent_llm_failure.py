@@ -213,18 +213,6 @@ class SequenceLLM:
         del messages, prompt, tools
         return 1
 
-    def clear_reasoning_content(self, messages: list[dict]) -> None:
-        """保持历史消息不变。
-
-        Args:
-            messages: 本轮消息。
-
-        Returns:
-            None。
-        """
-        del messages
-
-
 def _terminal_error(
     kind: LLMErrorKind,
     message: str,
