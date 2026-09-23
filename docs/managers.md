@@ -451,6 +451,8 @@ MCP 连接配置和授权边界见 [mcp-and-hooks.md](mcp-and-hooks.md)。
 
 日志每行是一条批记录：`{"v":1,"seq":N,"ts":…,"contents":{…},"records":[…],"record_deltas":[…],"context":{"keep":n,"append":[…]},…}`。长度 ≥ `POOL_MIN_CHARS`（256）的文本在写入前抽取到本批 `contents`，正文位置只留 `{"$ref": "<内容指纹>"}`；同一段文本在整个会话中只落一份。上下文只提交增量：`keep` 是相对上次提交保留的公共前缀长度，`append` 是新增尾部，截断与整体替换同样用这一形式表达，因此同一批 ID 不会随轮次反复落盘。
 
+追加式日志假定「一行一条完整批记录」，而强杀、断电或磁盘写满都可能让最后一次追加只落下一截字节。写侧因此在追加前修整末尾（`_repair_log_tail`）：末尾已以换行结束则不动作；末尾片段仍是完整 JSON（只丢了行尾换行）时补一个换行、内容照旧属于该会话；其余情况截掉这段残缺字节——否则下一条批记录会与残片粘成一行，在折叠时被整行丢弃（状态层却已按写入成功推进摘要，等于静默丢数据）。读侧同样容错：日志按替换字符解码，坏字节与残缺尾行交给 `iter_batch_lines` 跳过（冷归档解压同样按替换字符解码），因此最后一段没写完的内容只会被丢弃，不会让整份会话不可恢复。
+
 记录有两种落盘形态。首次写入是整份 `records` 快照；此后只要视图键集合没有收缩、正文仍能在已落盘正文上追加，就只提交 `record_deltas`：`fields` 恒带 timestamp/kind/model_message/raw_input/recallable/correlation_id 全部静态字段，`view.set` 是按键整体覆盖（末次写胜）的非正文视图数据，`view.append` 是本次未确认的 `content`/`thinking` 尾部，`stream_boundaries` 给出这段正文的 `base`/`after` 摘要供写入端链式校验。正文被替换、被截断，或视图键被删除（`set` 无法表达删除）时无法用增量表达，回退整份快照。`fold_log()` 按 `seq` 顺序先覆盖 `records` 再合并 `record_deltas`，`plan` 与 `metrics` 末次写胜，恢复后可继续追加。
 
 写入端还保证「同一份数据只落一次」：`append_batch` 逐块比对上次落盘投影的内容摘要（16 字节 blake2b，比较用规范化 JSON，落盘字节不变），丢弃与上次相同的 record、`llm_calls`、`plan`、`metrics` 和空上下文增量；过滤后没有真实变更时整批不写，内容池与批序号也不动。`_written` 因此只随记录条数增长，不再为每个会话保留一份完整编码副本。恢复会话时用折叠结果预热这份摘要（含每条记录的正文摘要与静态投影摘要），避免续写第一轮把整段上下文重写一遍。脱敏已在文本入口完成，`append_batch` 只对载荷做漏网检测：若仍被改写，说明入口漏了一条路径，记录告警后按脱敏结果写入。
@@ -466,7 +468,7 @@ MCP 连接配置和授权边界见 [mcp-and-hooks.md](mcp-and-hooks.md)。
 | `save_metadata` | `session_id`, `is_new`, `topic`, `mode` | `None` | 原子写/更新元数据（首次写 `created_at`，后续更 `updated_at`） |
 | `append_state` | `session_id`, `state` | `bool` | 准备增量并在追加成功后确认（确认时按写侧登记的 `resync` 退回整份快照）；失败返回 `False` 并保留待重试状态 |
 | `append_batch` | `session_id`, `payload`, `resync=None` | `bool` | 在会话级内容池与序号上编码并追加一条批记录；丢弃与上次落盘摘要相同的区块，无真实变更时零写入（可在工作线程调用）；无法对位的正文保留写入并把记录 ID 登记到 `resync`（调用方通常传 `commit.resync`） |
-| `load_state` | `session_id` | `SessionState \| None` | 读取并折叠当前格式日志，校验 record 与 context 引用；日志缺失、损坏或无法恢复时返回 `None`，成功时同时恢复内容池与序号供后续追加复用 |
+| `load_state` | `session_id` | `SessionState \| None` | 读取并折叠当前格式日志，校验 record 与 context 引用；末尾残缺记录按丢弃处理；日志缺失、损坏或无法恢复时返回 `None`，成功时同时恢复内容池与序号供后续追加复用 |
 | `start_cold_compression` | — | `threading.Thread` | 启动守护线程，压缩够冷的会话日志 |
 | `list_sessions` | `limit` | `list[dict]` | 按 `updated_at` 降序列出会话元数据 |
 | `list_resumable` | `current_session_id`, `limit` | `list[dict]` | 只列存在有效日志（含冷归档）的非当前会话 |

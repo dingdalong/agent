@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass, field
@@ -40,6 +41,7 @@ _EMPTY_DIGEST = text_digest("")
 _STATIC_FIELDS = ("timestamp", "kind", "model_message", "raw_input", "recallable", "correlation_id")
 _STREAM_KEYS = ("content", "thinking")
 _STREAM_KEY_SET = frozenset(_STREAM_KEYS)
+_TAIL_SCAN_CHUNK = 64 * 1024
 
 
 def _leaked_record_ids(guard: Any, payload: dict[str, Any]) -> set[str]:
@@ -93,6 +95,58 @@ def _without_record_deltas(payload: dict[str, Any], record_ids: set[str]) -> dic
     else:
         result.pop("record_deltas", None)
     return result
+
+
+def _repair_log_tail(path: Path) -> None:
+    """修复日志末尾，保证下一次追加独占一行。
+
+    每条批记录都以换行结束；进程被强杀、断电或磁盘写满时，最后一次追加可能只落下
+    一截字节。残尾不构成完整记录，却会让下一次追加粘在同一行上——新批记录会在折叠
+    时被整行丢弃。这里在追加前按末尾形态处理：
+
+    - 已以换行结束（含空文件）：不动作；
+    - 末尾片段仍是完整 JSON（只丢了行尾换行）：补一个换行，内容保留；
+    - 其余：截掉这段残缺字节，恢复「一行一条批记录」的不变式。
+
+    Args:
+        path: 会话日志路径。
+
+    Returns:
+        None。文件不存在或为空时不做任何事。
+    """
+    try:
+        size = path.stat().st_size
+    except FileNotFoundError:
+        return
+    if size == 0:
+        return
+    with path.open("rb") as stream:
+        # 常见路径只读最后 1 字节：记录完整时无需再看别处
+        stream.seek(size - 1)
+        if stream.read(1) == b"\n":
+            return
+        end = size
+        tail = b""
+        while end > 0:
+            start = max(0, end - _TAIL_SCAN_CHUNK)
+            stream.seek(start)
+            chunk = stream.read(end - start)
+            pos = chunk.rfind(b"\n")
+            if pos >= 0:
+                tail = chunk[pos + 1:] + tail
+                end = start + pos + 1
+                break
+            tail = chunk
+            end = start
+    try:
+        complete = isinstance(json.loads(tail), dict)
+    except ValueError:
+        complete = False
+    if complete:
+        append_text(path, "\n")
+        return
+    os.truncate(path, end)
+    logger.warning("丢弃会话日志末尾残缺记录: %s（%d 字节）", path.name, size - end)
 
 
 def _digest(value: Any) -> bytes:
@@ -360,6 +414,7 @@ class SessionMgr:
                     payload=filtered,
                     pool=candidate_pool,
                 )
+                _repair_log_tail(log_path)
                 append_text(log_path, json.dumps(batch, ensure_ascii=False) + "\n")
                 pool.clear()
                 pool.update(candidate_pool)
@@ -634,10 +689,14 @@ class SessionMgr:
         return self._sessions_dir / f"{session_id}.jsonl"
 
     def _read_log(self, session_id: str) -> str | None:
-        """读取会话日志原文，必要时透明解压冷日志。"""
+        """读取会话日志原文，必要时透明解压冷日志。
+
+        解码用替换字符兜底：末尾被截断的多字节字符不该让整份日志不可读，坏字节落在
+        哪一行就由哪一行承担（解析失败的行由 ``iter_batch_lines`` 跳过）。
+        """
         log_path = self._log_path(session_id)
         if log_path.exists():
-            return log_path.read_text(encoding="utf-8")
+            return log_path.read_text(encoding="utf-8", errors="replace")
         for suffix in COLD_SUFFIXES:
             cold_path = self._sessions_dir / f"{session_id}{suffix}"
             if cold_path.exists():
@@ -651,7 +710,7 @@ class SessionMgr:
             return 0
         seq = 0
         try:
-            with log_path.open("r", encoding="utf-8") as stream:
+            with log_path.open("r", encoding="utf-8", errors="replace") as stream:
                 for line in stream:
                     line = line.strip()
                     if not line:
@@ -671,7 +730,7 @@ class SessionMgr:
         log_path = self._log_path(session_id)
         if log_path.exists():
             try:
-                with log_path.open("r", encoding="utf-8") as stream:
+                with log_path.open("r", encoding="utf-8", errors="replace") as stream:
                     for line in stream:
                         line = line.strip()
                         if not line:

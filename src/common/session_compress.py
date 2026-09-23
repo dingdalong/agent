@@ -46,20 +46,20 @@ def decompress_log(path: Path) -> str:
         path: ``.jsonl.zst`` 或 ``.jsonl.xz`` 文件路径。
 
     Returns:
-        解压后的日志原文。
+        解压后的日志原文；坏字节按替换字符解码，半写的残尾不会让整份归档不可读。
 
     Raises:
         OSError: 未知后缀、zstandard 缺失或解压失败。
     """
     if path.suffix == ".xz":
-        return lzma.decompress(path.read_bytes()).decode("utf-8")
+        return lzma.decompress(path.read_bytes()).decode("utf-8", errors="replace")
     try:
         import zstandard
     except ImportError as exc:
         raise OSError("缺少 zstandard，无法读取压缩会话日志") from exc
     with path.open("rb") as stream:
         with zstandard.ZstdDecompressor().stream_reader(stream) as reader:
-            return reader.read().decode("utf-8")
+            return reader.read().decode("utf-8", errors="replace")
 
 
 def compress_log(path: Path, *, level: int = COMPRESSION_LEVEL) -> Path | None:

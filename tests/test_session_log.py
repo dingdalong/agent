@@ -12,7 +12,7 @@ from src.common.session_log import (
     text_digest,
 )
 from src.common.session_state import SessionState, ViewPayload
-from src.mgr.session_mgr import SessionMgr
+from src.mgr.session_mgr import ResumeResult, SessionMgr, _TAIL_SCAN_CHUNK
 
 
 LONG_TEXT = "长文本片段。" * 60
@@ -331,6 +331,158 @@ def test_load_state_ignores_malformed_batches(tmp_path) -> None:
     restored = manager.load_state("session")
     assert restored is not None
     assert restored.context_messages() == [{"role": "user", "content": "有效会话"}]
+
+
+def test_append_after_crash_drops_incomplete_tail_and_keeps_new_batch(tmp_path) -> None:
+    """半写的残尾不能粘住下一条批记录：重启后追加的记录必须能恢复。"""
+    manager = SessionMgr(tmp_path, tmp_path)
+    state = SessionState()
+    state.append_user("问题一", {"role": "user", "content": "问题一"})
+    manager.append_state("session", state)
+    log_path = tmp_path / "sessions" / "session.jsonl"
+
+    # 模拟崩溃：最后一次追加只落下一截字节，没有换行
+    half_state = SessionState()
+    half_state.append_user("问题三", {"role": "user", "content": "问题三"})
+    commit = half_state.prepare_commit()
+    assert commit is not None
+    partial = json.dumps(
+        build_batch(seq=2, timestamp=0.0, payload=commit.payload, pool={}),
+        ensure_ascii=False,
+    )[:30]
+    with log_path.open("a", encoding="utf-8") as stream:
+        stream.write(partial)
+
+    reopened = SessionMgr(tmp_path, tmp_path)
+    resumed = reopened.load_state("session")
+    assert resumed is not None
+    assert resumed.context_messages() == [{"role": "user", "content": "问题一"}]
+    resumed.append_user("问题二", {"role": "user", "content": "问题二"})
+    assert reopened.append_state("session", resumed) is True
+
+    restored = reopened.load_state("session")
+    assert restored is not None
+    assert restored.context_messages() == [
+        {"role": "user", "content": "问题一"},
+        {"role": "user", "content": "问题二"},
+    ]
+    assert [line["seq"] for line in _log_lines(log_path)] == [1, 2]
+
+
+def test_tail_missing_only_newline_keeps_complete_record(tmp_path) -> None:
+    """只丢了行尾换行的完整记录（内容已全部落盘）不能被当成残片丢弃。"""
+    manager = SessionMgr(tmp_path, tmp_path)
+    state = SessionState()
+    state.append_user("问题一", {"role": "user", "content": "问题一"})
+    manager.append_state("session", state)
+    log_path = tmp_path / "sessions" / "session.jsonl"
+
+    state.append_user("问题二", {"role": "user", "content": "问题二"})
+    commit = state.prepare_commit()
+    assert commit is not None
+    batch = build_batch(seq=2, timestamp=0.0, payload=commit.payload, pool={})
+    with log_path.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(batch, ensure_ascii=False))
+
+    reopened = SessionMgr(tmp_path, tmp_path)
+    resumed = reopened.load_state("session")
+    assert resumed is not None
+    assert resumed.context_messages() == [
+        {"role": "user", "content": "问题一"},
+        {"role": "user", "content": "问题二"},
+    ]
+    resumed.append_user("问题三", {"role": "user", "content": "问题三"})
+    assert reopened.append_state("session", resumed) is True
+
+    assert [line["seq"] for line in _log_lines(log_path)] == [1, 2, 3]
+    restored = reopened.load_state("session")
+    assert restored is not None
+    assert restored.context_messages() == [
+        {"role": "user", "content": "问题一"},
+        {"role": "user", "content": "问题二"},
+        {"role": "user", "content": "问题三"},
+    ]
+
+
+def test_partial_append_failure_is_repaired_on_retry(tmp_path, monkeypatch) -> None:
+    """写到一半失败（如磁盘写满）留下的残尾必须在重试时被截掉，记录完整落盘。"""
+    manager = SessionMgr(tmp_path, tmp_path)
+    state = SessionState()
+    state.append_user("问题", {"role": "user", "content": LONG_TEXT})
+    log_path = tmp_path / "sessions" / "session.jsonl"
+    real_append = __import__("src.mgr.session_mgr", fromlist=["append_text"]).append_text
+    calls = 0
+
+    def write_half_then_fail(path, content, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            real_append(path, content[: len(content) // 2], **kwargs)
+            raise OSError("disk full")
+        real_append(path, content, **kwargs)
+
+    monkeypatch.setattr("src.mgr.session_mgr.append_text", write_half_then_fail)
+    assert manager.append_state("session", state) is False
+    assert manager.append_state("session", state) is True
+
+    restored = manager.load_state("session")
+    assert restored is not None
+    assert restored.context_messages() == [{"role": "user", "content": LONG_TEXT}]
+    assert [line["seq"] for line in _log_lines(log_path)] == [1]
+
+
+def test_tail_scan_covers_records_larger_than_one_chunk(tmp_path) -> None:
+    """残尾跨过多个扫描分块时也要整段截掉，不能只截最后一块。"""
+    manager = SessionMgr(tmp_path, tmp_path)
+    state = SessionState()
+    state.append_user("问题一", {"role": "user", "content": "问题一"})
+    manager.append_state("session", state)
+    log_path = tmp_path / "sessions" / "session.jsonl"
+
+    half_state = SessionState()
+    half_state.append_user("问题二", {"role": "user", "content": "长文本片段。" * 8000})
+    commit = half_state.prepare_commit()
+    assert commit is not None
+    tail = json.dumps(
+        build_batch(seq=2, timestamp=0.0, payload=commit.payload, pool={}),
+        ensure_ascii=False,
+    )
+    assert len(tail.encode("utf-8")) > 2 * _TAIL_SCAN_CHUNK
+    with log_path.open("a", encoding="utf-8") as stream:
+        stream.write(tail[: len(tail) // 2])
+
+    reopened = SessionMgr(tmp_path, tmp_path)
+    resumed = reopened.load_state("session")
+    assert resumed is not None
+    assert resumed.context_messages() == [{"role": "user", "content": "问题一"}]
+    resumed.append_user("问题三", {"role": "user", "content": "问题三"})
+    assert reopened.append_state("session", resumed) is True
+
+    assert [line["seq"] for line in _log_lines(log_path)] == [1, 2]
+    assert "长文本片段" not in log_path.read_text(encoding="utf-8")
+
+
+def test_truncated_multibyte_tail_keeps_session_resumable(tmp_path) -> None:
+    """末尾半个多字节字符不能让整份会话不可恢复：残缺的最后一段按丢弃处理。"""
+    manager = SessionMgr(tmp_path, tmp_path)
+    state = SessionState()
+    state.append_user("问题一", {"role": "user", "content": "第一条中文消息"})
+    manager.append_state("session", state)
+    state.append_user("问题二", {"role": "user", "content": "第二条中文消息"})
+    manager.append_state("session", state)
+    manager.save_metadata("session", is_new=True, topic="中文")
+    log_path = tmp_path / "sessions" / "session.jsonl"
+    raw = log_path.read_bytes()
+    # 只留最后一条批记录里某个汉字的首字节，模拟写到一半的 UTF-8 截断
+    log_path.write_bytes(raw[: raw.rindex("第二条".encode("utf-8")) + 1])
+
+    restored = manager.load_state("session")
+    assert restored is not None
+    assert restored.context_messages() == [{"role": "user", "content": "第一条中文消息"}]
+
+    resumed = manager.resolve_resume(["session"], "其他会话", str(tmp_path))
+    assert isinstance(resumed, ResumeResult)
+    assert resumed.state.context_messages() == [{"role": "user", "content": "第一条中文消息"}]
 
 
 def test_streamed_round_survives_restore_with_model_message(tmp_path) -> None:

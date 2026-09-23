@@ -78,6 +78,28 @@ def test_session_manager_reads_archived_log_transparently(tmp_path) -> None:
     assert json.loads(text.splitlines()[0])["v"] == LOG_VERSION
 
 
+def test_decompress_tolerates_truncated_multibyte_tail(tmp_path) -> None:
+    """冷归档里带着半写的残尾时，读取端按替换字符解码并丢弃该行。"""
+    manager = SessionMgr(tmp_path, tmp_path)
+    log_path = tmp_path / "sessions" / "session.jsonl"
+    state = SessionState()
+    state.append_user("问题一", {"role": "user", "content": "第一条中文消息"})
+    manager.append_state("session", state)
+    state.append_user("问题二", {"role": "user", "content": "第二条中文消息"})
+    manager.append_state("session", state)
+    raw = log_path.read_bytes()
+    log_path.write_bytes(raw[: raw.rindex("第二条".encode("utf-8")) + 1])
+
+    archive = compress_log(log_path)
+    assert archive is not None
+    assert "\ufffd" in decompress_log(archive)
+
+    reopened = SessionMgr(tmp_path, tmp_path)
+    restored = reopened.load_state("session")
+    assert restored is not None
+    assert restored.context_messages() == [{"role": "user", "content": "第一条中文消息"}]
+
+
 def test_append_after_archive_keeps_both_generations(tmp_path) -> None:
     manager = SessionMgr(tmp_path, tmp_path)
     state = SessionState()
