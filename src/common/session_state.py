@@ -239,6 +239,7 @@ class PreparedCommit:
     context_ids: list[str]
     plan: dict[str, Any] | None
     calls: dict[tuple[str, int], dict[str, Any]]
+    metrics: dict[str, Any] | None = None
     stream_deltas: dict[tuple[str, str], list[str]] = field(default_factory=dict)
     record_delta_snapshots: dict[str, dict[str, Any]] = field(default_factory=dict)
     stream_state: dict[tuple[str, str], str] = field(default_factory=dict)
@@ -259,6 +260,7 @@ class SessionState:
     context_ids: list[str] = field(default_factory=list)
     plan: dict[str, Any] = field(default_factory=dict)
     llm_calls: list[LLMCallRecord] = field(default_factory=list)
+    session_elapsed: float = 0.0
     _view_streams: dict[tuple[str, str], _TextChunks] = field(
         default_factory=dict,
         init=False,
@@ -267,6 +269,7 @@ class SessionState:
     _dirty_records: set[str] = field(default_factory=set, init=False, repr=False)
     _dirty_context: bool = field(default=False, init=False, repr=False)
     _dirty_plan: bool = field(default=False, init=False, repr=False)
+    _dirty_metrics: bool = field(default=False, init=False, repr=False)
     _dirty_calls: set[tuple[str, int]] = field(default_factory=set, init=False, repr=False)
     _committed_context_ids: list[str] = field(default_factory=list, init=False, repr=False)
     _stream_pending: dict[tuple[str, str], list[str]] = field(
@@ -325,12 +328,32 @@ class SessionState:
             context_ids=list(context_ids),
             plan=copy.deepcopy(value.get("plan")) if isinstance(value.get("plan"), dict) else {},
             llm_calls=[item for item in llm_calls if item is not None],
+            session_elapsed=cls._elapsed_from_metrics(value.get("metrics")),
         )
         state._committed_context_ids = list(context_ids)
         state._committed_records = {record.id for record in records}
         for record in records:
             state._remember_committed(record)
         return state
+
+    @staticmethod
+    def _elapsed_from_metrics(value: object) -> float:
+        """从会话载荷的 ``metrics`` 段读取累计耗时。
+
+        旧日志没有该键、值非法或为负时按 0 处理，保证恢复向后兼容。
+
+        Args:
+            value: 载荷中的 ``metrics`` 段。
+
+        Returns:
+            非负的累计耗时秒数。
+        """
+        if not isinstance(value, dict):
+            return 0.0
+        elapsed = value.get("elapsed_seconds")
+        if isinstance(elapsed, bool) or not isinstance(elapsed, (int, float)):
+            return 0.0
+        return max(0.0, float(elapsed))
 
     def to_dict(self) -> dict[str, Any]:
         """返回完整状态载荷；仅用于校验与测试，落盘走 prepare/ack 提交。"""
@@ -341,7 +364,28 @@ class SessionState:
             "llm_calls": [call.to_dict() for call in self.llm_calls],
             "records": [record.to_dict() for record in self.records],
             "context_ids": list(self.context_ids),
+            "metrics": self._metrics_projection(),
         }
+
+    def _metrics_projection(self) -> dict[str, Any]:
+        """返回会话指标的提交投影（当前只有累计耗时）。"""
+        return {"elapsed_seconds": self.session_elapsed}
+
+    def set_session_elapsed(self, seconds: float) -> None:
+        """更新会话累计耗时（秒）并标记待提交。
+
+        等值写入不置脏，避免检查点周期把未变化的值反复落盘。
+
+        Args:
+            seconds: 累计耗时秒数；非法值忽略，负值按 0 处理。
+        """
+        if isinstance(seconds, bool) or not isinstance(seconds, (int, float)):
+            return
+        value = max(0.0, float(seconds))
+        if value == self.session_elapsed:
+            return
+        self.session_elapsed = value
+        self._dirty_metrics = True
 
     def prepare_commit(self) -> PreparedCommit | None:
         """创建稳定提交快照，但不确认或清除脏状态。"""
@@ -349,6 +393,7 @@ class SessionState:
             not self._dirty_records
             and not self._dirty_context
             and not self._dirty_plan
+            and not self._dirty_metrics
             and not self._dirty_calls
         ):
             return None
@@ -386,6 +431,9 @@ class SessionState:
         plan = self._snapshot_value(self.plan) if self._dirty_plan else None
         if plan is not None:
             payload["plan"] = plan
+        metrics = self._metrics_projection() if self._dirty_metrics else None
+        if metrics is not None:
+            payload["metrics"] = metrics
         calls = {
             (call.call_id, call.attempt): self._snapshot_value(call.to_dict())
             for call in self.llm_calls
@@ -399,6 +447,7 @@ class SessionState:
             context_ids=context_ids,
             plan=plan,
             calls=calls,
+            metrics=metrics,
             stream_deltas={key: list(value) for key, value in self._stream_pending.items()},
             record_delta_snapshots=record_delta_snapshots,
             stream_state=stream_state,
@@ -446,6 +495,8 @@ class SessionState:
             self._dirty_context = True
         if commit.plan is not None and self.plan == commit.plan:
             self._dirty_plan = False
+        if commit.metrics is not None and self.session_elapsed == commit.metrics.get("elapsed_seconds"):
+            self._dirty_metrics = False
         for key, snapshot in commit.calls.items():
             call = next(
                 (item for item in self.llm_calls if (item.call_id, item.attempt) == key),
@@ -468,7 +519,7 @@ class SessionState:
         """
         if not (
             self._dirty_records or self._dirty_context or self._dirty_plan
-            or self._dirty_calls or self._stream_pending
+            or self._dirty_metrics or self._dirty_calls or self._stream_pending
         ):
             return False
         if force:

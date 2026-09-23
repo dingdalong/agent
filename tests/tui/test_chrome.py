@@ -68,6 +68,25 @@ def test_repeated_chrome_render_skips_unchanged_content(monkeypatch) -> None:
 
 
 @pytest.mark.integration
+def test_status_line_shows_restored_session_elapsed() -> None:
+    """状态行耗时来自共享读模型：/resume 回填的累计耗时直接显示，重置后归零。"""
+    async def scenario() -> None:
+        app = _app()
+        async with app.run_test(size=(100, 32)):
+            app.agent_view_store.add_session_elapsed(90.0)
+            app.chrome.render_status()
+
+            assert "1m30s" in app._status.render().plain
+
+            app.agent_view_store.reset()
+            app.chrome.render_status()
+
+            assert "0s" in app._status.render().plain
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
 def test_ask_user_ticks_do_not_repeat_static_updates(monkeypatch) -> None:
     async def scenario() -> None:
         app = _app()

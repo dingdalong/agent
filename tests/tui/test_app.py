@@ -2014,14 +2014,14 @@ def test_permission_menu_settles_turn_elapsed_only_when_input_resumes(
             await app.coordinator.submit(permission)
             await app.coordinator.submit(next_input)
             await pilot.pause()
-            assert app._session_elapsed == 0.0
+            assert app.agent_view_store.session_elapsed == 0.0
 
             await pilot.press("1")
             assert await permission.future == "yes"
             await pilot.pause()
 
             assert app.coordinator.input_active
-            assert app._session_elapsed == 7.0
+            assert app.agent_view_store.session_elapsed == 7.0
 
     asyncio.run(scenario())
 
@@ -2195,6 +2195,35 @@ def test_session_history_is_bulk_hydrated_into_rich_lines() -> None:
             assert app._history._entries[4].content == "**恢复的回答**"
             assert app._history._entries[4].markdown
             assert "恢复的回答" in app.history_journal.snapshot()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_session_elapsed_banks_into_store_and_survives_session_switch(monkeypatch) -> None:
+    """回合耗时计入共享读模型；切换会话（replace_session_history）不清零恢复值。"""
+    async def scenario() -> None:
+        app = _app()
+        app.agent_view_store.add_session_elapsed(90.0)  # 模拟 /resume 回填的累计耗时
+        async with app.run_test(size=(90, 28)) as pilot:
+            loop = asyncio.get_running_loop()
+            request = InputMenu(
+                timestamp=1.0,
+                source="test",
+                prompt="输入",
+                future=loop.create_future(),
+            )
+            app._turn_started = 1.0
+            monkeypatch.setattr(app, "_turn_elapsed", lambda _now: 5.0)
+
+            await app.coordinator.submit(request)
+            await pilot.pause()
+
+            assert app.agent_view_store.session_elapsed == 95.0
+
+            await app.replace_session_history(SessionState().visible_records())
+
+            assert app.agent_view_store.session_elapsed == 95.0
 
     asyncio.run(scenario())
 

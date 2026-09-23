@@ -236,6 +236,35 @@ def test_written_projection_keeps_only_content_digests(tmp_path) -> None:
     assert _log_lines(log_path) == before
 
 
+def test_metrics_payload_written_once_and_primed_on_reopen(tmp_path) -> None:
+    """会话耗时按变化追加，未变化不写新批；重开日志后按最后值回读并预热摘要。"""
+    manager = SessionMgr(tmp_path, tmp_path)
+    state = SessionState()
+    log_path = tmp_path / "sessions" / "session.jsonl"
+
+    state.set_session_elapsed(12.5)
+    manager.append_state("session", state)
+    assert len(_log_lines(log_path)) == 1
+
+    manager.append_state("session", state)
+    assert len(_log_lines(log_path)) == 1
+
+    state.set_session_elapsed(40.0)
+    manager.append_state("session", state)
+    assert len(_log_lines(log_path)) == 2
+
+    reopened = SessionMgr(tmp_path, tmp_path)
+    resumed = reopened.load_state("session")
+    assert resumed is not None
+    assert resumed.session_elapsed == 40.0
+    assert isinstance(reopened._written["session"].metrics, bytes)
+
+    # 模拟仅指标置脏的提交：内容未变时应被已落盘摘要过滤丢弃。
+    resumed._dirty_metrics = True
+    reopened.append_state("session", resumed)
+    assert len(_log_lines(log_path)) == 2
+
+
 def test_log_skips_context_delta_without_changes(tmp_path) -> None:
     """上下文重绑但结果相同时不写新批，也不重复登记内容池。"""
     manager = SessionMgr(tmp_path, tmp_path)

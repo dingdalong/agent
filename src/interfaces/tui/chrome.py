@@ -218,10 +218,11 @@ class ChromeRenderer:
                 else present_ended_agent(app.transcript.viewing_agent_id)
             )
         else:
+            session_elapsed = app.agent_view_store.session_elapsed
             if app._turn_started is not None and not app.coordinator.input_active:
-                elapsed = app._session_elapsed + app._turn_elapsed(now)
+                elapsed = session_elapsed + app._turn_elapsed(now)
             else:
-                elapsed = app._session_elapsed
+                elapsed = session_elapsed
             status = Text("plan" if app.get_plan_state() else "normal")
             status.append(" (Shift+Tab 切换)", style="bright_black")
             status.append("  ·  ", style="bright_black")

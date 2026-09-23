@@ -71,7 +71,7 @@ LLM 调用使用 `emit_telemetry_safely()`（`src/events/bus.py:36-65`）发布�
 
 ## 4. `AgentViewStore`
 
-`AgentViewStore` 是状态栏与子 agent 读模型。它维护会话累计 token、前台 UUID、活动与历史 Agent、每 Agent 的窗口/活动/生命周期以及子 agent 分段转录；主聊天历史来自 `SessionState.records[].view`，Store 不保存第二份主聊天副本。子 agent 快照会以隐藏的 `subagent` view 投影写入当前 `SessionState`，恢复后重新水合为只读历史。快照里的 `messages` 是该子 agent 上下文的唯一副本，同一快照的 `transcript` 只保留 `retry`/`error` 行，不与消息重复存正文。
+`AgentViewStore` 是状态栏与子 agent 读模型。它维护会话累计 token、会话累计耗时、前台 UUID、活动与历史 Agent、每 Agent 的窗口/活动/生命周期以及子 agent 分段转录；主聊天历史来自 `SessionState.records[].view`，Store 不保存第二份主聊天副本。耗时由 TUI 在回到输入态时结算进 Store（`add_session_elapsed`，已剔除纯人工等待），`AgentApp` 在提交会话前把它并入 `SessionState`，`/resume` 时由 `restore_session_metrics()` 连同按 `llm_calls` 重建的会话 token 与前台上下文一起回填，`reset()` 才会归零。子 agent 快照会以隐藏的 `subagent` view 投影写入当前 `SessionState`，恢复后重新水合为只读历史。快照里的 `messages` 是该子 agent 上下文的唯一副本，同一快照的 `transcript` 只保留 `retry`/`error` 行，不与消息重复存正文。
 
 `record()`（`agent_view_store.py:139-165`）对 LLM 事件的处理：
 

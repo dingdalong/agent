@@ -8,6 +8,7 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from src.common.session_state import SessionState
 from src.events.types import (
     Event,
     LLMCallCompleted,
@@ -151,6 +152,7 @@ class AgentViewStore:
         self._transcript_limit = max(1, transcript_limit)
         self._foreground_uuid: str | None = None
         self._session_usage = TokenUsage()
+        self._session_elapsed = 0.0
         self._active: dict[str, _AgentState] = {}
         self._history: dict[str, _AgentState] = {}
         self._task_snapshot: list[dict] = []
@@ -163,6 +165,30 @@ class AgentViewStore:
             Foreground agent UUID, or None before registration.
         """
         return self._foreground_uuid
+
+    @property
+    def session_elapsed(self) -> float:
+        """返回本会话累计耗时（秒，已剔除纯人工等待）。
+
+        Returns:
+            累计处理时间；会话重置后为 0.0。
+        """
+        return self._session_elapsed
+
+    def add_session_elapsed(self, seconds: float) -> None:
+        """累计一段会话处理耗时。
+
+        调用方是回合结算点（TUI 在回到输入态时结算上一回合），非正值与非法值忽略。
+
+        Args:
+            seconds: 本次要累计的耗时秒数。
+
+        Returns:
+            None。
+        """
+        if isinstance(seconds, bool) or not isinstance(seconds, (int, float)):
+            return
+        self._session_elapsed += max(0.0, float(seconds))
 
     def register_foreground(self, uuid: str, agent_type: str = "agent") -> None:
         """Register the root agent represented by the session status bar.
@@ -389,6 +415,58 @@ class AgentViewStore:
             "messages": list(state.messages) if state.messages is not None else [],
         }
 
+    def restore_session_metrics(
+        self,
+        state: SessionState,
+        *,
+        context_limit: int = 0,
+    ) -> None:
+        """从恢复的会话状态水合会话累计 token、前台上下文与累计耗时。
+
+        会话累计覆盖全部调用（含子 agent、compact、智能权限等无身份调用），与实时
+        累加口径一致；前台上下文取最近一次主 agent 调用的输入 token，主 agent 自身
+        的用量与耗时基线与 ``restore_subagents()`` 恢复子 agent 的方式对称重建。
+        每次从零重算，可重复调用。
+
+        Args:
+            state: 已从会话日志折叠出的目标会话状态。
+            context_limit: 当前 provider 的上下文窗口上限；未知时传 0。
+
+        Returns:
+            None。
+        """
+        session_usage = TokenUsage()
+        main_usage = TokenUsage()
+        main_context_used = 0
+        latest_started: float | None = None
+        for call in state.llm_calls:
+            delta = TokenUsage(
+                max(0, call.input_tokens or 0),
+                max(0, call.output_tokens or 0),
+                max(0, call.cache_read_input_tokens or 0),
+                max(0, call.reasoning_output_tokens or 0),
+            )
+            session_usage = self._add_usage(session_usage, delta)
+            if call.caller_type != "main":
+                continue
+            main_usage = self._add_usage(main_usage, delta)
+            if call.input_tokens is None:
+                continue
+            if latest_started is None or call.started_at >= latest_started:
+                latest_started = call.started_at
+                main_context_used = max(0, call.input_tokens)
+        self._session_usage = session_usage
+        self._session_elapsed = max(0.0, float(state.session_elapsed))
+        foreground = self._find(self._foreground_uuid)
+        if foreground is None:
+            return
+        foreground.usage = main_usage
+        foreground.context = ContextUsage(
+            used_tokens=main_context_used,
+            limit_tokens=_nonnegative_int(context_limit),
+        )
+        foreground.started_monotonic = self._clock() - self._session_elapsed
+
     def restore_subagents(self, snapshots: list[dict]) -> None:
         """Hydrate completed, read-only subagent views from a session snapshot."""
         for uuid in [
@@ -447,13 +525,14 @@ class AgentViewStore:
             self._history[uuid] = state
 
     def reset(self) -> None:
-        """Clear all session usage, foreground, agent, and transcript state.
+        """Clear all session usage, elapsed, foreground, agent, and transcript state.
 
         Returns:
             None.
         """
         self._foreground_uuid = None
         self._session_usage = TokenUsage()
+        self._session_elapsed = 0.0
         self._active.clear()
         self._history.clear()
         self._task_snapshot = []

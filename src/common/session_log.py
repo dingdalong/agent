@@ -157,6 +157,7 @@ def fold_log(
     order: list[str] = []
     context_ids: list[str] = []
     plan: dict[str, Any] = {}
+    metrics: dict[str, Any] = {}
     llm_calls: dict[tuple[Any, Any], dict[str, Any]] = {}
     call_order: list[tuple[Any, Any]] = []
     last_seq = 0
@@ -202,6 +203,8 @@ def fold_log(
                 ]
         if isinstance(batch.get("plan"), dict):
             plan = batch["plan"]
+        if isinstance(batch.get("metrics"), dict):
+            metrics = batch["metrics"]
         raw_calls = batch.get("llm_calls")
         if isinstance(raw_calls, list):
             for call in raw_calls:
@@ -217,6 +220,7 @@ def fold_log(
         "records": [records[record_id] for record_id in order],
         "context_ids": context_ids,
         "plan": plan,
+        "metrics": metrics,
         "llm_calls": [llm_calls[key] for key in call_order],
     }, contents, last_seq
 

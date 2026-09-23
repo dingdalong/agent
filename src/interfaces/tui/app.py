@@ -155,7 +155,6 @@ class AgentTuiApp(App[None]):
         self._turn_started: float | None = None
         self._activity_started: float | None = None
         self._activity_pause_baseline = 0.0
-        self._session_elapsed = 0.0
         self._retry_deadline: float | None = None
         self._retry_error_kind = ""
         self._retry_safe_message = ""
@@ -376,7 +375,8 @@ class AgentTuiApp(App[None]):
 
     async def begin_input(self, request: InputMenu) -> None:
         await self.flush_round()
-        self._session_elapsed += self._turn_elapsed(time.monotonic())
+        # 回合耗时在回到输入态时结算进共享读模型：它随会话落盘，/resume 时被回填。
+        self.agent_view_store.add_session_elapsed(self._turn_elapsed(time.monotonic()))
         self._main_focus_target = "composer"
         lines = request.prompt.splitlines()
         context = "\n".join(lines[:-1]).strip("\n") if len(lines) > 1 else ""
@@ -798,7 +798,6 @@ class AgentTuiApp(App[None]):
         return agent_label(self._current_agent_type, self._current_agent_uuid) or "助手"
 
     def reload_session_state(self) -> None:
-        self._session_elapsed = 0.0
         self._reset_turn_status()
         self._agent_signature = None
         self._agent_label_signatures.clear()

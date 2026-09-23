@@ -378,6 +378,12 @@ class AgentApp:
                 restore_subagents = getattr(self.agent_view_store, "restore_subagents", None)
                 if restore_subagents is not None:
                     restore_subagents(result.state.subagent_views())
+                # 会话指标（累计 token / 上下文 / 耗时）从目标会话状态回填，之后的新
+                # 调用在恢复值上继续累加。
+                self.agent_view_store.restore_session_metrics(
+                    result.state,
+                    context_limit=agent.llm.context_limit,
+                )
                 set_history_provider = getattr(self.deps.ui, "set_input_history_provider", None)
                 if set_history_provider is not None:
                     set_history_provider(agent.get_input_history)
@@ -447,6 +453,8 @@ class AgentApp:
             True 表示无待提交内容或提交成功；False 表示本次写盘失败，增量已保留
             待下次检查点重试。
         """
+        # 会话耗时由 UI 侧累计（已剔除纯人工等待），提交前并入状态才能随日志恢复。
+        state.set_session_elapsed(self.agent_view_store.session_elapsed)
         if not state.checkpoint_due(force=force):
             return True
         async with self.deps.session.commit_lock:

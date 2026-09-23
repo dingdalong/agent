@@ -175,6 +175,7 @@ class _WrittenState:
         deltas: 记录 ID → 已落盘静态投影（字段 + 非正文视图数据）的摘要。
         calls: ``(call_id, attempt)`` → 已落盘调用记录的摘要。
         plan: 已落盘计划载荷的摘要。
+        metrics: 已落盘会话指标载荷的摘要。
         context_length: 已落盘的上下文长度（用于识别空增量）。
     """
 
@@ -182,6 +183,7 @@ class _WrittenState:
     deltas: dict[str, bytes] = field(default_factory=dict)
     calls: dict[tuple[Any, Any], bytes] = field(default_factory=dict)
     plan: bytes | None = None
+    metrics: bytes | None = None
     context_length: int = -1
     context_ids: tuple[str, ...] = ()
     streams: dict[tuple[str, str], str] = field(default_factory=dict)
@@ -414,6 +416,7 @@ class SessionMgr:
             deltas=dict(written.deltas),
             calls=dict(written.calls),
             plan=written.plan,
+            metrics=written.metrics,
             context_length=written.context_length,
             context_ids=written.context_ids,
             streams=dict(written.streams),
@@ -446,6 +449,12 @@ class SessionMgr:
             if digest != next_written.plan:
                 next_written.plan = digest
                 result["plan"] = plan
+        metrics = payload.get("metrics")
+        if isinstance(metrics, dict):
+            digest = _digest(metrics)
+            if digest != next_written.metrics:
+                next_written.metrics = digest
+                result["metrics"] = metrics
         context = payload.get("context")
         if isinstance(context, dict):
             keep = context.get("keep")
@@ -558,6 +567,9 @@ class SessionMgr:
         plan = payload.get("plan")
         if isinstance(plan, dict):
             written.plan = _digest(plan)
+        metrics = payload.get("metrics")
+        if isinstance(metrics, dict):
+            written.metrics = _digest(metrics)
         for call in payload.get("llm_calls") or []:
             if isinstance(call, dict):
                 written.calls[(call.get("call_id"), call.get("attempt"))] = _digest(call)

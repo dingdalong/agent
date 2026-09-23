@@ -6,7 +6,8 @@ import logging
 
 import pytest
 
-from src.events.types import LLMCallCompleted
+from src.common.session_state import SessionState
+from src.events.types import LLMCallCompleted, LLMCallStarted
 from src.interfaces.agent_view_store import (
     AgentViewStore,
     ContextUsage,
@@ -130,3 +131,103 @@ def test_usage_log_preserves_raw_none_and_records_applied_totals(
         "session_cache_read_input_tokens=0"
     ]
     assert event.source not in caplog.text
+
+
+def _record_call(
+    state: SessionState,
+    call_id: str,
+    *,
+    caller_type: str | None,
+    caller_uuid: str | None,
+    started_at: float,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
+    cache_read_input_tokens: int | None = None,
+    reasoning_output_tokens: int | None = None,
+    outcome: str = "completed",
+) -> None:
+    """按 provider 事件路径写入一次 attempt 的核账记录。
+
+    ``outcome="running"`` 只写开始事件，模拟未完成的调用。
+    """
+    state.record_llm_event(LLMCallStarted(
+        timestamp=started_at, source="provider/model", model="model", call_id=call_id,
+        attempt=1, caller_agent_type=caller_type, caller_uuid=caller_uuid,
+    ))
+    if outcome == "running":
+        return
+    state.record_llm_event(LLMCallCompleted(
+        timestamp=started_at + 0.5, source="provider/model", model="model", call_id=call_id,
+        attempt=1, outcome=outcome, caller_agent_type=caller_type, caller_uuid=caller_uuid,
+        input_tokens=input_tokens, output_tokens=output_tokens,
+        cache_read_input_tokens=cache_read_input_tokens,
+        reasoning_output_tokens=reasoning_output_tokens,
+    ))
+
+
+def test_restore_session_metrics_rebuilds_totals_context_and_elapsed() -> None:
+    """恢复会话按核账记录重建：会话累计覆盖全部调用，前台上下文取最近主调用。"""
+    state = SessionState()
+    _record_call(
+        state, "main-1", caller_type="main", caller_uuid="u1", started_at=1.0,
+        input_tokens=100, output_tokens=20, cache_read_input_tokens=30,
+        reasoning_output_tokens=4,
+    )
+    _record_call(
+        state, "worker-1", caller_type="worker", caller_uuid="w1", started_at=2.0,
+        input_tokens=40, output_tokens=5, cache_read_input_tokens=8,
+    )
+    _record_call(
+        state, "internal-1", caller_type=None, caller_uuid=None, started_at=3.0,
+        input_tokens=12, output_tokens=3,
+    )
+    _record_call(
+        state, "main-2", caller_type="main", caller_uuid="u1", started_at=4.0,
+        input_tokens=250, output_tokens=30, cache_read_input_tokens=200,
+    )
+    _record_call(
+        state, "main-3", caller_type="main", caller_uuid="u1", started_at=5.0,
+        outcome="running",
+    )
+    state.set_session_elapsed(42.5)
+
+    store = AgentViewStore(clock=lambda: 1000.0)
+    store.register_foreground("new-main", "main")
+    store.restore_session_metrics(state, context_limit=200_000)
+
+    snapshot = store.session_snapshot()
+    assert snapshot.usage == TokenUsage(402, 58, 238, 4)
+    assert snapshot.foreground_context == ContextUsage(250, 200_000)
+    assert store.session_elapsed == 42.5
+    main = store.agent_snapshot("new-main")
+    assert main is not None
+    assert main.usage == TokenUsage(350, 50, 230, 4)
+    assert main.context == ContextUsage(250, 200_000)
+    assert main.elapsed_seconds == 42.5
+
+    # 恢复后的新调用在恢复值上继续累加，前台上下文随最新调用推进。
+    store.record(_completed(
+        "call-live",
+        input_tokens=10,
+        output_tokens=1,
+        total_tokens=11,
+        cache_read_tokens=0,
+        cache_creation_tokens=None,
+        caller_type="main",
+        caller_uuid="new-main",
+    ))
+    assert store.session_snapshot().usage == TokenUsage(412, 59, 238, 4)
+    assert store.session_snapshot().foreground_context == ContextUsage(10, 200_000)
+
+
+def test_restore_session_metrics_with_empty_log_stays_zero_and_applies_limit() -> None:
+    """没有核账记录的会话恢复后保持零值，上下文上限取当前 provider 配置。"""
+    store = AgentViewStore()
+    store.register_foreground("main-id", "main")
+
+    store.restore_session_metrics(SessionState(), context_limit=128_000)
+
+    snapshot = store.session_snapshot()
+    assert snapshot.usage == TokenUsage()
+    assert snapshot.foreground_context == ContextUsage(0, 128_000)
+    assert store.session_elapsed == 0.0

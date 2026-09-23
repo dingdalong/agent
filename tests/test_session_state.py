@@ -19,10 +19,11 @@ from src.events.types import (
     ToolCallCompleted,
     ToolCallStarted,
 )
-from src.interfaces.agent_view_store import AgentViewStore
+from src.interfaces.agent_view_store import AgentViewStore, ContextUsage, TokenUsage
 from src.interfaces.output_router import OutputRouter
 from src.mgr.session_mgr import SessionMgr
 from src.mgr.session_mgr import ResumeResult
+from src.common.session_log import LOG_VERSION
 from src.common.session_state import SessionState, ViewPayload
 from src.common.tool_display import ToolDisplay
 from src.mode import RunMode
@@ -399,45 +400,90 @@ def test_session_manager_only_lists_valid_sessions_and_writes_current_files(tmp_
     assert (sessions_dir / "valid.jsonl").exists()
 
 
+class _ResumeBus:
+    """resume 门控用的事件总线桩：只记录 join 次数。"""
+
+    def __init__(self) -> None:
+        self.joins = 0
+
+    @contextmanager
+    def reject_ui_requests(self):
+        yield
+
+    async def join(self) -> None:
+        self.joins += 1
+
+
+class _ResumeUI:
+    """resume 门控用的 UI 桩：记录切换后的状态与 provider 回调。"""
+
+    def __init__(self) -> None:
+        self.state = None
+
+    @asynccontextmanager
+    async def reset_session_interactions(self):
+        yield
+
+    async def replace_session_state(self, state) -> None:
+        self.state = state
+
+    def set_input_history_provider(self, provider) -> None:
+        self.input_provider = provider
+
+    def set_model_info_provider(self, provider) -> None:
+        self.model_provider = provider
+
+
+class _RecordingSessions:
+    """resume 保存源会话时用的会话管理器桩。"""
+
+    def __init__(self) -> None:
+        self.saved = []
+
+    def append_batch(self, session_id, payload, resync=None) -> None:
+        self.saved.append((session_id, payload))
+
+
+class _ResumeRouter:
+    """resume 切换会话状态时用的输出路由桩。"""
+
+    def bind_session_state(self, state) -> None:
+        self.state = state
+
+
+def _record_call(
+    state: SessionState,
+    call_id: str,
+    *,
+    caller_type: str | None,
+    caller_uuid: str | None,
+    started_at: float,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
+    cache_read_input_tokens: int | None = None,
+    reasoning_output_tokens: int | None = None,
+    outcome: str = "completed",
+) -> None:
+    """按 provider 事件路径写入一次 attempt 的核账记录。
+
+    ``outcome="running"`` 只写开始事件，模拟未完成的调用。
+    """
+    state.record_llm_event(LLMCallStarted(
+        timestamp=started_at, source="provider/model", model="model", call_id=call_id,
+        attempt=1, caller_agent_type=caller_type, caller_uuid=caller_uuid,
+    ))
+    if outcome == "running":
+        return
+    state.record_llm_event(LLMCallCompleted(
+        timestamp=started_at + 0.5, source="provider/model", model="model", call_id=call_id,
+        attempt=1, outcome=outcome, caller_agent_type=caller_type, caller_uuid=caller_uuid,
+        input_tokens=input_tokens, output_tokens=output_tokens,
+        cache_read_input_tokens=cache_read_input_tokens,
+        reasoning_output_tokens=reasoning_output_tokens,
+    ))
+
+
 def test_app_resume_switches_state_inside_gates_and_resets_transient_store() -> None:
-    class Bus:
-        def __init__(self) -> None:
-            self.joins = 0
-
-        @contextmanager
-        def reject_ui_requests(self):
-            yield
-
-        async def join(self) -> None:
-            self.joins += 1
-
-    class UI:
-        def __init__(self) -> None:
-            self.state = None
-
-        @asynccontextmanager
-        async def reset_session_interactions(self):
-            yield
-
-        async def replace_session_state(self, state) -> None:
-            self.state = state
-
-        def set_input_history_provider(self, provider) -> None:
-            self.input_provider = provider
-
-        def set_model_info_provider(self, provider) -> None:
-            self.model_provider = provider
-
-    class Sessions:
-        def __init__(self) -> None:
-            self.saved = []
-
-        def append_batch(self, session_id, payload, resync=None) -> None:
-            self.saved.append((session_id, payload))
-
-    class Router:
-        def bind_session_state(self, state) -> None:
-            self.state = state
 
     source = SessionState()
     source.append_user("旧会话", {"role": "user", "content": "旧会话"})
@@ -455,10 +501,10 @@ def test_app_resume_switches_state_inside_gates_and_resets_transient_store() -> 
         "transcript": [{"kind": "response", "text": "目标结果"}],
         "messages": [{"role": "assistant", "content": "目标结果"}],
     })
-    bus = Bus()
-    ui = UI()
-    sessions = Sessions()
-    router = Router()
+    bus = _ResumeBus()
+    ui = _ResumeUI()
+    sessions = _RecordingSessions()
+    router = _ResumeRouter()
     deps = SimpleNamespace(
         event_bus=bus,
         ui=ui,
@@ -471,7 +517,7 @@ def test_app_resume_switches_state_inside_gates_and_resets_transient_store() -> 
     fake_agent = SimpleNamespace(
         uuid="new-main",
         agent_type="main",
-        llm=SimpleNamespace(model="model", reasoning_effort="medium"),
+        llm=SimpleNamespace(model="model", reasoning_effort="medium", context_limit=200_000),
         reasoning_effort=None,
         mode=RunMode.PLAN,
         task_mgr=None,
@@ -504,6 +550,76 @@ def test_app_resume_switches_state_inside_gates_and_resets_transient_store() -> 
     assert [s.uuid for s in app.agent_view_store.subagent_snapshots()] == ["worker-target"]
     assert deps.session.context != ["old"]
     assert bus.joins == 2
+
+
+def test_app_resume_restores_session_metrics_and_persists_source_elapsed() -> None:
+    """恢复会话回填会话累计 token / 上下文 / 耗时，源会话耗时在切换前落盘。"""
+    source = SessionState()
+    source.append_user("旧会话", {"role": "user", "content": "旧会话"})
+    target = SessionState()
+    target.append_user("恢复", {"role": "user", "content": "恢复"})
+    _record_call(
+        target, "call-main-1", caller_type="main", caller_uuid="old-main",
+        started_at=1.0, input_tokens=100, output_tokens=20,
+        cache_read_input_tokens=30, reasoning_output_tokens=4,
+    )
+    _record_call(
+        target, "call-worker", caller_type="worker", caller_uuid="worker-1",
+        started_at=2.0, input_tokens=40, output_tokens=5, cache_read_input_tokens=8,
+    )
+    _record_call(
+        target, "call-internal", caller_type=None, caller_uuid=None,
+        started_at=3.0, input_tokens=12, output_tokens=3,
+    )
+    _record_call(
+        target, "call-main-2", caller_type="main", caller_uuid="old-main",
+        started_at=4.0, input_tokens=250, output_tokens=30, cache_read_input_tokens=200,
+    )
+    target.set_session_elapsed(120.0)
+
+    bus = _ResumeBus()
+    ui = _ResumeUI()
+    sessions = _RecordingSessions()
+    router = _ResumeRouter()
+    store = AgentViewStore(clock=lambda: 1000.0)
+    deps = SimpleNamespace(
+        event_bus=bus,
+        ui=ui,
+        session_mgr=sessions,
+        session=SessionContext(id="source", state=source, context=["old"]),
+        role_mgr=None,
+    )
+    app = AgentApp(deps, store, router)  # type: ignore[arg-type]
+    app._install_plan_mode_controller = lambda: None  # type: ignore[method-assign]
+    store.add_session_elapsed(9.0)  # 源会话已累计的耗时
+    fake_agent = SimpleNamespace(
+        uuid="new-main",
+        agent_type="main",
+        llm=SimpleNamespace(model="model", reasoning_effort="medium", context_limit=200_000),
+        reasoning_effort=None,
+        mode=RunMode.EXECUTE,
+        task_mgr=None,
+        get_input_history=target.input_history,
+    )
+    result = ResumeResult(session_id="target", state=target, metadata={"topic": "主题"})
+
+    async def scenario() -> None:
+        with patch("src.app.app.Agent.from_manifest", return_value=fake_agent):
+            await app.resume_session(result)
+
+    asyncio.run(scenario())
+
+    # 源会话的耗时在切换前并入载荷，保证 A→B→A 往复恢复不丢。
+    assert sessions.saved[0][1]["metrics"] == {"elapsed_seconds": 9.0}
+    snapshot = store.session_snapshot()
+    assert snapshot.usage == TokenUsage(402, 58, 238, 4)
+    assert snapshot.foreground_context == ContextUsage(250, 200_000)
+    assert store.session_elapsed == 120.0
+    main = store.agent_snapshot("new-main")
+    assert main is not None
+    assert main.usage == TokenUsage(350, 50, 230, 4)
+    assert main.context == ContextUsage(250, 200_000)
+    assert main.elapsed_seconds == 120.0
 
 
 def test_taken_commit_is_stable_against_later_streaming() -> None:
@@ -629,6 +745,47 @@ def test_context_delta_only_commits_the_growing_tail() -> None:
     payload = state.take_commit()
     assert payload is not None
     assert payload["context"] == {"keep": 1, "append": []}
+
+
+def test_session_elapsed_commit_is_change_driven_and_round_trips() -> None:
+    """会话耗时只在变化时产生提交，确认后清脏；非法与旧载荷按 0 兼容。"""
+    state = SessionState()
+    assert state.take_commit() is None
+
+    state.set_session_elapsed(-1.0)
+    assert state.session_elapsed == 0.0
+    assert state.take_commit() is None
+
+    state.set_session_elapsed(12.5)
+    assert state.take_commit() == {"metrics": {"elapsed_seconds": 12.5}}
+
+    state.set_session_elapsed(12.5)
+    assert state.take_commit() is None
+
+    state.set_session_elapsed(40.0)
+    assert state.checkpoint_due(now=state._last_checkpoint_at + 10.0)
+    assert state.take_commit() == {"metrics": {"elapsed_seconds": 40.0}}
+
+    restored = SessionState.from_dict(state.to_dict())
+    assert restored is not None
+    assert restored.session_elapsed == 40.0
+    assert restored.to_dict()["metrics"] == {"elapsed_seconds": 40.0}
+
+    legacy = SessionState.from_dict({
+        "version": LOG_VERSION,
+        "records": [],
+        "context_ids": [],
+        "llm_calls": [],
+    })
+    assert legacy is not None
+    assert legacy.session_elapsed == 0.0
+    assert SessionState.from_dict({
+        "version": LOG_VERSION,
+        "records": [],
+        "context_ids": [],
+        "llm_calls": [],
+        "metrics": {"elapsed_seconds": -3.0},
+    }).session_elapsed == 0.0
 
 
 def test_view_reuses_the_model_message_text_object() -> None:

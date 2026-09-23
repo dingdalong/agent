@@ -10,7 +10,7 @@
 
 `reset_session()` 是首次启动与 `/clear` 共用的新会话生命周期。处理 `/clear` 时先检查工作目录信任；确认结束后进入 UI reset gate，取消活跃、排队和只读请求并等待窗口 runner 清理。随后拒绝新的 `UiRequest`，用 `EventBus.join()` 收束已投递事件并保存源 `SessionState`，在 `deps.session` 上生成新 `id` 和空状态；`/clear` 再更新信任状态并重载配置、角色、Hook、模型与 MCP。最后重置 `AgentViewStore`，从激活角色 manifest 构造新主 Agent，替换 UI 会话状态，运行 `SessionStart` Hook，输出使用重载后模型、角色、Plan 状态和工作目录的启动 Banner，并在重新开放 gate 前完成最终事件 drain。重建失败时不输出 Banner。
 
-`resume_session()` 使用同一组 UI/EventBus gate：保存源状态后绑定目标会话状态（`SessionMgr.load_state()` 折叠目标会话的追加式日志），清空旧 metrics 和瞬态 UI，按目标 session 重建任务与 Plan，并从隐藏的 `subagent` view 投影恢复 `/agents` 只读记录，再从其他 `SessionRecord.view` 水合聊天。旧子 agent 不会继续运行。`/resume` 是 app 层命令，不能在 Agent 状态机内直接替换共享状态。
+`resume_session()` 使用同一组 UI/EventBus gate：保存源状态（提交前把 UI 累积的会话耗时并入源 `SessionState`）后绑定目标会话状态（`SessionMgr.load_state()` 折叠目标会话的追加式日志），重置瞬态 UI，按目标 session 重建任务与 Plan，从隐藏的 `subagent` view 投影恢复 `/agents` 只读记录，从其他 `SessionRecord.view` 水合聊天，最后回填状态栏指标：`AgentViewStore.restore_session_metrics()` 按目标状态的 `llm_calls` 重建会话累计 token 与前台上下文，并从 `metrics` 段读回累计耗时。旧子 agent 不会继续运行。`/resume` 是 app 层命令，不能在 Agent 状态机内直接替换共享状态。
 
 主会话只有一个状态权威写入点 `SessionState`（`src/common/session_state.py`）：
 
@@ -21,6 +21,8 @@ SessionState.records
     └─ recallable raw_input → 输入回溯
 SessionState.llm_calls
     └─ call_id + attempt → provider usage / 结果 / 阶段
+SessionState.session_elapsed
+    └─ metrics 段 → 状态栏累计耗时（回合结束时由 UI 写入）
 ```
 
 用户记录同时保存原始输入和注入 hook/reminder 后的模型消息；assistant 以 LLM `call_id` 合并流与最终消息，工具以 `tool_call_id` 合并展示和 tool message。每次实际 provider attempt 的开始与完成事件归并进 `llm_calls`，前台和后台 agent 使用同一核账路径；失败或取消且 provider 未给 usage 时保留 unknown 记录。compact 只替换 `context_ids`，不会删除已有可见记录。子 Agent 仍使用独立的纯内存 history。

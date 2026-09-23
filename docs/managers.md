@@ -451,13 +451,13 @@ MCP 连接配置和授权边界见 [mcp-and-hooks.md](mcp-and-hooks.md)。
 
 日志每行是一条批记录：`{"v":1,"seq":N,"ts":…,"contents":{…},"records":[…],"record_deltas":[…],"context":{"keep":n,"append":[…]},…}`。长度 ≥ `POOL_MIN_CHARS`（256）的文本在写入前抽取到本批 `contents`，正文位置只留 `{"$ref": "<内容指纹>"}`；同一段文本在整个会话中只落一份。上下文只提交增量：`keep` 是相对上次提交保留的公共前缀长度，`append` 是新增尾部，截断与整体替换同样用这一形式表达，因此同一批 ID 不会随轮次反复落盘。
 
-记录有两种落盘形态。首次写入是整份 `records` 快照；此后只要视图键集合没有收缩、正文仍能在已落盘正文上追加，就只提交 `record_deltas`：`fields` 恒带 timestamp/kind/model_message/raw_input/recallable/correlation_id 全部静态字段，`view.set` 是按键整体覆盖（末次写胜）的非正文视图数据，`view.append` 是本次未确认的 `content`/`thinking` 尾部，`stream_boundaries` 给出这段正文的 `base`/`after` 摘要供写入端链式校验。正文被替换、被截断，或视图键被删除（`set` 无法表达删除）时无法用增量表达，回退整份快照。`fold_log()` 按 `seq` 顺序先覆盖 `records` 再合并 `record_deltas`，恢复后可继续追加。
+记录有两种落盘形态。首次写入是整份 `records` 快照；此后只要视图键集合没有收缩、正文仍能在已落盘正文上追加，就只提交 `record_deltas`：`fields` 恒带 timestamp/kind/model_message/raw_input/recallable/correlation_id 全部静态字段，`view.set` 是按键整体覆盖（末次写胜）的非正文视图数据，`view.append` 是本次未确认的 `content`/`thinking` 尾部，`stream_boundaries` 给出这段正文的 `base`/`after` 摘要供写入端链式校验。正文被替换、被截断，或视图键被删除（`set` 无法表达删除）时无法用增量表达，回退整份快照。`fold_log()` 按 `seq` 顺序先覆盖 `records` 再合并 `record_deltas`，`plan` 与 `metrics` 末次写胜，恢复后可继续追加。
 
-写入端还保证「同一份数据只落一次」：`append_batch` 逐块比对上次落盘投影的内容摘要（16 字节 blake2b，比较用规范化 JSON，落盘字节不变），丢弃与上次相同的 record、`llm_calls`、`plan` 和空上下文增量；过滤后没有真实变更时整批不写，内容池与批序号也不动。`_written` 因此只随记录条数增长，不再为每个会话保留一份完整编码副本。恢复会话时用折叠结果预热这份摘要（含每条记录的正文摘要与静态投影摘要），避免续写第一轮把整段上下文重写一遍。脱敏已在文本入口完成，`append_batch` 只对载荷做漏网检测：若仍被改写，说明入口漏了一条路径，记录告警后按脱敏结果写入。
+写入端还保证「同一份数据只落一次」：`append_batch` 逐块比对上次落盘投影的内容摘要（16 字节 blake2b，比较用规范化 JSON，落盘字节不变），丢弃与上次相同的 record、`llm_calls`、`plan`、`metrics` 和空上下文增量；过滤后没有真实变更时整批不写，内容池与批序号也不动。`_written` 因此只随记录条数增长，不再为每个会话保留一份完整编码副本。恢复会话时用折叠结果预热这份摘要（含每条记录的正文摘要与静态投影摘要），避免续写第一轮把整段上下文重写一遍。脱敏已在文本入口完成，`append_batch` 只对载荷做漏网检测：若仍被改写，说明入口漏了一条路径，记录告警后按脱敏结果写入。
 
 记录增量按同一套摘要去重。正文只用 `stream_boundaries` 判断「是否已经在盘上」：`after` 与上次落盘摘要相同表示重复提交，直接丢弃该段；`after` 不同而 `base` 与上次落盘摘要不符时说明无法对位，写侧绝不丢弃这段正文——保留正文写入并把记录 ID 登记到 `commit.resync`，`SessionState.ack_commit()` 确认提交时对该记录退回整份快照（`invalidate_append_baseline`），保证用户已经看到的正文不会在磁盘上被静默截断。静态部分用归一化投影（字段 + 非正文视图数据）的摘要判断是否真的变了，没有正文也没有静态变化时整条增量丢弃。整份快照写入同样登记正文摘要与静态投影摘要，因此「整份快照之后的第一条增量」不会再有无基线的放行捷径。
 
-`SessionRecord` 可同时包含模型消息、可见 `ViewPayload`、原始输入和关联 ID。`SessionState` 分别投影 LLM 上下文、TUI 历史与输入回溯，并以 `LLMCallRecord` 持久化每次 provider attempt 的模型、调用者、阶段、结果和原始 usage；compact 只更新上下文投影。
+`SessionRecord` 可同时包含模型消息、可见 `ViewPayload`、原始输入和关联 ID。`SessionState` 分别投影 LLM 上下文、TUI 历史与输入回溯，并以 `LLMCallRecord` 持久化每次 provider attempt 的模型、调用者、阶段、结果和原始 usage；`metrics` 段持久化会话累计耗时（UI 在回合结束时经 `set_session_elapsed()` 写入、提交前由 app 层并入，只有变化才产生新批），`/resume` 由它恢复状态栏耗时；compact 只更新上下文投影。
 
 **公共方法**：
 
@@ -475,7 +475,7 @@ MCP 连接配置和授权边界见 [mcp-and-hooks.md](mcp-and-hooks.md)。
 
 **feature 门控**：否。 **reload**：无。
 
-**持有的关键状态**：`_sessions_dir`、`_workdir`、每会话的内容池 `_pools`、下一批序号 `_seqs` 与已落盘投影摘要 `_written`（记录摘要、记录增量静态摘要、调用摘要、计划摘要、上下文增量，以及每条记录 `content`/`thinking` 的正文摘要；无可变会话状态，`SessionState` 的生命周期所有者是 app 层）。
+**持有的关键状态**：`_sessions_dir`、`_workdir`、每会话的内容池 `_pools`、下一批序号 `_seqs` 与已落盘投影摘要 `_written`（记录摘要、记录增量静态摘要、调用摘要、计划摘要、指标摘要、上下文增量，以及每条记录 `content`/`thinking` 的正文摘要；无可变会话状态，`SessionState` 的生命周期所有者是 app 层）。
 
 冷压缩把 7 天未更新的 `{id}.jsonl` 压成同名归档：先写临时文件、校验可完整解压回原文，再原子替换并删除原日志；编码器优先 zstandard（`.jsonl.zst`），环境未安装时回退标准库 lzma（`.jsonl.xz`）。启动时由 `start_cold_compression()` 在守护线程里执行一次，6 小时内的重复扫描由 `.cold-compress.marker` 跳过。续写一个已归档会话时，`append_batch` 先把归档还原成活跃日志再追加，保证归档与活跃文件不会各自成为半份历史。
 
