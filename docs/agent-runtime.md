@@ -42,7 +42,7 @@ provider 不再就地裁剪共享历史：思考载体一律保留并随每轮�
 | `REQUEST_INPUT` | 读取用户输入、命令和 UserPromptSubmit hook |
 | `CHECK_COMPACT` | 构建提示词、估算完整输入、检查压缩进展 |
 | `COMPACT` | 执行一次自动压缩并返回复检 |
-| `LLM_CALL` | 调用统一 LLM 模板方法 |
+| `LLM_CALL` | 调用统一 LLM 模板方法；调用前把排队中的用户输入并入对话（仅主 agent） |
 | `PROCESS_RESPONSE` | 分流普通、工具、长度和协议续接终态 |
 | `LENGTH_RETRY` | 保存可用文本、丢弃半截工具调用并请求恢复 |
 | `PAUSE_TURN` | 回填 Anthropic 原始响应载体并按协议自动续接 |
@@ -138,6 +138,8 @@ handler 映射在 `Agent.__post_init__` 建立（`src/agent/agent.py:212-245`）
 
 `_on_request_input()` 读取输入；处理 `exit` / `quit`；分派 `/plan`、`/clear`、`/agents`、`/resume`、`/models`；运行 `UserPromptSubmit` Hook；首次输入前追加外部上下文 user 消息，排队 turn-start reminder，最后追加真实 user 消息并记录 `user_message_index`（中断收尾据此定位本轮消息）。Hook 附加文本使用带来源标记的外部 user 上下文，不进入 system/developer。
 
+工作期间提交的用户输入由 UI 经 `PendingUserInputPort` 放进 `Agent._pending_user_inputs`，在每次 `LLM_CALL` 开头（回滚点 `llm_call_start_idx` 之前）由 `_adopt_queued_user_inputs()` 按 FIFO 逐条作为 user 消息并入模型历史与会话状态，并入前脱敏、并入后发 `UserInputAdopted` 让 UI 展示并立即提交落盘；因此输入随**下一次模型调用**一起发出，而不是等整轮结束。命令与 `exit`/`quit` 不参与中途注入（队首是这类文本时整队延后），由本方法在下一次输入窗口解析；队列非空时本方法直接消费队首，不再打开输入窗口。子 agent 不消费该队列。
+
 ### 压缩检查
 
 `_on_check_compact()` 构建当前系统提示词，并在线程中按 provider 的真实请求形态估算 `messages + prompt + tools`。新 turn 首次采样前达到阈值时进入 `COMPACT`；工具或 Stop hook 需要继续当前 turn 时回到同一检查点，只有再次达到阈值才压缩。压缩后立即复检：摘要消息数为 0、摘要为空、token 未下降都视为无进展并转 `SUMMARIZE_EXIT`；token 下降但连续三次仍超阈值也转退出总结。
@@ -146,7 +148,7 @@ handler 映射在 `Agent.__post_init__` 建立（`src/agent/agent.py:212-245`）
 
 ### LLM 调用与正常响应
 
-`_on_llm_call()`（`agent.py` 的 `_on_llm_call`）先调用 `_append_pending_framework_message()`：只在模式相对上次 chat 发生变化时生成当前最终模式说明，并与 ReminderMgr 及恢复指令合并为最多一条 developer；随后 `normalize_messages()` 并调用 `llm.chat()`。工具执行和模式切换只更新状态或排队，不在中途改消息。
+`_on_llm_call()`（`agent.py` 的 `_on_llm_call`）先按回滚点之前的顺序并入排队中的用户输入（`_adopt_queued_user_inputs()`，见 §输入与命令），再调用 `_append_pending_framework_message()`：只在模式相对上次 chat 发生变化时生成当前最终模式说明，并与 ReminderMgr 及恢复指令合并为最多一条 developer；随后 `normalize_messages()` 并调用 `llm.chat()`。工具执行和模式切换只更新状态或排队，不在中途改消息。
 
 `_on_process_response()`（`agent.py:842-870`）在普通调用中用当前正文替换 `final_text`（包括空串，避免旧工具前言残留），在已建立恢复 checkpoint 时只累加非空正文；`length` 与 `pause_turn` 分别转专用恢复状态。普通终态或完整工具调用会清空恢复状态、追加真实 `assistant_message`，再转 `EXECUTE_TOOLS` 或 `CHECK_STOP`。因此恢复链能给 `RunResult` 与 Stop hook 完整拼接正文，后续普通工具轮仍只返回最后一份完整回答。
 

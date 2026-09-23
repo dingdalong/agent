@@ -8,9 +8,11 @@ import pytest
 from textual.geometry import Offset
 
 from src.events.menu import ChoiceMenu, InputMenu
-from src.events.types import SubagentLifecycle
+from src.events.types import SubagentLifecycle, ToolCallCompleted, ToolCallStarted
 from src.interfaces.agent_view_store import AgentViewStore
+from src.interfaces.tui.widgets import Composer
 from tests.tui.support import (
+    StubPendingInputs,
     _app,
     _wait_for_transcript_render,
 )
@@ -30,6 +32,12 @@ async def _open_input(app, pilot):
     )
     await pilot.pause()
     return future
+
+
+async def _focus_composer(app, pilot) -> None:
+    """把键盘交给输入框：处理态沿用首个输入窗口留下的焦点。"""
+    app.focus_composer()
+    await pilot.pause()
 
 
 def _completion_text(app) -> str:
@@ -489,5 +497,198 @@ def test_up_key_on_soft_wrapped_line_moves_one_visual_line_before_history() -> N
 
             await pilot.press("up")
             assert composer.text == "最新历史"
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_processing_submit_queues_via_port_without_rendering_history() -> None:
+    """处理态提交交给 Agent 排队：清空输入框、显示排队预览，但历史区不出现用户消息。"""
+
+    async def scenario() -> None:
+        stub = StubPendingInputs()
+        app = _app(pending_inputs=stub)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _focus_composer(app, pilot)
+            app.input_area.load_text("继续检查日志")
+            await pilot.press("enter")
+            await pilot.pause()
+
+            assert stub.snapshot() == ["继续检查日志"]
+            assert app.input_area.composer.text == ""
+            assert app.history_journal.snapshot() == ""
+            assert app._queued_widget.display
+            rendered = app._queued_widget.render().plain
+            assert "已排队 1 条" in rendered
+            assert "↳ 继续检查日志" in rendered
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_adopted_user_input_renders_after_live_tool_rows() -> None:
+    """并入事件把用户消息上屏，位置在本轮工具行之后（先落定工具行再展示）。"""
+
+    async def scenario() -> None:
+        app = _app(pending_inputs=StubPendingInputs())
+        async with app.run_test(size=(100, 30)) as pilot:
+            await app.on_tool_call_started(ToolCallStarted(
+                timestamp=1.0,
+                source="test",
+                tool_name="exec_command",
+                tool_call_id="call_1",
+                detail="echo hi",
+            ))
+            await app.on_tool_call_completed(ToolCallCompleted(
+                timestamp=2.0,
+                source="test",
+                tool_name="exec_command",
+                tool_call_id="call_1",
+                status="success",
+                duration_seconds=0.5,
+            ))
+            await pilot.pause()
+            assert app.history_journal.snapshot() == ""
+
+            await app.on_user_input_adopted("排队内容")
+            await pilot.pause()
+
+            snapshot = app.history_journal.snapshot()
+            assert "echo hi" in snapshot
+            assert "排队内容" in snapshot
+            assert snapshot.index("echo hi") < snapshot.index("排队内容")
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_processing_draft_survives_window_open_and_adoption() -> None:
+    """工作态草稿在输入窗口打开与排队文本并入时都保留。"""
+
+    async def scenario() -> None:
+        stub = StubPendingInputs()
+        app = _app(pending_inputs=stub)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _focus_composer(app, pilot)
+            app.input_area.load_text("排队内容")
+            await pilot.press("enter")
+            await pilot.pause()
+            app.input_area.load_text("正在写的草稿")
+            await pilot.pause()
+
+            await _open_input(app, pilot)
+            await pilot.pause()
+            # 输入窗口不再替用户作答：排队内容仍归 Agent，草稿原样保留。
+            assert stub.snapshot() == ["排队内容"]
+            assert app.input_area.text == "正在写的草稿"
+
+            stub.items.clear()  # 模拟 Agent 取走该条并并入对话
+            await app.on_user_input_adopted("排队内容")
+            await pilot.pause()
+            assert app.input_area.text == "正在写的草稿"
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_empty_submit_is_not_queued() -> None:
+    """空输入框回车不入队，也不显示预览。"""
+
+    async def scenario() -> None:
+        stub = StubPendingInputs()
+        app = _app(pending_inputs=stub)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _focus_composer(app, pilot)
+            await pilot.press("enter")
+            await pilot.pause()
+
+            assert stub.snapshot() == []
+            assert not app._queued_widget.display
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_alt_up_pulls_last_queued_input_before_draft() -> None:
+    """Alt+↑ 取回最后一条排队输入，插到当前草稿之前。"""
+
+    async def scenario() -> None:
+        stub = StubPendingInputs()
+        app = _app(pending_inputs=stub)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _focus_composer(app, pilot)
+            for text in ("第一条", "第二条"):
+                app.input_area.load_text(text)
+                await pilot.press("enter")
+                await pilot.pause()
+            app.input_area.load_text("草稿")
+            await pilot.pause()
+
+            await pilot.press("alt+up")
+            await pilot.pause()
+            assert app.input_area.text == "第二条\n草稿"
+            assert stub.snapshot() == ["第一条"]
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_interrupted_turn_restores_queued_input_into_composer_without_sending() -> None:
+    """中断不自动发送排队内容，而是按序合并回输入框（草稿在后）。"""
+
+    async def scenario() -> None:
+        stub = StubPendingInputs()
+        app = _app(pending_inputs=stub)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _focus_composer(app, pilot)
+            for text in ("第一条", "第二条"):
+                app.input_area.load_text(text)
+                await pilot.press("enter")
+                await pilot.pause()
+            app.input_area.load_text("草稿")
+            await pilot.pause()
+
+            await app.finish_interrupted_turn()
+            await pilot.pause()
+
+            assert app.input_area.text == "第一条\n第二条\n草稿"
+            assert stub.snapshot() == []
+            assert not app._queued_widget.display
+            assert app.history_journal.snapshot() == ""
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_processing_state_keeps_input_editable_without_completions() -> None:
+    """处理态输入框可编辑且不弹补全；隐藏态（内嵌交互）只读且提交不入队。"""
+
+    async def scenario() -> None:
+        stub = StubPendingInputs()
+        app = _app(slash_commands=_COMMANDS, pending_inputs=stub)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            assert not app.coordinator.input_active
+            assert not app.input_area.composer.read_only
+
+            app.input_area.load_text("/cle")
+            await pilot.pause()
+            assert not app.input_area.completion_visible
+
+            choice = ChoiceMenu(
+                timestamp=2.0,
+                source="test",
+                options=[("one", "一")],
+                future=asyncio.get_running_loop().create_future(),
+            )
+            await app.coordinator.submit(choice)
+            await pilot.pause()
+            assert app.coordinator.inline_widget_active
+            assert app.input_area.composer.read_only
+
+            app.input_area.load_text("排队试试")
+            await app.on_composer_submitted(Composer.Submitted("排队试试"))
+            await pilot.pause()
+            assert stub.snapshot() == []
 
     asyncio.run(scenario())

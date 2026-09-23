@@ -3,13 +3,47 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 
 from src.events.menu import FormMenu
 from src.interfaces.agent_view_store import AgentViewStore
+from src.interfaces.base import PendingUserInputPort
 from src.interfaces.turn_clock import TurnClock
 from src.interfaces.tui.app import AgentTuiApp
 from src.interfaces.tui.history_log import HistoryLog
 from src.interfaces.tui.render_policy import TuiRenderPolicy
+
+
+class StubPendingInputs:
+    """测试用的排队输入端口：在内存 deque 上复现 Agent 侧的四个操作。"""
+
+    def __init__(self) -> None:
+        self.items: deque[str] = deque()
+
+    def port(self) -> PendingUserInputPort:
+        return PendingUserInputPort(
+            queue=self.queue,
+            snapshot=self.snapshot,
+            take_last=self.take_last,
+            take_all=self.take_all,
+        )
+
+    def queue(self, text: str) -> bool:
+        if not text.strip():
+            return False
+        self.items.append(text)
+        return True
+
+    def snapshot(self) -> list[str]:
+        return list(self.items)
+
+    def take_last(self) -> str | None:
+        return self.items.pop() if self.items else None
+
+    def take_all(self) -> list[str]:
+        pending = list(self.items)
+        self.items.clear()
+        return pending
 
 
 def _track_render_concurrency(app) -> list[int]:
@@ -47,6 +81,7 @@ def _app(
     render_policy: TuiRenderPolicy | None = None,
     slash_commands: list[tuple[str, str]] | None = None,
     get_input_history=None,
+    pending_inputs: StubPendingInputs | None = None,
 ) -> AgentTuiApp:
     return AgentTuiApp(
         store or AgentViewStore(),
@@ -58,6 +93,7 @@ def _app(
         lambda: False,
         lambda: None,
         get_input_history=get_input_history,
+        pending_inputs=(pending_inputs or StubPendingInputs()).port(),
         get_model_info=get_model_info,
         platform_name=platform,
         native_clipboard=False,

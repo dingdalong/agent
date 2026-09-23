@@ -19,6 +19,7 @@ from src.interfaces.status_presenter import (
     format_token_count,
     present_agent,
     present_ended_agent,
+    present_queued_inputs,
     present_session_metrics,
     present_spinner_frame,
     present_task_panel,
@@ -45,6 +46,7 @@ class ChromeRenderer:
         self._activity_content_cache: str | None = None
         self._status_signature: tuple[Any, ...] | None = None
         self._input_status_cache: str | None = None
+        self._queued_signature: tuple[Any, ...] | None = None
         self._separator_width = 0
 
     @property
@@ -57,7 +59,8 @@ class ChromeRenderer:
         self._dirty = True
 
     def update(self) -> None:
-        """全量渲染三段状态区；调用方须保证 App 已挂载。"""
+        """全量渲染四段状态区；调用方须保证 App 已挂载。"""
+        self.render_queued_inputs()
         self.render_activity()
         self.render_status()
         self.render_input_status()
@@ -254,6 +257,26 @@ class ChromeRenderer:
             return
         app._status.update(status)
         self._status_signature = signature
+
+    def render_queued_inputs(self) -> None:
+        """渲染输入框上方的排队分组；空队列或查看转录时隐藏，不留占位空行。"""
+        app = self._app
+        previews = app.pending_inputs.snapshot()
+        widget = app._queued_widget
+        visible = bool(previews) and not app.transcript.viewing_agent_id
+        signature = (tuple(previews), app.screen.size.width)
+        if not visible:
+            widget.display = False
+            self._queued_signature = None
+            return
+        widget.display = True
+        if signature == self._queued_signature:
+            return
+        self._queued_signature = signature
+        widget.update(
+            present_queued_inputs(previews, width=max(1, app.screen.size.width)),
+            layout=False,
+        )
 
     def render_input_status(self) -> None:
         """渲染输入框上方的右对齐状态行。

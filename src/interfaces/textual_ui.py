@@ -25,9 +25,10 @@ from src.events.types import (
     ThinkingDelta,
     ToolCallCompleted,
     ToolCallStarted,
+    UserInputAdopted,
 )
 from src.interfaces.agent_view_store import AgentViewStore
-from src.interfaces.base import UserInterface
+from src.interfaces.base import PendingUserInputPort, UserInterface
 from src.interfaces.status_presenter import agent_label
 from src.interfaces.turn_clock import TurnClock
 from src.interfaces.tui import session_replay
@@ -141,6 +142,7 @@ class TextualInterface(UserInterface):
             self.get_plan_state,
             self._toggle_plan,
             self._get_input_history,
+            pending_inputs=self._pending_inputs_facade(),
             get_model_info=self.get_model_info,
             copy_on_select=self.copy_on_select,
             history_journal=self.history_journal,
@@ -429,6 +431,33 @@ class TextualInterface(UserInterface):
             return []
         return self._input_history_provider()
 
+    def _pending_inputs_facade(self) -> PendingUserInputPort:
+        """构造 TUI 侧排队输入通道：每次调用都解引用当前端口，会话重置后自动生效。"""
+        return PendingUserInputPort(
+            queue=self._queue_pending_input,
+            snapshot=self._snapshot_pending_inputs,
+            take_last=self._take_last_pending_input,
+            take_all=self._take_all_pending_inputs,
+        )
+
+    def _queue_pending_input(self, text: str) -> bool:
+        port = self._pending_input_port
+        if port is None:
+            return False
+        return port.queue(text)
+
+    def _snapshot_pending_inputs(self) -> list[str]:
+        port = self._pending_input_port
+        return port.snapshot() if port is not None else []
+
+    def _take_last_pending_input(self) -> str | None:
+        port = self._pending_input_port
+        return port.take_last() if port is not None else None
+
+    def _take_all_pending_inputs(self) -> list[str]:
+        port = self._pending_input_port
+        return port.take_all() if port is not None else []
+
     async def replace_session_state(self, state: SessionState) -> None:
         """切换聊天历史的数据源并水合当前前台。"""
         records = state.visible_records()
@@ -690,6 +719,14 @@ class TextualInterface(UserInterface):
             if await self._invoke(lambda: self._app.on_permission_notice(event)):
                 return
         self._write_blocks(blocks_for_event(event))
+
+    async def on_user_input_adopted(self, event: UserInputAdopted) -> None:
+        if self.is_tty:
+            app = self._app
+            if app is not None:
+                await self._invoke(lambda: app.on_user_input_adopted(event.text))
+            return
+        self._plain.write(event.text, end="\n")
 
     async def on_tool_call_started(self, event: ToolCallStarted) -> None:
         if self.is_tty:

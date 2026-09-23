@@ -48,6 +48,7 @@ from src.interfaces.tui.widgets import (
 )
 from src.common.session_state import SessionState
 from tests.tui.support import (
+    StubPendingInputs,
     _app,
     _assert_regions_do_not_overlap,
     _follow_newest,
@@ -601,7 +602,8 @@ def test_keyboard_focus_moves_between_composer_agent_list_and_transcript() -> No
             agent_type="worker",
             phase="start",
         ))
-        app = _app(store)
+        stub = StubPendingInputs()
+        app = _app(store, pending_inputs=stub)
         async with app.run_test(size=(100, 30)) as pilot:
             request = InputMenu(
                 timestamp=2.0,
@@ -633,16 +635,21 @@ def test_keyboard_focus_moves_between_composer_agent_list_and_transcript() -> No
             await pilot.pause()
             assert await request.future == "go"
             assert not app.coordinator.input_active
-            assert app.input_area.composer.read_only
+            # 处理态输入框可编辑：无输入窗口时提交进入排队区。
+            assert not app.input_area.composer.read_only
             assert app.input_area.composer.has_focus
             assert app.input_area.composer.show_cursor
             assert app.input_area.composer._draw_cursor
             assert app.input_area.composer.text == ""
 
+            rendered_before = app.history_journal.snapshot()
             await pilot.press("x", "shift+enter", "enter")
             await pilot.pause()
             assert app.input_area.composer.text == ""
             assert app.input_area.composer.has_focus
+            assert stub.snapshot() == ["x\n"]
+            # 排队提交不上屏：并入对话时才由 Agent 发事件展示。
+            assert app.history_journal.snapshot() == rendered_before
 
             await pilot.press("down")
             assert app._agent_list.has_focus
@@ -673,7 +680,7 @@ def test_keyboard_focus_moves_between_composer_agent_list_and_transcript() -> No
 
             await pilot.press("up")
             assert app.input_area.composer.has_focus
-            assert app.input_area.composer.read_only
+            assert not app.input_area.composer.read_only
             assert app.input_area.composer._draw_cursor
 
             await pilot.press("down", "down", "enter")

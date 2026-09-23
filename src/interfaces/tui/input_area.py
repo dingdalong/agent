@@ -81,7 +81,11 @@ class InputAreaController:
         self.shell.styles.height = min(_MAX_COMPOSER_ROWS, max(1, visual_lines))
 
     def sync_state(self) -> None:
-        """同步只读态与光标可见性：转录查看、内嵌交互与处理态都影响输入区。"""
+        """同步只读态与光标可见性：转录查看与内嵌交互隐藏输入区并置为只读。
+
+        处理态（Agent 工作中）也允许输入：提交内容进入排队区，由下一个输入窗口
+        按序送出，因此这里不再要求 ``coordinator.input_active``。
+        """
         if not self.composer.is_mounted:
             return
         app = self._app
@@ -89,9 +93,12 @@ class InputAreaController:
             not app.transcript.viewing_agent_id
             and not app.coordinator.inline_widget_active
         )
-        editable = app.coordinator.input_active and input_visible
-        self.composer.read_only = not editable
+        self.composer.read_only = not input_visible
         self.composer.show_cursor = input_visible
+
+    def pull_last_queued_input(self) -> bool:
+        """Alt+↑：取回最后一条排队输入并插到当前草稿之前。"""
+        return self._app.pull_last_queued_input()
 
     def on_text_changed(self, text: str) -> None:
         """输入内容变化：先重算高度，再刷新补全候选。"""

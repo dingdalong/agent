@@ -140,3 +140,47 @@ def test_present_agent_identity_omits_status_slot_for_transcript_header() -> Non
     ).plain
     assert rendered[0] in _SPINNER_CHARS
     assert "repository-map  分析代码结构" in rendered
+
+
+def test_present_queued_inputs_is_empty_without_previews() -> None:
+    """无排队内容时不产生任何文本（调用方据此隐藏控件）。"""
+    assert status_presenter.present_queued_inputs([], width=80).plain == ""
+
+
+def test_present_queued_inputs_lists_messages_with_header_and_hint() -> None:
+    """标题行给出条数与取回提示，正文逐条列出摘要。"""
+    rendered = status_presenter.present_queued_inputs(
+        ["第一条输入", "第二条输入"],
+        width=80,
+    ).plain
+
+    assert rendered.splitlines() == [
+        "• 已排队 2 条（下一次模型调用前带上 · Alt+↑ 取回最后一条）",
+        "  ↳ 第一条输入",
+        "  ↳ 第二条输入",
+    ]
+
+
+def test_present_queued_inputs_uses_first_nonempty_line() -> None:
+    """多行排队输入取首个非空行并折叠空白，避免预览被换行撑开。"""
+    rendered = status_presenter.present_queued_inputs(
+        ["\n  第一行   内容 \n第二行"],
+        width=80,
+    ).plain
+
+    assert rendered.splitlines()[1] == "  ↳ 第一行 内容"
+
+
+def test_present_queued_inputs_truncates_and_reports_overflow() -> None:
+    """超过展示上限时以「… 另有 N 条」收尾，过长摘要按宽度截断。"""
+    rendered = status_presenter.present_queued_inputs(
+        ["一" * 40, "二", "三", "四"],
+        width=30,
+    ).plain
+
+    lines = rendered.splitlines()
+    assert lines[0] == "• 已排队 4 条（下一次模型调用前带上 · Alt+↑ 取回最后一条）"
+    assert lines[1] == "  ↳ " + "一" * 22 + "…"
+    assert lines[2] == "  ↳ 二"
+    assert lines[3] == "  ↳ 三"
+    assert lines[4] == "  … 另有 1 条"

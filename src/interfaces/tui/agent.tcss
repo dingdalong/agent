@@ -88,6 +88,16 @@ MarkdownFence {
     color: #8d989f;
 }
 
+/* 输入框上方的排队分组：只在有排队输入时显示，最多标题 + 3 条 + 溢出行 */
+#queued-input {
+    display: none;
+    height: auto;
+    max-height: 5;
+    padding: 0 2;
+    background: ansi_default;
+    color: #8d989f;
+}
+
 #composer-shell {
     height: 1;
     min-height: 1;
@@ -153,13 +163,14 @@ MarkdownFence {
 
 .viewing #composer-shell, .viewing #separator-top,
 .viewing #separator-bottom, .viewing #input-status,
+.viewing #queued-input,
 .viewing #agent-list {
     display: none;
 }
 
 .compact #history, .compact #activity, .compact #transcript-panel,
 .compact #transcript-header, .compact #completion, .compact #core-status,
-.compact #input-status, .compact #agent-list ListItem {
+.compact #input-status, .compact #queued-input, .compact #agent-list ListItem {
     padding-left: 1;
     padding-right: 1;
 }

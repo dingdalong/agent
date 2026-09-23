@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio, json, logging, time, uuid
+from collections import deque
 from uuid import UUID
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -11,6 +12,7 @@ from src.events.types import (
     CompactDelta,
     LLMCallFailed,
     LLMLengthRetrying,
+    UserInputAdopted,
     caller_identity,
 )
 from src.agent.assembly import AgentAssembly, AgentAssembler
@@ -232,6 +234,8 @@ class Agent:
     _initial_context_message_count: int = field(init=False, default=0, repr=False)
     _manager_guidance_injected: bool = field(init=False, default=False, repr=False)
     _queued_user_action: str = field(init=False, default="", repr=False)
+    # 工作期间提交、等待在下次模型调用前并入对话的用户文本（FIFO）。
+    _pending_user_inputs: deque[str] = field(init=False, default_factory=deque, repr=False)
     _handlers: dict[AgentState, Callable] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -498,6 +502,46 @@ class Agent:
         if self._queued_user_action:
             raise RuntimeError("已有待处理的框架用户 action")
         self._queued_user_action = content
+
+    def queue_user_input(self, text: str) -> bool:
+        """排队一条用户输入：在下一次模型调用前并入当前对话。
+
+        Args:
+            text: 用户在 Agent 工作期间提交的原始文本；纯空白忽略。
+
+        Returns:
+            True 表示已受理；False 表示纯空白、没有可排队的内容。
+        """
+        if not text.strip():
+            return False
+        self._queued_inputs().append(text)
+        return True
+
+    def pending_user_inputs(self) -> list[str]:
+        """按 FIFO 返回尚未并入对话的排队输入副本（供 UI 预览）。"""
+        return list(self._queued_inputs())
+
+    def take_last_pending_user_input(self) -> str | None:
+        """取回最后一条排队输入（供用户改主意时编辑）；无排队时返回 None。"""
+        pending = self._queued_inputs()
+        if not pending:
+            return None
+        return pending.pop()
+
+    def take_all_pending_user_inputs(self) -> list[str]:
+        """取走全部排队输入（中断时回填输入框），不自动发送。"""
+        pending = self._queued_inputs()
+        taken = list(pending)
+        pending.clear()
+        return taken
+
+    def _queued_inputs(self) -> deque[str]:
+        """返回排队输入队列；最小化测试实例未走 ``__post_init__`` 时按需创建。"""
+        pending = getattr(self, "_pending_user_inputs", None)
+        if pending is None:
+            pending = deque()
+            self._pending_user_inputs = pending
+        return pending
 
     async def run(self, input: str | None = None) -> RunResult:
         """运行 agent 对话。
@@ -844,9 +888,16 @@ class Agent:
             下一个状态：DONE（退出/命令）、REQUEST_INPUT（hook 阻断）或 CHECK_COMPACT。
         """
         queued_action = getattr(self, "_queued_user_action", "")
+        adopted_from_queue = False
+        pending_inputs = self._queued_inputs()
         if queued_action:
             user_input = queued_action
             self._queued_user_action = ""
+        elif pending_inputs:
+            # 排到本次输入窗口的文本（含命令与退出词）直接作为本轮输入，
+            # 不再弹出输入窗口：用户已经表达过要说什么。
+            user_input = pending_inputs.popleft()
+            adopted_from_queue = True
         else:
             try:
                 user_input = await self.deps.event_bus.request_input(
@@ -868,6 +919,8 @@ class Agent:
         state = self._session_state()
         if state is not None and user_input:
             ctx.user_record_id = state.append_user(user_input)
+        if adopted_from_queue:
+            await self._emit_user_input_adopted(user_input)
 
         if user_input.strip().lower() in ("exit", "quit"):
             ctx.exit_requested = True
@@ -1076,6 +1129,9 @@ class Agent:
         """
         ctx.llm_call_count += 1
         state = self._session_state()
+        # 工作期间排队的用户输入必须在回滚点之前并入：中断回滚只丢弃本次调用
+        # 新增的临时消息，用户说过的话要留在模型历史里。
+        await self._adopt_queued_user_inputs()
         ctx.llm_call_start_idx = len(ctx.messages)
         ctx.llm_call_context_start = (
             len(state.context_ids) if state is not None else 0
@@ -1518,6 +1574,58 @@ class Agent:
         return AgentState.DONE
 
     # ---- helpers ----
+
+    @staticmethod
+    def _is_injectable_user_input(text: str) -> bool:
+        """判断排队文本能否中途并入：命令与退出词必须留给输入窗口解析。"""
+        return parse_command(text) is None and text.strip().lower() not in ("exit", "quit")
+
+    async def _adopt_queued_user_inputs(self) -> int:
+        """在 chat 之前把排队输入逐条并入对话（仅主 agent）。
+
+        命令与退出词留在队列里，由 ``REQUEST_INPUT`` 正常解析；子 agent 不消费
+        用户排队输入，避免把用户的话注入到子 agent 的上下文。
+
+        Returns:
+            本次并入的条数。
+        """
+        pending = self._queued_inputs()
+        if self.spec.is_subagent or not pending:
+            return 0
+        adopted = 0
+        while pending and self._is_injectable_user_input(pending[0]):
+            await self._adopt_user_input(pending.popleft())
+            adopted += 1
+        return adopted
+
+    async def _adopt_user_input(self, text: str) -> None:
+        """把一条排队文本并入模型历史与会话状态，并通知 UI 展示。"""
+        data_guard = getattr(self.deps, "data_guard", None)
+        content = str(data_guard.redact(text)) if data_guard is not None else text
+        state = self._session_state()
+        record_id = state.append_user(content) if state is not None else None
+        self._append_message(
+            self.history,
+            {"role": "user", "content": content},
+            record_id=record_id,
+            kind="user",
+        )
+        await self._emit_user_input_adopted(content)
+        await self._commit_session()
+
+    async def _emit_user_input_adopted(self, text: str) -> None:
+        """通知 UI：这条用户输入已并入对话，可在正确位置展示。"""
+        event_bus = getattr(self.deps, "event_bus", None)
+        if event_bus is None:
+            return
+        caller_agent_type, caller_uuid = caller_identity(self)
+        await event_bus.emit(UserInputAdopted(
+            timestamp=time.time(),
+            source=self.spec.agent_type,
+            text=text,
+            caller_agent_type=caller_agent_type,
+            caller_uuid=caller_uuid,
+        ))
 
     def _append_initial_context_messages(self) -> None:
         """在首条真实输入之前追加一次外部上下文，不污染固定 system。"""

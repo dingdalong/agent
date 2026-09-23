@@ -12,6 +12,7 @@ from rich.text import Text
 
 from src.events.menu import ChoiceMenu, InputMenu, TranscriptView
 from src.interfaces.agent_view_store import AgentViewStore
+from src.interfaces.base import PendingUserInputPort
 from src.interfaces.textual_ui import TextualInterface, TuiTermination
 from src.interfaces.turn_clock import TurnClock
 from src.interfaces.tui.app import AgentTuiApp
@@ -52,6 +53,30 @@ def _interface(monkeypatch: pytest.MonkeyPatch, stream: object) -> TextualInterf
     interface = TextualInterface(AgentViewStore())
     interface.is_tty = True
     return interface
+
+
+def test_pending_inputs_facade_tracks_current_port(monkeypatch) -> None:
+    """TUI 侧通道每次调用都解引用当前端口：会话重置后自动指向新的主 Agent。"""
+    interface = _interface(monkeypatch, _RecordingStream())
+    facade = interface._pending_inputs_facade()
+
+    assert facade.queue("第一条") is False
+    assert facade.snapshot() == []
+    assert facade.take_last() is None
+    assert facade.take_all() == []
+
+    queued: list[str] = []
+    interface.set_pending_input_port(PendingUserInputPort(
+        queue=lambda text: queued.append(text) or True,
+        snapshot=lambda: list(queued),
+        take_last=lambda: queued.pop() if queued else None,
+        take_all=lambda: queued.clear() or [],
+    ))
+
+    assert facade.queue("第二条") is True
+    assert facade.snapshot() == ["第二条"]
+    assert facade.take_last() == "第二条"
+    assert facade.snapshot() == []
 
 
 def test_stop_restores_vscode_keyboard_protocol_and_flushes(monkeypatch) -> None:

@@ -259,6 +259,19 @@ class InteractionCompleted(Event):
 
 
 @dataclass
+class UserInputAdopted(Event):
+    """排队中的用户输入已并入当前对话（模型上下文与会话状态）。
+
+    由主 Agent 在每次 chat 之前并入排队输入时发出，供 UI 在正确位置展示这条
+    用户消息：并入发生在工具结果之后、下一次模型调用之前，因此展示顺序与会话
+    记录、`/resume` 回放顺序一致。
+    """
+    text: str = ""
+    level: EventLevel = field(default=EventLevel.PROGRESS, init=False)
+    type: Literal["user_input_adopted"] = field(default="user_input_adopted", init=False)
+
+
+@dataclass
 class InterruptRequested(Event):
     """请求中断当前用户交互或 agent 工作。"""
     level: EventLevel = field(default=EventLevel.PROGRESS, init=False)

@@ -15,6 +15,7 @@ import src.interfaces.tui.chrome as tui_chrome_module
 from src.interfaces.tui.chrome import rich_text_signature
 
 from tests.tui.support import (
+    StubPendingInputs,
     _app,
     _assert_regions_do_not_overlap,
     _open_form,
@@ -188,5 +189,76 @@ def test_input_status_hidden_while_viewing_transcript() -> None:
             app.transcript.close()
             await pilot.pause()
             assert app._input_status.display
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_queued_input_preview_lists_messages_and_hides_when_empty() -> None:
+    """排队预览在输入框上方显示条数与逐条摘要；清空后隐藏且不留占位。"""
+
+    async def scenario() -> None:
+        stub = StubPendingInputs()
+        app = _app(get_model_info=lambda: ("deepseek-v4-pro", "max"), pending_inputs=stub)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            assert not app._queued_widget.display
+            _assert_regions_do_not_overlap(app)
+
+            stub.queue("第一条输入")
+            stub.queue("第二条输入")
+            app.refresh_chrome()
+            await pilot.pause()
+
+            assert app._queued_widget.display
+            rendered = app._queued_widget.render().plain
+            assert rendered.splitlines()[0] == (
+                "• 已排队 2 条（下一次模型调用前带上 · Alt+↑ 取回最后一条）"
+            )
+            assert rendered.splitlines()[1] == "  ↳ 第一条输入"
+            assert rendered.splitlines()[2] == "  ↳ 第二条输入"
+            assert app._input_status.display
+            _assert_regions_do_not_overlap(app)
+
+            stub.items.clear()
+            app.refresh_chrome()
+            await pilot.pause()
+            assert not app._queued_widget.display
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_queued_input_preview_hidden_while_viewing_transcript() -> None:
+    """查看子 agent 转录时排队预览与输入区一同隐藏，收起后恢复。"""
+
+    async def scenario() -> None:
+        store = AgentViewStore()
+        store.register_foreground("main", "main")
+        store.record(SubagentLifecycle(
+            timestamp=0.0,
+            source="subagent",
+            agent_uuid="worker-0",
+            agent_type="worker",
+            phase="start",
+        ))
+        stub = StubPendingInputs()
+        app = _app(store, pending_inputs=stub)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            stub.queue("排队内容")
+            app.refresh_chrome()
+            await pilot.pause()
+            assert app._queued_widget.display
+
+            await app.coordinator.open_live_transcript("worker-0")
+            await pilot.pause()
+            assert not app._queued_widget.display
+            assert app.input_area.composer.read_only
+
+            app.transcript.close()
+            await pilot.pause()
+            assert app._queued_widget.display
+            assert not app.input_area.composer.read_only
 
     asyncio.run(scenario())

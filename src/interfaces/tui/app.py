@@ -31,6 +31,7 @@ from src.events.types import (
     ToolCallStarted,
 )
 from src.interfaces.agent_view_store import AgentViewStore
+from src.interfaces.base import PendingUserInputPort
 from src.interfaces.status_presenter import agent_label, present_agent
 from src.interfaces.turn_clock import TurnClock
 from src.common.tool_display import permission_line
@@ -62,6 +63,14 @@ from src.interfaces.tui.widgets import (
     NativeClipboard,
     SelectionScreen,
     SelectionStatic,
+)
+
+
+_INERT_PENDING_INPUTS = PendingUserInputPort(
+    queue=lambda _text: False,
+    snapshot=lambda: [],
+    take_last=lambda: None,
+    take_all=lambda: [],
 )
 
 
@@ -115,6 +124,7 @@ class AgentTuiApp(App[None]):
         toggle_plan: Callable[[], None],
         get_input_history: Callable[[], list[str]] | None = None,
         *,
+        pending_inputs: PendingUserInputPort | None = None,
         get_model_info: Callable[[], tuple[str, str] | None] | None = None,
         copy_on_select: bool | None = None,
         platform_name: str | None = None,
@@ -133,6 +143,8 @@ class AgentTuiApp(App[None]):
         self.get_plan_state = get_plan_state
         self.toggle_plan = toggle_plan
         self.get_input_history = get_input_history or (lambda: [])
+        # 排队输入端口由应用层装配；未装配时提交不吞掉输入框内容（见 hold_queued_input）。
+        self.pending_inputs = pending_inputs or _INERT_PENDING_INPUTS
         self.get_model_info = get_model_info or (lambda: None)
         self.target_platform = platform_name or sys.platform
         self.copy_on_select = (
@@ -200,6 +212,7 @@ class AgentTuiApp(App[None]):
                     yield self.transcript.content
             yield self.input_area.completion
         yield SelectionStatic("", id="input-status", markup=False)
+        yield SelectionStatic("", id="queued-input", markup=False)
         yield SelectionStatic("", classes="separator", id="separator-top", markup=False)
         with self.input_area.shell:
             yield self.input_area.composer
@@ -215,6 +228,7 @@ class AgentTuiApp(App[None]):
         self._interaction_slot = self.query_one("#interaction-slot", Vertical)
         self._activity_widget = self.query_one("#activity", Static)
         self._input_status = self.query_one("#input-status", Static)
+        self._queued_widget = self.query_one("#queued-input", Static)
         self._status = self.query_one("#core-status", Static)
         self._agent_list = self.query_one("#agent-list", AgentList)
         self._separator_top = self.query_one("#separator-top", Static)
@@ -381,7 +395,7 @@ class AgentTuiApp(App[None]):
         context = "\n".join(lines[:-1]).strip("\n") if len(lines) > 1 else ""
         if context.strip():
             await self.append_output(context, markdown=request.markdown)
-        self.input_area.clear()
+        # 工作态写下的草稿是用户尚未提交的内容，开窗时保留（不再无条件清空）。
         self.input_area.sync_state()
         self.call_after_refresh(self.restore_focus)
 
@@ -392,6 +406,16 @@ class AgentTuiApp(App[None]):
         self._reset_turn_status()
         self.input_area.sync_state()
 
+    async def on_user_input_adopted(self, text: str) -> None:
+        """排队输入已并入对话：先把本轮工具行落定，再在正确位置展示这条用户消息。
+
+        展示时刻即并入时刻（工具结果之后、下一次模型调用之前），因此实时顺序与
+        会话记录、`/resume` 回放顺序一致。
+        """
+        await self.flush_round()
+        await self.append_user(text)
+        self.refresh_chrome()
+
     def finish_input_cancelled(self) -> None:
         """用户取消输入：清空输入框与轮次状态，但保留本轮工具行等待收尾落定。"""
         self.input_area.clear()
@@ -400,14 +424,49 @@ class AgentTuiApp(App[None]):
         self.input_area.sync_state()
 
     async def finish_interrupted_turn(self) -> None:
-        """中断收尾：先把本轮工具行写进转录，结算被中断回合的耗时，再重置轮次状态。"""
+        """中断收尾：先把本轮工具行写进转录，结算被中断回合的耗时，再重置轮次状态。
+
+        排队中的用户文本不自动发送，而是按序合并回输入框（既有草稿保持在后），
+        避免中断后又立刻开启新一轮，同时不丢用户已输入的内容。
+        """
         await self.flush_round()
         # 被中断的回合不会走到 begin_input，不在这里结算就会既不上屏也不落盘。
         self._bank_turn_elapsed()
         self._reset_turn_status()
-        self.input_area.clear()
+        self._restore_queued_input_to_composer()
         self.input_area.sync_state()
         self.refresh_chrome()
+
+    def _restore_queued_input_to_composer(self) -> None:
+        """把排队输入按 FIFO 合并到当前草稿之前；两处都为空时清空输入框。"""
+        restored = self.pending_inputs.take_all()
+        draft = self.input_area.text
+        merged = "\n".join([*restored, draft] if draft.strip() else restored)
+        if merged.strip():
+            self.input_area.load_text(merged, cursor_to_end=True)
+        else:
+            self.input_area.clear()
+
+    def hold_queued_input(self, text: str) -> None:
+        """工作态提交：交给 Agent 排队（下一次模型调用前并入），清空输入框并刷新预览。"""
+        if not self.pending_inputs.queue(text):
+            # 端口尚未装配（如应用已启动、主 Agent 未就绪）：保留输入内容，不吞掉。
+            return
+        self.input_area.clear()
+        self.refresh_chrome()
+
+    def pull_last_queued_input(self) -> bool:
+        """取回最后一条排队输入并插到当前草稿之前，供用户编辑或重发。"""
+        text = self.pending_inputs.take_last()
+        if text is None:
+            return False
+        draft = self.input_area.text
+        self.input_area.load_text(
+            f"{text}\n{draft}" if draft.strip() else text,
+            cursor_to_end=True,
+        )
+        self.refresh_chrome()
+        return True
 
     def focus_composer(self) -> None:
         self._main_focus_target = "composer"
@@ -459,7 +518,10 @@ class AgentTuiApp(App[None]):
     async def on_composer_submitted(self, event: Composer.Submitted) -> None:
         if self.input_area.read_only or not event.text.strip():
             return
-        await self.coordinator.complete_input(event.text)
+        if self.coordinator.input_active:
+            await self.coordinator.complete_input(event.text)
+            return
+        self.hold_queued_input(event.text)
 
     def on_inline_widget_completed(self, event: InlineWidget.Completed) -> None:
         """内嵌表单提交/取消后，触发 coordinator 完成流程。"""

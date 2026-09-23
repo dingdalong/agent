@@ -348,6 +348,7 @@ class Composer(KeyboardTextArea):
         Binding("ctrl+j", "newline", show=False, priority=True),
         Binding("tab", "tab_or_complete", show=False, priority=True),
         Binding("escape", "escape_or_clear", show=False, priority=True),
+        Binding("alt+up", "edit_queued", show=False, priority=True),
     ]
 
     async def _on_mouse_down(self, event: events.MouseDown) -> None:
@@ -376,6 +377,9 @@ class Composer(KeyboardTextArea):
 
     def action_escape_or_clear(self) -> None:
         self._input_area().hide_completion()
+
+    def action_edit_queued(self) -> None:
+        self._input_area().pull_last_queued_input()
 
     def action_cursor_down(self, select: bool = False) -> None:
         input_area = self._input_area()

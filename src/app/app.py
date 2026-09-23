@@ -13,6 +13,7 @@ from src.agent.states import RunResult
 from src.commands import CommandContext
 from src.interfaces.output_router import OutputRouter
 from src.interfaces.agent_view_store import AgentViewStore
+from src.interfaces.base import PendingUserInputPort
 from src.app.plan_mode_controller import PlanModeController
 from src.events.types import InterruptRequested
 from src.common.data_guard import register_runtime_secrets
@@ -156,6 +157,25 @@ class AgentApp:
         if ui is None or event_bus is None:
             return
         self._plan_mode_controller = PlanModeController(ui=ui, event_bus=event_bus)
+
+    def _install_pending_input_port(self, agent: Agent) -> None:
+        """把当前主 Agent 的排队输入通道交给 UI（提交、预览、取回与中断回填共用）。
+
+        Args:
+            agent: 当前入口主 Agent。
+
+        Returns:
+            None.
+        """
+        setter = getattr(self.deps.ui, "set_pending_input_port", None)
+        if setter is None:
+            return
+        setter(PendingUserInputPort(
+            queue=agent.queue_user_input,
+            snapshot=agent.pending_user_inputs,
+            take_last=agent.take_last_pending_user_input,
+            take_all=agent.take_all_pending_user_inputs,
+        ))
 
     def _refresh_slash_commands(self) -> None:
         """用 CommandMgr 的最新命令集刷新 UI 补全数据源（feature 门控对齐当前角色）。"""
@@ -309,6 +329,7 @@ class AgentApp:
                     set_history_provider = getattr(self.deps.ui, "set_input_history_provider", None)
                     if set_history_provider is not None:
                         set_history_provider(agent.get_input_history)
+                    self._install_pending_input_port(agent)
                     set_model_info = getattr(self.deps.ui, "set_model_info_provider", None)
                     if set_model_info is not None:
                         set_model_info(
@@ -387,6 +408,7 @@ class AgentApp:
                 set_history_provider = getattr(self.deps.ui, "set_input_history_provider", None)
                 if set_history_provider is not None:
                     set_history_provider(agent.get_input_history)
+                self._install_pending_input_port(agent)
                 set_model_info = getattr(self.deps.ui, "set_model_info_provider", None)
                 if set_model_info is not None:
                     set_model_info(

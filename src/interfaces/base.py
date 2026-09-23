@@ -6,6 +6,7 @@ import json
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from rich.text import Text
@@ -25,6 +26,7 @@ from src.events.types import (
     ThinkingDelta,
     ToolCallCompleted,
     ToolCallStarted,
+    UserInputAdopted,
 )
 from src.events.menu import (
     ChoiceInputMenu,
@@ -44,6 +46,27 @@ if TYPE_CHECKING:
     from src.common.session_state import SessionState
 
 
+@dataclass(frozen=True)
+class PendingUserInputPort:
+    """UI 与主 Agent 之间的排队输入通道。
+
+    由 AgentApp 用当前主 Agent 的方法构造并安装到 UI；TUI 只通过它提交、预览与
+    取回排队输入，不保存第二份副本。排队文本由 Agent 在每次模型调用前并入对话。
+
+    Attributes:
+        queue: 提交一条工作期间的输入，由 Agent 入队、在下一次模型调用前并入；
+            返回 False 表示通道尚未装配（调用方不得清空用户已输入的内容）。
+        snapshot: 按 FIFO 返回尚未并入对话的排队文本。
+        take_last: 取回最后一条排队输入供用户编辑；无排队时返回 None。
+        take_all: 取走全部排队输入，供中断时回填输入框。
+    """
+
+    queue: Callable[[str], bool]
+    snapshot: Callable[[], list[str]]
+    take_last: Callable[[], str | None]
+    take_all: Callable[[], list[str]]
+
+
 class UserInterface(ABC):
     """I/O 抽象基类，封装各 interface 共享的事件处理逻辑。"""
 
@@ -56,6 +79,7 @@ class UserInterface(ABC):
         self._request_interrupt: Callable[[], None] | None = None
         self._plan_state_provider: Callable[[], bool] | None = None
         self._model_info_provider: Callable[[], tuple[str, str] | None] | None = None
+        self._pending_input_port: PendingUserInputPort | None = None
         self._active_user_request: UiRequest | None = None
         self._session_reset_in_progress = False
 
@@ -214,6 +238,18 @@ class UserInterface(ABC):
         if self._model_info_provider is None:
             return None
         return self._model_info_provider()
+
+    def set_pending_input_port(self, port: PendingUserInputPort | None) -> None:
+        """设置 UI 与当前主 Agent 之间的排队输入通道。
+
+        Args:
+            port: 排队输入通道；None 表示移除（无主 Agent 或会话重置期间）。
+
+        Returns:
+            None。
+        """
+
+        self._pending_input_port = port
 
     def set_input_history_provider(
         self, provider: Callable[[], list[str]] | None
@@ -598,6 +634,8 @@ class UserInterface(ABC):
                 await self.on_thinking_delta(event, content)
             case PlanStateChanged():
                 self.on_plan_state_changed()
+            case UserInputAdopted():
+                await self.on_user_input_adopted(event)
             case _:
                 await self.on_unhandled_event(event)
 
@@ -606,6 +644,9 @@ class UserInterface(ABC):
 
     async def on_thinking_delta(self, event: ThinkingDelta, content: str) -> None:
         """流式思考增量。由具体 UI 覆盖实现渲染，默认无操作。"""
+
+    async def on_user_input_adopted(self, event: UserInputAdopted) -> None:
+        """排队输入已并入对话：由具体 UI 覆盖实现，在正确位置展示这条用户消息。"""
 
     async def on_unhandled_event(self, event: Event) -> None:
         pass

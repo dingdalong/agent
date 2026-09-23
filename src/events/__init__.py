@@ -23,6 +23,7 @@ from src.events.types import (
     ThinkingDelta,
     ToolCallCompleted,
     ToolCallStarted,
+    UserInputAdopted,
 )
 from src.events.menu import (
     ChoiceInputMenu,
@@ -48,6 +49,7 @@ AgentEvent = Union[
     LLMCallCompleted, LLMCallStarted, LLMRetrying, LLMLengthRetrying, LLMCallFailed,
     ResponseDelta, ThinkingDelta,
     AgentStateChanged, SubagentLifecycle, PlanStateChanged, TaskStateChanged,
+    UserInputAdopted,
 ]
 
 __all__ = [
@@ -82,4 +84,5 @@ __all__ = [
     "TranscriptView",
     "PlanStateChanged",
     "TaskStateChanged",
+    "UserInputAdopted",
 ]

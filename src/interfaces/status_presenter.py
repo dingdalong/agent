@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Sequence
 
 from rich.text import Text
 
@@ -14,6 +15,50 @@ from src.interfaces.agent_view_store import (
 )
 
 _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+_QUEUED_PREVIEW_MIN_WIDTH = 16
+_QUEUED_PREVIEW_LIMIT = 3
+
+
+def present_queued_inputs(
+    texts: Sequence[str],
+    *,
+    width: int,
+    limit: int = _QUEUED_PREVIEW_LIMIT,
+) -> Text:
+    """渲染输入框上方的排队分组：标题行 + 逐条摘要 + 溢出提示。
+
+    Args:
+        texts: 按 FIFO 排列的排队输入原文；每条取首个非空行并折叠空白作为摘要。
+        width: 终端宽度，用于截断单条摘要。
+        limit: 最多展示的条数，超出时以「… 另有 N 条」收尾。
+
+    Returns:
+        Rich Text；无排队内容时为空。
+    """
+    if not texts:
+        return Text()
+    lines = [
+        f"• 已排队 {len(texts)} 条（下一次模型调用前带上 · Alt+↑ 取回最后一条）"
+    ]
+    clip_width = max(_QUEUED_PREVIEW_MIN_WIDTH, width - 8)
+    for text in texts[:limit]:
+        lines.append(f"  ↳ {_clip_queued_preview(_queued_preview_text(text), clip_width)}")
+    if len(texts) > limit:
+        lines.append(f"  … 另有 {len(texts) - limit} 条")
+    return Text("\n".join(lines))
+
+
+def _queued_preview_text(text: str) -> str:
+    """取排队输入的首个非空行并折叠内部空白，作为单行摘要。"""
+    first = next((line for line in text.splitlines() if line.strip()), "")
+    return " ".join(first.split())
+
+
+def _clip_queued_preview(preview: str, clip_width: int) -> str:
+    """按可见字符截断摘要，超出部分以省略号结尾。"""
+    if len(preview) <= clip_width:
+        return preview
+    return preview[:clip_width] + "…"
 
 
 def present_spinner_frame(now: float, interval: float = 0.1) -> str:

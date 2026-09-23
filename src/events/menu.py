@@ -98,8 +98,10 @@ class InputMenu(MenuRequest):
         › Alice▮
         ──────────────────────────────
 
-    prompt 的上下文打印在上方；输入框始终以空文本开始。
-    这是文本输入而非选项菜单，作为交互事件与其它菜单同属控制面。
+    prompt 的上下文打印在上方；输入框保留用户在处理态写下的草稿（不再强制清空）。
+    这是文本输入而非选项菜单，作为交互事件与其它菜单同属控制面。处理态提交的文本
+    由主 Agent 排队（`PendingUserInputPort`），在每次模型调用前并入当前对话；
+    队列里剩下的命令与退出词由下一次 `InputMenu` 解析，队列非空时不再询问用户。
     """
     prompt: str = ""
     markdown: bool = False  # 上文提示是否按 Markdown 渲染（如 ask_user 的问题）
