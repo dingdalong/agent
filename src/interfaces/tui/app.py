@@ -375,8 +375,7 @@ class AgentTuiApp(App[None]):
 
     async def begin_input(self, request: InputMenu) -> None:
         await self.flush_round()
-        # 回合耗时在回到输入态时结算进共享读模型：它随会话落盘，/resume 时被回填。
-        self.agent_view_store.add_session_elapsed(self._turn_elapsed(time.monotonic()))
+        self._bank_turn_elapsed()
         self._main_focus_target = "composer"
         lines = request.prompt.splitlines()
         context = "\n".join(lines[:-1]).strip("\n") if len(lines) > 1 else ""
@@ -401,8 +400,10 @@ class AgentTuiApp(App[None]):
         self.input_area.sync_state()
 
     async def finish_interrupted_turn(self) -> None:
-        """中断收尾：先把本轮工具行写进转录，再重置轮次状态。"""
+        """中断收尾：先把本轮工具行写进转录，结算被中断回合的耗时，再重置轮次状态。"""
         await self.flush_round()
+        # 被中断的回合不会走到 begin_input，不在这里结算就会既不上屏也不落盘。
+        self._bank_turn_elapsed()
         self._reset_turn_status()
         self.input_area.clear()
         self.input_area.sync_state()
@@ -769,6 +770,16 @@ class AgentTuiApp(App[None]):
         self._current_agent_uuid = None
         if clear_round:
             self._round_entries = []
+
+    def _bank_turn_elapsed(self) -> None:
+        """把当前回合的处理时间结算进共享读模型（它随会话落盘，/resume 时被回填）。
+
+        只在回合真正结束时调用：正常回到输入态（``begin_input``）或被中断
+        （``finish_interrupted_turn``）。``_reset_turn_status`` 不调用它——提交输入
+        与切换会话时 ``_turn_started`` 仍指向上一回合的起点，在那里结算会把输入框
+        打字时间算进耗时。
+        """
+        self.agent_view_store.add_session_elapsed(self._turn_elapsed(time.monotonic()))
 
     def _turn_elapsed(self, now: float) -> float:
         if self._turn_started is None:

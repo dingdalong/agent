@@ -622,6 +622,41 @@ def test_app_resume_restores_session_metrics_and_persists_source_elapsed() -> No
     assert main.elapsed_seconds == 120.0
 
 
+def test_live_store_elapsed_reaches_log_and_restores_into_store(tmp_path) -> None:
+    """闭环：UI 结算的耗时经强制提交写进日志，恢复时折叠回状态并回填读模型。"""
+    manager = SessionMgr(tmp_path, tmp_path)
+    state = SessionState()
+    state.append_user("会话", {"role": "user", "content": "会话"})
+    store = AgentViewStore()
+    store.register_foreground("main-id", "main")
+    deps = SimpleNamespace(
+        session=SessionContext(id="live", state=state),
+        session_mgr=manager,
+        event_bus=None,
+        ui=None,
+        data_guard=None,
+    )
+    app = AgentApp(deps, store, _ResumeRouter())  # type: ignore[arg-type]
+
+    async def scenario() -> None:
+        store.add_session_elapsed(75.5)  # 回合结算（正常结束或被中断）后的累计值
+        assert await app._append_session_state(manager, "live", state, force=True)
+
+    asyncio.run(scenario())
+
+    log_text = (tmp_path / "sessions" / "live.jsonl").read_text(encoding="utf-8")
+    assert '"metrics"' in log_text
+
+    restored = manager.load_state("live")
+    assert restored is not None
+    assert restored.session_elapsed == 75.5
+
+    resumed = AgentViewStore()
+    resumed.register_foreground("new-main", "main")
+    resumed.restore_session_metrics(restored, context_limit=128_000)
+    assert resumed.session_elapsed == 75.5
+
+
 def test_taken_commit_is_stable_against_later_streaming() -> None:
     """已取出的增量是稳定快照：后续流式增量不能改写待落盘内容。"""
     state = SessionState()

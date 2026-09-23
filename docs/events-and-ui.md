@@ -71,7 +71,7 @@ LLM 调用使用 `emit_telemetry_safely()`（`src/events/bus.py:36-65`）发布�
 
 ## 4. `AgentViewStore`
 
-`AgentViewStore` 是状态栏与子 agent 读模型。它维护会话累计 token、会话累计耗时、前台 UUID、活动与历史 Agent、每 Agent 的窗口/活动/生命周期以及子 agent 分段转录；主聊天历史来自 `SessionState.records[].view`，Store 不保存第二份主聊天副本。耗时由 TUI 在回到输入态时结算进 Store（`add_session_elapsed`，已剔除纯人工等待），`AgentApp` 在提交会话前把它并入 `SessionState`，`/resume` 时由 `restore_session_metrics()` 连同按 `llm_calls` 重建的会话 token 与前台上下文一起回填，`reset()` 才会归零。子 agent 快照会以隐藏的 `subagent` view 投影写入当前 `SessionState`，恢复后重新水合为只读历史。快照里的 `messages` 是该子 agent 上下文的唯一副本，同一快照的 `transcript` 只保留 `retry`/`error` 行，不与消息重复存正文。
+`AgentViewStore` 是状态栏与子 agent 读模型。它维护会话累计 token、会话累计耗时、前台 UUID、活动与历史 Agent、每 Agent 的窗口/活动/生命周期以及子 agent 分段转录；主聊天历史来自 `SessionState.records[].view`，Store 不保存第二份主聊天副本。耗时由 TUI 在回合结束时结算进 Store（`add_session_elapsed`，已剔除纯人工等待）——正常回到输入态走 `begin_input()`，被中断的回合走 `finish_interrupted_turn()`；`_reset_turn_status()` 只清走时状态，不在那里结算（提交输入或切换会话时结算会把输入框打字时间算进去）。`AgentApp` 在提交会话前把它并入 `SessionState`，`/resume` 时由 `restore_session_metrics()` 连同按 `llm_calls` 重建的会话 token 与前台上下文一起回填，`reset()` 才会归零；本功能上线前写入的日志没有该字段，恢复后耗时从 0 起算并只累计之后的回合。子 agent 快照会以隐藏的 `subagent` view 投影写入当前 `SessionState`，恢复后重新水合为只读历史。快照里的 `messages` 是该子 agent 上下文的唯一副本，同一快照的 `transcript` 只保留 `retry`/`error` 行，不与消息重复存正文。
 
 `record()`（`agent_view_store.py:139-165`）对 LLM 事件的处理：
 
@@ -146,7 +146,7 @@ TTY 只缓冲前台 Agent 当前一轮的工具。实时区优先级为”重试
 
 **非 TTY 与 Store 转录**：非 TTY 输出使用 `display.title` 和内容的前 20 行（含截断提示）。`AgentViewStore` 转录使用 `display.title` 和前 10 行内容，回退到 `result_preview`。
 
-`StatusPresenter` 从不可变快照统一生成 token、上下文和 elapsed 文本。状态栏中的 token 从 1,000 起按最接近的 100 舍入并使用 `k`/`m` 紧凑显示，精确核账应使用 Store 的 INFO 日志。主会话 elapsed 是跨回合累计的有效耗时；纯人工等待仅在没有叶子工具继续计算时暂停，权限等内嵌交互不会结算当前回合，只有返回主输入态时由 `begin_input()` 结算一次。Agent 转录覆盖层显示当前 Agent 自身的生命周期、token 与上下文。
+`StatusPresenter` 从不可变快照统一生成 token、上下文和 elapsed 文本。状态栏中的 token 从 1,000 起按最接近的 100 舍入并使用 `k`/`m` 紧凑显示，精确核账应使用 Store 的 INFO 日志。主会话 elapsed 是跨回合累计的有效耗时；纯人工等待仅在没有叶子工具继续计算时暂停，权限等内嵌交互不会结算当前回合；回合在正常返回主输入态（`begin_input()`）或被中断（`finish_interrupted_turn()`）时各结算一次，中断因此不再让耗时回退。Agent 转录覆盖层显示当前 Agent 自身的生命周期、token 与上下文。
 
 ## 9. Textual UI 组件
 

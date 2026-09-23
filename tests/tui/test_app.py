@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 import pytest
 from rich.text import Text
@@ -2224,6 +2225,36 @@ def test_session_elapsed_banks_into_store_and_survives_session_switch(monkeypatc
             await app.replace_session_history(SessionState().visible_records())
 
             assert app.agent_view_store.session_elapsed == 95.0
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_interrupted_turn_banks_elapsed_into_store() -> None:
+    """被中断的回合不再丢耗时：收尾时结算进共享读模型，且不会被随后的输入重复计入。"""
+    async def scenario() -> None:
+        app = _app()
+        async with app.run_test(size=(90, 28)) as pilot:
+            loop = asyncio.get_running_loop()
+            app._turn_started = time.monotonic() - 3.0
+
+            await app.finish_interrupted_turn()
+            await pilot.pause()
+
+            banked = app.agent_view_store.session_elapsed
+            assert banked >= 3.0
+
+            request = InputMenu(
+                timestamp=1.0,
+                source="test",
+                prompt="输入",
+                future=loop.create_future(),
+            )
+            await app.coordinator.submit(request)
+            await pilot.pause()
+
+            # _turn_started 已被收尾清零：正常回到输入态不会把同一段时间再计一次。
+            assert app.agent_view_store.session_elapsed == banked
 
     asyncio.run(scenario())
 

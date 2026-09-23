@@ -22,7 +22,7 @@ SessionState.records
 SessionState.llm_calls
     └─ call_id + attempt → provider usage / 结果 / 阶段
 SessionState.session_elapsed
-    └─ metrics 段 → 状态栏累计耗时（回合结束时由 UI 写入）
+    └─ metrics 段 → 状态栏累计耗时（回合结束或被中断时由 UI 结算）
 ```
 
 用户记录同时保存原始输入和注入 hook/reminder 后的模型消息；assistant 以 LLM `call_id` 合并流与最终消息，工具以 `tool_call_id` 合并展示和 tool message。每次实际 provider attempt 的开始与完成事件归并进 `llm_calls`，前台和后台 agent 使用同一核账路径；失败或取消且 provider 未给 usage 时保留 unknown 记录。compact 只替换 `context_ids`，不会删除已有可见记录。子 Agent 仍使用独立的纯内存 history。

@@ -457,7 +457,7 @@ MCP 连接配置和授权边界见 [mcp-and-hooks.md](mcp-and-hooks.md)。
 
 记录增量按同一套摘要去重。正文只用 `stream_boundaries` 判断「是否已经在盘上」：`after` 与上次落盘摘要相同表示重复提交，直接丢弃该段；`after` 不同而 `base` 与上次落盘摘要不符时说明无法对位，写侧绝不丢弃这段正文——保留正文写入并把记录 ID 登记到 `commit.resync`，`SessionState.ack_commit()` 确认提交时对该记录退回整份快照（`invalidate_append_baseline`），保证用户已经看到的正文不会在磁盘上被静默截断。静态部分用归一化投影（字段 + 非正文视图数据）的摘要判断是否真的变了，没有正文也没有静态变化时整条增量丢弃。整份快照写入同样登记正文摘要与静态投影摘要，因此「整份快照之后的第一条增量」不会再有无基线的放行捷径。
 
-`SessionRecord` 可同时包含模型消息、可见 `ViewPayload`、原始输入和关联 ID。`SessionState` 分别投影 LLM 上下文、TUI 历史与输入回溯，并以 `LLMCallRecord` 持久化每次 provider attempt 的模型、调用者、阶段、结果和原始 usage；`metrics` 段持久化会话累计耗时（UI 在回合结束时经 `set_session_elapsed()` 写入、提交前由 app 层并入，只有变化才产生新批），`/resume` 由它恢复状态栏耗时；compact 只更新上下文投影。
+`SessionRecord` 可同时包含模型消息、可见 `ViewPayload`、原始输入和关联 ID。`SessionState` 分别投影 LLM 上下文、TUI 历史与输入回溯，并以 `LLMCallRecord` 持久化每次 provider attempt 的模型、调用者、阶段、结果和原始 usage；`metrics` 段持久化会话累计耗时（UI 在回合结束或被中断时经 `set_session_elapsed()` 写入、提交前由 app 层并入，只有变化才产生新批），`/resume` 由它恢复状态栏耗时——**本功能上线前写入的日志没有该段**，这些会话恢复后从 0 起算；compact 只更新上下文投影。
 
 **公共方法**：
 
