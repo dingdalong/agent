@@ -6,7 +6,7 @@
 
 调用链：参数对象/未知字段校验 → PreToolUse → 重验参数 → `PermissionManager.authorize(ToolAuthorizationRequest)`（模式、feature、调用方范围、manifest、路径与风险）→ 工具执行 → DataGuard 脱敏 → PostToolUse → 脱敏与单次预算 → ToolCallCompleted → 历史消息。MCP 参数按上游 schema 校验。未知工具、非法 JSON、授权失败、执行错误均返回明确状态；调用方不能从正文前缀推断失败。
 
-`exec_command` 与正常的 `write_stdin` 使用纯文本响应：`Chunk ID`、耗时、退出码或运行中 session、原始近似 token 数和命令原始输出。非零退出码仍是命令的真实完成结果。沙箱、启动、超时、取消等框架错误以及其他工具使用 JSON 元数据行加正文，模型无需从外部程序正文猜测框架状态。`display` 只供 UI 消费；`end_turn` 控制调度器结束回合。
+`exec_command` 与正常的 `write_stdin` 使用纯文本响应：`Chunk ID`、耗时、退出码或运行中 session、原始近似 token 数和命令原始输出。仍在前台运行的结果额外带一行可续传提示——`write_stdin` 加平铺参数示例，长会话里模型容易把参数包成 `{"arguments": ...}`，命中即被参数校验拒绝。非零退出码仍是命令的真实完成结果。沙箱、启动、超时、取消等框架错误以及其他工具使用 JSON 元数据行加正文，模型无需从外部程序正文猜测框架状态。`display` 只供 UI 消费；`end_turn` 控制调度器结束回合。
 
 所有模式、主 agent 和子 agent 都接收 `ToolsMgr.schemas()` 返回的同一份完整 schema 目录；模式切换不重建 schema。执行期由 `PermissionManager` 按 `ToolAvailability`、agent feature 与 manifest 声明拒绝不可用工具。模式拒绝使用 `tool_unavailable`，并携带当前模式、目标工具和该模式完整禁用列表。注册名称冲突直接报错。Pydantic schema 同时用于 JSON 参数验证，嵌套参数拒绝未声明字段，显式字典保留其键空间。
 
@@ -17,8 +17,8 @@
 | 工具 | 参数及契约 |
 |---|---|
 | `exec_command` | cmd、workdir、yield_time_ms、timeout_ms、max_output_tokens、stdin_open、additional_permissions、justification。默认等待 10 秒，上限 30 秒；执行超时上限 600 秒；尚未结束返回 session_id。 |
-| `write_stdin` | session_id、chars、yield_time_ms、max_output_tokens、terminate。空轮询默认等待 5 秒、上限 300 秒；消费增量输出；仅 stdin_open=true 的进程接收 stdin，权限保持创建时的范围，terminate 与非空 chars 互斥。session_id 仅在运行时返回，结束后再次轮询返回 unknown_session。 |
-| `apply_patch` | patch。Begin/End Patch 包裹 Add/Update/Delete File，可选 Move to 与 EOF 锚点；上下文必须唯一。先计算全部文本变更、复验授权，再原子替换每个文件。多文件 I/O 失败返回已完成清单，不声称全局事务回滚。 |
+| `write_stdin` | session_id、chars、yield_time_ms、max_output_tokens、terminate。session_id 取自上一次结果里的 `Process running with session ID <id>`，参数直接平铺（不包成 `{"arguments": ...}`），schema 内含轮询/发送输入/终止三个示例。空轮询默认等待 5 秒、上限 300 秒；消费增量输出；仅 stdin_open=true 的进程接收 stdin，权限保持创建时的范围，terminate 与非空 chars 互斥。session_id 仅在运行时返回，结束后再次轮询返回 unknown_session。 |
+| `apply_patch` | patch（字段名是 `patch`，不是 `input`）。Begin/End Patch 包裹 Add/Update/Delete File，可选 Move to 与 EOF 锚点；上下文必须唯一；schema 内含 Update 段示例。补丁行必须以空格（上下文，原样保留）、`+`（新增）或 `-`（删除）开头；结构错误在参数校验期即返回 invalid_arguments，不进入授权裁决。先计算全部文本变更、复验授权，再原子替换每个文件。多文件 I/O 失败返回已完成清单，不声称全局事务回滚。 |
 | `submit_plan` | title、content。一次保存完整计划、展示和审核；auto 批准后续执行，manual/取消结束当前回合，修改意见返回模型。保存位置受 PlanMgr 控制。 |
 
 搜索用 `exec_command` 执行 `rg --files`、`rg -n`；范围读取可用 `sed -n '起始行,结束行p'`。工具集直接使用上述接口，不提供旧文件/分页工具别名。

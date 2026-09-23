@@ -65,6 +65,10 @@ class ToolResult:
                 sections.append(f"Process exited with code {self.exit_code}")
             if self.session_id is not None:
                 sections.append(f"Process running with session ID {self.session_id}")
+                sections.append(
+                    "继续等待：write_stdin（参数直接平铺，不要包一层）"
+                    f'{{"session_id": "{self.session_id}", "yield_time_ms": 30000}}'
+                )
             if self.original_token_count is not None:
                 sections.append(f"Original token count: {self.original_token_count}")
             sections.append("Output:")

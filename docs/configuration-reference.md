@@ -149,7 +149,17 @@
 
 > **换算说明**：`config.yaml` 里存的是**比例**，`AgentAssembler` 在构造 `CompactMgr` 时用当前 agent 所用模型的 `context_limit`（`llm.context_limit`，`assembly.py:152`）乘以比例得到绝对 token 数。不同 agent 若用不同 `context_limit` 的模型，绝对阈值也不同；窗口未知（非正数）时不会自动压缩。切换模型时 `AgentAssembler.rebuild_model()` 用新 provider 重算阈值并整体替换装配产物，窗口不会停留在旧模型上。`CompactMgr` 细节见 [managers.md](managers.md)。
 
-### 3.5 `context` — 跨 agent 共享上下文
+### 3.5 `reminder` — 框架提醒节流
+
+`AgentAssembler._reminder_interval_rounds()` 读取本段，结果传给 `ReminderMgr`。提醒源（当前为 `TaskManager`）只判断“何时该提醒”，是否真的注入由中介按间隔统一决定——历史上同一句“更新你的任务列表。”在长会话里被逐轮注入 91 次。
+
+| 键 | 类型 | 默认值 | 可选值 | 效果 |
+|----|------|--------|--------|------|
+| `reminder.interval_rounds` | int | `5` | 非负整数（负值归一为 `0`） | 同一文本提醒两次注入之间至少间隔的工具轮数；`0` 表示不节流，只对待发队列去重。间隔按工具轮计（`notify_tool_round` 递增），同一轮内重复产出仍会被合并 |
+
+间隔是**文本粒度**的：`TaskManager` 的 turn-start 提醒与 post-round 提醒文本不同，各自独立计时。提高该值可减少提醒对上下文的占用；调到 `0` 即回到旧行为。机制说明见 [managers.md](managers.md#remindermgr--提醒注入中介)。
+
+### 3.6 `context` — 跨 agent 共享上下文
 
 仅在激活角色启用 `subagent` feature 时生效（未启用则 `bootstrap` 注入 `None`，整段配置无作用）。
 
@@ -164,7 +174,7 @@
 
 > 预算单位取**字符**而非 token：`ContextMgr` 不该依赖 `LLMProvider`（子 agent 的 tokenizer 各异、`estimate_tokens` 是阻塞调用）。保守按 2.4-3 字符/token 换算。落盘路径为 `{workdir}/.agent/context/{session_id}.md`（append-only）。机制说明见 [managers.md](managers.md#contextmgr--跨-agent-共享上下文)。
 
-### 3.6 `role` — 激活角色、模型槽位与推理力度
+### 3.7 `role` — 激活角色、模型槽位与推理力度
 
 `role` 必须是 mapping。`role.default` 先确定实际激活角色；缺省、空值或未发现的角色回退 `coding`。角色目录名作为 mapping key 原样使用，允许 Unicode、点号和长名称；`common` 与 `default` 是保留名，不会进入角色发现结果。
 
@@ -201,7 +211,7 @@ role:
 
 保存后重新启动，或执行 `/clear` 清空当前会话并重新加载配置，再打开 `/models` 选择。模型未被在线发现不会阻止启动或请求，实际可用性由供应商响应决定。
 
-### 3.7 `events` — 事件级别
+### 3.8 `events` — 事件级别
 
 | 键 | 类型 | 默认值 | 可选值 | 效果 |
 |----|------|--------|--------|------|
@@ -209,13 +219,13 @@ role:
 
 > `src/config.yaml` 内置值为 `detail`；`bootstrap` 读取时 `config_mgr.get_config("events").get("level", "progress")` 的 `"progress"` 只在整个 `events.level` 键缺失时才生效。事件级别语义见 [events-and-ui.md](events-and-ui.md)。
 
-### 3.8 `logging` — 运行日志级别
+### 3.9 `logging` — 运行日志级别
 
 | 键 | 类型 | 默认值 | 可选值 | 效果 |
 |----|------|--------|--------|------|
 | `logging.level` | str | `info`（本仓库；`bootstrap` 内 `.get` 回退同） | `debug` \| `info` \| `warning` \| `error` | 根 logger 级别，作用于写入 `{workdir}/.agent/logs/agent.log` 的文件 handler（`bootstrap.create_app()`）。`info` 下记录所有授权拒绝与非确定性放行；`debug` 额外记录 `source=policy` 的确定性放行（见 [permissions.md](permissions.md)「授权日志」） |
 
-### 3.9 完整注释版 `config.yaml` 示例
+### 3.10 完整注释版 `config.yaml` 示例
 
 ```yaml
 # ── LLM provider 连接配置 ────────────────────────────────
@@ -274,6 +284,10 @@ compact:
   auto_compact_rate: 0.8
   keep_recent_user_turns: 3
   keep_recent_messages_token_rate: 0.25
+
+# ── 框架提醒节流（ReminderMgr 统一按工具轮间隔去重）──────────
+reminder:
+  interval_rounds: 5                    # 同一文本提醒两次注入之间的最小工具轮间隔；0 不节流
 
 # ── 跨 agent 共享上下文（仅 subagent feature 启用时生效）────
 context:
@@ -475,6 +489,7 @@ TUI 诊断路径随 `$AGENT_HOME` 改写，不提供独立配置项。`tui.jsonl
 | 调整角色推理力度 | `config.yaml` `role.<角色名>.reasoning_effort` | 设为 `low`、`medium`、`high`、`xhigh` 或 `max`；两个槽位共用 |
 | 更早触发上下文压缩 | `config.yaml` `compact.auto_compact_rate` | 调小（如 `0.6`） |
 | 压缩后多保留近期对话 | `config.yaml` `compact.keep_recent_user_turns` / `keep_recent_messages_token_rate` | 调大 |
+| 减少 / 关闭重复的框架提醒注入 | `config.yaml` `reminder.interval_rounds` | 调大（如 `10`）；`0` 关闭节流，恢复旧的逐轮注入 |
 | 加大 / 减小模型上下文窗口 | `config.yaml` `llm_provider.<name>.context_limit` | 设为目标 token 数（同时影响压缩绝对阈值） |
 | 提高 provider 并发 | `config.yaml` `llm.concurrency` | 调大 |
 | 调整单次 LLM 请求超时 | `config.yaml` `llm.timeout_seconds` | 设为有限正秒数；模型发现固定为 3 秒，不可配置 |

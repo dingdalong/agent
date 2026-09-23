@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
+
+from src.agent.assembly import AgentAssembler
 from src.mgr.plan_mgr import PlanMgr
 from src.mgr.reminder_mgr import ReminderMgr
 from src.mgr.task_mgr import TaskManager
@@ -49,6 +53,52 @@ class _RecordingProvider:
         """
         self.post_round_calls.append((mode, is_subagent))
         return f"POST-{mode.value}-{is_subagent}"
+
+
+class _FixedTextProvider:
+    """每轮都要求同一条提醒的假提醒源，用于验证中介层的节流。
+
+    Attributes:
+        text: 当前要返回的提醒文本，可随时替换。
+        calls: 被调用（要求提醒）的次数。
+    """
+
+    def __init__(self, text: str) -> None:
+        """初始化提醒文本。
+
+        Args:
+            text: 该提醒源每次要求注入的文本。
+        """
+        self.text = text
+        self.calls = 0
+
+    def get_turn_start_reminder(self, mode: RunMode, is_subagent: bool, /) -> str:
+        """返回当前提醒文本。"""
+        self.calls += 1
+        return self.text
+
+    def pop_post_round_reminder(self, mode: RunMode, is_subagent: bool, /) -> str:
+        """返回当前提醒文本（与 turn start 同一文本，共用节流记录）。"""
+        self.calls += 1
+        return self.text
+
+
+def _post_round_rounds(mgr: ReminderMgr, rounds: int) -> list[list[str]]:
+    """连续跑 ``rounds`` 个工具轮，每轮收集一次 post-round 提醒。
+
+    Args:
+        mgr: 目标中介。
+        rounds: 执行的工具轮数。
+
+    Returns:
+        每轮 ``pop_pending()`` 的结果。
+    """
+    collected = []
+    for _ in range(rounds):
+        mgr.notify_tool_round(["exec_command"])
+        mgr.queue_post_round(RunMode.EXECUTE, False)
+        collected.append(mgr.pop_pending())
+    return collected
 
 
 def test_turn_start_forwards_both_args_positionally() -> None:
@@ -124,3 +174,85 @@ def test_task_reminder_never_contains_task_controlled_text() -> None:
     assert len(pending) == 1
     assert "task_list" in pending[0]
     assert payload not in pending[0]
+
+
+def test_same_text_is_throttled_within_interval() -> None:
+    """同一文本提醒在 ``interval_rounds`` 个工具轮内只注入一次。"""
+    mgr = ReminderMgr(interval_rounds=3)
+    provider = _FixedTextProvider("更新你的任务列表。")
+    mgr.register(provider)
+
+    mgr.queue_post_round(RunMode.EXECUTE, False)
+    assert mgr.pop_pending() == ["更新你的任务列表。"]
+
+    # 提醒源每轮都要求注入，但中介丢弃间隔内的重复文本。
+    assert _post_round_rounds(mgr, 2) == [[], []]
+    assert _post_round_rounds(mgr, 1) == [["更新你的任务列表。"]]
+    assert provider.calls == 4
+
+
+def test_default_interval_matches_config_default() -> None:
+    """不传参时按 5 轮节流，与内置 ``reminder.interval_rounds`` 一致。"""
+    mgr = ReminderMgr()
+    provider = _FixedTextProvider("更新你的任务列表。")
+    mgr.register(provider)
+
+    mgr.queue_post_round(RunMode.EXECUTE, False)
+    assert mgr.pop_pending() == ["更新你的任务列表。"]
+    assert _post_round_rounds(mgr, 4) == [[]] * 4
+    assert _post_round_rounds(mgr, 1) == [["更新你的任务列表。"]]
+
+
+def test_throttle_is_per_text() -> None:
+    """节流按文本粒度记录：换一条提醒文本不受上一条的间隔限制。"""
+    mgr = ReminderMgr(interval_rounds=5)
+    provider = _FixedTextProvider("存在久未更新的未完成任务。")
+    mgr.register(provider)
+
+    mgr.queue_turn_start(RunMode.EXECUTE, False)
+    assert mgr.pop_pending() == ["存在久未更新的未完成任务。"]
+
+    provider.text = "更新你的任务列表。"
+    mgr.queue_turn_start(RunMode.EXECUTE, False)
+    assert mgr.pop_pending() == ["更新你的任务列表。"]
+
+
+@pytest.mark.parametrize("interval", [0, -1])
+def test_interval_zero_disables_throttling(interval: int) -> None:
+    """``interval_rounds`` 为 0（或负值归一为 0）时只保留待发队列去重。"""
+    mgr = ReminderMgr(interval_rounds=interval)
+    provider = _FixedTextProvider("更新你的任务列表。")
+    mgr.register(provider)
+
+    mgr.queue_post_round(RunMode.EXECUTE, False)
+    mgr.queue_post_round(RunMode.EXECUTE, False)
+    assert mgr.pop_pending() == ["更新你的任务列表。"]
+
+    mgr.queue_post_round(RunMode.EXECUTE, False)
+    assert mgr.pop_pending() == ["更新你的任务列表。"]
+
+
+class _ConfigStub:
+    """按顶层键返回配置段的最小替身；缺键时与真实实现一样抛 KeyError。"""
+
+    def __init__(self, config: dict) -> None:
+        self.config = config
+
+    def get_config(self, key: str):
+        if key not in self.config:
+            raise KeyError(key)
+        return self.config[key]
+
+
+@pytest.mark.parametrize("config, expected", [
+    ({"reminder": {"interval_rounds": 2}}, 2),
+    ({"reminder": {"interval_rounds": 0}}, 0),
+    ({"reminder": {}}, 5),
+    ({"reminder": None}, 5),
+    ({}, 5),
+])
+def test_assembly_reads_interval_from_config(config: dict, expected: int) -> None:
+    """装配期从 ``reminder.interval_rounds`` 读取节流间隔，缺段按内置默认值。"""
+    assembler = AgentAssembler(SimpleNamespace(config_mgr=_ConfigStub(config)))
+
+    assert assembler._reminder_interval_rounds() == expected

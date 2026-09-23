@@ -78,6 +78,25 @@ def test_terminate_and_input_cannot_be_combined(runtime):
     assert result.error_code == 'invalid_arguments'
 
 
+def test_resumable_and_patch_schemas_carry_usage_examples(runtime):
+    """运行中进程与补丁的用法示例必须留在 schema 里。
+
+    长会话降级时模型会把参数包成 ``{"arguments": ...}``，或把 apply_patch 的字段
+    写成 ``input``；这两类错误只能靠 schema 内的示例与字段说明避免。
+    """
+    deps, _ = runtime
+    write_stdin = deps.tools_mgr.get('write_stdin')
+    properties = write_stdin.parameters_schema['properties']
+    assert 'session_id' in properties['session_id']['description']
+    assert '示例' in write_stdin.description
+    assert '{"session_id"' in write_stdin.description
+    assert 'arguments' in write_stdin.description
+    patch = deps.tools_mgr.get('apply_patch')
+    assert 'input' in patch.parameters_schema['properties']['patch']['description']
+    assert '示例' in patch.description
+    assert '*** Begin Patch' in patch.description and '@@' in patch.description
+
+
 def test_model_truncation_does_not_include_ui_folding(runtime):
     from src.events.types import ToolCallCompleted
     deps, agent = runtime
@@ -137,7 +156,7 @@ def test_actual_agent_mode_switch_keeps_schema_and_system_fixed(tmp_path):
     assert child.deps.tools_mgr.schemas() is schemas
     denied = asyncio.run(child.deps.tools_mgr.execute(
         'apply_patch',
-        {'patch': '*** Begin Patch\n*** End Patch'},
+        {'patch': '*** Begin Patch\n*** Add File: a\n+hello\n*** End Patch'},
         deps=child.deps,
         agent=child,
     ))

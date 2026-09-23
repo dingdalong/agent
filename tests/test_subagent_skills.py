@@ -231,7 +231,7 @@ def test_loading_skill_preserves_readonly_and_execution_permissions(tmp_path: Pa
     assert child.assembly.prompt_mgr.build() == system
     assert parent.history == []
     forbidden_calls = {
-        "apply_patch": {"patch": "*** Begin Patch\n*** End Patch"},
+        "apply_patch": {"patch": "*** Begin Patch\n*** Add File: forbidden.txt\n+content\n*** End Patch"},
         "submit_plan": {"title": "计划", "content": "内容"},
         "task_delegator": {
             "description": "任务",

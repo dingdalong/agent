@@ -53,7 +53,7 @@ feature 语义细节（未声明→全开、未知名告警、`plan` 依赖 `fil
 | `HooksMgr` (`hooks_mgr.py`) | 8 类生命周期钩子的加载与执行 | 否 | 有 |
 | `ConfigManager` (`config_mgr.py`) | 三层配置/settings/.env 合并 | 否 | 有 |
 | `PluginMgr` (`plugin_mgr.py`) | 三层扫描插件目录 | 否 | 有 |
-| `ReminderMgr` (`reminder_mgr.py`) | 中介，统一收集各源的提醒注入 | 否 | 无 |
+| `ReminderMgr` (`reminder_mgr.py`) | 中介，统一收集各源的提醒注入并按间隔节流 | 否 | 无 |
 | `src/common/features.py` / `src/common/paths.py` | feature 名单解析 / 三层目录路径 | — | — |
 | `src/common/env_baseline.py` | 静态环境基线采集（纯函数，无状态） | — | — |
 
@@ -429,9 +429,9 @@ MCP 连接配置和授权边界见 [mcp-and-hooks.md](mcp-and-hooks.md)。
 | `get_task` | `task_id` | `dict` | 单任务完整详情（不存在抛 `ValueError`） |
 | `has_open_items` | — | `bool` | 是否有未完成任务 |
 | `system_guidance` | — | `str` | 创建返回 ID、更新/委派传递 ID 及验收状态流转工作流 |
-| `get_turn_start_reminder` | `mode, is_subagent` | `str` | 未完成且连续 ≥3 轮未用任务工具时注入任务列表；Plan 模式静默 |
+| `get_turn_start_reminder` | `mode, is_subagent` | `str` | 未完成且连续 ≥3 轮未用任务工具时要求注入任务列表（是否真的注入由 `ReminderMgr` 按间隔决定）；Plan 模式静默 |
 | `notify_tool_round` | `tool_names` | `None` | 含任意 `task_*` 工具则重置计数，否则 +1 |
-| `pop_post_round_reminder` | `mode, is_subagent` | `str \| None` | 同条件下提示“更新你的任务列表”；Plan 模式静默 |
+| `pop_post_round_reminder` | `mode, is_subagent` | `str \| None` | 同条件下要求提示“更新你的任务列表”（节流同上）；Plan 模式静默 |
 | `cleanup_if_all_completed` | — | `bool` | 轮末收尾：全部任务 `completed` 时清空内存列表、删除 tasks 目录并发布空快照（隐藏 UI 面板）；否则返回 `False` 不清理 |
 
 **feature 门控**：`task`（未启用时 `Agent` 中为 `None`）。 **reload**：无（`/clear` 由 `Agent` 侧新建实例处理，非实例 `reload()`）。
@@ -575,7 +575,9 @@ hook 协议、JSON 字段与插件 `CLAUDE_PLUGIN_ROOT` 环境变量见 [mcp-and
 
 `src/mgr/reminder_mgr.py`
 
-**单一职责**：在 turn start 和 post round 向已注册的提醒源（如 `TaskManager`）收集固定框架提醒并排队。它不构造消息；Agent 在下一次 chat 前与模式指令合并为一条 developer。提醒源不得返回任务标题、工具结果或其他外部内容。
+**单一职责**：在 turn start 和 post round 向已注册的提醒源（如 `TaskManager`）收集固定框架提醒，按间隔节流后排队。它不构造消息；Agent 在下一次 chat 前与模式指令合并为一条 developer。提醒源不得返回任务标题、工具结果或其他外部内容。
+
+**构造参数 `interval_rounds`**（默认 `5`，负值归一为 `0`）：同一文本提醒两次注入之间至少间隔的工具轮数，由 `AgentAssembler` 从 `reminder.interval_rounds` 读取（配置段缺失时用默认值）。提醒源只需声明“何时该提醒”，冷却计数统一落在这里，避免每个源各写一套节流逻辑；`0` 表示不节流，只保留待发队列内的去重（旧行为）。
 
 **公共方法**：
 
@@ -589,7 +591,7 @@ hook 协议、JSON 字段与插件 `CLAUDE_PLUGIN_ROOT` 环境变量见 [mcp-and
 
 **feature 门控**：否（但注册的提醒源受各自 feature 门控）。 **reload**：无（随新 Agent 重建）。
 
-**持有的关键状态**：`_providers`（提醒源列表，按注册顺序迭代）、`_pending`（下一次 chat 的固定框架提醒）。
+**持有的关键状态**：`_providers`（提醒源列表，按注册顺序迭代）、`_pending`（下一次 chat 的固定框架提醒）、`_round`（已完成的工具轮计数，仅由 `notify_tool_round` 递增）、`_last_queued_round`（每条提醒文本上次排队的轮次，节流依据）。
 
 三处注入时机在状态机中的位置见 [agent-runtime.md](agent-runtime.md)。
 

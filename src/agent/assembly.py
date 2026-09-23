@@ -75,7 +75,7 @@ class AgentAssembler:
         llm, model = self._resolve_llm(spec.requested_model)
         self._validate_declared_tools(spec)
         task_mgr = self._build_task_mgr(spec)
-        reminder_mgr = ReminderMgr()
+        reminder_mgr = ReminderMgr(interval_rounds=self._reminder_interval_rounds())
         if task_mgr is not None:
             reminder_mgr.register(task_mgr)
         skill_mgr = self._build_skill_mgr(spec)
@@ -200,6 +200,17 @@ class AgentAssembler:
             data_guard=self.deps.data_guard,
             on_change=on_change,
         )
+
+    def _reminder_interval_rounds(self) -> int:
+        """读取 ``reminder.interval_rounds``，即同一文本提醒的最小工具轮间隔。
+
+        只实现部分键的配置替身可能没有本段，缺段按内置默认值 5 处理。
+        """
+        try:
+            cfg = self.deps.config_mgr.get_config("reminder") or {}
+        except KeyError:
+            return 5
+        return int(cfg.get("interval_rounds", 5))
 
     def _build_skill_mgr(self, spec: AgentSpec) -> SkillMgr | None:
         """按 ``skill`` feature 创建技能管理器。"""

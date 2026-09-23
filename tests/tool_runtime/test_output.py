@@ -113,6 +113,19 @@ def test_exec_result_uses_plain_envelope_and_never_exposes_artifact(runtime):
     assert 'head' in long.text and 'tail' in long.text
 
 
+def test_running_result_points_back_to_write_stdin(runtime):
+    """运行中结果必须带可续传提示：给出平铺参数的 write_stdin 调用示例。"""
+    _, agent = runtime
+    result = ToolOutput().finalize(ToolResult(
+        'partial\n', output_kind='exec', chunk_id='abc123',
+        wall_time_seconds=1.0, session_id='deadbeefcafe',
+    ), agent)
+    text = str(result)
+    assert 'Process running with session ID deadbeefcafe' in text
+    assert 'write_stdin' in text
+    assert '"session_id": "deadbeefcafe"' in text
+
+
 @pytest.mark.integration
 def test_process_increment_is_truncated_without_artifact(runtime):
     import sys

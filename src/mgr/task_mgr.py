@@ -96,7 +96,8 @@ class TaskManager:
     Attributes:
         _tasks: 任务存储，键为任务 ID。
         _next_id: 下一个任务的顺序 ID。
-        _rounds_without_update: 连续未使用任务工具的轮次计数。
+        _rounds_without_update: 连续未使用任务工具的轮次计数；只表达"何时该提醒"，
+            重复注入的节流由 ReminderMgr 统一负责。
         _tasks_dir: 任务文件存储目录，None 表示纯内存模式。
     """
 
@@ -618,6 +619,7 @@ class TaskManager:
 
         当存在未完成任务且连续多轮未使用任务工具时，返回固定指令要求模型调用
         task_list 获取当前数据。任务标题、描述等外部内容不得进入框架 developer 消息。
+        是否真正注入（含重复间隔）由 ReminderMgr 按 ``reminder.interval_rounds`` 决定。
         Plan 模式下任务写工具被权限层拒绝，因此不注入任何任务提醒。
 
         Args:
@@ -649,6 +651,7 @@ class TaskManager:
 
         当存在未完成项且连续多轮未调用任务工具时，返回提醒文本。
         标签包装由 ReminderMgr 统一处理。
+        重复注入的节流同样由 ReminderMgr 负责，本方法只判断触发条件。
         Plan 模式下任务写工具被权限层拒绝，因此不注入任何任务提醒。
 
         Args:
